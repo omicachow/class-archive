@@ -6,8 +6,13 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $examplePath = Join-Path $projectRoot '.env.example'
 $envPath = Join-Path $projectRoot '.env.piwigo'
+. (Join-Path $PSScriptRoot 'secret-file-acl.ps1')
 
 if (Test-Path -LiteralPath $envPath) {
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $envPath
+    if ([IO.File]::ReadAllText($envPath) -match '(?m)^[ \t]*PIWIGO_ADMIN_PASSWORD[ \t]*=') {
+        throw 'The legacy plaintext administrator entry must be removed with remove-admin-password-from-env.ps1.'
+    }
     Write-Host '.env.piwigo already exists; preserving it.'
     exit 0
 }
@@ -101,7 +106,6 @@ $content = [IO.File]::ReadAllText($examplePath)
 $replacements = @{
     '__GENERATE_DB_PASSWORD__' = New-Secret
     '__GENERATE_DB_ROOT_PASSWORD__' = New-Secret
-    '__GENERATE_ADMIN_PASSWORD__' = New-Secret 24
     '__GENERATE_CLAIM_PEPPER__' = New-Secret 48
     '__GENERATE_PSEUDONYM_SECRET__' = New-Secret 48
 }
@@ -111,4 +115,5 @@ foreach ($entry in $replacements.GetEnumerator()) {
 }
 
 [IO.File]::WriteAllText($envPath, $content, [Text.UTF8Encoding]::new($false))
+Set-ClassArchiveOwnerOnlyFileAcl -Path $envPath
 Write-Host 'Created ignored .env.piwigo with cryptographically random local secrets.'

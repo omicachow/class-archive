@@ -1,7 +1,8 @@
 # Media access policy
 
-Status: Phase 0 media-confidentiality gate passed on the localhost synthetic
-stack; identity-lifecycle production gates remain open
+Status: Phase 0 media confidentiality, Phase 1 explicit-principal integration
+and the Pending-moderation guard pass the final coordinated localhost synthetic
+regression. Production gates remain open.
 
 Applies to: Piwigo 16.4.0 / ClassArchivePolicy 0.1.0
 
@@ -9,14 +10,14 @@ Applies to: Piwigo 16.4.0 / ClassArchivePolicy 0.1.0
 
 A source or derivative URL is an identifier, never an authorization token.
 Every new HTTP request must resolve an authenticated Piwigo session, a single
-Class Archive actor role, the image's effective era, Piwigo's current private
-album/image ACL and the requested variant. Any missing, ambiguous or failed
-input is a denial.
+Class Archive actor role, any Community moderation state, the image's effective
+era, Piwigo's current private album/image ACL and the requested variant. Any
+missing, ambiguous or failed input is a denial.
 
 ```text
 HTTP request
   -> ClassArchivePolicy MediaGuard (PHP, current session + database)
-  -> ALLOW only after role + era + Core ACL + variant policy
+  -> ALLOW only after role + moderation state + era + Core ACL + variant policy
   -> X-Accel-Redirect
   -> nginx internal file location (sendfile / Range / HEAD)
 ```
@@ -33,7 +34,7 @@ check for that browser/account.
 ## Verified Phase 0 evidence
 
 The real Piwigo 16.4.0 + MariaDB runtime passed 290 HTTP probes across Guest,
-Family, Classmate, Teacher, Anonymous and phase-0 Admin actors; HERITAGE and
+Family, Classmate, Teacher, Anonymous and the independent SYSTEM_ADMIN actor; HERITAGE and
 LIVING; thumbnail/preview/original variants; and `GET`, `HEAD` and Range
 requests. The matrix also covered logout, same-browser account switching,
 known backing paths, guessed ids/filenames, query tampering, URL encoding/path
@@ -51,7 +52,7 @@ The observed default result is:
   enabled by default;
 - Anonymous: both-era previews allowed through Core ACL, originals denied by
   default;
-- phase-0 Admin: both eras and all variants allowed;
+- SYSTEM_ADMIN: both eras and all variants allowed;
 - cross-Era image association: denied for every actor, including Admin;
 - duplicate canonical original path: if two image rows reference the same
   source path, source, derivative, `action.php` (`part=e` and `part=r`) and
@@ -66,16 +67,23 @@ not approve real data, NAS access or public exposure.
 
 ## Actor roles
 
-During the Phase 0 spike, normal accounts resolve from exactly one managed
-Piwigo group: `CLASSMATE`, `TEACHER`, `FAMILY` or `ANONYMOUS`. Zero or multiple
-managed roles are `UNKNOWN` and denied. Piwigo `admin`/`webmaster` resolves to
-`SYSTEM_ADMIN` for media delivery only.
+The supported runtime resolves authority from one explicit ClassIdentity
+Principal, never from a username, Core status or Piwigo group alone:
 
-ClassIdentity will replace the normal-account resolver with an active
-Identity/Seat/Account binding and will require an explicit system-account
-binding for the Class Archive Admin Console. A `SYSTEM_ADMIN` is never a Seat.
-The transition must retain the same MediaGuard interface and fail closed while
-a binding is incomplete, frozen or inconsistent.
+- `SEAT_ACCOUNT` requires one active Principal, account binding, Seat and
+  Identity whose role shapes are mutually consistent. Its role is
+  `CLASSMATE`, `TEACHER`, `FAMILY` or `ANONYMOUS`.
+- `SYSTEM_ACCOUNT` requires an active Principal with `SYSTEM_ADMIN`, no account
+  binding and therefore no Identity or Seat. Merely being a Piwigo
+  `admin`/`webmaster` does not create this authority.
+- Missing, duplicate, partially provisioned, frozen, released, disabled or
+  shape-inconsistent state is `UNKNOWN` and denied.
+
+The four managed Piwigo groups are an exact projection used by Core private-
+album ACL and drift detection. They do not grant Class Archive authority by
+themselves. This explicit-principal resolver has passed the post-Phase 1
+MediaGuard regression; the historical Phase 0 group-only resolver is not a
+supported fallback.
 
 ## Effective era
 
@@ -136,16 +144,43 @@ Era authorization does not replace Piwigo private-album authorization. For a
 non-admin actor, at least one same-era association must also pass Core's current
 private-album permission calculation and image privacy level. These values are
 recomputed from current Core tables for each media request rather than trusted
-from the session cache. Pending Family submissions therefore remain
-inaccessible even when their planned era is HERITAGE.
+from the session cache.
+
+There is currently no supported Family submission surface: Community remains
+inactive. MediaGuard nevertheless now contains an explicit guard for the exact
+pinned Community `community_pendings` state model so later activation cannot
+rely on album privacy alone:
+
+- no pending row or one exact `validated` row continues to the ordinary
+  Principal/Era/Core ACL/variant policy;
+- one exact `moderation_pending` row denies every Seat role and allows only an
+  active independent SYSTEM_ADMIN to continue through the remaining media
+  checks;
+- malformed, unknown or duplicate rows deny every actor, including
+  SYSTEM_ADMIN;
+- an absent Community table is treated as ordinary Core-published media because
+  the plugin is inactive/absent, not as an unresolved Pending record.
+
+The reversible test creates the exact pinned pending table only when it is
+absent, reuses one existing HERITAGE fixture image without uploading or adding
+an image row, raises every tested user/image privacy level to prove state is the
+deciding barrier, and exercises thumbnail/preview/original delivery. It then
+restores passwords, levels, rows, table presence and the 72-image baseline.
+Its 75 real HTTP GET probes pass under Windows PowerShell 5.1:
+`COMMUNITY_INACTIVE`, `PENDING_SEAT_ROLES_DENY`,
+`PENDING_SYSTEM_ADMIN_ALLOW`, `MALFORMED_STATE_FAIL_CLOSED`,
+`DUPLICATE_STATE_FAIL_CLOSED` and `IMAGE_MODEL_RESTORED=72` are all verified.
+Community upload/moderation itself remains inactive and is not accepted by this
+guard alone. The same 75 probes pass inside the complete Phase 1 aggregate.
 
 Logout and switching the same browser from a privileged actor to a less
 privileged actor have been verified to re-run authorization and deny stale
 known URLs. Managed role/album permission removal is also verified against an
 already-authenticated session: MediaGuard recomputes current Core permissions
 from database tables rather than trusting cached forbidden-category state.
-ClassIdentity freeze/release and explicit session revocation remain the next
-lifecycle production gate.
+Identity freeze and its Core session/key revocation have passed real page and
+media-session tests. Releasing an already-active Family account and proving its
+old session loses access immediately remain lifecycle production gates.
 
 ## HTTP and cache rules
 
@@ -164,6 +199,11 @@ lifecycle production gate.
 - Raw paths, cookies, passwords and authorization data are not written to the
   Class Archive audit log. Internal gateway failures log only a bounded error
   code and return no media bytes.
+- PHP-FPM starts with umask `0007`, so runtime-generated private files default
+  to group-readable/other-denied modes; Phase 0 rechecks the full media tree
+  after Phase 1. This does not override a Core/plugin call that explicitly uses
+  a permissive `chmod`. Upload post-write normalization to `0660` and a real
+  Community upload regression are mandatory before Community activation.
 
 ## Fail-closed behavior
 
@@ -177,9 +217,11 @@ may be 403, 404 or 503, but never includes media bytes.
 Nginx configuration and plugin activation are both required runtime artifacts.
 Having only the PHP plugin or only rewrite rules is not a passing state.
 
-The current outage test confirms the fail-closed response boundary, but it is
-not a substitute for ClassIdentity freeze/session-revoke tests or an Admin
-Console health indicator.
+The outage and Phase 1 lifecycle tests confirm their respective fail-closed
+boundaries. The Admin Console reports MediaGuard configuration and keeps
+`PRODUCTION BLOCKED`, because a digest-bound, persisted record of the complete
+HTTP matrix is not implemented yet; a green configuration inspection is not a
+substitute for that attestation.
 
 ## Deployment boundary
 

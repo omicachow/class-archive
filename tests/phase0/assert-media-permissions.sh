@@ -49,4 +49,18 @@ printf '%s\n' "$probe_file_acl" | grep -Fqx 'other::---'
 cleanup_probe
 trap - 0 1 2 15
 
+# Init-time normalization is insufficient on its own. Every PHP-FPM process
+# must inherit a private umask so future templates, cache files and derivatives
+# cannot regress to 0644 after normal requests.
+php_fpm_pids="$(pgrep -x php-fpm84)"
+test -n "$php_fpm_pids"
+for php_fpm_pid in $php_fpm_pids
+do
+  php_fpm_umask="$(awk '$1 == "Umask:" { print $2 }' "/proc/$php_fpm_pid/status")"
+  if test "$php_fpm_umask" != '0007'; then
+    echo "PHP-FPM process has a non-private umask: $php_fpm_umask" >&2
+    exit 1
+  fi
+done
+
 echo 'MEDIA_PERMISSIONS=PASS'

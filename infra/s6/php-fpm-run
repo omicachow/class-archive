@@ -1,0 +1,10 @@
+#!/bin/sh
+# The upstream image's S6 service starts PHP-FPM without with-contenv, so the
+# master cannot expand the two explicit pool env allowlist entries. Import the
+# container environment into the root master; PHP-FPM keeps clear_env=yes and
+# exposes only the two names declared in class-archive-env.conf to workers.
+# Keep files and directories created after startup private to the archive
+# service. The init-time user script normalizes existing media; this umask
+# closes the gap for templates, cache entries and derivatives created later.
+umask 0007
+exec /command/with-contenv php-fpm84 -F -R

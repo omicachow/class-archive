@@ -7,6 +7,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+. (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
 $settings = @{}
 foreach ($line in [IO.File]::ReadAllLines((Join-Path $projectRoot '.env.piwigo'))) {
     $trimmed = $line.Trim()
@@ -18,14 +19,16 @@ foreach ($line in [IO.File]::ReadAllLines((Join-Path $projectRoot '.env.piwigo')
 }
 
 $baseUri = [Uri]("http://127.0.0.1:$($settings['CLASS_ARCHIVE_HTTP_PORT'])/")
-$null = Invoke-WebRequest -UseBasicParsing -Uri ([Uri]::new($baseUri, 'identification.php')) -SessionVariable adminSession
-$form = 'username=' + [Uri]::EscapeDataString($settings['PIWIGO_ADMIN_USERNAME']) `
-    + '&password=' + [Uri]::EscapeDataString($settings['PIWIGO_ADMIN_PASSWORD']) `
-    + '&login=Sign%20in&redirect='
-$null = Invoke-WebRequest -UseBasicParsing -Uri ([Uri]::new($baseUri, 'identification.php')) `
-    -Method Post -Body $form -ContentType 'application/x-www-form-urlencoded' -WebSession $adminSession
+$composeBase = @(
+    '-d', 'Ubuntu', '--cd', $projectRoot, '--',
+    'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml'
+)
+$adminLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $composeBase `
+    -AdminUsername ([string]$settings['PIWIGO_ADMIN_USERNAME'])
+$adminSession = $adminLease.Session
 
-$album = Invoke-WebRequest -UseBasicParsing `
+try {
+    $album = Invoke-WebRequest -UseBasicParsing `
     -Uri ([Uri]::new($baseUri, 'index.php?/category/fixture-living-reunion')) `
     -WebSession $adminSession
 $pictureLink = $album.Links | Where-Object { $_.href -match '^picture\.php\?/' } | Select-Object -First 1
@@ -55,6 +58,10 @@ if ($previewStatus -notin @(401, 403, 404) -or $originalStatus -notin @(401, 403
     throw "Known media URL bypass remains: derivative=$previewStatus original=$originalStatus"
 }
 
-Write-Output 'KNOWN_MEDIA_ACL_GAP=RESOLVED'
-Write-Output 'GUEST_KNOWN_LIVING_DERIVATIVE=DENY'
-Write-Output 'GUEST_KNOWN_LIVING_ORIGINAL=DENY'
+    Write-Output 'KNOWN_MEDIA_ACL_GAP=RESOLVED'
+    Write-Output 'GUEST_KNOWN_LIVING_DERIVATIVE=DENY'
+    Write-Output 'GUEST_KNOWN_LIVING_ORIGINAL=DENY'
+}
+finally {
+    Remove-ClassArchiveSystemAdminSession -Lease $adminLease
+}

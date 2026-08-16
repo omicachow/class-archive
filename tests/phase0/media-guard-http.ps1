@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envPath = Join-Path $projectRoot '.env.piwigo'
+. (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
 $script:failures = [Collections.Generic.List[string]]::new()
 $script:probeCount = 0
 
@@ -742,7 +743,6 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 $settings = Read-DotEnv -Path $envPath
 $port = Require-Setting -Settings $settings -Key 'CLASS_ARCHIVE_HTTP_PORT'
 $adminUsername = Require-Setting -Settings $settings -Key 'PIWIGO_ADMIN_USERNAME'
-$adminPassword = Require-Setting -Settings $settings -Key 'PIWIGO_ADMIN_PASSWORD'
 if ($port -notmatch '^[0-9]{1,5}$') { Stop-Setup 'Invalid local HTTP port.' }
 $baseUri = [Uri]("http://127.0.0.1:$port/")
 $webServiceUri = [Uri]::new($baseUri, 'ws.php?format=json')
@@ -764,8 +764,12 @@ if ($LASTEXITCODE -ne 0 -or 'ACCESS_FIXTURES_READY' -notin @($provisionOutput)) 
     Stop-Setup 'Synthetic access fixture provisioning failed.'
 }
 
-$sessions = [ordered]@{
-    Admin = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username $adminUsername -Password $adminPassword -RoleLabel 'Admin'
+$adminLease = $null
+$switchLease = $null
+try {
+    $adminLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $composeBase -AdminUsername $adminUsername
+    $sessions = [ordered]@{
+    Admin = $adminLease.Session
     Classmate = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username 'fixture-classmate' -Password $fixturePassword -RoleLabel 'Classmate'
     Teacher = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username 'fixture-teacher' -Password $fixturePassword -RoleLabel 'Teacher'
     Family = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username 'fixture-family' -Password $fixturePassword -RoleLabel 'Family'
@@ -865,9 +869,8 @@ foreach ($eraName in @('Heritage', 'Living')) {
 
 # Switching from Admin to Family in one cookie jar must immediately apply the
 # Family LIVING denial to already-known URLs.
-$switchSession = New-AuthenticatedSession `
-    -WebServiceUri $webServiceUri -Username $adminUsername `
-    -Password $adminPassword -RoleLabel 'Admin switch probe'
+$switchLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $composeBase -AdminUsername $adminUsername
+$switchSession = $switchLease.Session
 Invoke-Logout -WebServiceUri $webServiceUri -Session $switchSession -Label 'Admin switch probe'
 try {
     $switchLogin = Invoke-WebService -Uri $webServiceUri -Session $switchSession -Body @{
@@ -1008,3 +1011,14 @@ Write-Output 'ALLOW_BODY_IMAGE_MAGIC=PASS'
 Write-Output 'DENY_BODY_IMAGE_MAGIC_ABSENT=PASS'
 Write-Output 'RANGE_206_CONTENT_RANGE_32_BYTES=PASS'
 Write-Output 'HEAD_ZERO_BODY=PASS'
+}
+finally {
+    if ($null -ne $switchLease) {
+        try { Remove-ClassArchiveSystemAdminSession -Lease $switchLease }
+        catch { [Console]::Error.WriteLine('FAIL exact switch-session lease revocation failed') }
+    }
+    if ($null -ne $adminLease) {
+        Remove-ClassArchiveSystemAdminSession -Lease $adminLease
+    }
+    $fixturePassword = $null
+}

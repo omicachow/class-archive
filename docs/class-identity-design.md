@@ -1,6 +1,8 @@
 # ClassIdentity design for Piwigo-first V1
 
-Status: design only; no plugin code exists yet
+Status: Phase 1 foundation, credential hardening and Pending-media integration
+pass the final coordinated localhost regression; bounded lifecycle/Admin
+Console and production gaps remain explicit
 
 Target runtime: locked Piwigo Core 16.4.0 + MariaDB 11.8.8
 Design date: 2026-08-16 (Asia/Shanghai)
@@ -11,7 +13,7 @@ Design date: 2026-08-16 (Asia/Shanghai)
 not model:
 
 ```text
-Identity -> Seat -> ClassIdentity account binding -> Piwigo User Account
+Identity -> Seat -> ClassIdentity account binding -> Principal -> Piwigo User Account
 ```
 
 Piwigo continues to own usernames, password hashing, login, PHP sessions,
@@ -21,11 +23,13 @@ patches Core. It uses plugin hooks, numbered migrations, Core functions and a
 small version-gated adapter for any Core table operation without a public
 function.
 
-This design covers Phase 1 identity and governance. Media authorization,
-HERITAGE/LIVING action policy, comments, collections and Spotlight remain
-separate concerns: the deployable `ClassArchivePolicy` plugin owns its internal
-MediaGuard/AnonymousPresenter/Collections/Interactions services, while
-`ClassSpotlight` remains a separate plugin.
+This design covers Phase 1 identity and governance. The deployed
+`ClassArchivePolicy` plugin owns MediaGuard. The deployed `ClassIdentity`
+plugin owns Principal/login enforcement, Claim/Invite provisioning, the
+minimum Admin Console, action capability guards, anonymous presentation and
+audited resolution. Collections, Family submission workflow, Likes/reports and
+Spotlight remain separate later concerns; `ClassSpotlight` is still only a
+planned plugin.
 
 ## Domain invariants
 
@@ -50,8 +54,9 @@ MediaGuard/AnonymousPresenter/Collections/Interactions services, while
 
 - A Seat is an entitlement slot. It is not a Piwigo profile and is never shared
   as one login by several people.
-- Each current Seat has zero or one current account binding. A Piwigo user id
-  has at most one ClassIdentity account binding.
+- Each current Seat has zero or one current account binding. Every authenticated
+  Piwigo user id has at most one ClassIdentity principal; a Seat binding does
+  not duplicate that external id or its authorization epoch.
 - Historical released bindings are retained for registration/audit history, but
   cannot authenticate through the ClassIdentity guard.
 - A Family relationship belongs to the current Family account assignment, not
@@ -63,6 +68,11 @@ MediaGuard/AnonymousPresenter/Collections/Interactions services, while
 - Only an active Classmate account may issue or revoke an invitation for an
   available Family Seat under the same Identity. Admin may revoke/release or
   replace a Seat with a reason.
+- An expired issued Family Invitation is atomically changed to `EXPIRED` and
+  its matching `INVITED` Seat to `AVAILABLE` when presented or before the owner
+  next issues an invitation. Explicit Admin revoke performs the equivalent
+  `REVOKED` transition. Neither transition decrements `invite_generation`; a
+  reissue increments it and therefore cannot resurrect an old validator.
 - An Anonymous Seat may be activated only by its owning active Classmate or an
   authorized administrator. It creates an independent Piwigo user, credential
   and session.
@@ -81,8 +91,10 @@ enforce the allowed set.
 | Credential token | `ISSUED`, `RESERVED`, `CONSUMED`, `REVOKED`, `EXPIRED` |
 | Provisioning operation | `PREPARED`, `CORE_USER_CREATED`, `CORE_GROUP_ASSIGNED`, `COMMITTED`, `RETRY_CREDENTIAL_REQUIRED`, `COMPENSATING`, `COMPENSATED`, `FAILED_MANUAL` |
 
-An account is authorized only when Identity, Seat and account binding are all
-active. A group membership alone never authorizes it.
+An account is authorized only when its `SEAT_ACCOUNT` Principal, Identity, Seat
+and account binding are all active and mutually consistent. A group membership
+alone never authorizes it. A `SYSTEM_ACCOUNT` follows its separate exclusive
+shape and never receives a Seat.
 
 ## InnoDB schema
 
@@ -119,15 +131,19 @@ pseudonymization migration that preserves referential history.
 | `identity_id` | FK to Identity, `ON DELETE RESTRICT` | Permanent owner |
 | `ordinal` | `SMALLINT UNSIGNED` | Display/order only, not authorization |
 | `seat_type` | `VARCHAR(16)` | `CLASSMATE`, `TEACHER`, `FAMILY`, `ANONYMOUS` |
+| `singleton_marker` | generated nullable `VARCHAR(16)` | Mirrors non-Family `seat_type`; null for Family |
 | `state` | `VARCHAR(24)` indexed | Seat lifecycle |
 | `pseudonym_subject` | nullable `BINARY(16)` unique, random | Anonymous HMAC subject; never rendered; null on every non-Anonymous Seat |
 | `invite_generation` | `INT UNSIGNED` | Invalidates every earlier invitation generation |
 | `lock_version` | `INT UNSIGNED` | Concurrent claim/invite protection |
 | lifecycle timestamps | UTC `DATETIME(6)` | Created/invited/activated/frozen/released times |
 
-Unique key `(identity_id, ordinal)` prevents duplicate slots. A service-level
-constraint validates the allowed role counts from the Identity's captured
-template. `pseudonym_subject` is populated only for Anonymous Seats.
+Unique keys `(identity_id, ordinal)` and `(identity_id, singleton_marker)`
+prevent duplicate slots and enforce at most one Classmate, Teacher and
+Anonymous Seat per Identity while permitting multiple Family Seats. A
+service-level constraint additionally validates the exact allowed role counts
+from the Identity's captured template. `pseudonym_subject` is populated only
+for Anonymous Seats.
 
 ### `class_identity_account`
 
@@ -137,13 +153,11 @@ This table is an account **binding/history**, not a credential store.
 |---|---|---|
 | `id` | `BIGINT UNSIGNED` primary key | Binding id |
 | `seat_id` | FK to Seat, `ON DELETE RESTRICT` | Seat assignment |
-| `piwigo_user_id` | `BIGINT UNSIGNED` nullable, unique when present | Reconciled Core user reference |
 | `requested_username` | `VARCHAR(100)` | Nonsecret idempotent reconciliation input |
 | `real_name` | `VARCHAR(190)` nullable | Family assignment name; formal name remains on Identity |
 | `family_relationship` | `VARCHAR(24)` nullable | Required only for Family |
 | `state` | `VARCHAR(32)` indexed | Binding lifecycle |
 | `current_marker` | nullable `TINYINT`, value `1` only for a current binding | Supports unique `(seat_id, current_marker)` while allowing many historical null rows |
-| `auth_epoch` | `BIGINT UNSIGNED` | Optional defense-in-depth session generation; Core session/API-key deletion remains the primary revocation mechanism |
 | `pseudonym_key_version` | `SMALLINT UNSIGNED` nullable | Stable anonymous HMAC key version |
 | `provisioning_operation_id` | nullable unique FK to Operation, added after both tables exist | Saga correlation |
 | lifecycle/reconciliation timestamps | UTC `DATETIME(6)` | Bound, frozen, released, last checked |
@@ -151,6 +165,28 @@ This table is an account **binding/history**, not a credential store.
 No email or password is duplicated here. Piwigo remains the source of truth for
 login/email/password. The unique current-marker invariant is also checked under
 `SELECT ... FOR UPDATE`; database uniqueness handles concurrent claims.
+
+### `class_identity_principal`
+
+This is the single mapping from an authenticated Piwigo user to Class Archive
+authority. Core user id and session generation are intentionally not duplicated
+on the account-binding history table.
+
+| Column | Type / constraint | Purpose |
+|---|---|---|
+| `id` | `BIGINT UNSIGNED` primary key | Principal id |
+| `principal_type` | `VARCHAR(24)` | `SEAT_ACCOUNT` or `SYSTEM_ACCOUNT` |
+| `system_role` | nullable `VARCHAR(24)` | `SYSTEM_ADMIN`; schema also reserves `ARCHIVIST`/`MODERATOR` for later policy migrations |
+| `account_id` | nullable unique FK to Account | Required only for a Seat account |
+| `piwigo_user_id` | `BIGINT UNSIGNED` unique external reference | The one Core login represented by this principal |
+| `state` | `VARCHAR(16)` | `ACTIVE`, `FROZEN`, `DISABLED` |
+| `auth_epoch` | `BIGINT UNSIGNED` | Defense-in-depth session generation; Core session/key deletion remains primary revocation |
+| lifecycle timestamps | UTC `DATETIME(6)` | Created, updated, frozen and disabled times |
+
+A database `CHECK` enforces the exclusive shapes: `SEAT_ACCOUNT` requires an
+Account and no system role; `SYSTEM_ACCOUNT` requires no Account/Seat and one
+system role. V1 authorization accepts only `SYSTEM_ADMIN`. Reserving future
+role strings does not grant their permissions.
 
 ### `class_identity_token`
 
@@ -160,7 +196,8 @@ administrator-issued password-reset links.
 | Column | Type / constraint | Purpose |
 |---|---|---|
 | `id` | `BIGINT UNSIGNED` primary key | Internal token record |
-| `seat_id` | FK to Seat | Target Seat |
+| `seat_id` | nullable FK to Seat | Required for Claim/Family Invite; null for reset |
+| `principal_id` | nullable FK to Principal | Required only for Password Reset, including Seat-less administrators |
 | `purpose` | `VARCHAR(24)` | `CLAIM`, `FAMILY_INVITE`, `PASSWORD_RESET` |
 | `generation` | `INT UNSIGNED` | Reissue/revoke generation |
 | `selector_hash` | `BINARY(32)` unique | SHA-256 of public random selector |
@@ -171,6 +208,9 @@ administrator-issued password-reset links.
 | `issued_by_user_id` | nullable external Piwigo user id | Issuer audit link |
 | `issued_at`, `expires_at`, `reserved_at`, `consumed_at`, `revoked_at` | UTC `DATETIME(6)` | Lifecycle |
 
+`CHECK` requires Claim/Family Invite to target exactly a Seat and Password
+Reset to target exactly a principal. This removes the earlier contradiction
+where an administrator reset was described but every token required a Seat.
 Only hashes are stored. Claim codes should use at least 80 bits of generated
 entropy; Family/reset validators use 256 random bits. Comparison is constant
 time. Plain values exist only during generation/request handling and are
@@ -226,6 +266,21 @@ session ids/cookies, HMAC secrets, API keys and raw authorization headers are
 forbidden. Raw IP storage defaults off; a future explicit setting may enable it
 only with retention and access controls.
 
+Administrative reasons are validated at both the service and final Audit
+persistence boundaries. Normal bounded single-line Chinese business labels are
+accepted. Token-shaped values, authorization/cookie/session text, password
+assignments, bare password values and high-entropy credential-like strings are
+rejected before any side effect and are never reflected in the error response.
+The same secret scan applies recursively to structured `old_value` / `new_value`
+content, so moving a password-shaped value into Audit JSON is not a bypass.
+
+### `class_identity_role_group`
+
+This table projects a business role code to an external Piwigo group id and
+expected name. It never replaces the active Identity/Seat/principal checks.
+Business roles require a group id; a disabled/missing/mismatched projection
+fails closed. No cross-engine foreign key points to Piwigo's group table.
+
 The `JSON` columns above target the project's locked MariaDB 11.8 runtime. The
 plugin does not claim compatibility with every database version accepted by
 Piwigo Core; supporting an older server requires a tested `LONGTEXT` fallback
@@ -241,8 +296,9 @@ and anonymous secrets.
 
 ## Migrations
 
-- The plugin ships ordered, forward-only migration classes and records the
-  applied schema version in a ClassIdentity migration table or Piwigo config.
+- The plugin ships ordered, forward-only migrations and records each version,
+  name and binary SHA-256 checksum in `class_identity_migration`; it does not
+  use the caller-supplied old plugin version as migration state.
 - Install/upgrade uses Piwigo's plugin maintenance entry points. Runtime
   requests never opportunistically create or alter tables.
 - Each migration is restart-safe: inspect-before-create/index, bounded data
@@ -293,17 +349,28 @@ cross-engine transaction.
   user row exists. This makes partial accounts fail closed.
 - Group assignment is set reconciliation over ClassIdentity-managed groups,
   not “append one row.” It preserves unrelated extension groups.
-- Compensation first freezes the binding, increments `auth_epoch`, revokes Core
-  auth keys and removes managed business groups. A Core user is deleted only by
-  an explicit official-Core operation after proving it has no authored content;
-  otherwise it remains a disabled tombstone so attribution is preserved.
+- The Admin Console offers bounded idempotent compensation only when durable
+  saga state proves that the Core user was created by that operation before a
+  later step failed (`post_core_provisioning_failed`), the binding has no
+  Principal, and Seat/account/operation states still match. Before touching the
+  Core MyISAM user, it commits a `MANUAL_COMPENSATION_ATTEMPT` Audit event and
+  changes the durable operation state to `COMPENSATING`. It then revokes all
+  Core sessions/keys and removes every group before marking the operation
+  `COMPENSATED`, the binding `DELETED`, and the Seat `AVAILABLE`. The unbound
+  Core row remains a fail-closed tombstone for later content-aware cleanup.
+- A registration failure with uncertain Core-user provenance is never offered
+  automatic compensation: it stays `FAILED_MANUAL` / `COMPENSATION_REQUIRED`
+  and keeps production blocked so an existing same-name account cannot be
+  quarantined by guesswork.
 - A released Family Seat receives a new invitation generation. Old tokens stay
   revoked/consumed and can never be resurrected.
-- A lease-based background reconciler retries safe steps with backoff and scans
-  for drift: missing Core user, wrong group, duplicate/current binding conflict,
-  or operation stalled past its lease. Jobs are idempotent.
-- `FAILED_MANUAL` is visible in the Admin Panel with a safe error code and
-  remediation action; it never silently grants access.
+- Dashboard/System Health count `FAILED_MANUAL`, `COMPENSATION_REQUIRED`, and
+  operation/account/Seat provisioning states older than the bounded stale
+  threshold. Any count or health-query error adds `PROVISIONING_INCIDENT` to
+  `PRODUCTION BLOCKED`; the incident table exposes only safe error metadata.
+- A future lease-based background reconciler may retry additional safe steps
+  with backoff. Until then, ambiguous and stale operations remain visible and
+  blocked rather than being silently swallowed.
 
 ## Core account and group integration
 
@@ -315,17 +382,33 @@ ClassIdentity resolves group ids by configured name, never hardcoded ids.
 | Teacher | Core status `normal` | exactly `TEACHER` |
 | Family | Core status `normal` | exactly `FAMILY` |
 | Anonymous | Core status `normal`; internal opaque username | exactly `ANONYMOUS` |
-| Super Admin | Core `admin`/`webmaster`; not claimed through a Seat | optional mirrored `ADMIN`, outside the exactly-one business-role set |
+| Super Admin | Core `admin`/`webmaster` plus active `SYSTEM_ACCOUNT`/`SYSTEM_ADMIN` principal; never claimed through a Seat | optional mirrored `ADMIN`, outside the exactly-one business-role set |
 
 The four business groups and optional ADMIN mirror are non-default. A managed
 normal account must have exactly one business group. Admin status is always
 checked through Piwigo Core; membership in a string-named `ADMIN` group alone
 never grants administration.
 
-Registration calls the Core password hasher through `register_user()`. Password
-reset uses a one-time hashed reset token and the Core password-update/hash
-function; the administrator never sees the chosen password. Changing a password
-also triggers session/auth-key revocation and an audit event.
+Registration calls the Core password hasher through `register_user()`. The
+initial SYSTEM_ADMIN plaintext is not an environment value: fresh local
+bootstrap accepts no-echo input (or a consumed one-time file restricted to its
+owner, SYSTEM and Administrators with no additional principal), and
+the bounded local rotation command later passes no-echo input over CLI STDIN.
+After proving the independent Principal, one transaction increments its
+`auth_epoch` and records `PASSWORD_RESET_INITIATED`; Core then hashes the
+password and revokes sessions/auth keys before a redacted success event. A
+pre-ClassIdentity recovery may fall back to the exact Core webmaster only when
+`information_schema` proves zero `${prefix}class_identity_%` tables; partial or
+remnant schema fails closed. The live rotation returns `sessions=revoked`, the
+legacy env key count is zero and the secret-file ACL is restricted. A fresh
+empty-volume install has not been rehearsed, and this path is not production
+MFA.
+
+The separate planned **member-account** password-reset surface will use a
+one-time hashed reset token and the Core password-update/hash function; the
+administrator must never see the chosen password. It is not implemented in the
+current Admin Console. When added, changing a password must also trigger
+session/auth-key revocation and an audit event.
 
 Core already offers `generate_password_link()` and stores a hashed activation
 key, but its link carries the secret in a query string and its reset lifecycle
@@ -342,10 +425,10 @@ handled by the administrator policy.
 ## Login, freeze and session revocation
 
 Piwigo 16 exposes `finalize_login`, `user_login`, `user_init` and `user_logout`
-hooks. The implementation must version-gate and integration-test these hooks:
+hooks. The plugin version-gates and integration-tests these hooks:
 
 - `finalize_login` rejects password login for a nonactive binding/Seat/Identity.
-- `user_login` stores the binding id, current `auth_epoch` and issue time in a
+- `user_login` stores the principal id, current principal `auth_epoch` and issue time in a
   stateful PHP session. It is not assumed to run for a Header API Key login.
 - `user_init` guards every established UI/API request, remember-me/auth-key path
   and partially provisioned or unbound normal/generic account. Header API Key
@@ -356,7 +439,7 @@ hooks. The implementation must version-gate and integration-test these hooks:
   then immediately terminates dispatch with a generic 401/403 or sign-in
   redirect. The already constructed Core `$user` must never continue through
   the current request.
-- Freeze or “revoke sessions” increments `auth_epoch` as defense in depth, calls
+- Freeze or “revoke sessions” increments the principal `auth_epoch` as defense in depth, calls
   Core `delete_user_sessions($userId)`, calls `deactivate_user_auth_keys()`, and
   enumerates Core API keys through `revoke_api_key()`. Every stateful session
   and stateless key is removed, then the guard rejects any stale request.
@@ -367,10 +450,11 @@ stable public API; leaving them enabled would let an old cookie create a new
 post-revocation session. Re-enabling Remember Me requires a tested per-account
 revocation adapter and is outside the minimal design.
 
-Identity freeze logically cascades through the request guard immediately, then
-the reconciler increments/revokes every bound account. Account freeze affects
-only that binding. Unfreeze never restores an old invitation or authentication
-key.
+Identity freeze makes the request guard deny immediately and the Admin service
+increments each bound Principal epoch and revokes Core sessions/auth/API keys.
+Unfreeze repeats credential revocation before restoring the Identity so an old
+session or key is never resurrected. A standalone account-freeze action and
+release of an already-active Family account are not implemented yet.
 
 ### Core administration guard
 
@@ -380,9 +464,18 @@ group, auth-key and API-key methods. Direct calls to at least
 `pwg.users.getAuthKey` and `pwg.users.api_key.*` fail for managed accounts unless
 they originate from the plugin's audited internal operation. Native password or
 business-group changes are redirected to ClassIdentity so session/key revoke,
-saga state and Audit cannot be bypassed. `save_profile_from_post` is monitored
-for allowed profile changes and audit/drift reconciliation; it is not treated
-as an authorization substitute.
+saga state and Audit cannot be bypassed. The native Piwigo `profile`,
+`user_list`, `group_list` and `user_perm` business routes are currently denied
+even to SYSTEM_ADMIN unless an audited internal permit is active; technical
+Core maintenance pages remain available. A future scoped profile adapter must
+be implemented and tested before these routes can be reopened.
+
+CapabilityGuard separately classifies Web API and direct picture/community
+mutations. Known reads and explicitly allowed role actions proceed to Core;
+known forbidden actions are denied. An unknown or unclassified state-changing
+Web API method fails closed for **every** Seat role, including Classmate and
+Teacher. Adding a new plugin method therefore requires an explicit policy and
+negative HTTP regression rather than inheriting access from a high-trust role.
 
 ## Anonymous pseudonyms
 
@@ -408,15 +501,17 @@ binding records its key version so aliases remain stable for 10-20 years; old
 key material remains in encrypted recovery storage. A compromised-key rotation
 is an explicit audited migration that may intentionally change aliases.
 
-ClassIdentity owns the HMAC derivation/key-version contract and audited
-administrator resolution. The `ClassArchivePolicy` plugin's internal
-AnonymousPresenter owns ordinary comment/photo/album DTO and template/API
-rewriting: it replaces Core username, profile/avatar links and author ids before
-output. Browser/API regression tests scan for the Core id, username, Seat id,
-Identity id and roster code. Admin resolution maps the authenticated comment
-author -> binding -> Seat -> Identity, requires admin permission plus a reason,
-and writes an audit event. HMAC is not treated as encryption or a substitute
-for output filtering.
+ClassIdentity owns the HMAC derivation/key-version contract, its
+`AnonymousPresenter`, and audited administrator resolution. The presenter
+rewrites ordinary comment/photo DTOs and Piwigo template/API output: it replaces
+Core usernames and removes profile/avatar links and author ids before output.
+Browser/API regression tests scan for the Core id, username, Seat id, Identity
+id and roster code. Admin resolution maps the authenticated comment author ->
+binding -> Seat -> Identity, requires SYSTEM_ADMIN plus a reason, and appends an
+audit event before returning the mapping. Native Piwigo comment moderation
+remains reusable, but its hidden-author id/filter DTO is removed so it cannot
+become an unaudited alternate resolution path. HMAC is not treated as
+encryption or a substitute for output filtering.
 
 ## Settings
 
@@ -443,27 +538,30 @@ settings, not this plugin's authorization logic.
 
 ## HTTP and Admin surfaces
 
-Exact route registration follows Piwigo plugin routing; the semantic endpoints
-are:
+Exact route registration follows Piwigo plugin routing. This table distinguishes
+the deployed surface from the target design:
 
-| Surface | Operations |
-|---|---|
-| Public Claim | Show/submit Classmate or Teacher ID + Claim Code; create independent username/email/password |
-| Family invitation | Resolve selector; submit fragment/manual validator, real name, relationship and independent Core credentials |
-| My Identity | Read own Identity/Seat status; issue/revoke an available Family invitation; activate/disable own Anonymous Seat; request own reset |
-| Admin Identities | List/filter/import Classmate/Teacher roster; create/freeze/unfreeze/retire Identity |
-| Admin Seats/Accounts | Freeze/unfreeze, release/replace Family, disable Anonymous, revoke sessions, issue password reset |
-| Admin Claims/Invites | Batch generate hashed Claim Codes, reissue/revoke, inspect status without revealing secrets |
-| Admin Audit/Reconcile | Search redacted events; inspect/retry compensation operations; resolve anonymous ownership with reason |
-| Export | CSV/JSON Identity/Seat/account metadata only; never password/token/hash/session/secret fields |
+| Surface | Status | Operations |
+|---|---|---|
+| Public Claim | Implemented | Show/submit Classmate or Teacher ID + one-time Claim; create independent Core credentials |
+| Family invitation | Implemented | Submit one-time invitation, real name, relationship and independent Core credentials |
+| My Identity | Implemented subset | Read own Identity/Seat status; issue an available Family invitation; activate own Anonymous Seat |
+| Admin Dashboard | Implemented | Identity/content summaries, recent Audit and fail-closed production blockers |
+| Admin Identities / Teachers | Implemented subset | List/detail/create; issue/reissue Claim; freeze/unfreeze Identity. Import/edit/retire and account-level operations are pending |
+| Admin Invitations | Implemented | Inspect lifecycle; revoke/reissue Claim and Family Invitation. A newly issued raw code appears only in the terminal no-store POST response |
+| Admin Audit / System | Implemented subset | Read redacted events; inspect provisioning incidents; run only the bounded proven compensation. Search/export and anonymous-resolution UI are pending |
+| Admin Seats/Accounts | Planned | Active Family release, account freeze, Anonymous disable, force logout and member-account password reset |
+| Submissions / Anonymous / Archive / Spotlight | Planned | No Admin page or route exists yet |
+| Export | Planned | Future CSV/JSON Identity/Seat/account metadata only; never password/token/hash/session/secret fields |
 
 Every mutation is POST, CSRF-protected, same-origin checked and authorized on
 the server. Public errors do not reveal whether an Identity or Seat exists.
 Claim/invite/login actions are rate-limited. Pages carrying selectors use
 `no-store`/`no-referrer`; secrets never appear in query strings. Admin actions
-use Core `admin`/`webmaster` authorization plus action-specific permission and
-require a reason for freeze, release/replace, reset, anonymous resolution and
-manual compensation.
+require both Core `admin`/`webmaster` status and an active independent
+`SYSTEM_ACCOUNT/SYSTEM_ADMIN` Principal, plus action-specific permission.
+Implemented freeze and manual-compensation actions require a reason; future
+release/replace/reset and anonymous-governance UI must retain that rule.
 
 No general REST API is enabled in Phase 1. A future API must use the same domain
 services and sanitized DTOs; it cannot expose tables directly.
@@ -502,6 +600,8 @@ final gate.
 7. An expired, revoked, wrong-generation or wrong-Seat token fails generically.
 8. Family invitation may be issued only by the matching active Classmate, is
    one-use/expiring and cannot exceed available Family Seats.
+   Expiry/revoke releases the Seat, reissue increments generation, and every
+   older raw token remains invalid.
 9. Database, application logs, access logs, audit JSON and responses contain no
    plaintext Claim/Invite/reset validator or password.
 10. CSRF, enumeration and rate-limit tests cover every public mutation.
@@ -515,6 +615,9 @@ final gate.
 13. Reconciler repairs managed-group drift but preserves unrelated groups.
 14. Release preserves authored content attribution and denies the old login;
     replacement uses a new binding and invitation generation.
+14a. `FAILED_MANUAL`, `COMPENSATION_REQUIRED`, and stale provisioning rows are
+    visible and force `PRODUCTION BLOCKED`. Only proven post-Core failures get
+    the bounded compensation action; uncertain failures never do.
 
 ### Freeze, password and sessions
 
@@ -534,15 +637,15 @@ final gate.
 20. One Anonymous Seat/account maximum per Classmate; none for Teacher.
 21. Same Anonymous Seat + context yields the same alias; a different context
     yields a different alias; collision extension is deterministic.
-22. Through ClassArchivePolicy's AnonymousPresenter, ordinary HTML/API contains
+22. Through ClassIdentity's AnonymousPresenter, ordinary HTML/API contains
     no anonymous Core username/id, Identity/Seat id, roster code or identifying
     profile/avatar link.
 23. Admin resolution returns the correct Identity only to an authorized admin,
     requires a reason and writes a redacted audit event.
 24. Anonymous account is absent from all ordinary user discovery surfaces and
     cannot upload/create album/Like through direct endpoints; comment/output
-    behavior is a cross-plugin acceptance contract implemented by
-    ClassArchivePolicy.
+    behavior remains fail closed until ClassIdentity's HTML/WS presenter
+    attestation and its persistent readiness gate both pass.
 
 These tests cover the Phase 1 portions of acceptance criteria 2-6, 19, 26-27
 and 31-32, plus concurrency and MyISAM failure modes that the product-level list
@@ -555,8 +658,8 @@ Family submission review, named photo collections, Spotlight, Activity, SSO,
 email delivery, a second user directory or the photo-first Theme. It does not
 activate Community or User Collections.
 
-Implementation may start only as an isolated Piwigo plugin under `plugins/`,
-with migrations and tests. Any discovered need to edit Piwigo Core, add a
-cross-engine foreign key, store plaintext credentials/tokens, or bypass the
-compensation guard is an architecture blocker, not an invitation to weaken this
+The implementation is isolated under `plugins/ClassIdentity/`, with tracked
+migrations and tests. Any future need to edit Piwigo Core, add a cross-engine
+foreign key, store plaintext credentials/tokens, or bypass the compensation
+guard remains an architecture blocker, not an invitation to weaken this
 boundary.

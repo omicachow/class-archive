@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envPath = Join-Path $projectRoot '.env.piwigo'
+. (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
 $script:httpProbeCount = 0
 
 function Read-DotEnv {
@@ -878,7 +879,6 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 $settings = Read-DotEnv -Path $envPath
 $port = Require-Setting -Settings $settings -Key 'CLASS_ARCHIVE_HTTP_PORT'
 $adminUsername = Require-Setting -Settings $settings -Key 'PIWIGO_ADMIN_USERNAME'
-$adminPassword = Require-Setting -Settings $settings -Key 'PIWIGO_ADMIN_PASSWORD'
 if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
     throw 'Invalid local HTTP port.'
 }
@@ -899,6 +899,7 @@ $prepared = $false
 $databaseStopAttempted = $false
 $sessions = [ordered]@{}
 $failure = $null
+$adminLease = $null
 
 try {
     $runningServices = @(& wsl.exe @($composeBase + @('ps', '--status', 'running', '--services')))
@@ -914,9 +915,9 @@ try {
         throw 'The selected image is not a same-Era multi-album fixture.'
     }
 
-    $sessions.Admin = New-AuthenticatedSession `
-        -WebServiceUri $webServiceUri -Username $adminUsername `
-        -Password $adminPassword -RoleLabel 'Admin'
+    $adminLease = New-ClassArchiveSystemAdminSession `
+        -BaseUri $baseUri -ComposeBase $composeBase -AdminUsername $adminUsername
+    $sessions.Admin = $adminLease.Session
     $sessions.Classmate = New-AuthenticatedSession `
         -WebServiceUri $webServiceUri -Username 'fixture-classmate' `
         -Password $fixturePassword -RoleLabel 'Classmate'
@@ -1091,8 +1092,11 @@ finally {
             Invoke-LogoutBestEffort -WebServiceUri $webServiceUri -Session $session
         }
     }
+    if ($null -ne $adminLease) {
+        try { Remove-ClassArchiveSystemAdminSession -Lease $adminLease }
+        catch { if ($null -eq $failure) { $failure = $_.Exception.Message } }
+    }
     $fixturePassword = $null
-    $adminPassword = $null
 }
 
 if ($null -ne $failure) {

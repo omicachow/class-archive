@@ -51,28 +51,22 @@ $fixtures = [
 foreach ($fixtures as $username => $groupName) {
     $userId = get_userid($username);
     if (!$userId) {
-        $errors = [];
-        $userId = register_user(
-            $username,
-            $password,
-            $username . '@class-archive.local',
-            false,
-            $errors,
-            false
-        );
-        if ($userId === false) {
-            fail("Cannot create {$username}: " . implode('; ', $errors));
-        }
+        fail("Missing bound {$username}; run the explicit synthetic ClassIdentity bootstrap first.");
+    }
+    if (!class_exists(\ClassIdentity\Access::class)
+        || !class_exists(\ClassIdentity\CoreAdapter::class)
+        || !\ClassIdentity\Access::isEnforcementEnabled()
+    ) {
+        fail('Active fail-closed ClassIdentity runtime required.');
+    }
+    $context = \ClassIdentity\Access::resolveAuthorizationContext((int) $userId);
+    if (($context['role'] ?? null) !== $groupName) {
+        fail("Fixture principal {$username} is not bound to {$groupName}.");
     }
 
-    $hash = $conf['password_hash']($password);
-    single_update(USERS_TABLE, ['password' => $hash], ['id' => (int) $userId]);
+    \ClassIdentity\CoreAdapter::setPassword((int) $userId, $password);
     single_update(USER_INFOS_TABLE, ['status' => 'normal'], ['user_id' => (int) $userId]);
-    pwg_query('DELETE FROM ' . USER_GROUP_TABLE . ' WHERE user_id = ' . (int) $userId);
-    single_insert(
-        USER_GROUP_TABLE,
-        ['user_id' => (int) $userId, 'group_id' => (int) $groups[$groupName]['id']]
-    );
+    \ClassIdentity\CoreAdapter::reconcileManagedGroups((int) $userId, $groupName);
 
     $row = query2array('SELECT password FROM ' . USERS_TABLE . ' WHERE id = ' . (int) $userId);
     if (
@@ -83,6 +77,8 @@ foreach ($fixtures as $username => $groupName) {
         fail("Fixture password storage check failed for {$username}.");
     }
 }
+
+unset($password);
 
 invalidate_user_cache();
 fwrite(STDOUT, "ACCESS_FIXTURES_READY\n");

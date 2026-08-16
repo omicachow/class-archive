@@ -36,6 +36,8 @@ services:
       TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
       PIWIGO_UID: ${PIWIGO_UID:-1000}
       PIWIGO_GID: ${PIWIGO_GID:-1000}
+      CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER:?Set CLASS_ARCHIVE_CLAIM_CODE_PEPPER in .env.piwigo}
+      CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET:?Set CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET in .env.piwigo}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/"]
       interval: 10s
@@ -49,6 +51,8 @@ services:
       - piwigo_derivatives:/var/www/html/piwigo/_data/i
       - piwigo_scripts:/usr/local/bin/scripts
       - ./piwigo-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./php-fpm/class-archive-env.conf:/etc/php84/php-fpm.d/zz-class-archive-env.conf:ro
+      - ./s6/php-fpm-run:/etc/s6-overlay/s6-rc.d/php-fpm/run:ro
       - ../infra:/workspace/infra:ro
       - ../plugins:/workspace/plugins:ro
       - ../themes:/workspace/themes:ro

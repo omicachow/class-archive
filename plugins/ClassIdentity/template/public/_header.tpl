@@ -1,0 +1,13 @@
+{literal}
+<style>
+.ca-public{--ca-border:#dfe3ea;--ca-muted:#697386;--ca-ink:#18212f;max-width:760px;margin:24px auto 56px;padding:0 16px;color:var(--ca-ink)}
+.ca-public *{box-sizing:border-box}.ca-public__head{margin-bottom:20px}.ca-public h2{font-size:28px;line-height:1.2;margin:0 0 8px}.ca-public h3{font-size:19px;margin:0 0 12px}.ca-public p{line-height:1.6}.ca-public__muted{color:var(--ca-muted)}
+.ca-public__panel{background:#fff;border:1px solid var(--ca-border);border-radius:14px;padding:20px;margin:14px 0}.ca-public__form{display:grid;gap:14px}.ca-public label{display:grid;gap:6px;font-weight:650}.ca-public input,.ca-public select{width:100%;min-height:44px;padding:10px 11px;border:1px solid #b7c0cf;border-radius:8px;background:#fff;color:var(--ca-ink);font:inherit}.ca-public button,.ca-public__button{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:9px 15px;border:0;border-radius:8px;background:#25324a;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.ca-public button[disabled]{opacity:.5;cursor:not-allowed}
+.ca-public__alert{padding:12px 14px;border-radius:9px;margin:12px 0;border:1px solid #f2c27b;background:#fff8ea}.ca-public__alert--success{border-color:#abefc6;background:#ecfdf3}.ca-public__alert--error{border-color:#fecdca;background:#fef3f2}.ca-public__secret{display:block;padding:14px;background:#111827;color:#fff;border-radius:9px;font:700 16px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;user-select:all}.ca-public__actions{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.ca-public__link{color:#314c74;font-weight:650}
+.ca-public__summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.ca-public__summary>div{padding:12px;border:1px solid #e7eaf0;border-radius:9px}.ca-public__label{display:block;color:var(--ca-muted);font-size:12px;margin-bottom:4px}.ca-public__seats{list-style:none;padding:0;margin:0;display:grid;gap:9px}.ca-public__seat{display:flex;justify-content:space-between;gap:16px;padding:12px;border:1px solid #e7eaf0;border-radius:9px}.ca-public__seat-main{font-weight:700}.ca-public__seat-meta{color:var(--ca-muted);font-size:13px;text-align:right}
+@media(max-width:600px){.ca-public{margin-top:12px}.ca-public__panel{padding:16px}.ca-public__seat{display:block}.ca-public__seat-meta{text-align:left;margin-top:6px}.ca-public__actions>*{width:100%}}
+</style>
+{/literal}
+<section class="ca-public">
+  {if isset($CA_ERROR) && $CA_ERROR}<div class="ca-public__alert ca-public__alert--error" role="alert">{$CA_ERROR|escape:'html'}</div>{/if}
+  {if isset($CA_SUCCESS) && $CA_SUCCESS}<div class="ca-public__alert ca-public__alert--success" role="status">{$CA_SUCCESS|escape:'html'}</div>{/if}

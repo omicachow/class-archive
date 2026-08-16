@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'baseline-verify', 'seed', 'test-access', 'test-phase0', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'test-access', 'test-phase0', 'test-phase1', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -9,12 +9,19 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envPath = Join-Path $projectRoot '.env.piwigo'
+. (Join-Path $PSScriptRoot 'secret-file-acl.ps1')
 if (-not (Test-Path -LiteralPath $envPath)) {
     throw 'Missing .env.piwigo. Run infra\scripts\init-dev-env.ps1 first.'
+}
+Assert-ClassArchiveOwnerOnlyFileAcl -Path $envPath
+if ([IO.File]::ReadAllText($envPath) -match '(?m)^[ \t]*PIWIGO_ADMIN_PASSWORD[ \t]*=') {
+    throw 'Refusing long-lived PIWIGO_ADMIN_PASSWORD in .env.piwigo; run remove-admin-password-from-env.ps1.'
 }
 
 $runtimeDirectory = Join-Path $projectRoot '.codex-work'
 $keepAlivePidPath = Join-Path $runtimeDirectory 'wsl-keepalive.pid'
+$classPluginWorkflowLockPath = Join-Path $runtimeDirectory 'runtime\class-plugin-workflow.lock'
+. (Join-Path $PSScriptRoot 'class-plugin-workflow-lock.ps1')
 
 function Get-KeepAliveProcess {
     if (-not (Test-Path -LiteralPath $keepAlivePidPath)) {
@@ -60,6 +67,54 @@ $composeArguments = @(
     '-f', 'infra/docker-compose.yml'
 )
 
+$classPluginWorkflow = $false
+$classPluginSynthetic = $false
+
+function Wait-ClassArchiveMaintenanceReady {
+    # Docker's public healthcheck intentionally receives 503 while the durable
+    # maintenance marker is present. During this bounded window, exact nginx
+    # fail-closed output plus the later CLI runtime verifier is the readiness
+    # contract. The normal Docker healthcheck resumes after finalization.
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        $probeLines = @(& wsl.exe @($composeArguments + @(
+            'exec', '-T', 'piwigo',
+            'curl', '--silent', '--show-error',
+            '--write-out', 'CLASS_ARCHIVE_STATUS:%{http_code}',
+            'http://127.0.0.1/'
+        )) 2>&1)
+        $probeExit = $LASTEXITCODE
+        if (
+            $probeExit -eq 0 `
+            -and $probeLines.Count -eq 2 `
+            -and $probeLines[0] -eq 'Class Archive maintenance mode.' `
+            -and $probeLines[1] -eq 'CLASS_ARCHIVE_STATUS:503'
+        ) {
+            # The nginx maintenance response does not enter FastCGI. Require
+            # the restarted PHP-FPM listener as separate process-level health
+            # evidence before running the current-code CLI verifier.
+            & wsl.exe @($composeArguments + @(
+                'exec', '-T', '--user', 'nginx', 'piwigo',
+                'php', '/workspace/tests/phase1/php-fpm-ready.php'
+            ))
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw 'Piwigo did not reach the exact fail-closed maintenance readiness state after restart.'
+}
+
+function Invoke-ClassArchiveMaintenancePrepare {
+    & wsl.exe @($composeArguments + @(
+        'exec', '-T', '--user', 'root', 'piwigo',
+        'php', '/workspace/infra/scripts/prepare-class-archive-maintenance.php', '--prepare'
+    ))
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The controlled maintenance marker preparation failed; maintenance remains active.'
+    }
+}
+
 if ($Action -eq 'up' -or $Action -eq 'stop' -or $Action -eq 'down') {
     Start-KeepAlive
 }
@@ -85,6 +140,7 @@ switch ($Action) {
         )
     }
     'class-plugins' {
+        $classPluginWorkflow = $true
         $commandArguments = $composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/infra/scripts/install-class-archive-plugins.php'
@@ -94,6 +150,25 @@ switch ($Action) {
         $commandArguments = $composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--verify-only'
+        )
+    }
+    'identity-bootstrap' {
+        # Compatibility alias: bootstrap may no longer be invoked online by
+        # itself. It runs the complete install/restart/verify/finalize protocol.
+        $classPluginWorkflow = $true
+        $commandArguments = $composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php'
+        )
+    }
+    'identity-bootstrap-synthetic' {
+        # Synthetic fixtures use the same bounded protocol; only their explicit
+        # bootstrap and post-restart verification requirement differs.
+        $classPluginWorkflow = $true
+        $classPluginSynthetic = $true
+        $commandArguments = $composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--with-synthetic-fixtures'
         )
     }
     'baseline-verify' {
@@ -144,6 +219,82 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase0\media-guard-state-transitions.ps1')
+        exit $LASTEXITCODE
+    }
+    'test-phase1' {
+        # Cheap deterministic policy checks run first. Any nonzero status is a
+        # hard stop; an HTTP runner's explicit PENDING exit must not be hidden.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\class-plugin-workflow-lock.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-maintenance-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-enforcement-context.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-anonymous-presenter.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-audit-reason.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-capability-guard.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-rate-limiter.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-schema-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/class-identity-synthetic-bootstrap-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/system-admin-credential-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\system-admin-session-fault-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\class-identity-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\maintenance-gate-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\runtime-surface-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\enforcement-fault-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\capability-guard-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\pending-media-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase1\anonymous-presenter-http.ps1')
         exit $LASTEXITCODE
     }
     'test-access' {
@@ -208,11 +359,72 @@ switch ($Action) {
     }
 }
 
-& wsl.exe @commandArguments
-$commandExitCode = $LASTEXITCODE
+$classPluginWorkflowLock = $null
+try {
+    if ($classPluginWorkflow) {
+        try {
+            # This non-blocking Windows handle must be owned before any helper
+            # can create/adopt the durable maintenance marker. It remains held
+            # through install, restart, runtime verification and finalization.
+            $classPluginWorkflowLock = Enter-ClassArchivePluginWorkflowLock `
+                -LockPath $classPluginWorkflowLockPath
+        }
+        catch [InvalidOperationException] {
+            [Console]::Error.WriteLine($_.Exception.Message)
+            exit 1
+        }
 
-if ($Action -eq 'stop' -or $Action -eq 'down') {
-    Stop-KeepAlive
+        # The pinned image normalizes persistent-volume ownership at startup. A
+        # root-only narrow helper creates/adopts only the exact marker inode; the
+        # installer and bootstrap themselves continue to run as nginx.
+        Invoke-ClassArchiveMaintenancePrepare
+    }
+
+    & wsl.exe @commandArguments
+    $commandExitCode = $LASTEXITCODE
+
+    if ($classPluginWorkflow -and $commandExitCode -eq 0) {
+        # A successful installer intentionally leaves nginx in durable maintenance.
+        # Restart clears PHP-FPM/opcache; every failure below returns with the exact
+        # marker still present. No direct online bootstrap path exists in dev.ps1.
+        & wsl.exe @($composeArguments + @('restart', 'piwigo'))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Wait-ClassArchiveMaintenanceReady
+        # Restart may normalize the marker to the exact persistent-volume form.
+        # Re-establish nginx ownership atomically before any runtime/finalize check.
+        Invoke-ClassArchiveMaintenancePrepare
+
+        $runtimeVerificationArguments = @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--verify-runtime'
+        )
+        if ($classPluginSynthetic) {
+            $runtimeVerificationArguments += '--with-synthetic-fixtures'
+        }
+        & wsl.exe @($composeArguments + $runtimeVerificationArguments)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        # Finalization is a separate process and repeats current tree, active plugin,
+        # schema, enforcement and principal assertions before exact-marker removal.
+        $finalizeArguments = @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'
+        )
+        if ($classPluginSynthetic) {
+            $finalizeArguments += '--with-synthetic-fixtures'
+        }
+        & wsl.exe @($composeArguments + $finalizeArguments)
+        $commandExitCode = $LASTEXITCODE
+    }
+
+    if ($Action -eq 'stop' -or $Action -eq 'down') {
+        Stop-KeepAlive
+    }
+
+    exit $commandExitCode
 }
-
-exit $commandExitCode
+finally {
+    # Dispose only our OS handle. The persistent lock inode and any unknown
+    # bytes in it are deliberately preserved for safe crash/restart behavior.
+    Exit-ClassArchivePluginWorkflowLock -Handle $classPluginWorkflowLock
+}

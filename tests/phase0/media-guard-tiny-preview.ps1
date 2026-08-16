@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envPath = Join-Path $projectRoot '.env.piwigo'
+. (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
 $fixture = $null
 $baselineCount = $null
 $cleanupError = $null
@@ -171,7 +172,6 @@ if (-not (Test-Path -LiteralPath $envPath)) { throw 'Missing ignored .env.piwigo
 $settings = Read-DotEnv $envPath
 $port = Require-Setting $settings 'CLASS_ARCHIVE_HTTP_PORT'
 $adminUsername = Require-Setting $settings 'PIWIGO_ADMIN_USERNAME'
-$adminPassword = Require-Setting $settings 'PIWIGO_ADMIN_PASSWORD'
 if ($port -notmatch '^\d{1,5}$') { throw 'Invalid localhost port.' }
 
 $baseUri = [Uri]("http://127.0.0.1:$port/")
@@ -186,6 +186,7 @@ try { $runGenerator.GetBytes($runBytes) } finally { $runGenerator.Dispose() }
 $runId = ([BitConverter]::ToString($runBytes)).Replace('-', '').ToLowerInvariant()
 
 $testError = $null
+$adminLease = $null
 try {
     $baselineCount = [int](Invoke-Fixture -ComposeBase $composeBase -Mode 'count').image_count
     $fixture = Invoke-Fixture -ComposeBase $composeBase -Mode 'create' -RunId $runId
@@ -201,8 +202,9 @@ try {
         throw 'Could not provision synthetic role accounts.'
     }
 
+    $adminLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $composeBase -AdminUsername $adminUsername
     $sessions = @{
-        Admin = New-AuthenticatedSession $webServiceUri $adminUsername $adminPassword
+        Admin = $adminLease.Session
         Family = New-AuthenticatedSession $webServiceUri 'fixture-family' $fixturePassword
         Anonymous = New-AuthenticatedSession $webServiceUri 'fixture-anonymous' $fixturePassword
         Guest = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
@@ -283,6 +285,10 @@ catch {
     $testError = $_
 }
 finally {
+    if ($null -ne $adminLease) {
+        try { Remove-ClassArchiveSystemAdminSession -Lease $adminLease }
+        catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+    }
     if ($null -ne $fixture) {
         try {
             $deleteResult = Invoke-Fixture -ComposeBase $composeBase -Mode 'delete' -RunId $runId -ImageId ([int]$fixture.image_id)
@@ -309,6 +315,7 @@ finally {
             if ($null -eq $cleanupError) { $cleanupError = $_ }
         }
     }
+    $fixturePassword = $null
 }
 
 if ($null -ne $cleanupError) {

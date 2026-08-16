@@ -1,4 +1,4 @@
-# Piwigo-first Phase 0 research
+# Piwigo-first research and verified runtime
 
 Research refreshed: 2026-08-16 (Asia/Shanghai)
 
@@ -67,11 +67,38 @@ The supported Compose stack was inspected and tested on 2026-08-16:
   the other three fixture roles have both roots.
 - Community 16.f is present but inactive. Bootstrap Darkroom 16.d is active.
   User Collections is absent.
+- `ClassArchivePolicy` 0.1.0 and `ClassIdentity` 0.1.0 are active without a Core
+  patch. Media authority resolves through explicit ClassIdentity Principals;
+  the Piwigo role groups are an exact ACL projection, not an authorization
+  fallback.
+- The initial Piwigo webmaster is bound to an independent
+  `SYSTEM_ACCOUNT/SYSTEM_ADMIN` Principal with no Identity, Seat or ordinary
+  account binding. The business Admin Console exposes only Dashboard,
+  Identities, Teachers, Invitations, Audit and System Health in this phase.
+- Administrator plaintext is no longer a long-lived environment value. The
+  ACL-restricted `.env.piwigo` stores database/derivation secrets and the
+  configured username, while fresh bootstrap uses no-echo input (or a consumed
+  one-time file restricted to its owner, SYSTEM and Administrators) and later
+  rotation uses a guarded CLI Core-hash path. Live rotation returns
+  `sessions=revoked`; the legacy env key count is zero and its ACL is restricted.
+  Fresh empty-volume installation remains unrehearsed.
+- PHP-FPM uses a `0007` umask and the post-Phase 1 media-permission regression
+  passes in the final coordinated baseline. Explicit permissive `chmod` calls in
+  future upload paths still require a normalization adapter and real regression
+  before Community activation.
+- MediaGuard now recognizes the pinned Community Pending states, and a
+  reversible 75-real-GET focused test passes without activating Community or
+  uploading an image. It proves Seat denial, SYSTEM_ADMIN review,
+  malformed/duplicate fail-closed and restoration to 72 images, both focused
+  and inside the complete Phase 1 aggregate.
 - The database contains **72 deterministic synthetic PNGs** and no real people
   or class material. All 72 have unique original paths; **8** are associated
   with more than one logical album without another image row or original file.
 
 ### Automated checks observed
+
+The results below are the final coordinated localhost baseline, not production
+deployment approval.
 
 `dev.ps1 test-access` passed:
 
@@ -104,6 +131,35 @@ the signed-in viewer uses a screen-sized preview and explicit original-download
 action, and the configured API/album enumeration enforces the tested role
 matrix.
 
+`dev.ps1 test-phase1` exits zero against the real locked runtime after
+coordinated plugin publication:
+
+| Gate | Verified result |
+|---|---:|
+| ClassIdentity HTTP | 87 probes |
+| Workflow mutex | 12 checks |
+| Maintenance protocol | 40 assertions |
+| Enforcement context | 8 assertions |
+| Anonymous pure policy | 12 assertions |
+| Audit reason safety | 20 assertions |
+| CapabilityGuard pure policy | 96 assertions |
+| Rate limiter | 22 assertions |
+| Schema semantics | 9 assertions |
+| Synthetic bootstrap protocol | 13 assertions |
+| SYSTEM_ADMIN credential protocol | 24 assertions |
+| SYSTEM_ADMIN commit/output fault | 1 real fault scenario; no residual lease/session |
+| Maintenance HTTP | 11 probes |
+| Runtime surface | 45 probes / 352 assertions |
+| Enforcement-fault HTTP | 116 assertions |
+| CapabilityGuard HTTP | 43 assertions |
+| Pending Community media HTTP | 75 probes |
+| AnonymousPresenter HTTP | 211 assertions |
+
+The subsequent Phase 0 regression again passed the 72 image / 72 original /
+8 multi-album model, media permissions and the 290 + 16 + 38 HTTP probes. The
+controlled database-outage state-transition variant remains an explicit
+40-probe opt-in test and passes.
+
 The supported backup helper was also exercised. A direct Compose run was
 refused by its quiescence guard; `dev.ps1 backup` preserved the application's
 prior run state and atomically published `database.sql.gz`,
@@ -125,18 +181,22 @@ The supported runtime now routes every public original and derivative path
 through `ClassArchivePolicy` MediaGuard. PHP recomputes the current actor, Era,
 Core album/privacy ACL and original policy; nginx sends bytes only after an
 authorized `X-Accel-Redirect`. The 290-request HTTP matrix, 38-request mutable
-state/path-alias suite and the opt-in 40-request database-outage suite pass. The specific
-known-URL blocker is resolved without a Core patch. Real photos/public/NAS
-deployment remain prohibited until ClassIdentity, admin governance and the
-other production gates below are complete.
+state/path-alias suite and the opt-in 40-request database-outage suite pass. The
+specific known-URL blocker is resolved without a Core patch. Real photos/public/NAS
+deployment remain prohibited until the remaining admin, upload, recovery and
+deployment gates below are complete.
 
 ## Other unresolved risks
 
-1. `ClassIdentity` does not exist yet. Claim/Invite, Identity -> Seat -> Account,
-   freeze, session revoke, anonymous traceability and audit remain Phase 1 work.
-2. Comments are fail-closed in the supported baseline: global public commenting
-   is off and the era roots are not commentable. Role-specific Family denial,
-   Anonymous alias rendering, reports and replies need server-side plugin code.
+1. The ClassIdentity Phase 1 foundation exists and its current HTTP contract
+   passes. Active Family-account release, account-level freeze, member password reset,
+   standalone force logout, roster import/edit/retire and full Admin RBAC remain
+   unimplemented.
+2. Comments are fail-closed in the ordinary baseline: global public commenting
+   is off and the era roots are not generally commentable. Family/Anonymous
+   action guards and context-scoped anonymous presentation are implemented and
+   tested through a controlled comment fixture; reports, replies, Likes and the
+   production comment enablement policy remain pending.
 3. Community remains inactive until the moderation CSRF/input findings and
    permission bootstrap are fixed without patching Core.
 4. Piwigo Core and mature plugins include MyISAM tables. Custom identity tables
@@ -153,10 +213,15 @@ other production gates below are complete.
 8. Safe coexistence with an existing NAS photo library is not proven by this
    local spike. Never point Piwigo or a synchronization job at real NAS files
    until the read-only/source-of-truth policy and restore behavior are tested.
-9. Open-source release policy is unfinished: the repository has no project
-   `LICENSE`/`NOTICE` decision yet, and digest/hash locks do not guarantee that
-   OCI images or extension ZIPs remain downloadable for 10-20 years. Legal
-   review and an authorized offline artifact-retention plan are release gates.
+9. The repository now has a project `LICENSE` and `NOTICE`, but digest/hash
+   locks do not guarantee that OCI images or extension ZIPs remain downloadable
+   for 10-20 years. Legal review and an authorized offline artifact-retention
+   plan remain release gates.
+10. System Health deliberately remains `PRODUCTION BLOCKED`: it has no
+    persisted digest-bound MediaGuard HTTP attestation, Admin MFA, configured
+    cron, completed empty-volume restore drill, enabled safe Community upload,
+    or complete audited business-mutation coverage. A fresh empty-volume
+    bootstrap/credential rehearsal is also still required.
 
 ## Scope boundary
 
@@ -164,5 +229,5 @@ No HumHub/Piwigo hybrid, independent frontend, Redis, Elasticsearch, object
 storage, CDN, AI/OCR/face recognition, SSO, public ingress or real deployment
 data is part of this baseline. No Piwigo Core file is modified. Piwigo owns
 media storage, derivative generation, metadata, albums, album/query ACL
-primitives and basic comments; Class Archive plugins will own only class
-identity and the end-to-end class/media policy those primitives do not cover.
+primitives and basic comments; Class Archive plugins own only class identity
+and the end-to-end class/media policy those primitives do not cover.

@@ -40,6 +40,10 @@ final class ClassArchiveMediaGuard
     private const ERA_HERITAGE = 'HERITAGE';
     private const ERA_LIVING = 'LIVING';
 
+    private const COMMUNITY_MEDIA_PUBLISHED = 'PUBLISHED';
+    private const COMMUNITY_MEDIA_PENDING = 'PENDING';
+    private const COMMUNITY_MEDIA_UNRESOLVED = 'UNRESOLVED';
+
     /** @return array{request: ClassArchiveMediaRequest, image: array<string, mixed>} */
     public static function resolveRequest(string $kind): array
     {
@@ -72,6 +76,20 @@ final class ClassArchiveMediaGuard
         $role = self::resolveRole($user ?? []);
         if ($role === null) {
             return new ClassArchiveMediaDecision(false, 'actor_unresolved', $request->imageId);
+        }
+
+        // Community creates the normal Core image row before moderation is
+        // complete. Its privacy level is a useful second barrier, but it is
+        // not the Class Archive approval boundary: a drifted level-16 Seat
+        // account must still never receive a pending upload. An exact active
+        // SYSTEM_ADMIN principal may review the bytes. Unknown Community
+        // schema/state is denied to every actor, including Admin.
+        $communityState = self::resolveCommunityMediaState($request->imageId);
+        if ($communityState === self::COMMUNITY_MEDIA_UNRESOLVED) {
+            return new ClassArchiveMediaDecision(false, 'community_state_unresolved', $request->imageId, null, $role);
+        }
+        if ($communityState === self::COMMUNITY_MEDIA_PENDING && $role !== self::ROLE_ADMIN) {
+            return new ClassArchiveMediaDecision(false, 'community_moderation_pending', $request->imageId, null, $role);
         }
 
         $eras = self::resolveImageEras($request->imageId);
@@ -334,30 +352,62 @@ final class ClassArchiveMediaGuard
             return null;
         }
 
-        $statusRows = query2array(
-            'SELECT status FROM ' . USER_INFOS_TABLE . ' WHERE user_id = ' . $userId
+        // Media never falls back to Core status or projected groups, including
+        // the bounded CLI migration window. An active ClassIdentity principal
+        // chain is the only authority. Missing plugin/schema/DB state is DENY.
+        if (!class_exists('ClassIdentity\\Access', false)) {
+            return null;
+        }
+        if (\ClassIdentity\Access::hasUntrustedDisabledConfiguration()) {
+            return null;
+        }
+
+        return \ClassIdentity\Access::isEnforcementEnabled()
+            ? \ClassIdentity\Access::resolveMediaRole($userId)
+            : null;
+    }
+
+    private static function resolveCommunityMediaState(int $imageId): string
+    {
+        global $prefixeTable;
+
+        if ($imageId <= 0 || !is_string($prefixeTable ?? null)) {
+            return self::COMMUNITY_MEDIA_UNRESOLVED;
+        }
+        $table = $prefixeTable . 'community_pendings';
+        if (!preg_match('/\A[A-Za-z0-9_]+\z/D', $table)) {
+            return self::COMMUNITY_MEDIA_UNRESOLVED;
+        }
+
+        $escapedTable = pwg_db_real_escape_string($table);
+        $tables = query2array(
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            . "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$escapedTable}'"
         );
-        if (count($statusRows) !== 1) {
-            return null;
+        if ($tables === []) {
+            // Community has never been installed (or was cleanly uninstalled).
+            // Existing Core-managed published media remains usable.
+            return self::COMMUNITY_MEDIA_PUBLISHED;
         }
-        $currentStatus = (string) $statusRows[0]['status'];
-        if (in_array($currentStatus, ['webmaster', 'admin'], true)) {
-            return self::ROLE_ADMIN;
-        }
-        if ($currentStatus !== 'normal') {
-            return null;
+        if (count($tables) !== 1 || (string) ($tables[0]['TABLE_NAME'] ?? '') !== $table) {
+            return self::COMMUNITY_MEDIA_UNRESOLVED;
         }
 
         $rows = query2array(
-            'SELECT g.name FROM ' . GROUPS_TABLE . ' g JOIN ' . USER_GROUP_TABLE . ' ug ON ug.group_id = g.id '
-            . 'WHERE ug.user_id = ' . $userId . " AND g.name IN ('CLASSMATE','TEACHER','FAMILY','ANONYMOUS')"
+            "SELECT state FROM `{$table}` WHERE image_id = {$imageId}"
         );
-        $roles = array_values(array_unique(array_map(static fn(array $row): string => (string) $row['name'], $rows)));
-        if (count($roles) !== 1) {
-            return null;
+        if ($rows === []) {
+            return self::COMMUNITY_MEDIA_PUBLISHED;
+        }
+        if (count($rows) !== 1 || !array_key_exists('state', $rows[0]) || !is_string($rows[0]['state'])) {
+            return self::COMMUNITY_MEDIA_UNRESOLVED;
         }
 
-        return $roles[0];
+        return match ($rows[0]['state']) {
+            'validated' => self::COMMUNITY_MEDIA_PUBLISHED,
+            'moderation_pending' => self::COMMUNITY_MEDIA_PENDING,
+            default => self::COMMUNITY_MEDIA_UNRESOLVED,
+        };
     }
 
     /** @return array<string, string> */
@@ -452,13 +502,40 @@ final class ClassArchiveMediaGuard
     private static function originalAllowed(string $role, array $conf): bool
     {
         return match ($role) {
-            self::ROLE_CLASSMATE => (bool) ($conf['class_archive_classmate_original_download'] ?? true),
-            self::ROLE_TEACHER => (bool) ($conf['class_archive_teacher_original_download'] ?? true),
-            self::ROLE_FAMILY => (bool) ($conf['class_archive_family_original_download'] ?? false),
-            self::ROLE_ANONYMOUS => (bool) ($conf['class_archive_anonymous_original_download'] ?? false),
+            self::ROLE_CLASSMATE => self::strictConfigBoolean(
+                $conf,
+                'class_archive_classmate_original_download',
+                true,
+            ),
+            self::ROLE_TEACHER => self::strictConfigBoolean(
+                $conf,
+                'class_archive_teacher_original_download',
+                true,
+            ),
+            self::ROLE_FAMILY => self::strictConfigBoolean(
+                $conf,
+                'class_archive_family_original_download',
+                false,
+            ),
+            self::ROLE_ANONYMOUS => self::strictConfigBoolean(
+                $conf,
+                'class_archive_anonymous_original_download',
+                false,
+            ),
             self::ROLE_ADMIN => true,
             default => false,
         };
+    }
+
+    private static function strictConfigBoolean(array $conf, string $key, bool $default): bool
+    {
+        if (!array_key_exists($key, $conf)) {
+            return $default;
+        }
+
+        // Only explicit affirmative values grant a capability. In particular,
+        // PHP's truthy string "false" must never enable original downloads.
+        return in_array($conf[$key], [true, 1, '1'], true);
     }
 
     /** @return array<string, mixed> */

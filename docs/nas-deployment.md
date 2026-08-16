@@ -127,7 +127,11 @@ For a NAS bind-mount deployment, use a stable layout such as:
 
 Do not store `.env.piwigo` inside a Photos-indexed folder. Keep it mode `0600`,
 include it only in an encrypted recovery set, and never regenerate its keyed
-secrets against an existing database.
+secrets against an existing database. It contains database/derivation secrets
+and non-sensitive administrator username/email, never the raw SYSTEM_ADMIN
+password. Store that password in an external password manager and provision it
+through a reviewed no-echo/staged-secret bootstrap; production Admin MFA remains
+a separate deployment gate.
 
 ## UID, GID, and ACL policy
 
@@ -152,10 +156,14 @@ Before first start:
 `/usr/local/bin/scripts/user.sh` hook which removes all `other` permissions from
 `upload`, `galleries` and `_data`, preserves the explicit nginx ACL, and sets a
 private default ACL. Directories grant nginx `rwx`; files grant nginx `rw-` and
-are not executable. The hook has passed a container restart plus recursive and
-new-file `MEDIA_PERMISSIONS=PASS` checks. A NAS bind mount still needs a
-host-side ACL test; container ACL success does not prove the NAS share is
-private.
+are not executable. The PHP-FPM wrapper also sets umask `0007`, so files created
+by normal request-time library code remain other-denied. These controls have
+passed a container restart plus recursive, request-generated and new-file
+`MEDIA_PERMISSIONS=PASS` checks. A NAS bind mount still needs a host-side ACL
+test; container ACL success does not prove the NAS share is private. Umask does
+not override a component that explicitly calls `chmod(0644)`: Community upload
+cannot be enabled until the completed original is normalized to `0660` and that
+path passes a real upload/restart/NAS ACL regression.
 
 ### Recursive ownership trap
 
@@ -181,7 +189,8 @@ The following flow is vendor-neutral. NAS GUI wording may differ.
    directory.
 2. Verify the Git commit, `infra/piwigo-extensions.lock.json`, and image digests.
 3. Copy `.env.example` to `.env.piwigo`, replace every generated placeholder
-   with a strong unique value, and set the numeric UID/GID.
+   with a strong unique value, set the numeric UID/GID, and do not add an
+   administrator password variable.
 4. Keep the app port bound to `127.0.0.1`. Do not publish MariaDB.
 5. Validate Compose before pulling or starting:
 
