@@ -2,7 +2,7 @@
 
 决策日期：2026-08-16（Asia/Shanghai）
 
-状态：**V1 架构已接受，但真实数据与任何网络开放仍受安全门禁阻断**
+状态：**Piwigo-first 已通过媒体可行性门禁并正式冻结；整体生产仍受后续安全门禁阻断**
 替代：此前的 HumHub-first 方向；HumHub 实验与文档保留为可追溯证据
 
 ## 决策
@@ -11,7 +11,7 @@ Class Archive V1 采用 **Piwigo-first 单运行时**：Piwigo 负责照片、�
 
 V1 **不运行 HumHub，也不做 Piwigo + HumHub Hybrid**。保留下来的 HumHub 1.18.4、Gallery 1.7.1 等实测成果是比较基线和未来参考，不进入登录链路、权限链路、数据库、备份或最终用户界面。若未来确实需要通用社区能力，应另开 ADR，不能在 V1 中悄悄增加第二套用户、会话和内容模型。
 
-这不是对 Piwigo 当前状态的无条件放行。实测发现：已登录页面/API 的私有相册边界正确，但已知 URL 的原图和 `i.php` 派生图仍可被未登录访客直接取得。该问题是 **P0 生产阻断项**。选择 Piwigo 的前提是通过独立插件与 Web Server 规则实现媒体授权层，不修改 Piwigo Core；若这一门禁无法在不修改 Core 的条件下通过，本决策必须重新打开，而不是带漏洞上线。
+这仍不是对当前系统的生产放行。此前已知 URL 可绕过页面 ACL 的 **P0 媒体阻断项已经解决**：独立 `ClassArchivePolicy` 插件在每次请求中读取当前 session、数据库角色、有效 Era、Piwigo Core ACL 与 original policy；只有授权成功才交给 nginx `X-Accel-Redirect` 发送文件。Piwigo Core 未修改。Piwigo-first 因而通过媒体可行性硬门槛并正式冻结，但 ClassIdentity 的冻结/释放/session revoke、独立 SYSTEM_ADMIN、Community、Collections、NAS、HTTPS 与真实恢复演练仍阻止真实数据和网络开放。
 
 ## 证据边界
 
@@ -22,7 +22,7 @@ V1 **不运行 HumHub，也不做 Piwigo + HumHub Hybrid**。保留下来的 Hum
 - 72 个 Piwigo image 记录对应 72 个不同 original path；至少一张照片通过 `image_category` 关系进入多个逻辑相册，没有产生第二个 image 记录或另一个 original path。文件系统层的去重/硬链接不是本结论的一部分。
 - 通过真实登录会话和 Web API 验证：Guest 相册 API 被拒绝；FAMILY 只列出 HERITAGE；CLASSMATE、TEACHER、ANONYMOUS 可列出 HERITAGE 和 LIVING；FAMILY 直接请求 LIVING album id 也得不到图片。
 - 通过真实 HTTP/HTML 响应验证：相册网格使用缩略/封面派生图，不直接加载 original；照片页默认使用 `medium` preview、预取相邻图片、提供显式 original download，并初始化 PhotoSwipe。当前轮次没有完成受支持浏览器中的截图/触屏视觉验收，因此这里不宣称像素级 UI 或真机手势 QA 已通过。
-- 反向安全测试同时证明：将一条已知 LIVING 派生图 URL 或 `/upload/...` original URL 交给 Guest，请求仍返回 HTTP 200。页面/API ACL 通过不等于媒体文件 ACL 通过。
+- `ClassArchivePolicy` + nginx MediaGuard 已通过 290 个真实 HTTP probes：Guest 的两个 Era 全部拒绝；FAMILY 的 LIVING 全部拒绝且 HERITAGE preview 允许、original 默认拒绝；CLASSMATE/TEACHER 两个 Era 允许；ANONYMOUS 两个 Era preview 允许、original 默认拒绝；phase-0 Admin 全部允许。GET/HEAD/Range、logout、account switch、直接 backing path、猜测、path normalization、query tamper 与 cache revalidation 均通过；跨 Era 关联对所有角色 fail closed；受控数据库中断返回无媒体字节、无诊断细节的通用 503。
 - Community 16.f 的低信任 Pending → Admin Approve 与高信任直接发布流程可复用，但实测还发现三个门禁：默认权限过宽、`category` 必须拒绝数组形态、管理员审核端点接受无 CSRF token 的 POST。该插件在受支持主栈中保持 inactive。
 - User Collections 16.a 实测存在跨 ACL 路径：仅能访问 HERITAGE 的 FAMILY 可在猜中 LIVING image id 后把它加入/呈现到 collection，并取得派生图。它没有安装进受支持主栈；Core Favorites 只是范围更窄的候选退路，也必须通过猜 id、权限撤销、呈现和媒体 URL 回归，不能先称为安全。
 - 未在真实绿联 NAS、真实照片库、真实移动设备或高并发环境上测试。NAS 结论来自官方 UGOS/Piwigo 行为、源代码和本地容器边界，仍需真机只读验收。
@@ -35,8 +35,8 @@ Piwigo 16.4.0 是 2026-05-03 发布的稳定修复版本；官方 changelog 将 
 |---|---|---|---|---|---|---|
 | 1. 达成 Apple Photos / Immich 风格 photo-first UI | 信息模型以 Stream、Space、作者和内容容器为中心。即使 Gallery 可显示网格，仍需重写首页、全局照片聚合、导航和照片详情语义。 | Core 的一级对象就是照片、相册、日期和元数据；当前 Bootstrap Darkroom 响应已经是相册网格 → 照片页 → 全屏 viewer 路径。仍不是最终视觉，但方向一致。 | HumHub Gallery；Piwigo album/photo/calendar；Bootstrap Darkroom。 | HumHub：应用级首页、聚合层和大量 view override。Piwigo：连续时间轴、产品导航和克制的 child Theme。 | HumHub 高：每个 Core/Gallery 模板升级都可能冲突。Piwigo 中：少量模板/hook，媒体模型不变。 | **Piwigo-first**；照片是页面骨架，不是帖子附件。 |
 | 2. 新增自研代码量 | 除 Identity/Policy/Anonymous/Submission/Spotlight 外，还要新增 photo home、跨 Gallery 查询、viewer 适配、社交 UI 隐藏和兼容测试。 | 媒体基础全部复用；新增范围集中在 Identity、业务权限、媒体 URL 授权、匿名、collections、Spotlight、少量互动和 Theme。 | 两边都复用认证/用户记录；Piwigo 额外复用完整图库管线。 | 用“升级敏感面”估算而不伪造 LOC：HumHub 至少 10 类跨 Core/Gallery UI/数据接点；Piwigo 是 3 个可部署 Class 插件、约 6 个内部 domain/service 边界加一个 child Theme。 | HumHub 高；Piwigo 中，主要风险在自定义授权插件而非媒体 CRUD。 | 选择更少、更窄的 Piwigo 扩展面。 |
-| 3. 是否需要修改 Core | 无需 fork，但若用重度 Theme 改变产品模型，会覆盖大量 Core/模块视图。 | 目标是不修改 Core；plugin hooks、迁移、child Theme 与反向代理/容器 Web Server 配置是待验证路线，尚不能把媒体授权可行性当作已证事实。 | HumHub module/theme API；Piwigo plugin hooks/theme parent fallback。 | Piwigo 必须先完成 MediaGuard spike，且不得 patch `i.php`、`picture.php` 或 Core 表定义。 | 大量 view override 等同持续 merge 负担；独立插件可单独回归；若 hook/proxy 无法闭合直链授权则本 ADR 失效。 | **条件选择 Piwigo：以不改 Core 的媒体 403 spike 通过为硬门槛。** |
-| 4. HERITAGE/LIVING 与角色权限 | 两个 private/invisible Space 很适合读边界；但 Space 角色不能直接表达 CLASSMATE/TEACHER/FAMILY/ANONYMOUS 的动作差异，仍需 policy bridge。 | 两个 private root album + group ACL 已通过真实矩阵；FAMILY 不在 LIVING ACL。上传、评论、建相册、下载等动作仍需 role policy。 | HumHub Space membership；Piwigo private albums、groups、album inheritance。官方说明 private album 可按用户/组授权：[album permissions](https://doc.piwigo.org/organizing-albums/permissions-and-album-visibility)。 | `ClassArchivePolicy`：唯一业务角色、Era 不变量、动作级 server-side guard；其内部 MediaGuard 覆盖派生图/原图。 | HumHub 中；Piwigo 中高，原因是媒体 URL 层的已确认缺口。 | Piwigo ACL 作为目录/查询基础，但 **不能单独视为完整安全边界**。 |
+| 3. 是否需要修改 Core | 无需 fork，但若用重度 Theme 改变产品模型，会覆盖大量 Core/模块视图。 | 已实证无需修改 Core：独立 plugin、nginx public gateway/internal locations 与 `X-Accel-Redirect` 闭合 original/derivative 授权。 | HumHub module/theme API；Piwigo plugin hooks/theme parent fallback；nginx internal delivery。 | 保持薄 MediaGuard 并在每次 Core/URL 约定升级时重跑 HTTP 矩阵；不得 patch `i.php`、`picture.php` 或 Core 表定义。 | 大量 HumHub view override 等同持续 merge 负担；独立 Piwigo 插件/代理配置升级面较窄但必须回归。 | **Piwigo 胜出：不改 Core 的媒体 403 spike 已通过。** |
+| 4. HERITAGE/LIVING 与角色权限 | 两个 private/invisible Space 很适合读边界；但 Space 角色不能直接表达 CLASSMATE/TEACHER/FAMILY/ANONYMOUS 的动作差异，仍需 policy bridge。 | 两个 private root album + group ACL 负责目录/API 基础，MediaGuard 对每个 original/derivative 叠加当前角色、有效 Era、Core ACL 与下载策略；跨 Era 关联对所有角色拒绝。上传、评论、建相册等动作仍需 role policy。 | HumHub Space membership；Piwigo private albums、groups、album inheritance；ClassArchivePolicy MediaGuard。官方说明 private album 可按用户/组授权：[album permissions](https://doc.piwigo.org/organizing-albums/permissions-and-album-visibility)。 | 延续中央 policy resolver；ClassIdentity 接入冻结/释放/session revoke，所有未来端点做服务器端负面测试。 | HumHub 中；Piwigo 中，主要风险转为自定义 policy 与 Core URL/ACL 组合的升级回归。 | Piwigo ACL + MediaGuard 已闭合当前读路径；**不能把 Core album ACL 单独当完整安全边界**。 |
 | 5. 用户自建 Community Album | Gallery 支持 Space/Profile Gallery，但用户相册仍依附 Space/Profile；官方档案层级和协作关系需适配。 | Piwigo 原生 album/sub-album CRUD 和封面/说明天然匹配；需限制只有 CLASSMATE/TEACHER 可在 Community root 下创建。 | HumHub Gallery；Piwigo album tree。官方把 album 作为图库结构中心：[albums and sub-albums](https://doc.piwigo.org/organizing-albums/albums-and-sub-albums-piwigo)。 | Piwigo 只需 owner、Community root、Era、成员动作检查；不写相册 CRUD。 | HumHub 中高；Piwigo 低到中。 | 复用 Piwigo album CRUD，Class 插件只加所有权与边界。 |
 | 6. FAMILY 投稿审核 | Gallery 上传立即发布；需要另建 pending submission 层，虽可继续用 HumHub File。 | Community 16.f 已验证低信任 Pending 和高信任直接发布，功能更接近需求，但当前安全门禁阻止激活。 | Piwigo Community 的上传、待审和发布流程；[Community workflow](https://doc.piwigo.org/managing-users/community-plugin-piwigo)、[Community extension](https://piwigo.org/ext/index.php?eid=303)。 | 首选给 Community 提交上游修复并加 `ClassSubmissionPolicy` 封装默认权限、标量 category、CSRF、Era 和 audit；若不能安全封装，再写薄 Submission Layer，媒体仍交给 Piwigo。 | 当前 Community 16.f 为高，门禁通过后中。 | 保留复用价值但默认 inactive；**安全测试通过前不启用**。 |
 | 7. 评论、回复、点赞 | Core 评论、回复、Like、Notification 非常成熟，HumHub 明显领先。 | Core 提供照片评论和审核，但不是业务角色权限系统；album comments 不是 Core；Core rating 是加权星级评分，不是 Like。官方边界见 [comments](https://doc.piwigo.org/comments-and-ratings/managing-comments)、[ratings](https://doc.piwigo.org/comments-and-ratings/managing-ratings-votes)。 | Piwigo photo comments；候选 Comments on Albums / Reply To / Subscribe 尚未通过本项目安全回归；Core rating 保持关闭。 | ClassArchivePolicy 内部 Interactions hooks：FAMILY 拒绝、ANONYMOUS 允许、上下文匿名渲染、真正 reply、账号级唯一 Like、Report。Notification/Activity 延后且只能围绕照片。 | HumHub 低；Piwigo 中。 | 接受 Piwigo 的小型互动缺口，避免为复用社交后台引入整个 HumHub。 |
@@ -91,24 +91,24 @@ Hybrid 会新增两套账户、密码重置、session、冻结状态、内容 id
 - viewer 的 Class 操作抽屉与 Featured/Spotlight 大图卡；
 - 隐藏 Piwigo 的传统图库/后台痕迹，但不承担授权、不复制媒体、不重写 PhotoSwipe。
 
-## 已确认的安全缺口与门禁
+## 已确认的安全门禁
 
-### P0：媒体 URL 必须真正受 ACL 保护
+### P0（已通过）：媒体 URL 受服务器端 ACL 保护
 
-当前已确认的失败用例是：从一个已授权管理员会话取得 LIVING `i.php` medium derivative URL，并由 image path 构造直接 `/upload/...` original storage URL；两者在无 cookie 的 Guest 会话中仍返回 HTTP 200。Piwigo 的 `i.php` 有无数据库快速路径，不能假定它会执行 private-album ACL；Core 源码入口可见于 [`i.php`](https://github.com/Piwigo/Piwigo/blob/bef1a4ac424b4e986589e4cfc9f4d134f1b16f15/i.php#L8-L16)。
+原始 spike 曾证明：从授权会话取得 LIVING `i.php` derivative 或直接 `/upload/...` original path 后，Guest 可得到 HTTP 200。该失败证明页面/API ACL 不等于文件 ACL。当前实现用独立插件 + Web Server 边界解决它，不修改 Core：所有 public `/upload/`、`/galleries/`、`/_data/i/`、`i.php`、`action.php` 媒体请求进入 PHP MediaGuard；Guard 读取实时 session/DB role、有效 Era、Core forbidden category/image ACL 与 original policy；ALLOW 后才发出 nginx internal redirect。PHP 不承担 200GB 文件的 userspace 流式传输。
 
-生产方案必须满足：
+当前实现满足：
 
 1. Web Server 默认拒绝直接访问 original 和 derivative backing paths；
-2. Theme/Core 生成的媒体 URL 经过 `ClassMediaGuard` 或等价的签名/鉴权端点；
+2. Theme/Core 生成的媒体 URL 经过 `ClassArchivePolicy` MediaGuard；URL 不是 bearer credential；
 3. Guard 从 path/image id 反查 Piwigo 可见 album 集，并叠加 Seat 状态、role、Era、Family 下载设置；
 4. thumbnail、preview、original、Range、HEAD、cache-hit/cache-miss、相邻预取全部经过同一授权；
-5. URL 复制给 Guest、FAMILY 或被冻结用户时仍被拒绝；缓存 key 不得跨权限复用；
+5. URL 复制给 Guest/FAMILY、logout 后重放或切换到低权限账号时被拒绝；私有缓存必须 revalidate；
 6. 不以“路径难猜”作为安全控制，不 patch Piwigo Core。
 
-同一威胁模型还覆盖 API、搜索、Activity/Feed、分享、Archive、viewer、download action 与导出端点产生或传播的媒体 URL，不能只封住三个静态目录名称。
+290-probe HTTP 矩阵已覆盖角色/Era/variant、GET/HEAD/Range、logout/account switch、backing paths、guessing、path/query tamper 与 cache revalidation。另有 38-probe 可恢复状态套件证明：旧 session 权限撤销立即生效、跨 Era 关联对 Admin 也拒绝、两个 image row 指向同一 canonical original path 时 source/derivative/action 对所有角色 fail closed；40-probe 数据库断连版本返回 generic 503 且无 bytes/diagnostics。exact roots 和 internal locations 返回 404。完整规则见 `docs/media-access-policy.md`。
 
-门禁测试未通过前，只允许 localhost + synthetic fixtures，不得导入真实照片或开放网络。
+这项通过只冻结“Piwigo 能否安全承担媒体 Core”的架构判断。冻结账号、释放 Seat、显式 session revoke 的状态转换测试仍在 ClassIdentity 门禁内；API、搜索、分享、Archive、viewer/download 与未来导出端点也必须继续复用同一中央 policy，不能另开旁路。真实照片与网络开放仍禁止。
 
 ### P0：Community 16.f 只能在包装后启用
 
@@ -129,7 +129,7 @@ Community 的成熟上传/待审流程值得复用，但必须先完成：
 - FAMILY 无法用猜测 id 添加 LIVING 图片；
 - 已被移出可见 album 的图片立刻从集合结果消失；
 - list、detail、count、cover、export/download 和 viewer API 均重新校验；
-- collection link 不能绕过 `ClassMediaGuard`；
+- collection link 不能绕过 `ClassArchivePolicy` MediaGuard；
 - 管理员的审计查看与普通 owner 的媒体响应分离。
 
 ### 评论、匿名与 Like
@@ -167,7 +167,7 @@ Piwigo 的 filesystem synchronization 要求源位于 `./galleries/` 并在文�
 - 所有 32 项身份/角色验收先从 Piwigo account boundary 开始落地；
 - 不先做漂亮 Theme。
 
-同时只做 `ClassMediaGuard` 的最小可行 spike，证明不修改 Core 也能挡住 Guest/FAMILY 的已知 URL；失败就停止后续 Archive 开发并重新打开本 ADR。
+MediaGuard 最小可行 spike 已作为 Phase 1 前置门禁通过。ClassIdentity 现在必须把 active Account binding、freeze/release 与 session revoke 接入同一 resolver，并补齐状态转换回归；不得回退到只看 Piwigo group 的长期实现。
 
 ### Phase 2：Archive / Policy
 
@@ -203,4 +203,4 @@ Piwigo-first 不是因为 Piwigo 的社交能力更强；相反，HumHub 在评�
 
 因此正式判断是：
 
-> **Piwigo-first，非 Hybrid；先 ClassIdentity，Theme 最后；媒体 URL ACL、Community 和 Collections 安全门禁不过，绝不导入真实数据或开放网络。**
+> **Piwigo-first，非 Hybrid，媒体可行性已冻结；先 ClassIdentity，Theme 最后；Identity 生命周期、Community、Collections、NAS 与部署安全门禁不过，绝不导入真实数据或开放网络。**

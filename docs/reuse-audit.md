@@ -10,15 +10,15 @@ failed security test.
 | Requirement | Existing Feature | Can Reuse? | Limitations | Custom Code Needed? | Decision |
 |---|---|---|---|---|---|
 | Photo storage, metadata and image lifecycle | Piwigo Core images/uploads | Yes | External NAS source ownership and import reconciliation are not proven | No second media library; later thin import adapter only if needed | Piwigo is the sole V1 media system |
-| Thumbnail, preview and original tiers | Core derivatives plus protected original action | Partial | Signed-in UI is thumbnail/preview-first, but a known LIVING derivative and original URL returned 200 to Guest | **Server-side media authorization guard plus denial tests** | Reuse generation/cache; production blocked until known-media access is denied |
+| Thumbnail, preview and original tiers | Core derivative generation/cache plus ClassArchivePolicy MediaGuard and nginx internal delivery | **Yes for Phase 0 media confidentiality** | Final Theme representative/format choices and browser/touch UX still need QA; identity freeze/revoke transitions remain a later gate | Maintain the thin server-side MediaGuard and same-size safe-preview fallback; do not replace Core generation or stream 200GB through PHP | 290 matrix probes, 38 mutable/path-alias probes and 16 small-photo probes pass; PHP authorizes, Piwigo re-encodes/strips when needed, and nginx sends bytes with no Core patch |
 | Photo-first album grid | Core album pages + Bootstrap Darkroom | Yes for spike | Darkroom is not Apple Photos/Immich-like and is not the product theme | Photo-first child theme and timeline templates only | Keep media/query primitives; replace presentation after policy gates |
 | Full-screen swipe/zoom viewer | Darkroom-bundled PhotoSwipe 4.1.3; PhotoSwipe 5.4.4 upstream | Partial | HTML/assets/preview/prefetch markers pass, but browser fullscreen, swipe, zoom and mobile touch are not yet interactively verified | Thin PhotoSwipe 5 integration plus browser/touch QA in the Class Archive Theme | Never implement gestures, zoom or lightbox from scratch |
 | Chronological photo home | Core `date_creation`, calendar and image API | Partial | No continuous, event-labelled Apple Photos-style timeline by default | Theme-level grouped query/pagination; no new media table | Default route becomes Photos, not activity/feed |
 | Album CRUD, trees, names, descriptions and covers | Piwigo Core albums | Yes | Role-specific create/publish policy is not the default | ClassArchivePolicy hooks | Reuse Core album model and admin tools |
 | Official archive vs Community albums | Core album hierarchy and many-to-many image association | Yes as primitives | “Official” governance, ownership and admissible Era require policy | Thin archive metadata/policy relation only where Core fields are insufficient | Keep one image/original; associate it with logical albums |
 | One photo in several albums without copying | Core `image_category` many-to-many relation | **Yes, verified** | Cross-Era association would leak content if allowed | Era invariant validation on every association | 72-image test found 8 multi-album images and one original path per image |
-| Private gallery and no open signup | Core config, private albums/groups | Partial | Guest UI, registration and API discovery are closed; direct known-media access still leaks | Media-path authorization; Claim-only account creation later | Keep open registration, guest album access and guest comments disabled |
-| HERITAGE/LIVING read isolation | Private root albums + group ACL/inheritance | Yes for album/API discovery | Must also guard derivatives, originals, search, comments, collections and future endpoints | Central ClassArchivePolicy resolver and negative endpoint tests | Family only receives HERITAGE; Classmate/Teacher/Anonymous receive both according to Seat owner rights |
+| Private gallery and no open signup | Core config, private albums/groups + MediaGuard | Yes for Phase 0 read paths | Claim-only provisioning, freeze/release/session revoke and future endpoints are not complete | ClassIdentity account lifecycle next; keep MediaGuard at every media path | Guest UI/API/media are denied; open registration, guest album access and guest comments remain disabled |
+| HERITAGE/LIVING read isolation | Private root albums + group ACL/inheritance + effective-Era MediaGuard | **Yes for current album/API/media paths** | Upload, comments, collections and future endpoints still need their own action policy; ClassIdentity freeze/release is not implemented yet | Keep one central ClassArchivePolicy resolver and negative endpoint tests | Family gets HERITAGE preview only; Classmate/Teacher/Anonymous get permitted both-era previews; old-session Core ACL revocation passes and a cross-Era association denies every role |
 | Identity -> Seat -> Account | None in Core | No | Piwigo accounts do not model permanent class identities or fixed seats | `ClassIdentity` plugin, InnoDB migrations, claim/invite hashes, audit and reconciliation | First custom implementation phase; do not replace Core login/password hashing |
 | Session/login/password hashing | Piwigo Core users/auth | Yes | Freeze cascade, session revoke and Claim provisioning are missing | Identity lifecycle adapter around Core accounts | Reuse authentication; never store plaintext passwords |
 | Role groups | Core groups and private-album ACL | Yes | Core groups do not enforce every action in the requested role matrix | Server-side policy hook; exactly one business group per account | Reuse groups as ACL inputs, not as the entire domain model |
@@ -38,7 +38,7 @@ failed security test.
 | Search by date/year/album/uploader/file/tag | Core search, metadata and tags | Mostly | Product search UI and role-safe uploader facet need verification | Theme/search adapter; central policy filter | Reuse Core index/query; no Elasticsearch in V1 |
 | Spotlight / Featured 24h | No matching photo-first primitive | No | Forum-style pin is irrelevant; owner/TTL/audit rules are class-specific | `ClassSpotlight` InnoDB table, idempotent expiry job and theme component | Large photo/album card on Photos home; no ranking algorithm |
 | Activity and notifications | History/admin events and optional comment email | Partial | Piwigo has no HumHub-like member feed; a feed is intentionally secondary | Optional projection from class-domain events after core product works | Do not add HumHub solely for Activity in V1 |
-| EXIF privacy | Core metadata plus derivative pipeline | Yes as primitive | Original may retain GPS; UI setting alone does not solve known-media access | Preview metadata regression and download policy | Keep EXIF in originals if configured; do not render it in web preview (`show_exif=false`) |
+| EXIF privacy | Core metadata plus derivative pipeline | Yes as primitive | Original may retain GPS; preview metadata stripping and the final download policy still need dedicated regression | Preview metadata regression and download policy | Keep EXIF in originals if configured; do not render it in web preview (`show_exif=false`) |
 | Backup and NAS portability | Docker volumes, MariaDB dump, file archives | Partial | Local backup volume is not off-device recovery; restore and external-photo coexistence need drills | Operator scripts/docs, not a second storage service | Quiesced MyISAM-safe backup now; vendor-neutral NAS work remains later |
 
 ## Phase 0 reuse outcome
@@ -48,8 +48,18 @@ records, metadata, derivative generation, caches, album CRUD/tree, album ACL,
 many-to-many album placement, favorites, basic photo comments, admin tools,
 search primitives and Web API. PhotoSwipe owns gesture navigation and zoom.
 
+The previously open direct-media boundary is now closed without a Core patch:
+PHP resolves the live session, managed role, effective Era, Core image/album ACL
+and original-download setting on every request, then nginx performs the actual
+file transfer. The 290-probe HTTP matrix passes, including logout,
+account-switch, HEAD, Range, path/query tampering and cache revalidation. A
+controlled database outage fails with a generic 503 and no media bytes.
+
 The justified custom boundary is therefore limited to `ClassIdentity`,
 `ClassArchivePolicy` with internal MediaGuard/AnonymousPresenter/collections,
 `ClassSpotlight`, a small Like/Report adapter if retained, and the photo-first
 Theme. Community and User Collections are not counted as reused until their
-recorded security gates pass.
+recorded security gates pass. Piwigo-first is therefore frozen for media
+feasibility, while production remains blocked on ClassIdentity lifecycle,
+independent admin control, Community/collections safety, NAS and deployment
+gates.

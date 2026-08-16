@@ -114,19 +114,21 @@ bundle. Host and backup-volume locks reject overlapping local runs. This proves
 fail-closed local data-bundle creation, not restoration or
 a complete encrypted off-device recovery set.
 
-## Critical unresolved security finding
+## Historical media finding and resolution
 
-The successful UI/API checks do **not** yet make the runtime safe for real
-photos. A separate known-media probe requested an already-known LIVING
-derivative URL and a direct `/upload/...` original storage path without a session; both returned
-**HTTP 200**. In other words, album discovery is private, but possession or
-guessing of a media URL can bypass the intended content boundary in the current
-stack.
+The architecture spike originally requested an already-known LIVING derivative
+URL and a direct `/upload/...` original storage path without a session; both
+returned **HTTP 200**. That historical failure proved album discovery ACL was
+not a sufficient file-delivery boundary.
 
-This is a production blocker. No real photos may enter this runtime until a
-server-side media authorization design denies both derivatives and originals,
-and regression tests cover Guest and Family against known LIVING identifiers.
-Changing navigation or hiding links is not a fix.
+The supported runtime now routes every public original and derivative path
+through `ClassArchivePolicy` MediaGuard. PHP recomputes the current actor, Era,
+Core album/privacy ACL and original policy; nginx sends bytes only after an
+authorized `X-Accel-Redirect`. The 290-request HTTP matrix, 38-request mutable
+state/path-alias suite and the opt-in 40-request database-outage suite pass. The specific
+known-URL blocker is resolved without a Core patch. Real photos/public/NAS
+deployment remain prohibited until ClassIdentity, admin governance and the
+other production gates below are complete.
 
 ## Other unresolved risks
 

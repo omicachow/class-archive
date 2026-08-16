@@ -188,6 +188,21 @@ function ensureUnsafeExtensionsInactive(): void
     }
 }
 
+function ensureClassArchivePolicyActive(): void
+{
+    $row = fetchOne(
+        "SELECT id, version, state FROM " . PLUGINS_TABLE . " WHERE id = 'ClassArchivePolicy'"
+    );
+    if (
+        $row === null
+        || $row['state'] !== 'active'
+        || $row['version'] !== '0.1.0'
+        || !is_file(PIWIGO_ROOT . '/plugins/ClassArchivePolicy/media-gateway.php')
+    ) {
+        fail('ClassArchivePolicy 0.1.0 must be installed and active.');
+    }
+}
+
 function ensureModernAdminHash(): void
 {
     $row = fetchOne('SELECT password FROM ' . USERS_TABLE . ' WHERE id = 1');
@@ -226,6 +241,7 @@ function main(array $argv): void
     ], $verifyOnly);
 
     ensureUnsafeExtensionsInactive();
+    ensureClassArchivePolicyActive();
     ensureModernAdminHash();
     ensureTheme($verifyOnly);
 

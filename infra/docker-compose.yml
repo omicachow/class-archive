@@ -48,6 +48,7 @@ services:
       - piwigo_galleries:/var/www/html/piwigo/galleries
       - piwigo_derivatives:/var/www/html/piwigo/_data/i
       - piwigo_scripts:/usr/local/bin/scripts
+      - ./piwigo-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../infra:/workspace/infra:ro
       - ../plugins:/workspace/plugins:ro
       - ../themes:/workspace/themes:ro

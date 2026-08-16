@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'baseline-verify', 'seed', 'test-access', 'test-phase0', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'baseline-verify', 'seed', 'test-access', 'test-phase0', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -84,6 +84,18 @@ switch ($Action) {
             'php', '/workspace/infra/scripts/install-locked-piwigo-extensions.php', '--verify-only'
         )
     }
+    'class-plugins' {
+        $commandArguments = $composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php'
+        )
+    }
+    'class-plugins-verify' {
+        $commandArguments = $composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--verify-only'
+        )
+    }
     'baseline-verify' {
         $commandArguments = $composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
@@ -123,6 +135,15 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase0\access-matrix.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase0\media-guard-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase0\media-guard-tiny-preview.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase0\media-guard-state-transitions.ps1')
         exit $LASTEXITCODE
     }
     'test-access' {

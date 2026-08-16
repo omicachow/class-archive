@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param()
 
-# Engineering-spike evidence, not a passing production gate. This probe exits
-# zero only while the documented Piwigo 16.4 static-media ACL gap is reproduced.
-# ClassArchivePolicy must replace it with a deny test before production.
+# Fast regression for the exact Piwigo 16.4 static-media bypass reproduced by
+# the architecture spike. The prior insecure behavior is preserved in Git
+# history; the current gate succeeds only when both known URLs are denied.
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -39,15 +39,22 @@ if (-not $previewMatch.Success) { throw 'Could not resolve the LIVING media path
 
 $previewUri = [Uri]::new($baseUri, $previewMatch.Groups[1].Value)
 $originalUri = [Uri]::new($baseUri, $previewMatch.Groups[2].Value + '.png')
-$preview = Invoke-WebRequest -UseBasicParsing -Uri $previewUri -TimeoutSec 20
-$original = Invoke-WebRequest -UseBasicParsing -Uri $originalUri -TimeoutSec 20
-if (
-    $preview.StatusCode -ne 200 -or $preview.Headers['Content-Type'] -notlike 'image/*' `
-    -or $original.StatusCode -ne 200 -or $original.Headers['Content-Type'] -notlike 'image/*'
-) {
-    throw 'The known media gap was not reproduced; replace this probe with the production 403 regression gate.'
+function Get-DeniedStatus([Uri]$Uri) {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 20
+        return [int]$response.StatusCode
+    }
+    catch {
+        return [int]$_.Exception.Response.StatusCode
+    }
 }
 
-Write-Output 'KNOWN_MEDIA_ACL_GAP=CONFIRMED'
-Write-Output 'GUEST_KNOWN_LIVING_DERIVATIVE=HTTP_200'
-Write-Output 'GUEST_KNOWN_LIVING_ORIGINAL=HTTP_200'
+$previewStatus = Get-DeniedStatus $previewUri
+$originalStatus = Get-DeniedStatus $originalUri
+if ($previewStatus -notin @(401, 403, 404) -or $originalStatus -notin @(401, 403, 404)) {
+    throw "Known media URL bypass remains: derivative=$previewStatus original=$originalStatus"
+}
+
+Write-Output 'KNOWN_MEDIA_ACL_GAP=RESOLVED'
+Write-Output 'GUEST_KNOWN_LIVING_DERIVATIVE=DENY'
+Write-Output 'GUEST_KNOWN_LIVING_ORIGINAL=DENY'

@@ -1,9 +1,10 @@
 # Reproducible local first run: Piwigo-first Phase 0
 
 This procedure creates the supported **local engineering spike** on the current
-Windows + WSL2 Ubuntu workstation. It is not production approval: the known
-media-URL authorization blocker described below must be resolved before any real
-photo is imported.
+Windows + WSL2 Ubuntu workstation. The known-media-URL P0 gate now passes, but
+this is not production approval: ClassIdentity lifecycle, independent Admin,
+Community/collections, NAS and public-deployment gates remain open. Use only
+synthetic photos on localhost.
 
 ## 1. Data and secret boundary
 
@@ -75,12 +76,16 @@ The idempotent bootstrap:
 4. performs one real administrator login so the upstream installer MD5 hash is
    migrated to Piwigo's current phpass representation;
 5. installs/verifies only extension archives allowed by the lock;
-6. configures the fail-closed baseline and verifies it.
+6. installs/activates the tracked `ClassArchivePolicy` plugin and nginx
+   MediaGuard routing;
+7. configures the fail-closed baseline and verifies it.
 
 The baseline disables guest gallery access, open registration, guest comments,
 ratings and web-UI extension installation; creates private HERITAGE/LIVING root
 albums and non-default business groups; and keeps Community/User Collections
-inactive. It does not patch Piwigo Core.
+inactive. Public `/upload/`, `/galleries/`, `/_data/i/`, `i.php` and
+`action.php` media requests pass through MediaGuard; authorized bytes are sent
+by nginx internal locations. It does not patch Piwigo Core.
 
 Verify the running state and locks:
 
@@ -126,6 +131,7 @@ the model test expects exactly 72 image records.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 test-access
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase0\media-guard-http.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 test-phase0
 ```
 
@@ -156,11 +162,37 @@ THUMBNAIL_FIRST=PASS
 PHOTOSWIPE_INTEGRATION_MARKERS=PASS
 ```
 
-This verifies album/API discovery and the signed-in UI. It does **not** clear the
-known-media security blocker: a separate probe currently gets HTTP 200 for an
-already-known LIVING derivative and original URL without a session. Until a
-server-side fix and negative regression test land, this stack is synthetic-data
-only and must not be exposed publicly.
+The standalone MediaGuard matrix has passed with:
+
+```text
+MEDIA_GUARD_HTTP=PASS
+HTTP_PROBES=290
+ROLE_ERA_VARIANT_MATRIX=PASS
+KNOWN_URL_LOGOUT_SWITCH=PASS
+HEAD_RANGE_TAMPER_NORMALIZATION_GUESS=PASS
+PRIVATE_CACHE_POLICY=PASS
+ALLOW_BODY_IMAGE_MAGIC=PASS
+DENY_BODY_IMAGE_MAGIC_ABSENT=PASS
+RANGE_206_CONTENT_RANGE_32_BYTES=PASS
+HEAD_ZERO_BODY=PASS
+```
+
+It verifies that known original/derivative URLs are re-authorized for Guest,
+Family, Classmate, Teacher, Anonymous and phase-0 Admin sessions. It also covers
+logout/account switching, `GET`/`HEAD`/Range, path/query tampering and cache
+revalidation. Allowed and denied bodies are inspected rather than inferred from
+headers; Range must be an exact 32-byte `206`, and HEAD must have no body. A
+controlled database outage returned a generic 503 without media bytes or
+diagnostics.
+
+The broader `test-phase0` command also invokes the mutable authorization-state
+suite. Its default 38-probe run verifies old-session permission revocation,
+same-Era multi-album union, cross-Era fail-closed behavior and rejection of two
+image rows that alias the same physical original path. The explicit
+`-IncludeDatabaseOutage` run adds a real database stop/recovery and passes with
+40 probes. Keep the stack synthetic-data-only and localhost-only until
+ClassIdentity freeze/release/session revoke and all later production gates
+pass.
 
 ## 7. Create a quiesced backup
 
@@ -212,7 +244,11 @@ the application volume, and do not enable Community or User Collections.
 
 This first run proves a reproducible localhost-only, photo-first Piwigo spike
 with 72 synthetic images, group/album visibility, no-copy multi-album placement,
-thumbnail-first pages and a mature viewer. It does not yet prove production
-media confidentiality, ClassIdentity, Community moderation safety, anonymous
-comments, named collections, NAS coexistence, public HTTPS or restore. Those are
-explicit later gates, not implied by a healthy container.
+thumbnail-first pages, a mature viewer integration and fail-closed known-media
+delivery. It does not yet prove ClassIdentity lifecycle, Community moderation
+safety, anonymous comments, named collections, browser/touch viewer UX, NAS
+coexistence, public HTTPS or restore. Same-size small-photo safe preview is
+covered by a separate 16-request synthetic re-encode/metadata-strip regression;
+that fixture also verifies its temporary database row, physical original and
+derivative are removed in `finally`. Those are explicit later gates, not
+implied by MediaGuard or a healthy container.

@@ -4,7 +4,7 @@ These are mandatory end-to-end authorization/lifecycle gates. Each row will link
 
 | ID | Acceptance criterion | Phase | Status |
 |---:|---|---:|---|
-| 1 | Guest cannot view formal content, including known media URLs | 1/2 | Blocked: UI/API pass; direct original/derivative URLs still leak |
+| 1 | Guest cannot view formal content, including known media URLs | 1/2 | **Pass (Phase 0 MediaGuard):** Guest is denied HERITAGE/LIVING thumbnails, previews and originals through every tested public media route |
 | 2 | Open registration is unavailable | 1 | Pass (Phase 0 baseline) |
 | 3 | Classmate claim code is single-use | 1 | Pending |
 | 4 | A classmate cannot claim Seat 1 twice | 1 | Pending |
@@ -13,7 +13,7 @@ These are mandatory end-to-end authorization/lifecycle gates. Each row will link
 | 7 | Family cannot comment | 2 | Pending |
 | 8 | Family cannot like | 2 | Pending |
 | 9 | Family cannot create a public album | 2 | Pending |
-| 10 | Family cannot access LIVING content, including known media URLs | 2 | Blocked: album/API pass; direct media authorization pending |
+| 10 | Family cannot access LIVING content, including known media URLs | 2 | **Pass for read paths (Phase 0 MediaGuard):** album/API and known LIVING thumbnail/preview/original requests are denied; Family HERITAGE preview remains allowed |
 | 11 | Family can upload a HERITAGE submission | 2 | Pending |
 | 12 | Family upload defaults to Pending | 2 | Pending |
 | 13 | Submission enters archive only after Admin approval | 2 | Pending |
@@ -21,7 +21,7 @@ These are mandatory end-to-end authorization/lifecycle gates. Each row will link
 | 15 | Teacher upload publishes directly | 2 | Pending |
 | 16 | Classmate can create Community Album | 2 | Pending |
 | 17 | Teacher can create Community Album | 2 | Pending |
-| 18 | One image record/original file can enter multiple logical albums without another image row/path/file | 2 | Pass (Phase 0 fixture): 72 image rows resolve to 72 referenced physical originals; 8 images have multiple album relations |
+| 18 | One image record/original file can enter multiple logical albums without another image row/path/file | 2 | Pass (Phase 0 fixture): 72 image rows resolve to 72 referenced physical originals; 8 images have same-Era multi-album relations; cross-Era album association and duplicate image rows sharing one canonical original both fail closed for every actor |
 | 19 | Anonymous Seat cannot upload | 1/2 | Pending |
 | 20 | Anonymous Seat cannot create an album | 2 | Pending |
 | 21 | Anonymous Seat cannot like | 3 | Pending |
@@ -40,7 +40,7 @@ These are mandatory end-to-end authorization/lifecycle gates. Each row will link
 | 34 | Community Approve/Reject requires a valid CSRF token, Admin permission and an idempotent pending state | 2 | Blocked: tokenless POST reproduced in isolated spike |
 | 35 | Community upload accepts one authorized scalar album id; array/unknown/cross-Era category fails without a partial upload | 2 | Blocked: unsafe array path reproduced in isolated spike |
 | 36 | Favorites/Collections cannot add, read, count, cover, export or retain an image after its album access is absent/revoked | 2 | Blocked: User Collections cross-ACL bypass reproduced; Core Favorites unverified |
-| 37 | Guest, FAMILY→LIVING, frozen accounts and expired signatures get 403 for known originals/derivatives through GET, HEAD, Range, cache-hit/miss and every direct storage path | 1/2 | Blocked: current Guest probe returns 200 |
+| 37 | Guest, FAMILY→LIVING, frozen/released accounts and revoked sessions are denied known originals/derivatives through GET, HEAD, Range, cache revalidation and every direct storage path | 1/2 | **Partial:** 290 HTTP probes pass for Guest/FAMILY, roles/eras/variants, GET/HEAD/Range, logout, account switch, direct paths, tampering and cache revalidation; ClassIdentity freeze/release/explicit session-revoke transition remains pending |
 | 38 | Login, Claim, Invite and comment mutations enforce server-side rate limits without logging secrets/raw identifiers | 1/3 | Pending |
 | 39 | Production Admin accounts have a tested 2FA path and recovery procedure | 5 | Pending; no SMTP/real production credentials in V1 local spike |
 | 40 | Session revoke/freeze invalidates active UI, API, auth-key and remember-me paths on the next request | 1 | Pending |

@@ -20,6 +20,9 @@ The photo-first Phase 0 spike is runnable on this workstation:
 
 - Piwigo Core 16.4.0 in the pinned official 16.4.0a container image.
 - MariaDB 11.8.8, both images locked by immutable digest.
+- `ClassArchivePolicy` 0.1.0 MediaGuard, with every public original and
+  derivative route authorized by PHP and delivered by nginx only after an
+  internal `X-Accel-Redirect`; no Piwigo Core file is patched.
 - Bootstrap Darkroom 16.d with bundled PhotoSwipe 4.1.3, used only to validate
   derivative-first markup, preview loading and integration markers; interactive
   browser/touch QA remains pending.
@@ -39,11 +42,15 @@ vendor-neutral deployment/coexistence gates are in
 Historical HumHub evidence remains under `docs/evaluations/humhub/` and on the
 `codex/humhub-first-snapshot` branch.
 
-> Development only: Piwigo's directly served cached derivatives and upload
-> paths were proven reachable when their URLs are known, even though Guest UI
-> and API access are closed. Do not expose this stack to a network until the
-> ClassArchivePolicy media authorization layer and its Guest/FAMILY 403 tests
-> pass.
+> Development only: the former known-media-URL P0 blocker now passes a 290-probe
+> real HTTP matrix that verifies response bytes as well as status and headers.
+> Guest receives no HERITAGE/LIVING media, FAMILY receives
+> HERITAGE previews but no LIVING media (and no originals by default), and
+> Classmate/Teacher/Admin access follows the locked policy. This freezes
+> Piwigo-first for media feasibility; it is **not** production approval.
+> ClassIdentity freeze/release/session-revoke behavior, independent
+> `SYSTEM_ADMIN`, Community moderation, collections, NAS and public deployment
+> gates remain incomplete. Keep the stack on localhost with synthetic data.
 
 ## Local start
 
@@ -72,15 +79,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 baseline-verify
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 extensions-verify
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 test-access
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase0\media-guard-http.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 backup
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 stop
 ```
 
-The separate spike probe records the known production blocker:
+The fast probe and full matrix verify the former known-URL production blocker:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase0\probe-known-media-gap.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase0\media-guard-http.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase0\media-guard-tiny-preview.ps1
 ```
+
+The authorization and effective-Era rules are recorded in
+[`docs/media-access-policy.md`](docs/media-access-policy.md). A URL identifies a
+media object; it never grants access by itself.
 
 Never use `down -v`: the named volumes are the application data boundary.
 

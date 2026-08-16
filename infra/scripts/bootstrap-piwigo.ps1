@@ -184,11 +184,13 @@ if ($loginResponse.stat -ne 'ok' -or -not $loginResponse.result) {
 }
 
 Invoke-Dev -Action 'extensions'
+Invoke-Dev -Action 'class-plugins'
 Invoke-Compose -Arguments @(
     'exec', '-T', '--user', 'nginx', 'piwigo',
     'php', '/workspace/infra/scripts/configure-piwigo-baseline.php'
 )
 Invoke-Dev -Action 'extensions-verify'
+Invoke-Dev -Action 'class-plugins-verify'
 Invoke-Dev -Action 'baseline-verify'
 
 Write-Host 'Piwigo private photo-first baseline is configured and verified.'

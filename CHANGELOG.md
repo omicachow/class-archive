@@ -22,9 +22,20 @@ committed separately.
   ANONYMOUS group visibility.
 - Quarantined Community pending CSRF/category/default-permission guards and
   excluded User Collections after reproducing a cross-private-album ACL bypass.
-- Confirmed and documented the direct original/derivative media ACL blocker;
-  production remains prohibited until a server-side authorized media boundary
-  passes Guest/FAMILY 403 regression tests.
+- Closed the direct original/derivative media ACL blocker with
+  `ClassArchivePolicy`: PHP re-authorizes every request and nginx transfers
+  approved bytes through internal `X-Accel-Redirect` locations without a Core
+  patch.
+- Added 290 role/Era/variant/path/cache probes, 38 mutable ACL/cross-Era/path-
+  alias probes, a 40-probe database-outage run and 16 same-size safe-preview
+  probes. Small
+  originals are re-encoded and stripped through Piwigo's image library instead
+  of being exposed as implicit previews.
+- Rejects every delivery variant when more than one Piwigo image row resolves
+  to the same canonical original path, including cross-Era aliases and Admin
+  requests.
+- Kept production blocked on ClassIdentity, independent SYSTEM_ADMIN,
+  moderation/collections safety, NAS and public-deployment gates.
 - Added MyISAM-consistent app-quiesced backup bundles, independent original,
   derivative, database and backup volumes, and configurable NAS UID/GID/volume
   names.
