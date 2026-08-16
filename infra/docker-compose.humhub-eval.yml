@@ -1,0 +1,109 @@
+name: ${COMPOSE_PROJECT_NAME:-class_archive}
+
+# Comparison-only HumHub runtime. The supported V1 stack is docker-compose.yml.
+
+services:
+  config-init:
+    image: ${HUMHUB_IMAGE}
+    restart: "no"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        install -d -o www-data -g www-data -m 0755 /data/config
+        install -o www-data -g www-data -m 0644 /workspace/infra/humhub-eval-config/common.php /data/config/common.php
+    volumes:
+      - humhub_data:/data
+      - ../infra:/workspace/infra:ro
+    network_mode: none
+
+  humhub:
+    image: ${HUMHUB_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CLASS_ARCHIVE_HTTP_PORT:-8088}:${CLASS_ARCHIVE_HTTP_PORT:-8088}"
+    volumes:
+      - humhub_data:/data
+      - ../modules:/workspace/modules:ro
+      - ../infra:/workspace/infra:ro
+    environment:
+      HUMHUB_DEBUG: ${HUMHUB_DEBUG:-false}
+      CLASS_ARCHIVE_HTTP_PORT: ${CLASS_ARCHIVE_HTTP_PORT:-8088}
+      SERVER_NAME: ${CLASS_ARCHIVE_BASE_URL:-http://localhost:8088}
+      HUMHUB_CONFIG__COMPONENTS__DB__DSN: mysql:host=db;dbname=${DB_NAME:-humhub}
+      HUMHUB_CONFIG__COMPONENTS__DB__USERNAME: ${DB_USER:-humhub}
+      HUMHUB_CONFIG__COMPONENTS__DB__PASSWORD: ${DB_PASSWORD}
+      HUMHUB_CONFIG__COMPONENTS__DB__CHARSET: utf8mb4
+      HUMHUB_CONFIG__PARAMS__MODULE_AUTOLOAD_PATHS: '["/workspace/modules", "/data/modules-custom", "/data/modules"]'
+      HUMHUB_CONFIG__MODULES__MARKETPLACE__MODULES_PATH: /data/modules
+      HUMHUB_CONFIG__MODULES__MARKETPLACE__MODULE_BLACKLIST: '["updater"]'
+      HUMHUB_DOCKER__AUTOSTART_FRANKENPHP: "true"
+      HUMHUB_DOCKER__AUTOSTART_SCHEDULER: "true"
+      HUMHUB_DOCKER__AUTOSTART_WORKER: "true"
+      HUMHUB_DOCKER__NUMPROCS_WORKER: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --max-time 5 http://localhost:$${CLASS_ARCHIVE_HTTP_PORT}/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - app
+
+  db:
+    image: ${MARIADB_IMAGE}
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-humhub}
+      MARIADB_USER: ${DB_USER:-humhub}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - app
+
+  backup:
+    image: ${HUMHUB_IMAGE}
+    profiles: ["ops"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: /app/bin/humhub-backup.sh
+    user: root
+    volumes:
+      - humhub_data:/data
+      - backups:/backup
+    environment:
+      HUMHUB_CONFIG__COMPONENTS__DB__DSN: mysql:host=db;dbname=${DB_NAME:-humhub}
+      HUMHUB_CONFIG__COMPONENTS__DB__USERNAME: ${DB_USER:-humhub}
+      HUMHUB_CONFIG__COMPONENTS__DB__PASSWORD: ${DB_PASSWORD}
+      HUMHUB_DOCKER__BACKUP_MERGE_ARCHIVES: "true"
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  humhub_data:
+    name: class_archive_humhub_data
+  mariadb_data:
+    name: class_archive_mariadb_data
+  backups:
+    name: class_archive_backups

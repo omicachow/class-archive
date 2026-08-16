@@ -1,5 +1,6 @@
 {
   "lockFormat": 1,
+  "purpose": "comparison-only HumHub runtime",
   "generatedAt": "2026-08-10",
   "humhub": {
     "version": "1.18.4",

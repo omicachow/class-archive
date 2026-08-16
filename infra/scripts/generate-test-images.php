@@ -18,6 +18,22 @@ if (!is_dir(OUTPUT_DIRECTORY) && !mkdir(OUTPUT_DIRECTORY, 0700, true)) {
     exit(1);
 }
 
+$existingFixtures = glob(OUTPUT_DIRECTORY . '/class-archive-fixture-*.png');
+if ($existingFixtures === false) {
+    fwrite(STDERR, "Cannot enumerate old generated fixtures.\n");
+    exit(1);
+}
+foreach ($existingFixtures as $existingFixture) {
+    if (
+        realpath(dirname($existingFixture)) !== realpath(OUTPUT_DIRECTORY)
+        || preg_match('/^class-archive-fixture-[0-9]{3}\.png$/', basename($existingFixture)) !== 1
+        || !unlink($existingFixture)
+    ) {
+        fwrite(STDERR, "Cannot safely remove old fixture {$existingFixture}.\n");
+        exit(1);
+    }
+}
+
 $manifest = [
     'kind' => 'deterministic synthetic Class Archive test fixtures',
     'containsRealPeopleOrPhotos' => false,
@@ -76,9 +92,13 @@ for ($index = 1; $index <= $count; $index++) {
     ];
 }
 
-file_put_contents(
+$manifestResult = file_put_contents(
     OUTPUT_DIRECTORY . '/manifest.json',
     json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
 );
+if ($manifestResult === false) {
+    fwrite(STDERR, "Cannot write fixture manifest.\n");
+    exit(1);
+}
 
 fwrite(STDOUT, sprintf("Generated %d synthetic PNG fixtures in %s\n", $count, OUTPUT_DIRECTORY));

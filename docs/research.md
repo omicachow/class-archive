@@ -1,72 +1,166 @@
-# Phase 0 research
+# Piwigo-first Phase 0 research
 
-Research date: 2026-08-10 (Asia/Shanghai)
+Research refreshed: 2026-08-16 (Asia/Shanghai)
 
-## Stable-core decision
+This document records the photo-first spike that supersedes the original
+HumHub-first product direction. Historical HumHub evidence remains under
+`docs/evaluations/humhub/`; it is not rewritten or discarded here.
 
-HumHub `1.18.4`, released 2026-07-21, is the current stable release. HumHub `1.19.0-beta.1` is explicitly a pre-release/upcoming line and is excluded. The deployment is pinned to the official `humhub/humhub:1.18.4` image and immutable digest; no floating `stable` or nightly tag is used.
+## Current facts from upstream
 
-The Community Edition is published under AGPL-3.0-only with a commercial dual-license option. A privately operated network still needs an explicit source-offer/compliance review before distribution or external service use; that legal boundary is not inferred from technical testing.
+- **Piwigo 16.4.0 is the current stable Core selected for this repository.** It
+  was released on 2026-05-03 and includes security fixes. The official stable
+  changelog lists 16.4.0 as the newest stable release; no beta or upcoming Core
+  is used. Sources: [16.4.0 release note](https://piwigo.org/release-16.4.0),
+  [stable changelog](https://piwigo.org/changelogs).
+- Piwigo Core is licensed under **GPL-2.0-or-later**. The project is a PHP photo
+  gallery with albums, metadata, derivative generation, comments, ratings,
+  favorites, groups, private-album access and a Web API. Source:
+  [official repository](https://github.com/Piwigo/Piwigo).
+- Current official requirements are a web server such as Nginx or Apache,
+  PHP 8.2+, MySQL 5.6+ or MariaDB 10.1+, and GD or ImageMagick. ImageMagick is
+  recommended. Multiple generated image sizes consume additional storage.
+  Source: [Piwigo requirements](https://piwigo.org/guides/install/requirements).
+- The official Docker project documents a loopback-prefixed port binding and
+  persistent application/database data. The repository uses that upstream
+  image but supplies its own localhost-only Compose definition and explicit
+  named volumes. Source: [official Docker repository](https://github.com/Piwigo/piwigo-docker).
+- Piwigo's `image_category` relation is many-to-many. One image record and one
+  original file can therefore appear in several logical albums; the local
+  runtime test confirms this behavior.
+- Core supports photo comments, but not album comments or nested threads. Core
+  Favorites is a private, flat per-user photo list. Core ratings are global
+  stars, not an account-bound Like model with the required role matrix.
 
-Primary evidence:
+## Evaluated extensions and viewer
 
-- [Official HumHub downloads](https://download.humhub.com/site/index)
-- [HumHub 1.18 release notes](https://docs.humhub.org/docs/about/releasenotes/release_notes_1_18/)
-- [Official HumHub Docker repository](https://github.com/humhub/docker)
-- [Official HumHub Docker tags](https://hub.docker.com/r/humhub/humhub/tags)
-- [HumHub licensing](https://www.humhub.com/licenses/)
+| Candidate | Upstream state | Local result | Phase 0 decision |
+|---|---|---|---|
+| [Community 16.f](https://piwigo.org/ext/index.php?eid=303) | Compatible with Piwigo 16; released 2026-04-21; lets contributors create albums/upload, optionally with moderation | Low-trust pending and high-trust direct-publish behavior were demonstrated in the isolated evaluation runtime. A tokenless moderation POST was also accepted, and an array-shaped category input reached an unsafe/fatal path. | Its archive is pinned and the plugin is installed, but **inactive**. It is not a supported upload path until its CSRF/input and class-policy gates pass. |
+| [User Collections 16.a](https://piwigo.org/ext/index.php?eid=615) | Compatible with Piwigo 16; released 2026-01-15; named collections, optional public sharing and email | A Family user who knew a LIVING-only image id could obtain its derivative through the plugin despite album ACL. | **Quarantined, not installed, not active.** Core Favorites is only a narrower interim candidate and needs the same ACL/revocation tests; implement a guarded ClassCollections relation if no fixed upstream release passes. |
+| Bootstrap Darkroom 16.d | Compatible with Piwigo 16; responsive Bootstrap 4 theme with PhotoSwipe | HTTP/HTML checks exercised a derivative-first album page, screen-sized viewer preview, adjacent prefetch and a PhotoSwipe trigger. No supported-browser layout/touch QA was completed. | Active only as the **engineering-spike theme**. It is not the final Class Archive UX. |
+| Bundled PhotoSwipe 4.1.3 | MIT; shipped inside Bootstrap Darkroom | Its initialization markers and assets occur in the live photo response; full-screen navigation, swipe and zoom were not interactively verified in this run. | Reused only for the spike. Do not build a viewer from scratch. |
+| PhotoSwipe 5.4.4 | MIT; latest stable v5 release. Responsive sources, touch/zoom, modular lazy loading and configurable adjacent preload | Not yet integrated into the product theme. PhotoSwipe v6 is still under development with no ETA. | Planned viewer for the final Class Archive Theme; pin exact v5 assets and hashes when integrated. Sources: [releases](https://github.com/dimsemenov/PhotoSwipe/releases), [v5 documentation](https://photoswipe.com/). |
+| [Comments on Albums 14.a](https://piwigo.org/ext/index.php?eid=512) | GPL-2.0; declares compatibility with Piwigo 16/15/14, last functional release in 2024 | README describes the plugin as unmaintained, and an open Piwigo 16 regression remains. | Excluded from the supported lock. Re-evaluate only after a maintained release and runtime authorization tests. |
+| [Reply To 12.a](https://piwigo.org/ext/index.php?eid=556) | GPL-2.0; declares compatibility through Piwigo 16, last release in 2022 | Adds `@name`-style text, not a true threaded reply model; maintenance is stale. | Excluded. A minimal photo/album comment-parent adapter is safer if replies remain a V1 acceptance requirement. |
+| [Subscribe to Comments 14.a](https://piwigo.org/ext/index.php?eid=587) | GPL-2.0; compatible with Piwigo 16/15/14, last release in 2024 | Useful email subscription primitive, but SMTP and HERITAGE/LIVING recipient filtering are not configured or proven. | Optional later, after real SMTP is supplied and notification ACL tests pass. |
+| [Like / Dislike 1.0](https://piwigo.org/ext/index.php?eid=1019); [Smileys & Votes 1.6](https://piwigo.org/ext/index.php?eid=1021) | Marketplace pages declare Piwigo 16 compatibility | Small, young extensions with unclear package licensing/upstream maturity; their cookie/hash behavior does not match the required account/role rules. | Excluded. If Like remains required, implement one thin account-bound relation and policy hook. |
 
-## Platform requirements
+Exact installed archive URLs, commits, hashes and licenses are recorded in
+`infra/piwigo-extensions.lock.json` and summarized in
+`docs/dependency-matrix.md`.
 
-HumHub 1.18 supports PHP 8.2, 8.3, and 8.4; PHP 8.2 is the minimum. Supported web servers are Apache 2.4 (mod_php or preferably PHP-FPM) and nginx with PHP-FPM. The official Docker image instead supplies its tested FrankenPHP/Caddy runtime, including queue workers and the scheduler.
+## Observed supported runtime
 
-Database minimums are MariaDB 10.11+ or MySQL 8.0+; the documented recommended lines are MariaDB 11.8+ or MySQL 8.4+. This project uses the official MariaDB `11.8.8` image with InnoDB and `utf8mb4`.
+The supported Compose stack was inspected and tested on 2026-08-16:
 
-Required PHP extensions include GD (JPEG/PNG), Curl, MBString, MySQL, ZIP, EXIF, INTL, FileInfo, JSON, and iconv. ImageMagick is recommended but not required. Redis is not a HumHub requirement and is intentionally absent in V1.
+- Piwigo Core 16.4.0, packaged as immutable image
+  `piwigo/piwigo:16.4.0a@sha256:0ec6f159a3f972338b64e299d56ac37c442dd26cbeec39320d76ea826b5e0b84`.
+- PHP 8.4.20, Nginx 1.28.3, ImageMagick 7.1.2-19 and the PHP GD module.
+- MariaDB 11.8.8, immutable digest
+  `sha256:d9f7eb2637296652f24b484afd5d246f759f49f5babcadc6a9e344c9acb75fbf`.
+- Only Piwigo is mapped to the host, at `127.0.0.1:8090`; MariaDB has no host
+  port. Application, uploads, synchronized galleries, derivatives, database,
+  scripts and backups use separate named volumes.
+- Private, non-default groups `CLASSMATE`, `TEACHER`, `FAMILY` and `ANONYMOUS`
+  exist. The HERITAGE and LIVING roots are private. Family has HERITAGE only;
+  the other three fixture roles have both roots.
+- Community 16.f is present but inactive. Bootstrap Darkroom 16.d is active.
+  User Collections is absent.
+- The database contains **72 deterministic synthetic PNGs** and no real people
+  or class material. All 72 have unique original paths; **8** are associated
+  with more than one logical album without another image row or original file.
 
-Primary evidence:
+### Automated checks observed
 
-- [HumHub system requirements](https://docs.humhub.org/docs/admin/requirements/)
-- [HumHub installation guide](https://docs.humhub.org/docs/admin/installation/)
-- [HumHub security guidance](https://docs.humhub.org/docs/admin/security)
+`dev.ps1 test-access` passed:
 
-## Docker decision and limitations
+```text
+ACCESS_MATRIX_ASSERTIONS=PASS
+GUEST_ALBUM_API_DENIED=PASS
+FAMILY_HERITAGE_ONLY=PASS
+CLASSMATE_TEACHER_ANONYMOUS_BOTH_ERAS=PASS
+```
 
-The official Docker image is the smallest-maintenance local route and natively persists configuration, uploads, Marketplace modules, themes, assets, and logs below `/data`. It also provides separate custom-module autoload paths, so project modules remain outside Core. The current `1.18.4` image is linux/amd64 only; an ARM NAS will require a separately verified image/build path in Phase 5. This does not block the current amd64 workstation.
+`dev.ps1 test-phase0` passed its photo-model and HTML/media behavior checks:
 
-The official Docker repository is comparatively new and its custom-theme/upgrade documentation is still sparse. Therefore every image upgrade remains digest-pinned, backup-first, migration-tested, and explicitly accepted before production.
+```text
+PHOTO_MODEL_ASSERTIONS=PASS
+IMAGES=72
+ORIGINAL_FILES=72
+MULTI_ALBUM_IMAGES=8
+MEDIA_PERMISSIONS=PASS
+PHOTO_UI_SMOKE=PASS
+GUEST_PRIVATE=PASS
+OPEN_REGISTRATION_DISABLED=PASS
+REMEMBER_ME_DISABLED=PASS
+THUMBNAIL_FIRST=PASS
+PHOTOSWIPE_INTEGRATION_MARKERS=PASS
+```
 
-## Marketplace module decision
+These checks prove that the guest entry is the sign-in surface, open
+registration returns HTTP 403, grids use generated cover/thumbnail derivatives,
+the signed-in viewer uses a screen-sized preview and explicit original-download
+action, and the configured API/album enumeration enforces the tested role
+matrix.
 
-HumHub's Marketplace lists latest-overall releases, including builds that require the upcoming 1.19 line. The live 1.18.4 compatibility resolver and each downloaded `module.json` were therefore checked before locking:
+The supported backup helper was also exercised. A direct Compose run was
+refused by its quiescence guard; `dev.ps1 backup` preserved the application's
+prior run state and atomically published `database.sql.gz`,
+`piwigo-data.tar.gz`, `uploads.tar.gz`, `galleries.tar.gz`, `COMPLETE` and
+`SHA256SUMS`. All five recorded entries and gzip payloads verified. An injected
+dump failure returned nonzero and published neither a completed nor partial
+bundle. Host and backup-volume locks reject overlapping local runs. This proves
+fail-closed local data-bundle creation, not restoration or
+a complete encrypted off-device recovery set.
 
-- Gallery `1.7.1` (`minVersion: 1.18`, `maxVersion: 1.18`); Gallery 1.8.x is not selected because it targets HumHub 1.19.
-- Report Content `1.2.2` (`minVersion: 1.18.1`, `maxVersion: 1.18`).
-- Content Bookmarks `1.2.0` (`minVersion: 1.18`).
-- Share Content `1.1.1` (`minVersion: 1.18.1`, `maxVersion: 1.18`).
-- Two-Factor Authentication `1.2.3` (the maintained 1.18 branch); TwoFA 1.3+ is excluded with HumHub 1.19.
+## Critical unresolved security finding
 
-All five are free Marketplace modules and have recent 1.18/1.19 maintenance activity. Gallery is maintained in the `humhub-contrib` organization; the other four are in the official `humhub` organization. Their exact Marketplace ZIPs and SHA-256 values are locked in `infra/modules.lock.json`, and the installer refuses to overwrite a different installed version.
+The successful UI/API checks do **not** yet make the runtime safe for real
+photos. A separate known-media probe requested an already-known LIVING
+derivative URL and a direct `/upload/...` original storage path without a session; both returned
+**HTTP 200**. In other words, album discovery is private, but possession or
+guessing of a media URL can bypass the intended content boundary in the current
+stack.
 
-License evidence is uneven and is not generalized from HumHub Core. Gallery 1.7.1 ships the GNU AGPL v3 text in `docs/LICENCE.md`. Report Content declares `AGPL-3.0-or-later` in `module.json`. Content Bookmarks, Share Content and TwoFA do not include a module-level license declaration in the locked tag/package; generic HumHub license links and third-party dependency licenses are not sufficient evidence. These three require a compliance decision before redistribution or modification, even though their Marketplace price is free.
+This is a production blocker. No real photos may enter this runtime until a
+server-side media authorization design denies both derivatives and originals,
+and regression tests cover Guest and Family against known LIVING identifiers.
+Changing navigation or hiding links is not a fix.
 
-Primary evidence:
+## Other unresolved risks
 
-- [Gallery downloads](https://marketplace.humhub.com/module/gallery/downloads) and [v1.7.1 source](https://github.com/humhub-contrib/gallery/tree/v1.7.1)
-- [Report Content downloads](https://marketplace.humhub.com/module/reportcontent/downloads) and [v1.2.2 source](https://github.com/humhub/reportcontent/tree/v1.2.2)
-- [Content Bookmarks downloads](https://marketplace.humhub.com/module/content-bookmarks/downloads) and [v1.2.0 source](https://github.com/humhub/content-bookmarks/tree/v1.2.0)
-- [Share Content downloads](https://marketplace.humhub.com/module/sharebetween/downloads) and [v1.1.1 source](https://github.com/humhub/sharebetween/tree/v1.1.1)
-- [TwoFA downloads](https://marketplace.humhub.com/module/twofa/downloads) and [v1.2.3 source](https://github.com/humhub/twofa/tree/v1.2.3)
+1. `ClassIdentity` does not exist yet. Claim/Invite, Identity -> Seat -> Account,
+   freeze, session revoke, anonymous traceability and audit remain Phase 1 work.
+2. Comments are fail-closed in the supported baseline: global public commenting
+   is off and the era roots are not commentable. Role-specific Family denial,
+   Anonymous alias rendering, reports and replies need server-side plugin code.
+3. Community remains inactive until the moderation CSRF/input findings and
+   permission bootstrap are fixed without patching Core.
+4. Piwigo Core and mature plugins include MyISAM tables. Custom identity tables
+   must use InnoDB and idempotent provisioning/reconciliation instead of
+   pretending account creation is one cross-table transaction.
+5. User Collections cannot be enabled with its current ACL behavior. Core
+   Favorites is only a narrower interim candidate until its add/read/revocation
+   paths pass the same album/media authorization tests.
+6. Bootstrap Darkroom and PhotoSwipe 4 are evidence, not the final UI. The final
+   theme needs a time-grouped photo home and a pinned PhotoSwipe 5 integration,
+   with mobile browser tests.
+7. The backup command creates a guarded, checksum-verified local bundle, but
+   off-device export and a complete restore drill are not automated yet.
+8. Safe coexistence with an existing NAS photo library is not proven by this
+   local spike. Never point Piwigo or a synchronization job at real NAS files
+   until the read-only/source-of-truth policy and restore behavior are tested.
+9. Open-source release policy is unfinished: the repository has no project
+   `LICENSE`/`NOTICE` decision yet, and digest/hash locks do not guarantee that
+   OCI images or extension ZIPs remain downloadable for 10-20 years. Legal
+   review and an authorized offline artifact-retention plan are release gates.
 
-## Security baseline for local development
+## Scope boundary
 
-- Only `127.0.0.1:8088` is published; MariaDB has no host port.
-- Ordinary registration and guest content access will be disabled during bootstrap.
-- Secrets are generated into ignored `.env`; no claim/invitation token or password is committed or logged.
-- Marketplace updater is blacklisted because immutable image upgrades replace the Core.
-- Data and database storage use independent named volumes.
-- Production hardening (HTTPS, debug/test entry removal, rate limits, 2FA recommendation, backup restore drill) is a later gate and must be complete before any network exposure.
-
-## Deferred technologies
-
-Piwigo, Immich, PhotoPrism, Nextcloud, authentik, a separate frontend, microservices, Elasticsearch, Redis, object storage, CDN, AI indexing, OCR, SSO, and public deployment are explicitly outside V1. Their future adapters must not shape the Phase 0-1 runtime prematurely.
+No HumHub/Piwigo hybrid, independent frontend, Redis, Elasticsearch, object
+storage, CDN, AI/OCR/face recognition, SSO, public ingress or real deployment
+data is part of this baseline. No Piwigo Core file is modified. Piwigo owns
+media storage, derivative generation, metadata, albums, album/query ACL
+primitives and basic comments; Class Archive plugins will own only class
+identity and the end-to-end class/media policy those primitives do not cover.

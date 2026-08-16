@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 const MODULES_PATH_DEFAULT = '/data/modules';
-const MODULE_OWNER = 'www-data';
 
 function fail(string $message): never
 {
@@ -52,29 +51,6 @@ function removeTree(string $path): void
 
     if (!rmdir($path)) {
         throw new RuntimeException("Cannot remove {$path}");
-    }
-}
-
-function setOwnerRecursively(string $path): void
-{
-    $account = posix_getpwnam(MODULE_OWNER);
-    if ($account === false) {
-        throw new RuntimeException('The container has no www-data account.');
-    }
-
-    $apply = static function (string $target) use ($account): void {
-        if (!chown($target, $account['uid']) || !chgrp($target, $account['gid'])) {
-            throw new RuntimeException("Cannot set ownership on {$target}");
-        }
-    };
-
-    $apply($path);
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS),
-        RecursiveIteratorIterator::SELF_FIRST,
-    );
-    foreach ($iterator as $item) {
-        $apply($item->getPathname());
     }
 }
 
@@ -146,9 +122,6 @@ function installModule(array $module, string $modulesPath, bool $verifyOnly): vo
             throw new RuntimeException(
                 "Refusing to overwrite {$destination}; installed version does not match lock {$module['version']}",
             );
-        }
-        if (!$verifyOnly) {
-            setOwnerRecursively($destination);
         }
         fwrite(STDOUT, "LOCKED {$id} {$module['version']} (already present)\n");
         return;
@@ -235,34 +208,124 @@ function installModule(array $module, string $modulesPath, bool $verifyOnly): vo
         if (!rename($moduleRoot, $destination)) {
             throw new RuntimeException("Cannot atomically install {$id} into {$destination}");
         }
-        setOwnerRecursively($destination);
         fwrite(STDOUT, "LOCKED {$id} {$module['version']} (installed)\n");
     } finally {
         removeTree($temporaryRoot);
     }
 }
 
-function enableModule(string $id): void
+function runHumHubCommand(array $arguments): string
 {
-    $command = ['/app/yii', 'module/enable', $id];
-    $process = proc_open($command, [STDIN, STDOUT, STDERR], $pipes);
+    $command = ['/app/yii', ...$arguments];
+    $process = proc_open(
+        $command,
+        [
+            0 => ['file', 'php://stdin', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+    );
     if (!is_resource($process)) {
-        throw new RuntimeException("Cannot start HumHub CLI for {$id}");
+        throw new RuntimeException('Cannot start the HumHub CLI.');
     }
+
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
     $exitCode = proc_close($process);
     if ($exitCode !== 0) {
-        throw new RuntimeException("HumHub failed to enable {$id}; exit code {$exitCode}");
+        $detail = trim((string) $stderr);
+        throw new RuntimeException(
+            'HumHub CLI failed for ' . implode(' ', $arguments)
+            . "; exit code {$exitCode}" . ($detail === '' ? '' : ": {$detail}"),
+        );
+    }
+
+    return (string) $stdout;
+}
+
+function enableModule(string $id): void
+{
+    $output = runHumHubCommand(['module/enable', $id]);
+    if ($output !== '') {
+        fwrite(STDOUT, $output);
+    }
+}
+
+function configureTwoFaComparisonBaseline(): void
+{
+    // TwoFA 1.2.3 otherwise treats a missing setting as "all administrator
+    // groups" and defaults to email delivery. The comparison runtime has no
+    // SMTP recovery channel, so installation must fail closed without
+    // enforcement until that recovery path is deliberately configured.
+    runHumHubCommand(['settings/set', 'twofa', 'enforcedGroups', '', '--interactive=0']);
+}
+
+function verifyTwoFaComparisonBaseline(): void
+{
+    $output = runHumHubCommand(['settings/list-module', 'twofa']);
+    if (preg_match('/enforcedGroups\s*[│|]\s*[│|]/u', $output) !== 1) {
+        throw new RuntimeException(
+            'TwoFA enforcedGroups must exist and be empty in the comparison runtime.',
+        );
+    }
+}
+
+function verifyHumHubVersion(array $lock): void
+{
+    $expectedVersion = $lock['humhub']['version'] ?? null;
+    if (!is_string($expectedVersion) || $expectedVersion === '') {
+        throw new RuntimeException('The lock file has no HumHub core version.');
+    }
+
+    $coreConfigPath = '/opt/humhub/protected/humhub/config/common.php';
+    $coreConfig = file_get_contents($coreConfigPath);
+    if (
+        $coreConfig === false
+        || preg_match("/'version'\\s*=>\\s*'([^']+)'/", $coreConfig, $matches) !== 1
+    ) {
+        throw new RuntimeException("Cannot determine HumHub version from {$coreConfigPath}");
+    }
+    if (!hash_equals($expectedVersion, $matches[1])) {
+        throw new RuntimeException(
+            "HumHub core {$matches[1]} does not match locked version {$expectedVersion}",
+        );
+    }
+}
+
+function verifyModuleRuntime(array $module, string $modulesPath): void
+{
+    $id = $module['id'];
+    $version = $module['version'];
+    $output = runHumHubCommand(['module/info', $id]);
+
+    foreach (['Installed' => 'Yes', 'Enabled' => 'Yes', 'Version' => $version] as $label => $value) {
+        if (preg_match('/^' . preg_quote($label, '/') . ':\\s*' . preg_quote($value, '/') . '\\s*$/m', $output) !== 1) {
+            throw new RuntimeException("Runtime state for {$id} does not report {$label}: {$value}");
+        }
+    }
+
+    if (preg_match('/^Path:\\s*(.+)\\s*$/m', $output, $pathMatches) !== 1) {
+        throw new RuntimeException("Runtime path for {$id} was not reported.");
+    }
+    $expectedPath = realpath($modulesPath . '/' . $id);
+    $actualPath = realpath(trim($pathMatches[1]));
+    if ($expectedPath === false || $actualPath === false || $expectedPath !== $actualPath) {
+        throw new RuntimeException("Runtime path for {$id} is outside the locked module directory.");
     }
 }
 
 try {
     $verifyOnly = in_array('--verify-only', $argv, true);
-    $lockPath = dirname(__DIR__) . '/modules.lock.json';
+    $lockPath = dirname(__DIR__) . '/humhub-modules.lock.json';
     $lock = readJsonFile($lockPath);
     $modules = $lock['modules'] ?? null;
     if (!is_array($modules) || $modules === []) {
         throw new RuntimeException("No modules found in {$lockPath}");
     }
+    verifyHumHubVersion($lock);
 
     $modulesPath = getenv('HUMHUB_CONFIG__MODULES__MARKETPLACE__MODULES_PATH') ?: MODULES_PATH_DEFAULT;
     if (!is_dir($modulesPath)) {
@@ -287,9 +350,22 @@ try {
                 enableModule($module['id']);
             }
         }
+        configureTwoFaComparisonBaseline();
     }
 
-    fwrite(STDOUT, $verifyOnly ? "All locked module manifests verified.\n" : "All locked modules installed and enabled.\n");
+    foreach ($modules as $module) {
+        if (($module['enabled'] ?? false) === true) {
+            verifyModuleRuntime($module, $modulesPath);
+        }
+    }
+    verifyTwoFaComparisonBaseline();
+
+    fwrite(
+        STDOUT,
+        $verifyOnly
+            ? "All locked module manifests and runtime states verified.\n"
+            : "All locked modules installed, enabled, and runtime-verified.\n",
+    );
 } catch (Throwable $exception) {
     fail($exception->getMessage());
 }

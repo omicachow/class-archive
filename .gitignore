@@ -8,12 +8,18 @@ secrets/
 # Persistent runtime data. These must never enter Git.
 humhub-data/
 mysql-data/
+piwigo-data/
+mariadb-data/
 backups/
 infra/volumes/
 infra/backups/
+infra/cache/
+extension-cache/
+database-exports/
 *.sql
-*.sql.gz
+*.sql.*
 *.dump
+*.dump.*
 *.bak
 *.pem
 *.key

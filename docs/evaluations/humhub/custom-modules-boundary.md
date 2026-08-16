@@ -1,4 +1,4 @@
-# Project-owned HumHub modules
+# HumHub comparison: project-owned modules boundary
 
 Only thin, class-specific extensions belong here:
 

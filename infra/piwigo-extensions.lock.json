@@ -1,0 +1,62 @@
+{
+  "lockFormat": 1,
+  "generatedAt": "2026-08-16",
+  "piwigo": {
+    "version": "16.4.0",
+    "imageTag": "16.4.0a",
+    "image": "piwigo/piwigo:16.4.0a@sha256:0ec6f159a3f972338b64e299d56ac37c442dd26cbeec39320d76ea826b5e0b84"
+  },
+  "extensions": [
+    {
+      "id": "Community",
+      "name": "Community",
+      "type": "plugin",
+      "archiveRoot": "community",
+      "destinationDirectory": "Community",
+      "version": "16.f",
+      "compatiblePiwigo": ["16"],
+      "downloadUrl": "https://piwigo.org/ext/download.php?rid=10435",
+      "sha256": "c7f59e107c5230271352dcf251b9b925436d45a0018bfd52dc8258602025409f",
+      "sourceRepository": "https://github.com/plegall/Piwigo-community",
+      "sourceCommit": "552c3cb5342c45aa395c992e77736ada862cd9b3",
+      "license": "GNU GPL; version not stated in the package",
+      "install": true,
+      "activate": false,
+      "securityGate": "Quarantined after live testing: add admin CSRF validation, require a scalar positive category id, atomically replace the broad activation default, then pass low/high-trust regression tests before activation."
+    },
+    {
+      "id": "bootstrap_darkroom",
+      "name": "Bootstrap Darkroom",
+      "type": "theme",
+      "archiveRoot": "bootstrap_darkroom",
+      "destinationDirectory": "bootstrap_darkroom",
+      "version": "16.d",
+      "compatiblePiwigo": ["16"],
+      "downloadUrl": "https://piwigo.org/ext/download.php?rid=10278",
+      "sha256": "e01aa11b9609431b6c438f4d079a4afe180dd6e30c814813f4769e73c9401f92",
+      "sourceRepository": "https://github.com/Piwigo/piwigo-bootstrap-darkroom",
+      "sourceCommit": "1b9f3e4f6253deb135ae677faf75ab42528e35fe",
+      "license": "Apache-2.0; bundled PhotoSwipe 4.1.3 is MIT",
+      "install": true,
+      "activate": true,
+      "usageBoundary": "Engineering-spike viewer/theme only; the final Class Archive theme will use a separately pinned supported PhotoSwipe release."
+    },
+    {
+      "id": "UserCollections",
+      "name": "User Collections",
+      "type": "plugin",
+      "archiveRoot": "UserCollections",
+      "destinationDirectory": "UserCollections",
+      "version": "16.a",
+      "compatiblePiwigo": ["16"],
+      "downloadUrl": "https://piwigo.org/ext/download.php?rid=10296",
+      "sha256": "d80da68f6d8196dfaa986aae7ae32e5415423ccf24eb5540080ecf4ebdd686c0",
+      "sourceRepository": "https://github.com/Piwigo/Piwigo-User-Collections",
+      "sourceCommit": "6b853658afd5791306b17cfa264063672af9dd0d",
+      "license": "GPL-2.0",
+      "install": false,
+      "activate": false,
+      "securityGate": "Quarantined after a reproduced cross-album ACL bypass: private-album ACL must be rechecked on add, read, render and after permission revocation. Core Favorites is only an unverified candidate and must pass add/read/revoke/export/media ACL gates first."
+    }
+  ]
+}

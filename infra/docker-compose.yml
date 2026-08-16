@@ -1,82 +1,140 @@
-name: ${COMPOSE_PROJECT_NAME:-class_archive}
+name: ${COMPOSE_PROJECT_NAME:-class_archive_piwigo}
 
 services:
-  humhub:
-    image: ${HUMHUB_IMAGE}
+  db:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-piwigo}
+      MARIADB_USER: ${DB_USER:-piwigo}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.piwigo}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.piwigo}
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - piwigo_db:/var/lib/mysql
+    networks:
+      - app
+
+  piwigo:
+    image: ${PIWIGO_IMAGE:?Set PIWIGO_IMAGE in .env.piwigo}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${CLASS_ARCHIVE_HTTP_PORT:-8088}:${CLASS_ARCHIVE_HTTP_PORT:-8088}"
-    volumes:
-      - humhub_data:/data
-      - ../modules:/workspace/modules:ro
-      - ../infra:/workspace/infra:ro
+      - "127.0.0.1:${CLASS_ARCHIVE_HTTP_PORT:-8090}:80"
     environment:
-      HUMHUB_DEBUG: ${HUMHUB_DEBUG:-true}
-      SERVER_NAME: ${CLASS_ARCHIVE_BASE_URL:-http://localhost:8088}
-      HUMHUB_CONFIG__COMPONENTS__DB__DSN: mysql:host=db;dbname=${DB_NAME:-humhub}
-      HUMHUB_CONFIG__COMPONENTS__DB__USERNAME: ${DB_USER:-humhub}
-      HUMHUB_CONFIG__COMPONENTS__DB__PASSWORD: ${DB_PASSWORD}
-      HUMHUB_CONFIG__COMPONENTS__DB__CHARSET: utf8mb4
-      HUMHUB_CONFIG__PARAMS__MODULE_AUTOLOAD_PATHS: '["/workspace/modules", "/data/modules-custom", "/data/modules"]'
-      HUMHUB_CONFIG__MODULES__MARKETPLACE__MODULES_PATH: /data/modules
-      HUMHUB_CONFIG__MODULES__MARKETPLACE__MODULE_BLACKLIST: '["updater"]'
-      HUMHUB_DOCKER__AUTOSTART_FRANKENPHP: "true"
-      HUMHUB_DOCKER__AUTOSTART_SCHEDULER: "true"
-      HUMHUB_DOCKER__AUTOSTART_WORKER: "true"
-      HUMHUB_DOCKER__NUMPROCS_WORKER: "1"
-      CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER}
-      CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET}
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+      PIWIGO_UID: ${PIWIGO_UID:-1000}
+      PIWIGO_GID: ${PIWIGO_GID:-1000}
     healthcheck:
-      test: ["CMD", "/app/bin/humhub-simple-healthcheck.sh"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/"]
       interval: 10s
       timeout: 5s
-      retries: 12
+      retries: 30
       start_period: 30s
-    networks:
-      - app
-
-  db:
-    image: ${MARIADB_IMAGE}
-    restart: unless-stopped
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
     volumes:
-      - mariadb_data:/var/lib/mysql
-    environment:
-      MARIADB_DATABASE: ${DB_NAME:-humhub}
-      MARIADB_USER: ${DB_USER:-humhub}
-      MARIADB_PASSWORD: ${DB_PASSWORD}
-      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
+      - piwigo_data:/var/www/html/piwigo
+      - piwigo_uploads:/var/www/html/piwigo/upload
+      - piwigo_galleries:/var/www/html/piwigo/galleries
+      - piwigo_derivatives:/var/www/html/piwigo/_data/i
+      - piwigo_scripts:/usr/local/bin/scripts
+      - ../infra:/workspace/infra:ro
+      - ../plugins:/workspace/plugins:ro
+      - ../themes:/workspace/themes:ro
+      - ../tests:/workspace/tests:ro
     networks:
       - app
 
   backup:
-    image: ${HUMHUB_IMAGE}
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
     profiles: ["ops"]
     restart: "no"
     depends_on:
       db:
         condition: service_healthy
-    command: /app/bin/humhub-backup.sh
-    user: root
-    volumes:
-      - humhub_data:/data
-      - backups:/backup
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        umask 077
+        test "$${CLASS_ARCHIVE_BACKUP_QUIESCED}" = "true" || {
+          echo "Refusing backup: use infra/scripts/dev.ps1 backup so the application is quiesced." >&2
+          exit 1
+        }
+        lock_dir=/backup/.class-archive-backup.lock
+        mkdir "$${lock_dir}" 2>/dev/null || {
+          echo "Refusing overlapping backup: $${lock_dir} already exists." >&2
+          exit 1
+        }
+        partial_bundle=
+        cleanup_backup() {
+          if test -n "$${partial_bundle:-}" && test -d "$${partial_bundle}"; then
+            rm -f -- \
+              "$${partial_bundle}/database.sql" \
+              "$${partial_bundle}/database.sql.gz" \
+              "$${partial_bundle}/piwigo-data.tar.gz" \
+              "$${partial_bundle}/uploads.tar.gz" \
+              "$${partial_bundle}/galleries.tar.gz" \
+              "$${partial_bundle}/COMPLETE" \
+              "$${partial_bundle}/SHA256SUMS"
+            rmdir -- "$${partial_bundle}"
+          fi
+          if test -n "$${lock_dir:-}" && test -d "$${lock_dir}"; then
+            rmdir -- "$${lock_dir}"
+          fi
+        }
+        trap cleanup_backup 0 1 2 15
+        stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
+        bundle="/backup/class-archive-$${stamp}"
+        partial_bundle="$${bundle}.partial.$$$$"
+        test ! -e "$${bundle}" || {
+          echo "Refusing to overwrite existing backup bundle: $${bundle}" >&2
+          exit 1
+        }
+        test ! -e "$${partial_bundle}" || {
+          echo "Refusing to reuse existing partial backup: $${partial_bundle}" >&2
+          exit 1
+        }
+        mkdir "$${partial_bundle}"
+        # Piwigo and several mature plugins still use MyISAM tables. The app is
+        # stopped by dev.ps1 before this service runs, and --lock-all-tables
+        # gives those tables a consistent database snapshot.
+        mariadb-dump --quick --lock-all-tables \
+          --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          > "$${partial_bundle}/database.sql"
+        gzip -9 "$${partial_bundle}/database.sql"
+        tar -C /source/piwigo -czf "$${partial_bundle}/piwigo-data.tar.gz" .
+        tar -C /source/uploads -czf "$${partial_bundle}/uploads.tar.gz" .
+        tar -C /source/galleries -czf "$${partial_bundle}/galleries.tar.gz" .
+        printf 'completed_at=%s\n' "$${stamp}" > "$${partial_bundle}/COMPLETE"
+        cd "$${partial_bundle}"
+        sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz COMPLETE > SHA256SUMS
+        sha256sum -c SHA256SUMS
+        cd /backup
+        mv "$${partial_bundle}" "$${bundle}"
+        partial_bundle=
+        rmdir "$${lock_dir}"
+        lock_dir=
+        trap - 0 1 2 15
+        echo "Backup published: $${bundle}"
     environment:
-      HUMHUB_CONFIG__COMPONENTS__DB__DSN: mysql:host=db;dbname=${DB_NAME:-humhub}
-      HUMHUB_CONFIG__COMPONENTS__DB__USERNAME: ${DB_USER:-humhub}
-      HUMHUB_CONFIG__COMPONENTS__DB__PASSWORD: ${DB_PASSWORD}
-      HUMHUB_DOCKER__BACKUP_MERGE_ARCHIVES: "true"
+      DB_NAME: ${DB_NAME:-piwigo}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.piwigo}
+      CLASS_ARCHIVE_BACKUP_QUIESCED: "false"
+    volumes:
+      - backups:/backup
+      - piwigo_data:/source/piwigo:ro
+      - piwigo_uploads:/source/uploads:ro
+      - piwigo_galleries:/source/galleries:ro
     networks:
       - app
 
@@ -85,9 +143,17 @@ networks:
     driver: bridge
 
 volumes:
-  humhub_data:
-    name: class_archive_humhub_data
-  mariadb_data:
-    name: class_archive_mariadb_data
+  piwigo_data:
+    name: ${PIWIGO_DATA_VOLUME:-class_archive_piwigo_data}
+  piwigo_uploads:
+    name: ${PIWIGO_UPLOADS_VOLUME:-class_archive_piwigo_uploads}
+  piwigo_galleries:
+    name: ${PIWIGO_GALLERIES_VOLUME:-class_archive_piwigo_galleries}
+  piwigo_derivatives:
+    name: ${PIWIGO_DERIVATIVES_VOLUME:-class_archive_piwigo_derivatives}
+  piwigo_db:
+    name: ${PIWIGO_DB_VOLUME:-class_archive_piwigo_db}
+  piwigo_scripts:
+    name: ${PIWIGO_SCRIPTS_VOLUME:-class_archive_piwigo_scripts}
   backups:
-    name: class_archive_backups
+    name: ${PIWIGO_BACKUPS_VOLUME:-class_archive_piwigo_backups}
