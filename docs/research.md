@@ -1,0 +1,72 @@
+# Phase 0 research
+
+Research date: 2026-08-10 (Asia/Shanghai)
+
+## Stable-core decision
+
+HumHub `1.18.4`, released 2026-07-21, is the current stable release. HumHub `1.19.0-beta.1` is explicitly a pre-release/upcoming line and is excluded. The deployment is pinned to the official `humhub/humhub:1.18.4` image and immutable digest; no floating `stable` or nightly tag is used.
+
+The Community Edition is published under AGPL-3.0-only with a commercial dual-license option. A privately operated network still needs an explicit source-offer/compliance review before distribution or external service use; that legal boundary is not inferred from technical testing.
+
+Primary evidence:
+
+- [Official HumHub downloads](https://download.humhub.com/site/index)
+- [HumHub 1.18 release notes](https://docs.humhub.org/docs/about/releasenotes/release_notes_1_18/)
+- [Official HumHub Docker repository](https://github.com/humhub/docker)
+- [Official HumHub Docker tags](https://hub.docker.com/r/humhub/humhub/tags)
+- [HumHub licensing](https://www.humhub.com/licenses/)
+
+## Platform requirements
+
+HumHub 1.18 supports PHP 8.2, 8.3, and 8.4; PHP 8.2 is the minimum. Supported web servers are Apache 2.4 (mod_php or preferably PHP-FPM) and nginx with PHP-FPM. The official Docker image instead supplies its tested FrankenPHP/Caddy runtime, including queue workers and the scheduler.
+
+Database minimums are MariaDB 10.11+ or MySQL 8.0+; the documented recommended lines are MariaDB 11.8+ or MySQL 8.4+. This project uses the official MariaDB `11.8.8` image with InnoDB and `utf8mb4`.
+
+Required PHP extensions include GD (JPEG/PNG), Curl, MBString, MySQL, ZIP, EXIF, INTL, FileInfo, JSON, and iconv. ImageMagick is recommended but not required. Redis is not a HumHub requirement and is intentionally absent in V1.
+
+Primary evidence:
+
+- [HumHub system requirements](https://docs.humhub.org/docs/admin/requirements/)
+- [HumHub installation guide](https://docs.humhub.org/docs/admin/installation/)
+- [HumHub security guidance](https://docs.humhub.org/docs/admin/security)
+
+## Docker decision and limitations
+
+The official Docker image is the smallest-maintenance local route and natively persists configuration, uploads, Marketplace modules, themes, assets, and logs below `/data`. It also provides separate custom-module autoload paths, so project modules remain outside Core. The current `1.18.4` image is linux/amd64 only; an ARM NAS will require a separately verified image/build path in Phase 5. This does not block the current amd64 workstation.
+
+The official Docker repository is comparatively new and its custom-theme/upgrade documentation is still sparse. Therefore every image upgrade remains digest-pinned, backup-first, migration-tested, and explicitly accepted before production.
+
+## Marketplace module decision
+
+HumHub's Marketplace lists latest-overall releases, including builds that require the upcoming 1.19 line. The live 1.18.4 compatibility resolver and each downloaded `module.json` were therefore checked before locking:
+
+- Gallery `1.7.1` (`minVersion: 1.18`, `maxVersion: 1.18`); Gallery 1.8.x is not selected because it targets HumHub 1.19.
+- Report Content `1.2.2` (`minVersion: 1.18.1`, `maxVersion: 1.18`).
+- Content Bookmarks `1.2.0` (`minVersion: 1.18`).
+- Share Content `1.1.1` (`minVersion: 1.18.1`, `maxVersion: 1.18`).
+- Two-Factor Authentication `1.2.3` (the maintained 1.18 branch); TwoFA 1.3+ is excluded with HumHub 1.19.
+
+All five are free Marketplace modules and have recent 1.18/1.19 maintenance activity. Gallery is maintained in the `humhub-contrib` organization; the other four are in the official `humhub` organization. Their exact Marketplace ZIPs and SHA-256 values are locked in `infra/modules.lock.json`, and the installer refuses to overwrite a different installed version.
+
+License evidence is uneven and is not generalized from HumHub Core. Gallery 1.7.1 ships the GNU AGPL v3 text in `docs/LICENCE.md`. Report Content declares `AGPL-3.0-or-later` in `module.json`. Content Bookmarks, Share Content and TwoFA do not include a module-level license declaration in the locked tag/package; generic HumHub license links and third-party dependency licenses are not sufficient evidence. These three require a compliance decision before redistribution or modification, even though their Marketplace price is free.
+
+Primary evidence:
+
+- [Gallery downloads](https://marketplace.humhub.com/module/gallery/downloads) and [v1.7.1 source](https://github.com/humhub-contrib/gallery/tree/v1.7.1)
+- [Report Content downloads](https://marketplace.humhub.com/module/reportcontent/downloads) and [v1.2.2 source](https://github.com/humhub/reportcontent/tree/v1.2.2)
+- [Content Bookmarks downloads](https://marketplace.humhub.com/module/content-bookmarks/downloads) and [v1.2.0 source](https://github.com/humhub/content-bookmarks/tree/v1.2.0)
+- [Share Content downloads](https://marketplace.humhub.com/module/sharebetween/downloads) and [v1.1.1 source](https://github.com/humhub/sharebetween/tree/v1.1.1)
+- [TwoFA downloads](https://marketplace.humhub.com/module/twofa/downloads) and [v1.2.3 source](https://github.com/humhub/twofa/tree/v1.2.3)
+
+## Security baseline for local development
+
+- Only `127.0.0.1:8088` is published; MariaDB has no host port.
+- Ordinary registration and guest content access will be disabled during bootstrap.
+- Secrets are generated into ignored `.env`; no claim/invitation token or password is committed or logged.
+- Marketplace updater is blacklisted because immutable image upgrades replace the Core.
+- Data and database storage use independent named volumes.
+- Production hardening (HTTPS, debug/test entry removal, rate limits, 2FA recommendation, backup restore drill) is a later gate and must be complete before any network exposure.
+
+## Deferred technologies
+
+Piwigo, Immich, PhotoPrism, Nextcloud, authentik, a separate frontend, microservices, Elasticsearch, Redis, object storage, CDN, AI indexing, OCR, SSO, and public deployment are explicitly outside V1. Their future adapters must not shape the Phase 0-1 runtime prematurely.

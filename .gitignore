@@ -1,0 +1,39 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+infra/.env
+secrets/
+
+# Persistent runtime data. These must never enter Git.
+humhub-data/
+mysql-data/
+backups/
+infra/volumes/
+infra/backups/
+*.sql
+*.sql.gz
+*.dump
+*.bak
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User uploads and generated assets
+uploads/
+tests/artifacts/
+tests/fixtures/generated-images/
+
+# Local tooling and caches
+.serena/
+.codex-work/
+.codex_tmp/
+.idea/
+.vscode/
+.phpunit.result.cache
+vendor/
+
+# OS files
+Thumbs.db
+.DS_Store

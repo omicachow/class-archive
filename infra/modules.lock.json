@@ -1,0 +1,69 @@
+{
+  "lockFormat": 1,
+  "generatedAt": "2026-08-10",
+  "humhub": {
+    "version": "1.18.4",
+    "image": "humhub/humhub:1.18.4@sha256:8c4bee0edcc77de1104d154fc6ed2a20d5fa3a1eca700fdf0f96995377db1408"
+  },
+  "modules": [
+    {
+      "id": "gallery",
+      "name": "Gallery",
+      "version": "1.7.1",
+      "minHumHub": "1.18",
+      "maxHumHub": "1.18",
+      "downloadUrl": "https://marketplace.humhub.com/downloads/free/gallery-v1.7.1.zip",
+      "sha256": "02454e8182e8ce5cc317b1cb51bd87162e2da6b31a7eaff44bc47b0307d4de44",
+      "sourceRepository": "https://github.com/humhub-contrib/gallery",
+      "license": "GNU AGPL v3 (docs/LICENCE.md; module.json omits license)",
+      "enabled": true
+    },
+    {
+      "id": "reportcontent",
+      "name": "Report Content",
+      "version": "1.2.2",
+      "minHumHub": "1.18.1",
+      "maxHumHub": "1.18",
+      "downloadUrl": "https://marketplace.humhub.com/downloads/free/reportcontent-v1.2.2.zip",
+      "sha256": "176c750d61e481d61a1142a5f9a91ce2d0348c365fafa432bae97d8536935755",
+      "sourceRepository": "https://github.com/humhub/reportcontent",
+      "license": "AGPL-3.0-or-later",
+      "enabled": true
+    },
+    {
+      "id": "content-bookmarks",
+      "name": "Content Bookmarks",
+      "version": "1.2.0",
+      "minHumHub": "1.18",
+      "downloadUrl": "https://marketplace.humhub.com/downloads/free/content-bookmarks-v1.2.0.zip",
+      "sha256": "746d40dc05b50bb2a30ce9a5768c7d14369b613e756bba4d5b3d50976c6b03a5",
+      "sourceRepository": "https://github.com/humhub/content-bookmarks",
+      "license": "not declared; compliance review required",
+      "enabled": true
+    },
+    {
+      "id": "sharebetween",
+      "name": "Share Content",
+      "version": "1.1.1",
+      "minHumHub": "1.18.1",
+      "maxHumHub": "1.18",
+      "downloadUrl": "https://marketplace.humhub.com/downloads/free/sharebetween-v1.1.1.zip",
+      "sha256": "884e5b861cee6eab26715edaeefd3ddb5bd55fac95e517882b13323f837ef98a",
+      "sourceRepository": "https://github.com/humhub/sharebetween",
+      "license": "not declared; compliance review required",
+      "enabled": true
+    },
+    {
+      "id": "twofa",
+      "name": "Two-Factor Authentication (2FA)",
+      "version": "1.2.3",
+      "minHumHub": "1.18.0-beta.6",
+      "maxHumHub": "1.18",
+      "downloadUrl": "https://marketplace.humhub.com/downloads/free/twofa-v1.2.3.zip",
+      "sha256": "69a47b8267c27900d2ed1ade4d46bc17871d642e68ee542c9ef6be3b658904de",
+      "sourceRepository": "https://github.com/humhub/twofa",
+      "license": "not declared; compliance review required",
+      "enabled": true
+    }
+  ]
+}
