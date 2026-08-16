@@ -15,7 +15,7 @@
 {/literal}
 <section class="ca-admin">
   <header class="ca-admin__top">
-    <div><h2>Class Archive 管理控制台</h2><p class="ca-admin__subtitle">身份、席位、注册与安全健康的业务控制面</p></div>
+    <div><h2>班级数字档案馆管理控制台</h2><p class="ca-admin__subtitle">身份、席位、注册与安全健康的业务控制面</p></div>
     <a class="ca-admin__button" href="{$CA_NATIVE_ADMIN_URL|escape:'html'}">Piwigo 技术后台</a>
   </header>
   <nav class="ca-admin__nav" aria-label="Class Archive 管理导航">

@@ -32,6 +32,10 @@ Phase 1 and Phase 0 regressions pass on the current tree:
 - A minimum business Admin Console for Dashboard, Identities, Teachers,
   Invitations, Audit and System Health. Submissions, Anonymous governance,
   Archive and Spotlight pages do not exist yet.
+- The private UI defaults to Simplified Chinese (`zh_CN`) with browser-language
+  negotiation disabled. Core login/gallery labels and the implemented
+  ClassIdentity forms and Admin Console are translated; product names and
+  security machine identifiers remain stable where needed for operations.
 - PHP-FPM runs with a restrictive `0007` umask and the media-permission gate is
   rerun after Phase 1 requests generate runtime files. Piwigo upload paths that
   use an explicit permissive `chmod` still require a dedicated adapter and

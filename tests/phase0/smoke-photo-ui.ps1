@@ -35,7 +35,8 @@ $composeBase = @(
 
 $guest = Invoke-WebRequest -UseBasicParsing -Uri $baseUri -TimeoutSec 20
 Assert-True ($guest.StatusCode -eq 200) 'Guest entry page did not respond.'
-Assert-True ($guest.Content -match '<title>Identification \| Class Archive</title>') 'Guest was not forced to the identification surface.'
+$localizedLoginTitle = '<title>' + ((0x8eab, 0x4efd, 0x9a8c, 0x8bc1 | ForEach-Object { [char]$_ }) -join '') + ' \| Class Archive</title>'
+Assert-True ($guest.Content -match $localizedLoginTitle) 'Guest was not forced to the localized identification surface.'
 Assert-True ($guest.Content -notmatch 'name="remember_me"') 'Remember-me is still exposed in the private V1 baseline.'
 Assert-True ($guest.Content -notmatch 'i\.php\?/upload/') 'Guest entry page leaked a formal-photo derivative URL.'
 

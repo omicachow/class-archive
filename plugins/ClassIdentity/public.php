@@ -99,7 +99,7 @@ final class ClassIdentityPublicController
         self::rejectSecretsInUrl();
 
         if (!in_array($route, [self::ROUTE_CLAIM, self::ROUTE_FAMILY_INVITE, self::ROUTE_MY_IDENTITY], true)) {
-            ClassIdentityHttp::abort(404, 'Not Found');
+            ClassIdentityHttp::abort(404, '页面不存在');
         }
 
         $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
@@ -147,7 +147,7 @@ final class ClassIdentityPublicController
                     'password',
                     'password_confirmation',
                 ]);
-                ClassIdentityHttp::abort(400, 'Bad Request');
+                ClassIdentityHttp::abort(400, '请求无效');
             }
         }
 
@@ -429,7 +429,7 @@ final class ClassIdentityPublicController
 
         $userId = (int) ($user['id'] ?? 0);
         if ($userId <= 0) {
-            ClassIdentityHttp::abort(403, 'Forbidden');
+            ClassIdentityHttp::abort(403, '禁止访问');
         }
 
         return $userId;
@@ -449,23 +449,23 @@ final class ClassIdentityPublicController
     {
         $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
         if (!is_string($origin) || $origin === '' || $origin === 'null') {
-            ClassIdentityHttp::abort(403, 'Origin rejected');
+            ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
 
         $fetchSite = $_SERVER['HTTP_SEC_FETCH_SITE'] ?? null;
         if (is_string($fetchSite) && $fetchSite !== '' && $fetchSite !== 'same-origin') {
-            ClassIdentityHttp::abort(403, 'Origin rejected');
+            ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
 
         $originParts = parse_url($origin);
         $rootParts = parse_url(get_absolute_root_url());
         if (!is_array($originParts) || !is_array($rootParts)) {
-            ClassIdentityHttp::abort(403, 'Origin rejected');
+            ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
         if (isset($originParts['user']) || isset($originParts['pass']) || isset($originParts['path'])
             || isset($originParts['query']) || isset($originParts['fragment'])
         ) {
-            ClassIdentityHttp::abort(403, 'Origin rejected');
+            ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
 
         $originScheme = strtolower((string) ($originParts['scheme'] ?? ''));
@@ -480,7 +480,7 @@ final class ClassIdentityPublicController
             || !hash_equals($rootHost, $originHost)
             || $originPort !== $rootPort
         ) {
-            ClassIdentityHttp::abort(403, 'Origin rejected');
+            ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
     }
 

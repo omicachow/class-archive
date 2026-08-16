@@ -10,6 +10,11 @@ $conf['rate'] = false;
 $conf['rate_anonymous'] = false;
 $conf['authorize_remembering'] = false;
 
+// Keep the private Class Archive UI in Simplified Chinese. Browser language
+// negotiation is disabled so an English browser cannot silently switch the
+// gallery shell back to another installed language.
+$conf['browser_language'] = false;
+
 $conf['newcat_default_status'] = 'private';
 $conf['inheritance_by_default'] = true;
 $conf['newcat_default_commentable'] = false;

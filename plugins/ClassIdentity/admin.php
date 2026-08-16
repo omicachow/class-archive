@@ -27,13 +27,13 @@ $navigation = [
     ['id' => 'dashboard', 'label' => '概览'],
     ['id' => 'identities', 'label' => '同学身份'],
     ['id' => 'teachers', 'label' => '老师身份'],
-    ['id' => 'invitations', 'label' => 'Claim / 邀请'],
+    ['id' => 'invitations', 'label' => '认领码 / 邀请'],
     ['id' => 'audit', 'label' => '审计记录'],
     ['id' => 'system', 'label' => '系统健康'],
 ];
 $headerTemplate = realpath(CLASS_IDENTITY_PATH . 'template/admin/_header.tpl');
 if ($headerTemplate === false) {
-    ClassIdentityHttp::abort(503, 'Admin template unavailable');
+    ClassIdentityHttp::abort(503, '管理页面模板暂时不可用');
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
@@ -88,7 +88,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     ClassIdentityHttp::requireReason(),
                     $actorUserId
                 );
-                ClassIdentityHttp::flash('success', 'Claim 已撤销。');
+                ClassIdentityHttp::flash('success', '认领码已撤销。');
                 ClassIdentityHttp::redirectTo('invitations');
 
             case 'reissue_family_invitation':
@@ -110,7 +110,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     ClassIdentityHttp::requireReason(),
                     $actorUserId,
                 );
-                ClassIdentityHttp::flash('success', 'Family Invitation 已撤销，席位可再次使用。');
+                ClassIdentityHttp::flash('success', '家庭邀请已撤销，席位可再次使用。');
                 ClassIdentityHttp::redirectTo('invitations');
 
             case 'compensate_provisioning':
@@ -135,7 +135,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 ClassIdentityHttp::redirectTo($tab, ['identity_id' => $identityId]);
 
             default:
-                ClassIdentityHttp::abort(400, 'Unknown action');
+                ClassIdentityHttp::abort(400, '未知操作');
         }
     } catch (InvalidArgumentException $error) {
         ClassIdentityHttp::flash('error', $error->getMessage());
@@ -195,6 +195,6 @@ try {
 }
 
 $template->assign($view);
-$template->assign('ADMIN_PAGE_TITLE', 'Class Archive 管理控制台');
+$template->assign('ADMIN_PAGE_TITLE', '班级数字档案馆管理控制台');
 $template->set_filename('class_identity_admin', CLASS_IDENTITY_PATH . 'template/admin/' . $tab . '.tpl');
 $template->assign_var_from_handle('ADMIN_CONTENT', 'class_identity_admin');

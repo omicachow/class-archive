@@ -147,6 +147,70 @@ function ensureConfig(array $expected, bool $verifyOnly): void
     }
 }
 
+function ensureChineseLanguage(bool $verifyOnly): void
+{
+    $languageId = 'zh_CN';
+    $languagePath = PIWIGO_ROOT . '/language/' . $languageId . '/common.lang.php';
+    if (!is_file($languagePath)) {
+        fail('Pinned Simplified Chinese language files are not installed.');
+    }
+
+    require_once PHPWG_ROOT_PATH . 'admin/include/languages.class.php';
+    $languages = new languages();
+    $languages->get_db_languages();
+
+    if (!isset($languages->fs_languages[$languageId])) {
+        fail('Piwigo cannot discover the Simplified Chinese language files.');
+    }
+
+    if (!isset($languages->db_languages[$languageId])) {
+        if ($verifyOnly) {
+            fail('Simplified Chinese is not active in the Piwigo language table.');
+        }
+        $errors = $languages->perform_action('activate', $languageId);
+        if (!empty($errors)) {
+            fail('Cannot activate Simplified Chinese: ' . implode('; ', $errors));
+        }
+        $languages->get_db_languages();
+    }
+
+    if (!isset($languages->db_languages[$languageId])) {
+        fail('Simplified Chinese activation did not persist.');
+    }
+
+    if (!$verifyOnly) {
+        $errors = $languages->perform_action('set_default', $languageId);
+        if (!empty($errors)) {
+            fail('Cannot set Simplified Chinese as the default language: ' . implode('; ', $errors));
+        }
+
+        // The private deployment intentionally starts with one language. Set
+        // existing accounts as well so the admin, synthetic fixtures and guest
+        // all become Chinese immediately; future accounts inherit the default.
+        pwg_query(
+            'UPDATE ' . USER_INFOS_TABLE
+            . " SET language = '" . $languageId . "'"
+        );
+
+        // Core caches the default user's row during bootstrap. Drop only that
+        // read cache so the verification below observes the committed value.
+        global $cache;
+        unset($cache['default_user']);
+    }
+
+    $nonChinese = query2array(
+        'SELECT user_id, language FROM ' . USER_INFOS_TABLE
+        . " WHERE language IS NULL OR language <> '" . $languageId . "'"
+    );
+    if ($nonChinese !== []) {
+        fail('One or more Piwigo accounts are not using Simplified Chinese.');
+    }
+
+    if (get_default_language() !== $languageId) {
+        fail('Simplified Chinese is not the active default language.');
+    }
+}
+
 function ensureTheme(bool $verifyOnly): void
 {
     $themeId = 'bootstrap_darkroom';
@@ -230,6 +294,7 @@ function main(array $argv): void
         'rate' => false,
         'rate_anonymous' => false,
         'authorize_remembering' => false,
+        'browser_language' => false,
         'newcat_default_status' => 'private',
         'newcat_default_commentable' => false,
         'inheritance_by_default' => true,
@@ -239,6 +304,8 @@ function main(array $argv): void
         'enable_extensions_install' => false,
         'gallery_title' => 'Class Archive',
     ], $verifyOnly);
+
+    ensureChineseLanguage($verifyOnly);
 
     ensureUnsafeExtensionsInactive();
     ensureClassArchivePolicyActive();

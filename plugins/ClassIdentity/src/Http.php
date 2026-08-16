@@ -70,7 +70,7 @@ final class ClassIdentityHttp
             || str_contains($returnUrl, "\r")
             || str_contains($returnUrl, "\n")
         ) {
-            self::abort(503, 'Issued credential response unavailable');
+            self::abort(503, '一次性凭据页面暂时不可用');
         }
 
         self::noStore();
@@ -89,15 +89,15 @@ final class ClassIdentityHttp
 
         echo '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             . '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            . '<title>一次性 Claim Code · Class Archive</title>'
+            . '<title>一次性认领码 · 班级数字档案馆</title>'
             . '<style>body{margin:0;background:#f5f7fa;color:#172033;font:16px/1.6 system-ui,sans-serif}'
             . 'main{max-width:760px;margin:8vh auto;padding:28px;background:#fff;border:1px solid #d9dee8;border-radius:16px}'
             . 'code{display:block;padding:18px;background:#111827;color:#fff;border-radius:10px;font:700 17px/1.5 ui-monospace,monospace;overflow-wrap:anywhere;user-select:all}'
             . 'a{display:inline-block;margin-top:18px;padding:10px 14px;border-radius:8px;background:#25324a;color:#fff;text-decoration:none;font-weight:700}'
             . '.meta{color:#677287}</style></head><body><main>'
-            . '<h1>Claim Code 已生成</h1><p>旧 Code 已永久失效。请现在复制并通过安全渠道交给对应成员；离开本页后只能重新签发。</p>'
+            . '<h1>认领码已生成</h1><p>旧认领码已永久失效。请现在复制并通过安全渠道交给对应成员；离开本页后只能重新签发。</p>'
             . '<code class="ca-admin__code">' . $safeCode . '</code>'
-            . '<p class="meta">席位 #' . $safeSeatId . ' · generation ' . $safeGeneration
+            . '<p class="meta">席位 #' . $safeSeatId . ' · 第 ' . $safeGeneration . ' 代'
             . ' · 到期 ' . $safeExpiry . ' UTC</p>'
             . '<a href="' . $safeReturnUrl . '">我已安全保存，返回管理控制台</a>'
             . '</main></body></html>';
@@ -118,14 +118,14 @@ final class ClassIdentityHttp
             || !is_int($seatId)
             || $seatId <= 0
         ) {
-            self::abort(503, 'Issued credential response unavailable');
+            self::abort(503, '一次性凭据页面暂时不可用');
         }
 
         self::renderOneTimeCredential(
-            'Family Invitation 已生成',
+            '家庭邀请已生成',
             '请现在复制并通过安全渠道交给对应家属；离开本页后只能撤销并重新生成。',
             [
-                'Family Invitation Code' => $code,
+                '家庭邀请代码' => $code,
                 '到期时间（UTC）' => $expiresAt,
                 '席位' => '#' . $seatId,
             ],
@@ -150,7 +150,7 @@ final class ClassIdentityHttp
             || !is_int($seatId)
             || $seatId <= 0
         ) {
-            self::abort(503, 'Issued credential response unavailable');
+            self::abort(503, '一次性凭据页面暂时不可用');
         }
 
         self::renderOneTimeCredential(
@@ -177,11 +177,11 @@ final class ClassIdentityHttp
             || str_contains($returnUrl, "\r")
             || str_contains($returnUrl, "\n")
         ) {
-            self::abort(503, 'Issued credential response unavailable');
+            self::abort(503, '一次性凭据页面暂时不可用');
         }
         foreach ($fields as $label => $value) {
             if ($label === '' || $value === '' || strlen($label) > 80 || strlen($value) > 1024) {
-                self::abort(503, 'Issued credential response unavailable');
+                self::abort(503, '一次性凭据页面暂时不可用');
             }
         }
 
@@ -201,7 +201,7 @@ final class ClassIdentityHttp
 
         echo '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             . '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            . '<title>' . $escape($title) . ' · Class Archive</title>'
+            . '<title>' . $escape($title) . ' · 班级数字档案馆</title>'
             . '<style>body{margin:0;background:#f5f7fa;color:#172033;font:16px/1.6 system-ui,sans-serif}'
             . 'main{max-width:760px;margin:8vh auto;padding:28px;background:#fff;border:1px solid #d9dee8;border-radius:16px}'
             . 'h2{font-size:14px;margin:20px 0 6px;color:#677287}code{display:block;padding:14px;background:#111827;color:#fff;border-radius:10px;font:700 17px/1.5 ui-monospace,monospace;overflow-wrap:anywhere;user-select:all}'
@@ -223,7 +223,7 @@ final class ClassIdentityHttp
             && Access::isActiveSystemAdmin($userId);
 
         if (!$coreAllows || !$identityAllows) {
-            self::abort(403, 'Forbidden');
+            self::abort(403, '禁止访问');
         }
     }
 
@@ -309,7 +309,7 @@ final class ClassIdentityHttp
 
         $value = $_GET[$name];
         if (!is_string($value) || !preg_match('/^[1-9][0-9]*$/D', $value)) {
-            self::abort(400, 'Bad Request');
+            self::abort(400, '请求无效');
         }
 
         return (int) $value;
@@ -383,13 +383,13 @@ final class ClassIdentityHttp
             return;
         }
         if (!is_string($origin)) {
-            self::abort(403, 'Origin rejected');
+            self::abort(403, '请求来源未被允许');
         }
 
         $originParts = parse_url($origin);
         $rootParts = parse_url(get_absolute_root_url());
         if (!is_array($originParts) || !is_array($rootParts)) {
-            self::abort(403, 'Origin rejected');
+            self::abort(403, '请求来源未被允许');
         }
 
         $originScheme = strtolower((string) ($originParts['scheme'] ?? ''));
@@ -404,7 +404,7 @@ final class ClassIdentityHttp
             || !hash_equals($rootHost, $originHost)
             || $rootPort !== $originPort
         ) {
-            self::abort(403, 'Origin rejected');
+            self::abort(403, '请求来源未被允许');
         }
     }
 

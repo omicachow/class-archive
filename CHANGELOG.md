@@ -7,6 +7,13 @@ committed separately.
 
 ### Phase 1 ClassIdentity and independent administrator control plane
 
+- Set the private gallery's active/default language to Simplified Chinese
+  (`zh_CN`), disabled browser-language drift, and translated the custom
+  ClassIdentity public forms, Admin Console, one-time credential pages and
+  UI smoke title. Technical identifiers such as `SYSTEM_ADMIN`, `MediaGuard`
+  and stable machine states remain in parentheses where they are useful for
+  diagnosis.
+
 - Added the tracked `ClassIdentity` 0.1.0 plugin without modifying Piwigo Core:
   four checksum-attested forward migrations create ten MariaDB InnoDB/utf8mb4
   tables for Identity, Seat, account history, Principal, tokens, provisioning,
