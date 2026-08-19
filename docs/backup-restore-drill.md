@@ -42,12 +42,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 
 | 项目 | 结果 |
 |---|---|
-| 备份包 | `class-archive-20260819T061833Z` |
+| 备份包 | `class-archive-20260819T092426Z` |
 | 确定性恢复指纹 | `56058dc80fc7cfb987ee45832acaf7280a846aa267f866584fdc9c26a5473a62` |
 | 基线 | `72/72/8` 恢复前后一致 |
 | Phase 0 | PASS |
 | Phase 1 | PASS |
-| 从删除卷开始的粗略 RTO | 36 秒 |
+| 从删除卷开始的粗略 RTO | 40 秒 |
 
 RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 
