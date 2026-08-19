@@ -191,7 +191,7 @@ try {
     foreach (['/api/photos', '/api/timeline', '/api/albums', '/api/people', '/api/search', '/api/photos/{id}', '/api/me', '/api/memories'] as $route) {
         $assert(($routes[$route]['method'] ?? null) === 'GET' && ($routes[$route]['evidence'] ?? null) === 'CONTRACT_TESTED', 'route_contract_' . $route);
     }
-    $assert(GatewayRouteContract::publiclyBound() === false, 'routes_not_falsely_http_bound');
+    $assert(GatewayRouteContract::publiclyBound() === true, 'routes_are_explicitly_http_bound');
 
     $family = $gatewayFor(Access::ROLE_FAMILY);
     $familyPhotos = $family->photos();

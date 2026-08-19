@@ -7,12 +7,13 @@ namespace ClassIdentity\Gateway;
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
 /**
- * Contract-only Class Archive Gateway.
+ * Class Archive Gateway application boundary.
  *
- * These handlers are deliberately not mounted at /api yet. Until a future
- * gateway runtime can dispatch opaque media ids through MediaGuard, this class
- * is exercised only as a contract/policy boundary. That avoids presenting a
- * fake Immich or HTTP E2E claim during the source/image supply-chain block.
+ * It is shared by the same-origin, read-only Piwigo HTTP controller and by
+ * the contract tests. It has no media endpoint: opaque canonical ids remain
+ * metadata only until a future dispatcher can resolve them into the existing
+ * MediaGuard/X-Accel delivery path. This is intentionally not an Immich API
+ * adapter and does not create an Immich runtime claim.
  */
 final class GatewayService
 {
@@ -214,8 +215,9 @@ final class GatewayService
 }
 
 /**
- * Exact future public API contract. Binding remains deliberately disabled in
- * Phase 2 pre-runtime work; no route is advertised as HTTP/runtime tested.
+ * Exact public API contract. The route list is intentionally metadata-only:
+ * each caller must still provide a resolved ClassIdentity Principal and the
+ * Piwigo adapter must validate source/mapping consistency on every request.
  */
 final class GatewayRouteContract
 {
@@ -236,6 +238,6 @@ final class GatewayRouteContract
 
     public static function publiclyBound(): bool
     {
-        return false;
+        return true;
     }
 }

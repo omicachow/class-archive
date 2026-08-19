@@ -38,6 +38,7 @@ require_once CLASS_IDENTITY_PATH . 'src/Gateway/Contracts.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayPolicy.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/PiwigoGatewayAdapter.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayHttpController.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {
@@ -67,6 +68,8 @@ add_event_handler('get_admin_plugin_menu_links', [\ClassIdentity\Access::class, 
 add_event_handler('loc_end_section_init', [ClassIdentityPublicController::class, 'onSectionInit'], 5);
 add_event_handler('loc_begin_index', [ClassIdentityPublicController::class, 'onBeginIndex'], 5);
 add_event_handler('loc_end_index', [ClassIdentityPublicController::class, 'onEndIndex'], 5);
+add_event_handler('loc_end_section_init', [\ClassIdentity\Gateway\GatewayHttpController::class, 'onSectionInit'], 5);
+add_event_handler('loc_begin_index', [\ClassIdentity\Gateway\GatewayHttpController::class, 'onBeginIndex'], 4);
 
 $GLOBALS['class_identity_runtime'] = [
     'version' => CLASS_IDENTITY_VERSION,

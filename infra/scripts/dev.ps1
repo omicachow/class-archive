@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -337,6 +337,14 @@ switch ($Action) {
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/phase2/gateway-contract.php'
         ))
+        exit $LASTEXITCODE
+    }
+    'test-phase2-gateway-http' {
+        # This verifies only the same-origin Class Archive Gateway backed by
+        # Piwigo/ClassIdentity. It does not connect the API to Immich and does
+        # not constitute browser or Immich-adapter E2E evidence.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\gateway-http.ps1')
         exit $LASTEXITCODE
     }
     'test-phase2-runtime' {

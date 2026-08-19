@@ -67,9 +67,9 @@ presentation compatibility only
 
 - 技术用户只允许作为 Immich 的内部兼容账号；不向浏览器暴露 Immich 登录、
   注册、用户管理、API key、Partner Sharing 或管理员界面。
-- 将建立不可公开的 `ClassArchivePhoto UUID → piwigo_image_id / immich_asset_id /
+- 已建立不可公开的 `ClassArchivePhoto UUID → piwigo_image_id / nullable immich_asset_id /
   canonical physical path / SHA-256` 映射。Piwigo ID 和 Immich asset ID 都不是
-  公共 canonical identity。
+  公共 canonical identity；Immich link 仍为 nullable，且没有 Gateway→Immich adapter。
 - 所有 Timeline、People、Search、Memories、计数和缩略图结果都要在 Gateway
   进入浏览器前按 ClassArchivePolicy 过滤。Family 永远不得通过 count、People
   或 Search 侧信道得知 LIVING。
@@ -105,6 +105,7 @@ presentation compatibility only
 
 `IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E`。官方 source archive 与
 Server / ML 镜像已取得并校验，isolated Server 以及 ephemeral technical-user /
-external-library runtime lifecycle 已通过；但 Gateway runtime adapter、真实 ACL
-查询过滤、Web integration 和浏览器仍未验证。当前不暴露端口给浏览器，也不接触
-真实照片或 NAS。
+external-library runtime lifecycle 已通过；Class Archive 自有同源 Gateway 已对
+Piwigo + ClassIdentity 跑过真实 ACL/聚合 HTTP 回归，但 Gateway runtime adapter、
+Immich asset linkage、Web integration 和浏览器仍未验证。当前不暴露 Immich 端口给
+浏览器，也不接触真实照片或 NAS。

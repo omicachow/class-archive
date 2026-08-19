@@ -1,4 +1,4 @@
-# Class Archive Gateway 合约（Phase 2 预运行态）
+# Class Archive Gateway 合约（Phase 2）
 
 ## 证据等级
 
@@ -8,10 +8,11 @@
 | --- | --- | --- |
 | `ClassArchivePhoto` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
 | Gateway policy、列表、时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
+| 同源 `/api` Piwigo Gateway | `RUNTIME_TESTED` | 真实 localhost Piwigo + MariaDB + ClassIdentity 运行态；29 次 HTTP 请求、584 个 ACL / 聚合 / DTO / 输入断言通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
 | Immich technical user / external-library lifecycle | `RUNTIME_TESTED` | ephemeral internal user、read-only synthetic scan、asset count gate、spike reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | 未开始 | Gateway 尚不会连接实际 Immich runtime |
-| 浏览器 API/UI | 未开始 | 当前 `/api` 合约尚未绑定到 HTTP 路由 |
+| 浏览器 API/UI | 未开始 | `/api` 已有同源 JSON 边界，但没有 Photo UI / Immich Web E2E |
 
 [`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1) 与
 [`immich-external-library-runtime.ps1`](../tests/phase2/immich-external-library-runtime.ps1)
@@ -72,9 +73,13 @@ ImmichAdapter
 独立 Immich container 已完成 isolated boot 也一样；它不会建立 socket、不会模拟
 Immich 内容，也不会把空结果称为 Immich E2E。
 
-## 未来 HTTP 合约
+## 当前同源只读 HTTP API
 
-下列路由已经作为代码常量和 contract test 定义，但尚未公开绑定：
+下列路由已经由 Piwigo Nginx 的严格同源 rewrite 绑定到
+`GatewayHttpController`。Controller 只允许 `GET`，解析固定 route/query allowlist，要求
+每请求重新解析 ClassIdentity principal，并返回 private/no-store JSON；未知 principal、
+映射、文件、来源或序列化状态均拒绝或以 generic 503 fail closed。它没有 CORS，也没有
+任何 Immich proxy、media URL 或媒体字节出口。
 
 | 路由 | 当前用途 |
 | --- | --- |
@@ -90,6 +95,11 @@ Immich 内容，也不会把空结果称为 Immich E2E。
 API public projection 不包含：`piwigo_image_id`、`immich_asset_id`、
 `media_checksum`、`media_reference`、Piwigo category/user id、ClassIdentity
 principal/account/seat/identity id。
+
+当前 Piwigo adapter 只投影已关联 Piwigo 的 `ACTIVE` 照片。Family 投稿的 `PENDING`
+记录继续由独立的 SYSTEM_ADMIN 投稿审核页处理；它们不因为 Gateway 路由而向任何 Seat
+公开。`PENDING -> SYSTEM_ADMIN only` 的 policy 分支已由合约测试覆盖，未来将 Pending
+候选交给 Gateway 时也必须保留该约束。
 
 ## 强制 ACL 与侧信道规则
 
@@ -129,6 +139,17 @@ Gateway 的 Adapter 接口没有“未经授权 aggregate count”方法。每�
 
 它不启动 Immich、不访问公网、不上传真实图片，也不构成 Runtime 或 Browser
 验收。
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-gateway-http
+```
+
+此门是独立的 `RUNTIME_TESTED` 证据：真实 Piwigo + MariaDB + HTTP session 下验证
+`CLASSMATE` / `TEACHER` / `ANONYMOUS` 可见两个 Era、`FAMILY` 只见 HERITAGE，并对
+列表 total、单图 UUID、Timeline、Albums、Search、People、Memories、重复 query、跨域
+Origin、方法和 DTO 敏感字段运行 29 次请求 / 584 个断言。它明确输出
+`IMMICH_ADAPTER=UNAVAILABLE_NOT_SIMULATED`，所以绝不构成 Immich Adapter、Immich
+Web 或浏览器 E2E 证据。
 
 已启动时可单独运行：
 

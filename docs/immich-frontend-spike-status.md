@@ -58,9 +58,10 @@ Immich 登录、API key 或 library。
 | --- | --- | --- |
 | 官方 tag / source archive / Server 与 ML image | `STATIC` | 已校验官方 GitHub / GHCR 固定来源与 digest |
 | `ClassArchivePhoto` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、映射和 39 项 policy/side-channel 合约通过 |
+| 同源 Class Archive Gateway HTTP | `RUNTIME_TESTED` | Piwigo + ClassIdentity 的 29 次真实 localhost 请求、584 个断言；Family 的列表、单图、Timeline、Albums、Search 均在聚合前过滤 LIVING |
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
 | Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
-| Immich Web fork / Gateway HTTP / Browser | 未开始 | `/api` 合约尚未绑定 HTTP，浏览器无法直达 Immich |
+| Immich Adapter / Web fork / Browser | 未开始 | Gateway 仍使用 `NullImmichAdapter`；浏览器无法直达 Immich，也没有 Web E2E 结论 |
 
 可重复执行运行时隔离门：
 
@@ -81,11 +82,22 @@ Immich 登录、API key 或 library。
 重置本 spike 的数据库与 upload volumes。它不接入 Gateway，不发布端口，也不保留
 Immich user/library/asset 作为产品数据。
 
+可重复执行同源 Gateway 的真实 HTTP 门：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-gateway-http
+```
+
+这个门只会访问 `127.0.0.1` 上的 Piwigo / ClassIdentity：它不会启动 Immich、不会
+调用 Immich API，也不会返回媒体 URL 或字节。测试会用现有四个 synthetic Seat fixture
+轮换临时密码、建立可撤销的 SYSTEM_ADMIN session lease，并在 finally 中撤销会话与再次
+轮换凭据。Canonical 映射是长期 Class Archive 数据，不会被该读 API 测试删除。
+
 ## 尚未完成，不能伪称通过
 
 - Hidden Technical User 的受控 provisioning 与仅 Gateway 可用的内部凭据；
 - 外部图库扫描、ClassArchivePhoto ↔ Immich asset linkage；
-- ClassIdentity → Gateway → ClassArchivePolicy 的真实 runtime 查询过滤；
+- Gateway → Immich runtime adapter、ClassArchivePhoto ↔ Immich asset linkage；
 - Timeline / People / Smart Search 的 Family side-channel 真实运行时验证；
 - Immich Web fork、中文品牌、法律通知和 Gateway 媒体 URL 改写；
 - ML/CPU 结果、性能和 browser E2E 截图。
