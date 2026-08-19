@@ -337,6 +337,10 @@ switch ($Action) {
             try {
                 & wsl.exe @($composeArguments + @('--profile', 'ops', 'run', '--rm', '-e', 'CLASS_ARCHIVE_BACKUP_QUIESCED=true', 'backup'))
                 $backupExitCode = $LASTEXITCODE
+                if ($backupExitCode -eq 0) {
+                    & wsl.exe @($composeArguments + @('--profile', 'ops', 'run', '--rm', '-e', 'CLASS_ARCHIVE_BACKUP_AUDIT_WRITE=true', 'backup-audit'))
+                    $backupExitCode = $LASTEXITCODE
+                }
             }
             finally {
                 if ($piwigoWasRunning) {

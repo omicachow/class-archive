@@ -146,7 +146,7 @@ final class MaintenanceStatus
 
     private static function runnerDigest(): string
     {
-        $paths = [__FILE__, '/workspace/infra/scripts/run-maintenance.php'];
+        $paths = [__FILE__, '/workspace/infra/scripts/run-maintenance.php', '/workspace/infra/scripts/audit-backup.sh'];
         $context = hash_init('sha256');
         foreach ($paths as $path) {
             if (!is_file($path) || is_link($path)) {

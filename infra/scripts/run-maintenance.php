@@ -12,8 +12,6 @@ declare(strict_types=1);
  */
 
 const CLASS_ARCHIVE_MAINTENANCE_ROOT = '/var/www/html/piwigo';
-const CLASS_ARCHIVE_BACKUP_ROOT = '/class-archive-backups';
-const CLASS_ARCHIVE_BACKUP_FRESHNESS_SECONDS = 7 * 86400;
 
 /** @return array{json:bool,apply_rejected_cleanup:bool,require_ready:bool} */
 function maintenanceArguments(array $argv): array
@@ -61,68 +59,38 @@ function maintenancePrepareRuntime(): void
 }
 
 /** @return array{state:string,label:string,message:string,timestamp:?string,age_seconds:?int,verified_files:int} */
-function backupFreshness(): array
+function backupFreshnessStatus(): array
 {
-    if (!is_dir(CLASS_ARCHIVE_BACKUP_ROOT) || is_link(CLASS_ARCHIVE_BACKUP_ROOT)) {
-        return ['state' => 'MISSING', 'label' => '未找到', 'message' => '备份卷不可用。', 'timestamp' => null, 'age_seconds' => null, 'verified_files' => 0];
+    $path = PHPWG_ROOT_PATH . '_data/class-archive/backup-freshness.json';
+    if (!is_file($path) || is_link($path)) {
+        return ['state' => 'MISSING', 'label' => '未找到', 'message' => '尚未执行私有备份校验。', 'timestamp' => null, 'age_seconds' => null, 'verified_files' => 0];
     }
-    $latest = null;
-    $iterator = new DirectoryIterator(CLASS_ARCHIVE_BACKUP_ROOT);
-    foreach ($iterator as $entry) {
-        if ($entry->isDot() || !$entry->isDir() || $entry->isLink()) {
-            continue;
-        }
-        $name = $entry->getFilename();
-        if (preg_match('/\Aclass-archive-[0-9]{8}T[0-9]{6}Z\z/D', $name) !== 1) {
-            continue;
-        }
-        $complete = $entry->getPathname() . '/COMPLETE';
-        $manifest = $entry->getPathname() . '/SHA256SUMS';
-        if (!is_file($complete) || is_link($complete) || !is_file($manifest) || is_link($manifest)) {
-            continue;
-        }
-        $mtime = filemtime($complete);
-        if ($mtime === false) {
-            continue;
-        }
-        if ($latest === null || $mtime > $latest['mtime']) {
-            $latest = ['directory' => $entry->getPathname(), 'mtime' => $mtime];
-        }
+    $contents = @file_get_contents($path);
+    try {
+        $record = is_string($contents) ? json_decode($contents, true, 16, JSON_THROW_ON_ERROR) : null;
+    } catch (Throwable) {
+        $record = null;
     }
-    if ($latest === null) {
-        return ['state' => 'MISSING', 'label' => '未找到', 'message' => '没有完整的备份包。', 'timestamp' => null, 'age_seconds' => null, 'verified_files' => 0];
+    $state = is_array($record) ? ($record['state'] ?? null) : null;
+    if (!is_array($record)
+        || (int) ($record['backup_audit_version'] ?? 0) !== 1
+        || !in_array($state, ['FRESH', 'STALE', 'INVALID', 'MISSING'], true)
+        || !is_string($record['timestamp'] ?? null)
+        || strtotime((string) $record['timestamp']) === false
+        || !is_int($record['age_seconds'] ?? null)
+        || !is_int($record['verified_files'] ?? null)) {
+        return ['state' => 'INVALID', 'label' => '无效', 'message' => '私有备份校验记录无效。', 'timestamp' => null, 'age_seconds' => null, 'verified_files' => 0];
     }
-    $manifest = $latest['directory'] . '/SHA256SUMS';
-    $lines = @file($manifest, FILE_IGNORE_NEW_LINES);
-    $expected = ['database.sql.gz', 'piwigo-data.tar.gz', 'uploads.tar.gz', 'galleries.tar.gz', 'COMPLETE'];
-    $hashes = [];
-    if (!is_array($lines)) {
-        return ['state' => 'INVALID', 'label' => '无效', 'message' => '备份校验清单无法读取。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => max(0, time() - $latest['mtime']), 'verified_files' => 0];
-    }
-    foreach ($lines as $line) {
-        if (preg_match('/\A([a-f0-9]{64})  ([A-Za-z0-9._-]+)\z/D', $line, $matches) !== 1) {
-            return ['state' => 'INVALID', 'label' => '无效', 'message' => '备份校验清单格式无效。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => max(0, time() - $latest['mtime']), 'verified_files' => 0];
-        }
-        if (isset($hashes[$matches[2]])) {
-            return ['state' => 'INVALID', 'label' => '无效', 'message' => '备份校验清单包含重复条目。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => max(0, time() - $latest['mtime']), 'verified_files' => 0];
-        }
-        $hashes[$matches[2]] = $matches[1];
-    }
-    if (array_keys($hashes) !== $expected) {
-        return ['state' => 'INVALID', 'label' => '无效', 'message' => '备份内容与当前完整备份格式不一致。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => max(0, time() - $latest['mtime']), 'verified_files' => 0];
-    }
-    foreach ($expected as $name) {
-        $file = $latest['directory'] . '/' . $name;
-        $actual = (!is_file($file) || is_link($file)) ? false : hash_file('sha256', $file);
-        if (!is_string($actual) || !hash_equals($hashes[$name], $actual)) {
-            return ['state' => 'INVALID', 'label' => '无效', 'message' => '备份文件校验失败。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => max(0, time() - $latest['mtime']), 'verified_files' => 0];
-        }
-    }
-    $age = max(0, time() - $latest['mtime']);
-    if ($age > CLASS_ARCHIVE_BACKUP_FRESHNESS_SECONDS) {
-        return ['state' => 'STALE', 'label' => '需要备份', 'message' => '最近完整备份已超过七天。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => $age, 'verified_files' => count($expected)];
-    }
-    return ['state' => 'FRESH', 'label' => '正常', 'message' => '最近完整备份已校验。', 'timestamp' => gmdate('c', $latest['mtime']), 'age_seconds' => $age, 'verified_files' => count($expected)];
+    $labels = ['FRESH' => '正常', 'STALE' => '需要备份', 'INVALID' => '无效', 'MISSING' => '未找到'];
+    $messages = ['FRESH' => '最近完整备份已由隔离审计器校验。', 'STALE' => '最近完整备份已超过七天。', 'INVALID' => '私有备份校验失败。', 'MISSING' => '没有完整的备份包。'];
+    return [
+        'state' => $state,
+        'label' => $labels[$state],
+        'message' => $messages[$state],
+        'timestamp' => is_string($record['backup_timestamp'] ?? null) ? $record['backup_timestamp'] : null,
+        'age_seconds' => (int) $record['age_seconds'],
+        'verified_files' => (int) $record['verified_files'],
+    ];
 }
 
 /** @return array<string, mixed> */
@@ -156,7 +124,7 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         $cleanup = \ClassIdentitySubmissionService::fromPiwigo()->cleanupRejectedBinaries($retentionDays, $applyRejectedCleanup);
         $reconciliation = \ClassIdentity\ReconciliationService::fromPiwigo()->scanAndPersist();
         $attestation = \ClassIdentity\MediaAttestation::status();
-        $backup = backupFreshness();
+        $backup = backupFreshnessStatus();
         $attention = (
             ($reconciliation['result'] ?? null) !== 'PASS'
             || ($attestation['state'] ?? null) !== 'VERIFIED'

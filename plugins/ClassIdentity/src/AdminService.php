@@ -1178,6 +1178,17 @@ SQL);
                 'tasks' => [],
             ];
         }
+        try {
+            $backupRestore = \ClassIdentity\BackupRestoreEvidence::status();
+        } catch (Throwable) {
+            $backupRestore = [
+                'state' => 'MISSING',
+                'label' => '需要演练',
+                'message' => '备份恢复演练记录无法读取。',
+                'timestamp' => null,
+                'rto_seconds' => null,
+            ];
+        }
         $maintenanceTasks = is_array($maintenance['tasks'] ?? null) ? $maintenance['tasks'] : [];
         $backupFreshness = is_array($maintenanceTasks['backup_freshness'] ?? null)
             ? $maintenanceTasks['backup_freshness']
@@ -1198,6 +1209,12 @@ SQL);
         }
         if (($reconciliation['state'] ?? null) !== 'CLEAR') {
             $productionBlockers[] = 'RECONCILIATION';
+        }
+        if (($backupRestore['state'] ?? null) !== 'VERIFIED') {
+            $productionBlockers[] = 'BACKUP_RESTORE_DRILL';
+        }
+        if (($maintenance['state'] ?? null) !== 'VERIFIED') {
+            $productionBlockers[] = 'CRON_JOBS';
         }
         if (!$identityEnforcement) {
             $productionBlockers[] = 'IDENTITY_ENFORCEMENT';
@@ -1221,8 +1238,6 @@ SQL);
         // them visible prevents a green dashboard from being mistaken for a
         // production deployment approval.
         $productionBlockers[] = 'ADMIN_MFA';
-        $productionBlockers[] = 'BACKUP_RESTORE_DRILL';
-        $productionBlockers[] = 'CRON_JOBS';
         $productionBlockers[] = 'COMMUNITY_MODERATION';
         $productionBlockers[] = 'BUSINESS_MUTATION_AUDIT';
         $productionBlockers = array_values(array_unique($productionBlockers));
@@ -1249,6 +1264,11 @@ SQL);
             'maintenance_label' => (string) ($maintenance['label'] ?? '需要重新执行'),
             'maintenance_message' => (string) ($maintenance['message'] ?? ''),
             'maintenance_timestamp' => $maintenance['timestamp'] ?? null,
+            'backup_restore_drill' => (string) ($backupRestore['state'] ?? 'MISSING'),
+            'backup_restore_label' => (string) ($backupRestore['label'] ?? '需要演练'),
+            'backup_restore_message' => (string) ($backupRestore['message'] ?? ''),
+            'backup_restore_timestamp' => $backupRestore['timestamp'] ?? null,
+            'backup_restore_rto_seconds' => $backupRestore['rto_seconds'] ?? null,
             'identity_enforcement' => $identityEnforcement ? 'ENFORCED' : 'DISABLED',
             'identity_enforcement_label' => $identityEnforcement ? '已启用' : '已停用',
             'anonymous_presenter' => $anonymousPresenterReady ? 'READY' : 'FAIL',

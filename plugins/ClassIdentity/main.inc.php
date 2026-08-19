@@ -31,6 +31,7 @@ require_once CLASS_IDENTITY_PATH . 'src/AnonymousGovernanceService.php';
 require_once CLASS_IDENTITY_PATH . 'src/MediaAttestation.php';
 require_once CLASS_IDENTITY_PATH . 'src/ReconciliationService.php';
 require_once CLASS_IDENTITY_PATH . 'src/MaintenanceStatus.php';
+require_once CLASS_IDENTITY_PATH . 'src/BackupRestoreEvidence.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {

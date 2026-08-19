@@ -29,6 +29,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/SubmissionService.php', 'src/ArchiveService.php',
             'src/AnonymousGovernanceService.php', 'src/MediaAttestation.php',
             'src/ReconciliationService.php', 'src/MaintenanceStatus.php',
+            'src/BackupRestoreEvidence.php',
         ],
     ],
 ];
