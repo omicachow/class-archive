@@ -33,12 +33,10 @@ final class ClassIdentityAnonymousGovernanceService
         global $prefixeTable;
         $rows = $this->repository->fetchAll(
             'SELECT s.`id` AS `seat_id`,s.`state` AS `seat_state`,s.`pseudonym_subject`,a.`pseudonym_key_version`,'
-            . 'a.`id` AS `account_id`,a.`state` AS `account_state`,p.`id` AS `principal_id`,p.`piwigo_user_id`,'
-            . 'i.`id` AS `identity_id`,i.`roster_code`,i.`real_name` '
+            . 'a.`state` AS `account_state`,p.`piwigo_user_id` '
             . 'FROM `' . $this->repository->table('seat') . '` s '
             . 'JOIN `' . $this->repository->table('account') . '` a ON a.`seat_id`=s.`id` AND a.`current_marker`=1 '
             . 'JOIN `' . $this->repository->table('principal') . '` p ON p.`account_id`=a.`id` '
-            . 'JOIN `' . $this->repository->table('identity') . '` i ON i.`id`=s.`identity_id` '
             . "WHERE s.`seat_type`='ANONYMOUS' ORDER BY s.`id`",
         );
         $candidates = array_map(static fn(array $row): array => [
@@ -81,6 +79,12 @@ final class ClassIdentityAnonymousGovernanceService
             }
             $row['seat_state_label'] = self::stateLabel((string) ($row['seat_state'] ?? ''));
             $row['account_state_label'] = self::stateLabel((string) ($row['account_state'] ?? ''));
+
+            // The administration list is deliberately not a deanonymization API.
+            // Keep only presentation data after deriving the context-scoped alias;
+            // identity/account/principal/Core-user mapping is disclosed solely by
+            // AnonymousResolutionService after its explicit audited action.
+            unset($row['piwigo_user_id'], $row['pseudonym_subject'], $row['pseudonym_key_version']);
         }
         unset($row);
         return $rows;

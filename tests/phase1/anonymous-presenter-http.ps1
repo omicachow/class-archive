@@ -306,6 +306,16 @@ try {
         author_id=[string]$state.anonymous.piwigo_user_id
     }) 'Admin hidden-author comment filter'
 
+    # The governance list is intentionally not a bulk deanonymization view.
+    # A SYSTEM_ADMIN may see aliases and contexts here, but the underlying
+    # Classmate/Core identity must appear only after the explicit, audited
+    # "查看真实身份" action.
+    $adminAnonymousPage = Invoke-Http ([Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-anonymous')) $systemAdmin
+    Assert-True ($adminAnonymousPage.Status -eq 200) 'Anonymous Governance page was unavailable to SYSTEM_ADMIN.'
+    Assert-True ($adminAnonymousPage.Text -match 'name=["'']action["'']\s+value=["'']resolve_anonymous["'']') 'Anonymous Governance page omitted the explicit resolution action.'
+    Assert-NoRawLeak $adminAnonymousPage.Text $forbiddenValues 'Anonymous Governance HTML'
+    Assert-True ($adminAnonymousPage.Text -notmatch '(?i)(?:data-|["''])?identity_id(?:["'']|\s|=|:)') 'Anonymous Governance HTML exposed an underlying Identity identifier.'
+
     foreach ($index in 0..1) {
         $pictureUri = ConvertTo-AbsoluteUri $baseUri ([string]$state.picture_urls[$index])
         $picture = Invoke-Http $pictureUri $classmate
