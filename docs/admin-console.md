@@ -166,15 +166,17 @@ It can report database/schema status, migration version, Identity enforcement,
 SYSTEM_ADMIN count, exact role mappings, anonymous-presenter readiness,
 provisioning incidents, storage/free space and derivative-cache writability.
 
-It must continue to show `PRODUCTION BLOCKED`. These blockers are intentionally
-open:
+It must continue to show `PRODUCTION BLOCKED` until every production gate is
+complete. The localhost synthetic baseline now has a persisted digest-bound
+MediaGuard attestation, a destructive backup/restore drill, a single-instance
+maintenance runner and a clean reconciliation record. Those facts are visible
+as Chinese operational status, not inferred from a green configuration string.
 
-- `MEDIA_GUARD_HTTP_ATTESTATION`: the real HTTP suites pass, but no persisted,
-  digest-bound attestation ties that result to the installed Core/plugin/nginx
-  build;
+The following blockers remain intentionally open:
+
 - `ADMIN_MFA`;
-- `BACKUP_RESTORE_DRILL`;
-- `CRON_JOBS`;
+- browser/touch visual acceptance, which is tracked outside the technical
+  dashboard until its screenshot report is complete;
 - `COMMUNITY_MODERATION`, including explicit upload post-write mode `0660`;
 - `BUSINESS_MUTATION_AUDIT` for later business surfaces.
 
@@ -208,6 +210,7 @@ path.
 The Phase 0 media regression also passes 290 authorization probes, 16
 small-photo/safe-preview probes and 38 state/path probes. Anonymous presentation
 passes 211 HTTP assertions and the Pending-media state machine passes 75 HTTP
-probes. This is a usable minimum local business console, not production
-approval; Spotlight, browser/touch QA, restore rehearsal and the remaining
-production gates are still open.
+probes. The destructive `72/72/8` backup/restore rehearsal and maintenance
+reconciliation are now also verified. This is a usable minimum local business
+console, not production approval; Spotlight, browser/touch QA, mature Admin MFA
+and the remaining production gates are still open.
