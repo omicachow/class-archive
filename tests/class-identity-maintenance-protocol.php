@@ -15,6 +15,7 @@ $paths = [
     'installer' => $root . '/infra/scripts/install-class-archive-plugins.php',
     'bootstrap' => $root . '/infra/scripts/bootstrap-class-identity.php',
     'prepare' => $root . '/infra/scripts/prepare-class-archive-maintenance.php',
+    'backup_audit' => $root . '/infra/scripts/audit-backup.sh',
     'dev' => $root . '/infra/scripts/dev.ps1',
     'access' => $root . '/plugins/ClassIdentity/src/Access.php',
     'media_guard' => $root . '/plugins/ClassArchivePolicy/src/MediaGuard.php',
@@ -49,6 +50,7 @@ $lastPosition = static function (string $haystack, string $needle): int {
 $installer = $sources['installer'];
 $bootstrap = $sources['bootstrap'];
 $prepare = $sources['prepare'];
+$backupAudit = $sources['backup_audit'];
 $dev = $sources['dev'];
 $access = $sources['access'];
 $mediaGuard = $sources['media_guard'];
@@ -78,6 +80,8 @@ $assert(str_contains($prepare, "\$uid === (int) (\$directory['uid'] ?? -2)"), 'n
 $assert(str_contains($prepare, 'rename($temporary, CLASS_ARCHIVE_PREPARE_MARKER)'), 'ownership bridge must atomically publish its staged inode');
 $assert(str_contains($prepare, 'chown($temporary, $nginxUid)'), 'ownership bridge may chown only its newly staged inode');
 $assert(!str_contains($prepare, 'chmod(CLASS_ARCHIVE_PREPARE_MARKER'), 'ownership bridge must never chmod the existing marker inode');
+$assert(str_contains($backupAudit, 'chmod 0660 "$temporary"'), 'backup freshness evidence must remain private inside _data');
+$assert(!str_contains($backupAudit, 'chmod 0644 "$temporary"'), 'backup freshness evidence must never become world-readable');
 
 $bootstrapFalse = $position($bootstrap, "conf_update_param('class_identity_enforcement', false, true);");
 $bootstrapMarker = $position($bootstrap, 'assertTrustedMaintenanceGate();');

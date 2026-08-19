@@ -108,10 +108,11 @@ printf '{"backup_audit_version":1,"timestamp":"%s","state":"%s","bundle":%s,"bac
   "$(if [ -n "$backup_timestamp" ]; then printf '"%s"' "$backup_timestamp"; else printf 'null'; fi)" \
   "$age_seconds" "$verified_files" > "$temporary"
 chown "$PIWIGO_UID:$PIWIGO_GID" "$temporary" || fail status_owner_failed
-# The record has no paths, checksums or secrets. It is deliberately readable
-# by both the PHP-FPM storage identity and the restricted CLI runner, while
-# the private backup bundle itself remains root-only and unmounted from Piwigo.
-chmod 0644 "$temporary" || fail status_mode_failed
+# The record has no paths, checksums or secrets, but it still lives under the
+# private `_data` tree. Keep it non-world-readable: the directory's inherited
+# nginx ACL lets PHP-FPM and the restricted CLI runner read it, while the
+# private backup bundle remains root-only and unmounted from Piwigo.
+chmod 0660 "$temporary" || fail status_mode_failed
 mv -f "$temporary" "$status_path" || fail status_publish_failed
 trap - EXIT HUP INT TERM
 printf '%s\n' "BACKUP_FRESHNESS=$state verified_files=$verified_files"
