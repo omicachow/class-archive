@@ -8,7 +8,7 @@
 | release tag | `v3.1.0` |
 | source commit | `8aa95c67470a02a8ddedf03c2e52963af33065ff` |
 | 许可证 | GNU AGPL-3.0-only |
-| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server runtime 已通过，不含 technical user / library / asset |
+| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server 与 ephemeral technical-user/external-library lifecycle runtime 已通过 |
 
 精确镜像引用和摘要记录于
 [`infra/immich-spike/immich-upstream.lock.json`](../infra/immich-spike/immich-upstream.lock.json)。
@@ -32,8 +32,17 @@ source archive 的 tag→commit 对应关系来自 GitHub 的官方 tag-ref API�
 内部 `package.json`、`web/package.json`、`server/package.json` 都是 `3.1.0`。
 
 这部分只是 `STATIC` 供应链证据，不等同于 Gateway、ACL 或浏览器验证。隔离
-dependency images 已取得，真实 Server runtime 已另由 runtime isolation gate 验证；
-仍不能据此声称 Web integration、技术用户或 Photo UI 已通过。
+dependency images 已取得；真实 Server runtime 已另由两个 runtime gates 验证：
+
+- `test-phase2-runtime`：isolated boot、internal ping、无 host port、read-only mount
+  和 original SHA-256；
+- `test-phase2-runtime-integration`：短暂创建内部 technical user 与只读 external
+  library，扫描 synthetic originals，确认 asset count，再销毁本 spike volumes 并复验
+  空状态与 original SHA-256。
+
+第二项只证明上游 v3.1.0 可在本隔离模型下执行 external-library 生命周期；其技术用户
+和 asset index 都已随 spike volume reset 清除。它不证明 Gateway ACL、Web integration
+或 Photo UI 已通过。
 可重复运行 [`verify-supply-chain.ps1`](../infra/immich-spike/verify-supply-chain.ps1)
 以验证本机 archive SHA-256、source 版本、compose digest pin 和本地 Docker
 repo digest；该脚本不下载或启动容器。
@@ -94,7 +103,8 @@ presentation compatibility only
 
 ## 当前结论
 
-`IMMICH_WEB_FORK_FEASIBLE` 尚未确定。官方 source archive 与 Server / ML
-镜像已取得并校验，isolated Server runtime 也已通过；但 Gateway ACL、技术用户、
-external library、Web integration 和浏览器仍未验证。当前不暴露端口给浏览器，
-也不接触真实照片或 NAS。
+`IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E`。官方 source archive 与
+Server / ML 镜像已取得并校验，isolated Server 以及 ephemeral technical-user /
+external-library runtime lifecycle 已通过；但 Gateway runtime adapter、真实 ACL
+查询过滤、Web integration 和浏览器仍未验证。当前不暴露端口给浏览器，也不接触
+真实照片或 NAS。

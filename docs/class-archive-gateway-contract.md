@@ -9,12 +9,14 @@
 | `ClassArchivePhoto` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
 | Gateway policy、列表、时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
-| Immich Adapter、技术用户、外部图库扫描 | 未开始 | Gateway 尚不会连接实际 Immich runtime |
+| Immich technical user / external-library lifecycle | `RUNTIME_TESTED` | ephemeral internal user、read-only synthetic scan、asset count gate、spike reset 后空状态复验 |
+| Immich Adapter / Gateway runtime query | 未开始 | Gateway 尚不会连接实际 Immich runtime |
 | 浏览器 API/UI | 未开始 | 当前 `/api` 合约尚未绑定到 HTTP 路由 |
 
-因此只有 [`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1)
-可表述为 `RUNTIME_TESTED`，且仅限隔离启动；本文件的 Gateway 合约仍不得表述为
-Immich integration 或 `BROWSER_E2E_TESTED`。
+[`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1) 与
+[`immich-external-library-runtime.ps1`](../tests/phase2/immich-external-library-runtime.ps1)
+可分别表述为 `RUNTIME_TESTED` 的隔离启动和可丢弃 external-library lifecycle；本文件的
+Gateway 合约仍不得表述为 Immich Adapter integration 或 `BROWSER_E2E_TESTED`。
 
 ## Canonical ClassArchivePhoto
 
@@ -136,3 +138,12 @@ Gateway 的 Adapter 接口没有“未经授权 aggregate count”方法。每�
 
 该门只检查隔离 runtime，不能替代上面的 Gateway contract 或未来的真实 Immich
 Adapter / Browser 集成。
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-runtime-integration
+```
+
+该生命周期门短暂创建一个仅限 internal network 的 Immich technical user 和一座只读
+external library，扫描 synthetic originals 后销毁并重建仅属于 spike 的 volumes。它不保留
+technical credentials、library 或 asset，也不把 Gateway 的 `NullImmichAdapter` 变成已实现
+的 runtime adapter。

@@ -38,8 +38,19 @@ pull 校验。完整 immutable evidence 记录在 upstream lock，compose 只使
 这使 `IMMICH_SOURCE_AVAILABLE=YES` 和核心 `IMMICH_IMAGE_AVAILABLE=YES`。随后
 真实 pinned Server、PostgreSQL 与 Valkey 已在独立 internal network 启动，并通过
 `/api/server/ping`、digest、无 host port、只读 Piwigo originals 及 before/after
-SHA-256 验证。该证据严格是 `RUNTIME_TESTED` 的**隔离启动**，不是 Gateway、
-技术用户、外部图库、Web 或浏览器验收。
+SHA-256 验证。
+
+2026-08-19 还完成了一次**可丢弃的 Runtime external-library lifecycle**：在空的
+Immich spike 中创建第一个内部 technical user、创建只指向 Piwigo `:ro` originals
+的 external library、扫描当前 synthetic originals，并验证 Immich DB 中出现恰好一名
+technical user、一座 library 与不少于当前 Piwigo image count 的 asset。随后测试只
+销毁本 compose 所有的 `immich_db` 与 `immich_upload` volumes，重建空实例并复验
+`user=0 / library=0 / asset=0`、Piwigo originals SHA-256 不变和 internal-only
+network。测试凭据只在 owner-only 临时文件中存在，并在 finally 删除；没有保留可复用
+Immich 登录、API key 或 library。
+
+这严格是 `RUNTIME_TESTED` 的**内部索引生命周期**，不是 Gateway、Web fork 或浏览器
+验收，更不表示浏览器能访问 Immich。
 
 ## 当前证据等级
 
@@ -48,7 +59,7 @@ SHA-256 验证。该证据严格是 `RUNTIME_TESTED` 的**隔离启动**，不�
 | 官方 tag / source archive / Server 与 ML image | `STATIC` | 已校验官方 GitHub / GHCR 固定来源与 digest |
 | `ClassArchivePhoto` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、映射和 39 项 policy/side-channel 合约通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
-| Immich technical user / external library / asset import | 未开始 | 不存在隐藏技术用户、库或 asset，不能称 Runtime integration |
+| Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
 | Immich Web fork / Gateway HTTP / Browser | 未开始 | `/api` 合约尚未绑定 HTTP，浏览器无法直达 Immich |
 
 可重复执行运行时隔离门：
@@ -59,6 +70,16 @@ SHA-256 验证。该证据严格是 `RUNTIME_TESTED` 的**隔离启动**，不�
 
 它不创建 Immich user、library、asset、thumbnail、ML index 或浏览器会话；也不会
 暴露端口或修改 Piwigo original。
+
+可重复执行可丢弃的 external-library runtime lifecycle：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-runtime-integration
+```
+
+此命令会短暂创建内部 technical user、external library 和 Immich asset index，然后仅
+重置本 spike 的数据库与 upload volumes。它不接入 Gateway，不发布端口，也不保留
+Immich user/library/asset 作为产品数据。
 
 ## 尚未完成，不能伪称通过
 
@@ -72,8 +93,8 @@ SHA-256 验证。该证据严格是 `RUNTIME_TESTED` 的**隔离启动**，不�
 因此当前状态为：
 
 ```text
-IMMICH_RUNTIME=PASS_ISOLATED_BOOT
-IMMICH_WEB_FORK_FEASIBLE=PENDING_RUNTIME_INTEGRATION
-IMMICH_FRONTEND_FEASIBLE=PENDING_RUNTIME_INTEGRATION
+IMMICH_RUNTIME=PASS_EPHEMERAL_TECHNICAL_LIBRARY_LIFECYCLE
+IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E
+IMMICH_FRONTEND_FEASIBLE=PENDING_GATEWAY_WEB_E2E
 PRODUCTION_READY=NO
 ```

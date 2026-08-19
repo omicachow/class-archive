@@ -44,3 +44,16 @@ library 或 asset：
 ```powershell
 .\infra\scripts\dev.ps1 test-phase2-runtime
 ```
+
+下面的第二个 runtime gate 会在**空的、可丢弃的** spike 中短暂创建第一个内部
+technical user 和指向两座 Piwigo read-only original volumes 的 external library，扫描
+synthetic originals 后确认 asset count。它在 finally 中只销毁并重建本 compose 的
+`immich_db` 与 `immich_upload` volumes，确认 runtime 再次为空，并复验 Piwigo
+original SHA-256。它不保留 Immich 凭据、API key、user、library 或 asset，也不打开
+host port：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-runtime-integration
+```
+
+这仍不是 Gateway、Web fork、ML 或 browser E2E 验收；浏览器仍不能直接访问 Immich。

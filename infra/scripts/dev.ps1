@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-runtime', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -345,6 +345,15 @@ switch ($Action) {
         # external library, asset or browser session.
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase2\immich-runtime-isolation.ps1')
+        exit $LASTEXITCODE
+    }
+    'test-phase2-runtime-integration' {
+        # This is a disposable RUNTIME_TESTED lifecycle gate. It creates an
+        # internal-only technical user and external library over read-only
+        # synthetic Piwigo originals, then resets only the spike volumes and
+        # proves the fresh state again. It never creates a browser endpoint.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\immich-external-library-runtime.ps1')
         exit $LASTEXITCODE
     }
     'browser-qa' {
