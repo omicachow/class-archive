@@ -19,7 +19,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' || true)"
+          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' | grep -Ev '(^|/)\.env\.example$' || true)"
           if [[ -n "$forbidden" ]]; then
             printf '%s\n' "Tracked private artifacts are not allowed:" >&2
             printf '%s\n' "$forbidden" >&2
