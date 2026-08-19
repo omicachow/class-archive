@@ -8,11 +8,35 @@
 | release tag | `v3.1.0` |
 | source commit | `8aa95c67470a02a8ddedf03c2e52963af33065ff` |
 | 许可证 | GNU AGPL-3.0-only |
-| 本地状态 | 仅隔离 spike；尚未启动 Immich 服务 |
+| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server runtime 已通过，不含 technical user / library / asset |
 
 精确镜像引用和摘要记录于
 [`infra/immich-spike/immich-upstream.lock.json`](../infra/immich-spike/immich-upstream.lock.json)。
 其中任一尚未取得的 digest 都是启动阻断条件，而不是可接受的浮动依赖。
+
+## 官方供应链证据（2026-08-19）
+
+`git clone` 不是唯一来源确认方式。本机已从 **官方 GitHub** 取得固定 tag
+archive，并从 **官方 GHCR** 取得本机 `linux/amd64` 平台的固定镜像：
+
+| 对象 | 官方来源 / 固定值 | 本机验证 |
+|---|---|---|
+| Tag ref | GitHub REST `refs/tags/v3.1.0` → `8aa95c67470a02a8ddedf03c2e52963af33065ff` | `STATIC` |
+| Source archive | `codeload.github.com/.../refs/tags/v3.1.0` | 74,961,232 bytes; SHA-256 `af0fba69cc5830093392de4f5576eeb7f2ccf28ba55154b7598e10f596fdfb40`; tar validation and local extraction passed |
+| Immich Server | `ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa` | GHCR manifest and local Docker pull verified |
+| Machine Learning | `ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05` | GHCR manifest and local Docker pull verified |
+
+archive 本体、GHCR manifest 与 Docker image inspect 证据在 ignored 的
+`.codex-work/immich-supply-chain/`；完整、机器可读字段在 upstream lock 中。
+source archive 的 tag→commit 对应关系来自 GitHub 的官方 tag-ref API，archive
+内部 `package.json`、`web/package.json`、`server/package.json` 都是 `3.1.0`。
+
+这部分只是 `STATIC` 供应链证据，不等同于 Gateway、ACL 或浏览器验证。隔离
+dependency images 已取得，真实 Server runtime 已另由 runtime isolation gate 验证；
+仍不能据此声称 Web integration、技术用户或 Photo UI 已通过。
+可重复运行 [`verify-supply-chain.ps1`](../infra/immich-spike/verify-supply-chain.ps1)
+以验证本机 archive SHA-256、source 版本、compose digest pin 和本地 Docker
+repo digest；该脚本不下载或启动容器。
 
 ## 架构边界
 
@@ -60,7 +84,7 @@ presentation compatibility only
 ## 升级流程
 
 1. 保留当前 lock 和可复现的测试结果；
-2. `git fetch upstream --tags`，获取 candidate tag 的完整 commit；
+2. 从官方 GitHub tag ref / git 或官方 codeload archive 获取 candidate tag 的完整 commit；
 3. 更新 Web patch / Gateway adapter，不能修改 Immich DB schema；
 4. 重建隔离的 synthetic-only stack；
 5. 重新跑 Classmate / Teacher / Family ACL、People/Search side-channel、MediaGuard
@@ -70,6 +94,7 @@ presentation compatibility only
 
 ## 当前结论
 
-`IMMICH_WEB_FORK_FEASIBLE` 尚未确定。上游 source commit 已固定，但本机尚未
-验证官方镜像 digest、运行态、Gateway ACL 和 Web integration。当前不启动、
-不暴露端口给非 localhost，也不接触真实照片或 NAS。
+`IMMICH_WEB_FORK_FEASIBLE` 尚未确定。官方 source archive 与 Server / ML
+镜像已取得并校验，isolated Server runtime 也已通过；但 Gateway ACL、技术用户、
+external library、Web integration 和浏览器仍未验证。当前不暴露端口给浏览器，
+也不接触真实照片或 NAS。

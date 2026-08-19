@@ -9,7 +9,8 @@
 - 只使用当前 72 张合成照片；
 - Piwigo 的 `uploads` / `galleries` 仅以 `:ro` 挂载；
 - 没有 Piwigo 数据库、`piwigo_data`、derivative 或 scripts 挂载；
-- 映射端口只能是 `127.0.0.1`；
+- 当前不映射任何 host port；未来如因受控 Gateway shell 必须新增 listener，
+  也只能映射到 `127.0.0.1`；
 - 浏览器不能直达任何 Immich original/thumbnail endpoint。媒体必须继续经过
   Class Archive Gateway 与 MediaGuard。
 
@@ -24,3 +25,22 @@ ClassIdentity/Policy 过滤和 MediaGuard URL 改写。
 
 不要直接执行 `docker compose up`。使用后续的受控验证脚本；它会在任何
 来源、媒体只读或 localhost 约束不满足时拒绝启动。
+
+Server 与 Machine Learning 均在 compose 内用 `tag@sha256:digest` 固定，
+不能通过 `.env` 改成浮动 tag。升级必须同时更新上游 lock、官方 provenance
+证据和兼容性测试，不能只替换版本字符串。
+
+以下命令只验证本地 lock、官方 source archive 与本地 Docker image，不下载、
+不启动或暴露任何容器：
+
+```powershell
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\immich-spike\verify-supply-chain.ps1 -RequireLocal
+```
+
+在受控 compose 已启动后，以下门只验证实际 Server 的 internal health、无 host
+port、Piwigo read-only mounts 和 originals SHA-256 不变；它不创建 Immich user、
+library 或 asset：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-runtime
+```

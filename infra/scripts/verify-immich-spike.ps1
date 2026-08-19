@@ -66,8 +66,9 @@ foreach ($needle in @(
 
 # Docker Compose validates the full model without starting, pulling or exposing
 # a container. The example has a non-secret placeholder password by design.
-$projectWsl = '/mnt/c/Users/Omica/Documents/ChatGPT/班级相册开发'
-$configOutput = & wsl.exe -d Ubuntu --cd $projectWsl -- docker compose --env-file infra/immich-spike/.env.example -f infra/immich-spike/docker-compose.yml --profile immich-spike config 2>&1
+# WSL accepts the current Windows path directly for --cd. Keeping the source
+# ASCII-only preserves Windows PowerShell 5.1 parsing in a Chinese workspace.
+$configOutput = & wsl.exe -d Ubuntu --cd $projectRoot -- docker compose --env-file infra/immich-spike/.env.example -f infra/immich-spike/docker-compose.yml --profile immich-spike config 2>&1
 if ($LASTEXITCODE -ne 0) {
     Fail 'compose_model_invalid'
 }

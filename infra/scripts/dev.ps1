@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-runtime', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -317,6 +317,34 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase1\anonymous-presenter-http.ps1')
+        exit $LASTEXITCODE
+    }
+    'test-phase2-contract' {
+        # This is intentionally a CONTRACT_TESTED gate, not Immich runtime or
+        # browser evidence. It starts no Immich service and contacts no
+        # external network.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/class-photo-schema-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/class-photo-mapping-integration.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/gateway-contract.php'
+        ))
+        exit $LASTEXITCODE
+    }
+    'test-phase2-runtime' {
+        # This is a runtime-isolation gate for the already-running, internal
+        # Immich spike. It neither opens a host port nor creates a user,
+        # external library, asset or browser session.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\immich-runtime-isolation.ps1')
         exit $LASTEXITCODE
     }
     'browser-qa' {

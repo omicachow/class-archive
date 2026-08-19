@@ -5,7 +5,9 @@ name: class-archive-immich-spike
 services:
   immich-server:
     profiles: ["immich-spike"]
-    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:?Set IMMICH_VERSION in infra/immich-spike/.env}
+    # The v3.1.0 tag is retained for human traceability, while the digest is
+    # the immutable admission reference recorded in immich-upstream.lock.json.
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa
     env_file: ${IMMICH_SPIKE_ENV_FILE:-.env}
     depends_on:
       database:
@@ -31,7 +33,9 @@ services:
 
   immich-machine-learning:
     profiles: ["immich-ml"]
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:?Set IMMICH_VERSION in infra/immich-spike/.env}
+    # Do not replace this with a floating tag. Upgrade by changing the source
+    # pin, verified platform digest, lock evidence and compatibility suite.
+    image: ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05
     env_file: ${IMMICH_SPIKE_ENV_FILE:-.env}
     volumes:
       - immich_model_cache:/cache
@@ -53,9 +57,9 @@ services:
     profiles: ["immich-spike"]
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
     environment:
-      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD:?Set IMMICH_DB_PASSWORD in infra/immich-spike/.env}
-      POSTGRES_USER: ${IMMICH_DB_USERNAME:-postgres}
-      POSTGRES_DB: ${IMMICH_DB_DATABASE_NAME:-immich}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in infra/immich-spike/.env}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_DB: ${DB_DATABASE_NAME:-immich}
       POSTGRES_INITDB_ARGS: --data-checksums
     volumes:
       - immich_db:/var/lib/postgresql/data
