@@ -39,7 +39,10 @@ done
 
 assert_archive_safe() {
   archive=$1
-  tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))' && fail restore_archive_path_unsafe
+  if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+    fail restore_archive_path_unsafe
+  fi
+  tar -tzf "$archive" >/dev/null 2>&1 || fail restore_archive_unreadable
 }
 assert_archive_safe "$bundle/piwigo-data.tar.gz"
 assert_archive_safe "$bundle/uploads.tar.gz"
