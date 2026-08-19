@@ -26,6 +26,8 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/RateLimiter.php', 'src/ProvisioningService.php',
             'src/AdminService.php', 'src/AnonymousPresenter.php',
             'src/AnonymousResolutionService.php', 'src/Http.php', 'public.php',
+            'src/SubmissionService.php', 'src/ArchiveService.php',
+            'src/AnonymousGovernanceService.php',
         ],
     ],
 ];

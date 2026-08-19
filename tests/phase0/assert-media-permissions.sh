@@ -23,12 +23,20 @@ do
       ;;
   esac
 
-  if test -n "$(find "$media_path" -perm /0007 -print -quit)"; then
+  # `_data/combined` is the one intentionally public asset subtree.  It is
+  # served by an explicit nginx allow-list and is checked separately below;
+  # all other `_data` content must remain private.
+  find_args=""
+  if test "$media_path" = /var/www/html/piwigo/_data; then
+    find_args="-path $media_path/combined -prune -o"
+  fi
+
+  if test -n "$(find "$media_path" $find_args -perm /0007 -print -quit)"; then
     echo "Media tree contains an entry accessible to other users: $media_path" >&2
     exit 1
   fi
 
-  if test -n "$(find "$media_path" -type f -perm /0111 -print -quit)"; then
+  if test -n "$(find "$media_path" $find_args -type f -perm /0111 -print -quit)"; then
     echo "Media tree contains an executable file: $media_path" >&2
     exit 1
   fi
@@ -37,6 +45,14 @@ do
   printf '%s\n' "$acl" | grep -Fqx 'user:nginx:rwx'
   printf '%s\n' "$acl" | grep -Fqx 'default:other::---'
 done
+
+combined_path=/var/www/html/piwigo/_data/combined
+test -d "$combined_path"
+test -n "$(find "$combined_path" -type f -print -quit)"
+if test -n "$(find "$combined_path" -type f -perm /0111 -print -quit)"; then
+  echo "Combined asset tree contains an executable file: $combined_path" >&2
+  exit 1
+fi
 
 mkdir "$probe_path"
 : > "$probe_path/file"

@@ -15,6 +15,7 @@ require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
 require_once CLASS_IDENTITY_PATH . 'src/ProvisioningService.php';
+require_once CLASS_IDENTITY_PATH . 'src/SubmissionService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Http.php';
 
 /**
@@ -140,6 +141,8 @@ final class ClassIdentityPublicController
                 self::handleFamilyInvitationIssue();
             } elseif ($route === self::ROUTE_MY_IDENTITY && $action === 'activate_anonymous') {
                 self::handleAnonymousActivation();
+            } elseif ($route === self::ROUTE_MY_IDENTITY && $action === 'submit_family_photo') {
+                self::handleFamilySubmission();
             } else {
                 self::clearSensitivePostedFields([
                     'claim_code',
@@ -322,6 +325,40 @@ final class ClassIdentityPublicController
         }
     }
 
+    private static function handleFamilySubmission(): void
+    {
+        try {
+            $date = self::postOptional('suggested_date', 32);
+            $precision = self::postOptional('date_precision', 16) ?? 'UNKNOWN';
+            $album = self::postOptional('suggested_album', 190);
+            $description = self::postOptional('description', 2000);
+            $file = $_FILES['submission_file'] ?? null;
+            unset($_POST['suggested_date'], $_POST['date_precision'], $_POST['suggested_album'], $_POST['description'], $_FILES['submission_file']);
+            if (!is_array($file)) {
+                throw new InvalidArgumentException('family_submission_upload_invalid');
+            }
+            $id = ClassIdentitySubmissionService::fromPiwigo()->submit(
+                self::currentUserId(),
+                $file,
+                $date,
+                $precision,
+                $album,
+                $description,
+            );
+            self::$view['CA_SUCCESS'] = '照片已提交，正在等待管理员审核（编号 #' . $id . '）。';
+        } catch (InvalidArgumentException $error) {
+            unset($error);
+            self::$view['CA_ERROR'] = '投稿资料或照片格式不符合要求，照片尚未提交。';
+        } catch (Throwable $error) {
+            self::logFailure('family_submission', $error);
+            http_response_code(503);
+            self::$view['CA_ERROR'] = '投稿暂时无法完成。系统已按默认拒绝处理，请稍后重试。';
+        } finally {
+            self::clearPostedFields(['suggested_date', 'date_precision', 'suggested_album', 'description']);
+            unset($_FILES['submission_file']);
+        }
+    }
+
     /** @return array<string, mixed> */
     private static function loadMyIdentity(): array
     {
@@ -410,6 +447,20 @@ final class ClassIdentityPublicController
             }
         }
 
+        $submissionRows = $role === Access::ROLE_FAMILY
+            ? ClassIdentitySubmissionService::fromPiwigo()->mine($userId)
+            : [];
+        foreach ($submissionRows as &$submission) {
+            $submission['state_label'] = match ((string) ($submission['state'] ?? '')) {
+                'PENDING' => '待审核',
+                'APPROVED' => '已通过',
+                'REJECTED' => '已拒绝',
+                default => '状态异常',
+            };
+            $submission['precision_label'] = ClassIdentityArchiveService::precisionLabel((string) ($submission['date_precision'] ?? 'UNKNOWN'));
+        }
+        unset($submission);
+
         return [
             'role' => $role,
             'role_label' => self::roleLabel($role),
@@ -420,6 +471,7 @@ final class ClassIdentityPublicController
             'seats' => $seats,
             'can_issue_family' => $canIssueFamily,
             'can_activate_anonymous' => $canActivateAnonymous,
+            'submissions' => $submissionRows,
         ];
     }
 
@@ -500,6 +552,19 @@ final class ClassIdentityPublicController
         }
 
         return $value;
+    }
+
+    private static function postOptional(string $name, int $maxLength): ?string
+    {
+        $value = $_POST[$name] ?? null;
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (!is_string($value) || self::length($value) > $maxLength || str_contains($value, "\0")) {
+            throw new InvalidArgumentException('invalid_input');
+        }
+        $value = trim($value);
+        return $value === '' ? null : $value;
     }
 
     private static function pullSensitive(string $name, int $maxLength, bool $trim): string

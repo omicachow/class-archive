@@ -136,7 +136,7 @@ coordinated plugin publication:
 
 | Gate | Verified result |
 |---|---:|
-| ClassIdentity HTTP | 87 probes |
+| ClassIdentity HTTP | 108 probes, including Family submission, Anonymous and Archive Admin routes |
 | Workflow mutex | 12 checks |
 | Maintenance protocol | 40 assertions |
 | Enforcement context | 8 assertions |

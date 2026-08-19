@@ -96,8 +96,11 @@ SQL) ?? [];
             'pending_submissions' => $content['pending_submissions'],
             'production_blocked' => (bool) $health['production_blocked'],
             'media_guard' => (string) $health['media_guard'],
+            'media_guard_label' => (string) ($health['media_guard_label'] ?? $health['media_guard']),
             'database' => (string) $health['database'],
+            'database_label' => (string) ($health['database_label'] ?? $health['database']),
             'migration' => (string) $health['migration'],
+            'migration_label' => str_starts_with((string) $health['migration'], 'Current') ? '当前' : '待处理',
             'failed_manual_operations' => (int) $health['failed_manual_operations'],
             'compensation_required_accounts' => (int) $health['compensation_required_accounts'],
             'stale_provisioning_operations' => (int) $health['stale_provisioning_operations'],
@@ -127,7 +130,7 @@ SQL) ?? [];
             $types = 's';
         }
 
-        return $this->all(<<<SQL
+        $rows = $this->all(<<<SQL
 SELECT i.id, i.roster_code, i.identity_type, i.real_name, i.state,
        i.created_at, i.updated_at,
        SUM(s.seat_type = 'FAMILY') AS family_total,
@@ -146,6 +149,14 @@ GROUP BY i.id, i.roster_code, i.identity_type, i.real_name, i.state, i.created_a
 ORDER BY i.roster_code ASC
 LIMIT 500
 SQL, $types, $params);
+        foreach ($rows as &$row) {
+            $row['identity_type_label'] = self::identityTypeLabel((string) ($row['identity_type'] ?? ''));
+            $row['state_label'] = self::stateLabel((string) ($row['state'] ?? ''));
+            $row['formal_seat_state_label'] = self::stateLabel((string) ($row['formal_seat_state'] ?? ''));
+            $row['anonymous_state_label'] = self::stateLabel((string) ($row['anonymous_state'] ?? ''));
+        }
+        unset($row);
+        return $rows;
     }
 
     /** @return array<string, mixed>|null */
@@ -179,6 +190,13 @@ LEFT JOIN `{$GLOBALS['prefixeTable']}users` u ON u.id = p.piwigo_user_id
 WHERE s.identity_id = ?
 ORDER BY s.ordinal ASC
 SQL, 'i', [$identityId]);
+        foreach ($row['seats'] as &$seatRow) {
+            $seatRow['seat_type_label'] = self::seatTypeLabel((string) ($seatRow['seat_type'] ?? ''));
+            $seatRow['state_label'] = self::stateLabel((string) ($seatRow['state'] ?? ''));
+            $seatRow['account_state_label'] = self::stateLabel((string) ($seatRow['account_state'] ?? ''));
+        }
+        unset($seatRow);
+        $row['state_label'] = self::stateLabel((string) ($row['state'] ?? ''));
 
         return $row;
     }
@@ -698,6 +716,19 @@ SQL, 'sss', [$cutoff, $cutoff, $cutoff]);
                 && ($row['last_error_code'] ?? null) === 'post_core_provisioning_failed'
                 && (int) ($row['core_user_id'] ?? 0) > 0
                 && (int) ($row['principal_count'] ?? 0) === 0;
+            $row['operation_state_label'] = self::stateLabel((string) ($row['operation_state'] ?? ''));
+            $row['account_state_label'] = self::stateLabel((string) ($row['account_state'] ?? ''));
+            $row['seat_state_label'] = self::stateLabel((string) ($row['seat_state'] ?? ''));
+            $row['seat_type_label'] = self::seatTypeLabel((string) ($row['seat_type'] ?? ''));
+            $row['operation_type_label'] = match ((string) ($row['operation_type'] ?? '')) {
+                'CLASSMATE_CLAIM' => '同学认领',
+                'TEACHER_CLAIM' => '教师认领',
+                'FAMILY_INVITE' => '家庭邀请',
+                default => '账号开通操作',
+            };
+            $row['error_label'] = (string) ($row['last_error_code'] ?? '') === 'post_core_provisioning_failed'
+                ? 'Core 账号已建立，但后续绑定失败'
+                : ((string) ($row['last_error_code'] ?? '') === '' ? '未记录' : '需人工核查');
         }
         unset($row);
 
@@ -896,7 +927,7 @@ SQL, 'i', [$operationId]);
         $seat = $this->table('seat');
         $identity = $this->table('identity');
 
-        return $this->all(<<<SQL
+        $rows = $this->all(<<<SQL
 SELECT t.id, t.purpose, t.generation, t.state, t.issued_at, t.expires_at,
        t.consumed_at, t.revoked_at, t.issued_by_user_id,
        s.id AS seat_id, s.seat_type, s.ordinal, s.state AS seat_state,
@@ -908,6 +939,13 @@ WHERE t.purpose IN ('CLAIM','FAMILY_INVITE')
 ORDER BY t.issued_at DESC, t.id DESC
 LIMIT 500
 SQL);
+        foreach ($rows as &$row) {
+            $row['purpose_label'] = (string) ($row['purpose'] ?? '') === 'CLAIM' ? '班级认领' : '家庭邀请';
+            $row['state_label'] = self::stateLabel((string) ($row['state'] ?? ''));
+            $row['seat_type_label'] = self::seatTypeLabel((string) ($row['seat_type'] ?? ''));
+        }
+        unset($row);
+        return $rows;
     }
 
     /** @return list<array<string, mixed>> */
@@ -916,7 +954,7 @@ SQL);
         $audit = $this->table('audit_event');
         global $prefixeTable;
 
-        return $this->all(<<<SQL
+        $rows = $this->all(<<<SQL
 SELECT a.id, a.occurred_at, HEX(a.request_id) AS request_id,
        a.actor_user_id, COALESCE(u.username, 'SYSTEM') AS actor_name,
        a.actor_kind, a.action, a.target_type, a.target_id,
@@ -926,6 +964,52 @@ LEFT JOIN `{$prefixeTable}users` u ON u.id = a.actor_user_id
 ORDER BY a.occurred_at DESC, a.id DESC
 LIMIT 500
 SQL);
+        foreach ($rows as &$row) {
+            $row['action_label'] = self::auditActionLabel((string) ($row['action'] ?? ''));
+            $row['target_type_label'] = self::auditTargetLabel((string) ($row['target_type'] ?? ''));
+            $row['result_label'] = self::auditResultLabel((string) ($row['result'] ?? ''));
+        }
+        unset($row);
+        return $rows;
+    }
+
+    private static function auditActionLabel(string $action): string
+    {
+        return match ($action) {
+            'SUBMISSION_CREATE' => '提交班级历史照片',
+            'SUBMISSION_APPROVE' => '通过投稿',
+            'SUBMISSION_REJECT' => '拒绝投稿',
+            'ARCHIVE_METADATA_UPDATE' => '更新档案信息',
+            'ANONYMOUS_ENABLE' => '恢复匿名席位',
+            'ANONYMOUS_DISABLE' => '禁用匿名席位',
+            'ANONYMOUS_RESOLVE' => '查看匿名真实身份',
+            'IDENTITY_FREEZE' => '冻结身份',
+            'IDENTITY_UNFREEZE' => '解除身份冻结',
+            default => $action === '' ? '未记录操作' : '其他管理操作',
+        };
+    }
+
+    private static function auditTargetLabel(string $target): string
+    {
+        return match ($target) {
+            'SUBMISSION' => '投稿',
+            'IMAGE' => '照片',
+            'ANONYMOUS_SEAT' => '匿名席位',
+            'IDENTITY' => '成员身份',
+            'SEAT' => '席位',
+            'TOKEN' => '邀请 / 认领凭据',
+            default => $target === '' ? '未记录对象' : '其他对象',
+        };
+    }
+
+    private static function auditResultLabel(string $result): string
+    {
+        return match ($result) {
+            'SUCCESS' => '已完成',
+            'FAILURE' => '失败',
+            'DENIED' => '已拒绝',
+            default => '未记录',
+        };
     }
 
     /** @return array<string, mixed> */
@@ -944,6 +1028,8 @@ SQL);
             'audit_event',
             'role_group',
             'rate_limit_bucket',
+            'submission',
+            'archive_image',
         ];
         $missing = [];
         try {
@@ -1101,22 +1187,29 @@ SQL);
         return [
             'production_blocked' => $blocked,
             'database' => $database,
+            'database_label' => $database === 'Healthy' ? '正常' : '异常',
             'media_guard' => $mediaGuard,
+            'media_guard_label' => $mediaGuard === 'CONFIGURED' ? '已配置' : '未通过',
             'media_guard_http_attestation' => 'Not persisted',
             'identity_enforcement' => $identityEnforcement ? 'ENFORCED' : 'DISABLED',
+            'identity_enforcement_label' => $identityEnforcement ? '已启用' : '已停用',
             'anonymous_presenter' => $anonymousPresenterReady ? 'READY' : 'FAIL',
+            'anonymous_presenter_label' => $anonymousPresenterReady ? '已就绪' : '未通过',
             'failed_manual_operations' => $provisioning['failed_manual_operations'],
             'compensation_required_accounts' => $provisioning['compensation_required_accounts'],
             'stale_provisioning_operations' => $provisioning['stale_provisioning_operations'],
             'stale_provisioning_accounts' => $provisioning['stale_provisioning_accounts'],
             'stale_provisioning_seats' => $provisioning['stale_provisioning_seats'],
             'provisioning_health' => $provisioningHealthError ? 'ERROR' : (array_sum($provisioning) > 0 ? 'BLOCKED' : 'CLEAR'),
+            'provisioning_health_label' => $provisioningHealthError ? '异常' : (array_sum($provisioning) > 0 ? '阻断' : '正常'),
             'system_admins' => $systemAdminCount,
             'role_group_mappings' => $roleMappingCount . ' / 4',
             'secret_configuration' => $secretsReady ? 'Configured' : 'Error',
             'admin_mfa' => 'Not configured',
             'production_blockers' => implode(', ', $productionBlockers),
+            'production_blockers_label' => implode('、', array_map([self::class, 'blockerLabel'], $productionBlockers)),
             'migration' => $migration,
+            'migration_label' => str_starts_with($migration, 'Current') ? '当前' : '待处理',
             'schema_verification' => $schemaVerified ? 'PASS' : 'FAIL',
             'missing_tables' => implode(', ', $missing),
             'storage_total' => is_numeric($storageTotal) ? self::humanBytes((int) $storageTotal) : 'Unknown',
@@ -1128,6 +1221,69 @@ SQL);
             'plugin_version' => defined('CLASS_IDENTITY_VERSION') ? (string) CLASS_IDENTITY_VERSION : 'Unknown',
             'core_version' => defined('PHPWG_VERSION') ? (string) PHPWG_VERSION : 'Unknown',
         ];
+    }
+
+    private static function blockerLabel(string $blocker): string
+    {
+        return match ($blocker) {
+            'DATABASE' => '数据库',
+            'MIGRATION' => '数据迁移',
+            'MEDIA_GUARD' => '媒体访问防护',
+            'MEDIA_GUARD_HTTP_ATTESTATION' => '媒体 HTTP 回归证明',
+            'IDENTITY_ENFORCEMENT' => '身份权限强制',
+            'SYSTEM_ADMIN' => '系统管理员',
+            'ROLE_GROUP_MAPPING' => '角色映射',
+            'SECRET_CONFIGURATION' => '密钥配置',
+            'ANONYMOUS_PRESENTER' => '匿名脱敏呈现',
+            'PROVISIONING_INCIDENT' => '账号开通故障',
+            'ADMIN_MFA' => '管理员多因素认证',
+            'BACKUP_RESTORE_DRILL' => '备份恢复演练',
+            'CRON_JOBS' => '定时任务',
+            'COMMUNITY_MODERATION' => '社区投稿治理',
+            'BUSINESS_MUTATION_AUDIT' => '业务变更审计',
+            default => $blocker,
+        };
+    }
+
+    private static function identityTypeLabel(string $type): string
+    {
+        return match ($type) {
+            'CLASSMATE' => '同学',
+            'TEACHER' => '教师',
+            default => '未知身份',
+        };
+    }
+
+    private static function seatTypeLabel(string $type): string
+    {
+        return match ($type) {
+            'CLASSMATE' => '同学席位',
+            'TEACHER' => '教师席位',
+            'FAMILY' => '家庭席位',
+            'ANONYMOUS' => '匿名席位',
+            default => '未知席位',
+        };
+    }
+
+    private static function stateLabel(string $state): string
+    {
+        return match ($state) {
+            'ACTIVE' => '正常',
+            'AVAILABLE' => '可用',
+            'INVITED' => '已邀请',
+            'PROVISIONING' => '处理中',
+            'FROZEN' => '已冻结',
+            'DISABLED' => '已禁用',
+            'RELEASED' => '已释放',
+            'ISSUED' => '已签发',
+            'RESERVED' => '已预留',
+            'CONSUMED' => '已使用',
+            'REVOKED' => '已撤销',
+            'EXPIRED' => '已过期',
+            'FAILED_MANUAL' => '待人工处理',
+            'COMPENSATION_REQUIRED' => '待安全补偿',
+            default => $state === '' ? '—' : '异常',
+        };
     }
 
     /** @return array{failed_manual_operations:int,compensation_required_accounts:int,stale_provisioning_operations:int,stale_provisioning_accounts:int,stale_provisioning_seats:int} */
@@ -1219,9 +1375,9 @@ SQL, 'ii', [$id, $id]) ?? 0);
         };
 
         $pending = 0;
-        $communityTable = $prefixeTable . 'community_pendings';
-        if ($this->tableExists($communityTable)) {
-            $pending = (int) ($this->scalar("SELECT COUNT(*) FROM `{$prefixeTable}community_pendings` WHERE state <> 'validated'") ?? 0);
+        $submissionTable = $this->prefix . 'submission';
+        if ($this->tableExists($submissionTable)) {
+            $pending = (int) ($this->scalar("SELECT COUNT(*) FROM `{$submissionTable}` WHERE `state` = 'PENDING'") ?? 0);
         }
 
         return [
@@ -1337,6 +1493,8 @@ SQL, 'ii', [$id, $id]) ?? 0);
             'audit_event',
             'role_group',
             'rate_limit_bucket',
+            'submission',
+            'archive_image',
         ];
         if (!in_array($suffix, $allowed, true)) {
             throw new InvalidArgumentException('class_identity_unknown_table');

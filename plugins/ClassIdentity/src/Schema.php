@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 4;
+    public const CURRENT_VERSION = 5;
 
     private const COLLATION = 'utf8mb4_unicode_ci';
 
@@ -176,6 +176,11 @@ final class Schema
                 'name' => '0004_public_claim_rate_limit',
                 'signature' => 'v1:fixed-window:hmac-subject:source-selector-roster:atomic-counter:innodb:utf8mb4',
                 'method' => 'migrationPublicClaimRateLimit',
+            ],
+            5 => [
+                'name' => '0005_submissions_archive_metadata',
+                'signature' => 'v1:family-pending-submission:admin-review:heritage-only:archive-date-precision:innodb:utf8mb4',
+                'method' => 'migrationSubmissionsAndArchive',
             ],
         ];
     }
@@ -489,6 +494,100 @@ CREATE TABLE IF NOT EXISTS {$rateLimit} (
 SQL);
     }
 
+    private function migrationSubmissionsAndArchive(): void
+    {
+        $submission = $this->quotedTable('submission');
+        $archive = $this->quotedTable('archive_image');
+        $identity = $this->quotedTable('identity');
+        $seat = $this->quotedTable('seat');
+        $account = $this->quotedTable('account');
+        $principal = $this->quotedTable('principal');
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$submission} (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `seat_id` BIGINT UNSIGNED NOT NULL,
+  `account_id` BIGINT UNSIGNED NOT NULL,
+  `principal_id` BIGINT UNSIGNED NOT NULL,
+  `identity_id` BIGINT UNSIGNED NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  `original_filename` VARCHAR(255) NOT NULL,
+  `storage_ref` VARCHAR(190) NOT NULL,
+  `thumbnail_ref` VARCHAR(190) NOT NULL,
+  `mime_type` VARCHAR(64) NOT NULL,
+  `extension` VARCHAR(8) NOT NULL,
+  `byte_size` BIGINT UNSIGNED NOT NULL,
+  `sha256` BINARY(32) NOT NULL,
+  `width` INT UNSIGNED NOT NULL,
+  `height` INT UNSIGNED NOT NULL,
+  `suggested_date` DATE NULL,
+  `date_precision` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+  `suggested_album` VARCHAR(190) NULL,
+  `description` TEXT NULL,
+  `uploaded_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `reviewed_at` DATETIME(6) NULL,
+  `reviewed_by_principal_id` BIGINT UNSIGNED NULL,
+  `review_reason` VARCHAR(500) NULL,
+  `approved_image_id` MEDIUMINT(8) UNSIGNED NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_ci_submission_storage` (`storage_ref`),
+  UNIQUE KEY `uq_ci_submission_thumb` (`thumbnail_ref`),
+  KEY `idx_ci_submission_state` (`state`, `uploaded_at`),
+  KEY `idx_ci_submission_identity` (`identity_id`, `uploaded_at`),
+  KEY `idx_ci_submission_seat` (`seat_id`, `uploaded_at`),
+  KEY `idx_ci_submission_approved` (`approved_image_id`),
+  CONSTRAINT `fk_ci_submission_identity` FOREIGN KEY (`identity_id`) REFERENCES {$identity} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `fk_ci_submission_seat` FOREIGN KEY (`seat_id`) REFERENCES {$seat} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `fk_ci_submission_account` FOREIGN KEY (`account_id`) REFERENCES {$account} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `fk_ci_submission_principal` FOREIGN KEY (`principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `fk_ci_submission_reviewed_by` FOREIGN KEY (`reviewed_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_submission_state` CHECK (`state` IN ('PENDING', 'APPROVED', 'REJECTED')),
+  CONSTRAINT `chk_ci_submission_precision` CHECK (`date_precision` IN ('EXACT', 'DAY', 'MONTH', 'TERM', 'YEAR', 'EVENT_ONLY', 'UNKNOWN')),
+  CONSTRAINT `chk_ci_submission_dimensions` CHECK (`byte_size` > 0 AND `width` > 0 AND `height` > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$archive} (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `piwigo_image_id` MEDIUMINT(8) UNSIGNED NOT NULL,
+  `era` VARCHAR(16) NOT NULL DEFAULT 'HERITAGE',
+  `archive_date` DATE NULL,
+  `date_precision` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+  `date_confidence` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+  `event_label` VARCHAR(190) NULL,
+  `official` TINYINT(1) NOT NULL DEFAULT 0,
+  `source_submission_id` BIGINT UNSIGNED NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_ci_archive_image` (`piwigo_image_id`),
+  UNIQUE KEY `uq_ci_archive_submission` (`source_submission_id`),
+  KEY `idx_ci_archive_era_date` (`era`, `archive_date`),
+  KEY `idx_ci_archive_precision` (`date_precision`),
+  CONSTRAINT `fk_ci_archive_submission` FOREIGN KEY (`source_submission_id`) REFERENCES {$submission} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_archive_era` CHECK (`era` IN ('HERITAGE', 'LIVING')),
+  CONSTRAINT `chk_ci_archive_precision` CHECK (`date_precision` IN ('EXACT', 'DAY', 'MONTH', 'TERM', 'YEAR', 'EVENT_ONLY', 'UNKNOWN')),
+  CONSTRAINT `chk_ci_archive_confidence` CHECK (`date_confidence` IN ('HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
+  CONSTRAINT `chk_ci_archive_official` CHECK (`official` IN (0, 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('submission', [
+            'id', 'seat_id', 'account_id', 'principal_id', 'identity_id', 'state',
+            'original_filename', 'storage_ref', 'thumbnail_ref', 'mime_type', 'extension',
+            'byte_size', 'sha256', 'width', 'height', 'suggested_date', 'date_precision',
+            'suggested_album', 'description', 'uploaded_at', 'reviewed_at',
+            'reviewed_by_principal_id', 'review_reason', 'approved_image_id',
+        ]);
+        $this->assertTable('archive_image', [
+            'id', 'piwigo_image_id', 'era', 'archive_date', 'date_precision',
+            'date_confidence', 'event_label', 'official', 'source_submission_id',
+        ]);
+    }
+
     private function ensureMigrationLedger(): void
     {
         $ledger = $this->quotedTable('migration');
@@ -670,6 +769,8 @@ SQL);
             'audit_event' => 'eb2cf5ede710cc8f8c0dd6fbc45bcbe6d274adc8997966d1ef31070397db1a39',
             'role_group' => '51cbc79121f83b63cbf70c538cc77194f9b726a54f9f893731d8412fdc1ceee4',
             'rate_limit_bucket' => 'e5717a295f89b6554ff8c6a2c8e526433c7de4922a5344e1c82578829787577a',
+            'submission' => '7f6b4832baf74dd5ccdfbeffe20fb849e1cd8e3e7b32f324869efd1b34bb9c28',
+            'archive_image' => '591fd3a21b5f9bd559a00913f7ff13e4115608b460f78452b40cddad3acc4c7a',
         ];
     }
 
@@ -963,6 +1064,8 @@ SQL);
             'audit_event',
             'role_group',
             'rate_limit_bucket',
+            'submission',
+            'archive_image',
         ];
     }
 

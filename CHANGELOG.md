@@ -11,10 +11,9 @@ committed separately.
   synchronization. No real names, photos, mailboxes, credentials, database
   dumps, NAS paths or deployment keys are tracked; generated fixtures remain
   synthetic and runtime secrets stay in ignored local files.
-- The latest direct ClassIdentity HTTP run is intentionally recorded as
-  `FAIL` (87 probes, one `provisioning/stale-visible` health assertion). The
-  historical all-green coordinated baseline is retained as evidence, but is
-  not presented as current release approval.
+- The coordinated localhost run is green: `test-phase1` and `test-phase0` both
+  exit 0 on the current tree. The latest ClassIdentity workflow run passes 108
+  real HTTP probes; the synthetic 72-image model is restored after cleanup.
 - Added the public-development and security boundary documents. Future work is
   synchronized as source-only commits; private deployment data is never used
   as a fixture or release artifact.
@@ -53,8 +52,19 @@ committed separately.
   valid, while reason text and structured old/new values containing password-
   shaped or credential-like material are rejected before persistence.
 - Added a minimum Class Archive Admin Console with Dashboard, Identities,
-  Teachers, Invitations, Audit and System Health. Submissions, Anonymous
-  governance, Archive and Spotlight remain explicit later work.
+  Teachers, Invitations, Submissions, Anonymous governance, Archive, Audit and
+  System Health. Spotlight remains explicit later work.
+- Added the Family submission state machine: validated HERITAGE-only multipart
+  upload into a private 0660 Pending store, safe Family status view, Admin-only
+  thumbnail/original review, audited approve/reject, and one-original Piwigo
+  handoff on approval. Community remains inactive because its existing CSRF,
+  parameter and default-permission gates are not accepted.
+- Added Anonymous Governance and Archive pages. Administrators can inspect
+  context-scoped aliases, explicitly deanonymize with Audit, disable/restore an
+  Anonymous Seat, create private official albums under either Era root, and
+  edit archive date precision/confidence without treating upload time as a
+  capture date. Internal enums remain English; implemented business labels are
+  Simplified Chinese.
 - Added server-side action guards for all Seat roles. Unknown/unclassified
   state-changing Web API methods fail closed even for Classmate/Teacher. Added
   context-scoped anonymous aliases, ordinary HTML/API redaction and audited
@@ -82,7 +92,7 @@ committed separately.
   upgrade/tools entry points are denied, PHP-FPM uses umask `0007`, and Phase 0
   media ownership/mode checks run again after Phase 1. Explicit upload `chmod`
   behavior remains a gate before Community uploads can be enabled.
-- Added real Piwigo/MariaDB/HTTP gates: ClassIdentity HTTP 87 probes, workflow
+- Added real Piwigo/MariaDB/HTTP gates: ClassIdentity HTTP 108 probes, workflow
   lock 12 checks, maintenance protocol 40 assertions, enforcement context 8,
   anonymous pure policy 12, audit reason 20, capability policy 96, rate limit
   22, schema semantics 9, synthetic bootstrap 13, SYSTEM_ADMIN credential 24,

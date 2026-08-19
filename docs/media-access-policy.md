@@ -220,8 +220,8 @@ Having only the PHP plugin or only rewrite rules is not a passing state.
 The outage and Phase 1 lifecycle tests confirm their respective fail-closed
 boundaries. The Admin Console reports MediaGuard configuration and keeps
 `PRODUCTION BLOCKED`, because a digest-bound, persisted record of the complete
-HTTP matrix is not implemented yet; a green configuration inspection is not a
-substitute for that attestation.
+HTTP matrix is not implemented; the live matrix passing is not itself a
+production attestation.
 
 ## Deployment boundary
 

@@ -164,6 +164,34 @@ final class ClassIdentityHttp
         );
     }
 
+    /** @param array<string, mixed> $mapping */
+    public static function renderAnonymousResolution(array $mapping, string $returnUrl): never
+    {
+        $alias = $mapping['alias'] ?? null;
+        $classmate = $mapping['classmate_id'] ?? null;
+        $realName = $mapping['real_name'] ?? null;
+        $seatId = filter_var($mapping['seat_id'] ?? null, FILTER_VALIDATE_INT);
+        if (
+            !is_string($alias) || $alias === '' || strlen($alias) > 128
+            || !is_string($classmate) || $classmate === '' || strlen($classmate) > 64
+            || !is_string($realName) || $realName === '' || strlen($realName) > 190
+            || !is_int($seatId) || $seatId <= 0
+        ) {
+            self::abort(503, '匿名身份结果暂时不可用');
+        }
+        self::renderOneTimeCredential(
+            '匿名身份解析结果',
+            '本次查看已写入操作审计。关闭本页后不会把映射结果保存在普通页面、会话或 URL 中。',
+            [
+                '对外匿名名' => $alias,
+                '班级成员编号' => $classmate,
+                '成员姓名' => $realName,
+                '匿名席位' => '#' . $seatId,
+            ],
+            $returnUrl,
+        );
+    }
+
     /** @param array<string, string> $fields */
     private static function renderOneTimeCredential(
         string $title,

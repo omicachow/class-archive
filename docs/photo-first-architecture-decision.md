@@ -22,8 +22,7 @@ V1 **不运行 HumHub，也不做 Piwigo + HumHub Hybrid**。保留下来的 Hum
 - 72 个 Piwigo image 记录对应 72 个不同 original path；至少一张照片通过 `image_category` 关系进入多个逻辑相册，没有产生第二个 image 记录或另一个 original path。文件系统层的去重/硬链接不是本结论的一部分。
 - 通过真实登录会话和 Web API 验证：Guest 相册 API 被拒绝；FAMILY 只列出 HERITAGE；CLASSMATE、TEACHER、ANONYMOUS 可列出 HERITAGE 和 LIVING；FAMILY 直接请求 LIVING album id 也得不到图片。
 - 通过真实 HTTP/HTML 响应验证：相册网格使用缩略/封面派生图，不直接加载 original；照片页默认使用 `medium` preview、预取相邻图片、提供显式 original download，并初始化 PhotoSwipe。当前轮次没有完成受支持浏览器中的截图/触屏视觉验收，因此这里不宣称像素级 UI 或真机手势 QA 已通过。
-- `ClassArchivePolicy` + nginx MediaGuard 已通过 290 个真实 HTTP probes：Guest 的两个 Era 全部拒绝；FAMILY 的 LIVING 全部拒绝且 HERITAGE preview 允许、original 默认拒绝；CLASSMATE/TEACHER 两个 Era 允许；ANONYMOUS 两个 Era preview 允许、original 默认拒绝；独立 SYSTEM_ADMIN 全部允许。GET/HEAD/Range、logout、account switch、直接 backing path、猜测、path normalization、query tamper 与 cache revalidation 均通过；跨 Era 关联对所有角色 fail closed；受控数据库中断返回无媒体字节、无诊断细节的通用 503。
-- 当前树的真实 Piwigo/MariaDB/HTTP 总回归已通过：`test-phase1` 与 `test-phase0` 都 exit 0；ClassIdentity HTTP 87 probes；独立 SYSTEM_ADMIN 不是 Seat；Guest 与四种 Seat 角色直链 Admin Console 均 403；Identity freeze 使现有页面/媒体 session 和新登录立即失效；匿名输出/解析分别由普通成员不可关联和管理员敏感查看写 Audit 的门禁保护。Pending-media 75 GET 同时证明 Seat 全拒绝、SYSTEM_ADMIN 审核允许、异常/重复状态全拒绝并恢复到 72 images。Phase 0 的 72/72/8 媒体模型、权限与 290 + 16 + 38 probes 再次通过，数据库断连 opt-in 40 probes 也通过。这进一步确认已经冻结的 Piwigo-first 架构决定，但不等于生产放行。
+- 当前树的真实 Piwigo/MariaDB/HTTP 总回归已通过：`test-phase1` 与 `test-phase0` 都 exit 0；ClassIdentity HTTP 108 probes；独立 SYSTEM_ADMIN 不是 Seat；Guest 与四种 Seat 角色直链 Admin Console 均 403；Identity freeze 使现有页面/媒体 session 和新登录立即失效；匿名输出/解析分别由普通成员不可关联和管理员敏感查看写 Audit 的门禁保护。Pending-media 75 GET 同时证明 Seat 全拒绝、SYSTEM_ADMIN 审核允许、异常/重复状态全拒绝并恢复到 72 images。Phase 0 的 72/72/8 媒体模型、权限与 290 + 16 + 38 probes 再次通过，数据库断连 opt-in 40 probes 也通过。这进一步确认已经冻结的 Piwigo-first 架构决定，但不等于生产放行。
 - Community 16.f 的低信任 Pending → Admin Approve 与高信任直接发布流程可复用，但实测还发现三个门禁：默认权限过宽、`category` 必须拒绝数组形态、管理员审核端点接受无 CSRF token 的 POST。该插件在受支持主栈中保持 inactive。
 - User Collections 16.a 实测存在跨 ACL 路径：仅能访问 HERITAGE 的 FAMILY 可在猜中 LIVING image id 后把它加入/呈现到 collection，并取得派生图。它没有安装进受支持主栈；Core Favorites 只是范围更窄的候选退路，也必须通过猜 id、权限撤销、呈现和媒体 URL 回归，不能先称为安全。
 - 未在真实绿联 NAS、真实照片库、真实移动设备或高并发环境上测试。NAS 结论来自官方 UGOS/Piwigo 行为、源代码和本地容器边界，仍需真机只读验收。
@@ -80,7 +79,7 @@ Hybrid 会新增两套账户、密码重置、session、冻结状态、内容 id
 ### Class 插件边界
 
 - `ClassIdentity`（已部署）：Identity → Seat → Account binding → Principal → Piwigo Account、Claim/Invite hash、Identity freeze/session revoke、审计、幂等 provisioning、SYSTEM_ADMIN、最小 Admin Console、CapabilityGuard、AnonymousPresenter 与敏感解析；自定义表一律 InnoDB；
-- `ClassArchivePolicy`（已部署）：HERITAGE/LIVING 根与跨 Era 关联不变量；其 MediaGuard 负责每次 original/preview/thumbnail/derivative 的 session、显式 Principal、角色、Era、冻结状态授权和 cache header；未来的 Collections/SubmissionPolicy 仍只是规划边界；
+- `ClassArchivePolicy`（已部署）：HERITAGE/LIVING 根与跨 Era 关联不变量；其 MediaGuard 负责每次 original/preview/thumbnail/derivative 的 session、显式 Principal、角色、Era、冻结状态授权和 cache header；ClassIdentity 现在承载 Family 投稿审核、匿名治理和档案元数据服务；Community 仍 inactive；
 - `ClassSpotlight`（规划）：本人公开相册/内容、同时一个 active、TTL、自动过期、Admin 撤销、audit；
 
 这些内部服务是代码边界，不代表另外部署五个插件；只有后来出现独立升级/权限边界的强证据才拆分。
@@ -163,8 +162,8 @@ Piwigo 的 filesystem synchronization 要求源位于 `./galleries/` 并在文�
 ### Phase 1：ClassIdentity（安全底座已实现）
 
 - 已完成四个 checksum-attested migrations、十张 InnoDB 表、Identity/Seat/Account/Principal、Claim/Family Invite/Teacher Claim、Anonymous Seat、exact group projection、Identity freeze/session revoke、Audit、SYSTEM_ADMIN 与最小 Admin Console；
-- 87-probe ClassIdentity HTTP、75-probe Pending-media 与 maintenance/enforcement/capability/anonymous/schema/credential gates 通过；随后 Phase 0 媒体回归再次通过；
-- active Family account release、member password reset、account-level governance、Submissions/Anonymous governance/Archive/Spotlight 页面仍待实现；
+- 108-probe ClassIdentity HTTP、75-probe Pending-media 与 maintenance/enforcement/capability/anonymous/schema/credential gates 通过；随后 Phase 0 媒体回归再次通过；
+- Family 投稿审核、Anonymous governance 和 Archive 页面已实现 Phase 1 子集；active Family account release、member password reset、Spotlight 与正式生产门禁仍待实现；
 - 不先做漂亮 Theme。
 
 MediaGuard 已使用 active Principal/Account/Seat/Identity resolver，且不再存在只看 Piwigo group 的受支持 fallback。尚未实现的 active Family release 必须沿用同一 resolver 和状态转换回归，不能另开授权路径。

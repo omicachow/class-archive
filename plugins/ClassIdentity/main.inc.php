@@ -24,6 +24,9 @@ require_once CLASS_IDENTITY_PATH . 'src/Access.php';
 require_once CLASS_IDENTITY_PATH . 'src/CapabilityGuard.php';
 require_once CLASS_IDENTITY_PATH . 'src/AnonymousPresenter.php';
 require_once CLASS_IDENTITY_PATH . 'src/AnonymousResolutionService.php';
+require_once CLASS_IDENTITY_PATH . 'src/SubmissionService.php';
+require_once CLASS_IDENTITY_PATH . 'src/ArchiveService.php';
+require_once CLASS_IDENTITY_PATH . 'src/AnonymousGovernanceService.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {

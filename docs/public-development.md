@@ -45,6 +45,8 @@ data or opening the localhost-only Docker service to the network.
 
 ## Current public-sync note
 
-On 2026-08-19 the direct ClassIdentity HTTP check returned `FAIL` with 87
-probes and one known `provisioning/stale-visible` health assertion. The public
-repository records that result instead of declaring the release gate green.
+On 2026-08-19 the coordinated direct ClassIdentity HTTP check returned
+`PASS` with 108 probes, including Family submission review and the Anonymous
+and Archive Admin routes. The repository still records the separate
+production blockers and does not treat a green localhost run as production
+approval.

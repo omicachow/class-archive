@@ -63,6 +63,9 @@ These routes are currently deployed:
 | Identities | `admin.php?page=plugin-ClassIdentity-identities` | List/detail/create Classmate Identity; inspect Seats/accounts; issue/reissue Claim; freeze/unfreeze Identity |
 | Teachers | `admin.php?page=plugin-ClassIdentity-teachers` | List/detail/create Teacher Identity; inspect its single Seat/account; issue/reissue Claim; freeze/unfreeze Identity |
 | Invitations | `admin.php?page=plugin-ClassIdentity-invitations` | Inspect Claim/Family Invitation lifecycle; revoke Claim; revoke/reissue Family Invitation |
+| Submissions | `admin.php?page=plugin-ClassIdentity-submissions` | View safe pending thumbnails and metadata; approve into HERITAGE through the Piwigo upload pipeline or reject with an audited reason |
+| Anonymous | `admin.php?page=plugin-ClassIdentity-anonymous` | List context-scoped aliases and interaction counts; explicitly resolve a real identity with an Audit event; disable/restore an Anonymous Seat |
+| Archive | `admin.php?page=plugin-ClassIdentity-archive` | Create private official albums under HERITAGE/LIVING; edit archive date precision/confidence/event label/official flag and associate existing Piwigo albums without copying the original |
 | Audit | `admin.php?page=plugin-ClassIdentity-audit` | Read recent redacted ClassIdentity Audit events |
 | System | `admin.php?page=plugin-ClassIdentity-system` | Schema/migration, Principal, MediaGuard configuration, storage and provisioning health; bounded compensation for one proven incident shape |
 
@@ -93,27 +96,34 @@ issue/reissue POST displays the raw value once in a terminal response with
 `Cache-Control: no-store`, restrictive CSP and no referrer; the database stores
 only selector/validator hashes.
 
-## Deliberately pending surfaces
+## Implemented Phase 1 pages and remaining surfaces
 
-No route or page currently exists for:
+The following business pages are now implemented for the localhost synthetic
+baseline. Community remains inactive; the custom ClassIdentity submission
+service is the upload boundary, and Piwigo Core is called only after an Admin
+approval. Pending originals and derivatives are never exposed to Family.
 
-- Submissions / Family Pending review;
-- Anonymous governance or ordinary UI for deanonymization;
-- Archive / Official Album management;
+- Submissions: Family can submit HERITAGE-only images; Admin can inspect a
+  safe thumbnail, approve into the HERITAGE root or reject with an Audit reason.
+- Anonymous: aliases are context-scoped; real-identity lookup is an explicit,
+  audited action; enable/disable revokes credentials when disabling.
+- Archive: Admin can create private official albums below the two Era roots;
+  existing Piwigo images can receive Class Archive date precision and
+  confidence metadata and be associated without copying originals. Bulk
+  curation and Spotlight remain separate work.
 - Spotlight;
 - a standalone Seats/Accounts console;
 - release of an already-active Family account;
 - account-level freeze/unfreeze or standalone force logout;
 - member-account password reset and its browser workflow (the bounded local
   SYSTEM_ADMIN CLI rotation described above is separate);
-- Anonymous Seat disable/enable;
 - roster import/edit/retire;
 - Audit search/export or batch governance.
 
-The audited `AnonymousResolutionService` exists and passes integration tests,
-but it is intentionally not presented as an implemented Anonymous governance
-page. Community is inactive, so the Dashboard's Pending count is not evidence
-that a secure submission workflow exists.
+The audited `AnonymousResolutionService` is now exposed only through the
+SYSTEM_ADMIN Anonymous page's explicit resolution action. Community is still
+inactive, so the Dashboard's Pending count refers to the custom
+ClassIdentitySubmissionService rather than Community moderation.
 
 ## Piwigo technical Admin boundary
 
@@ -174,8 +184,8 @@ add their own blockers. Unknown is never treated as allow or healthy.
 
 ## Verified Phase 1 evidence
 
-The final coordinated Piwigo/MariaDB/HTTP baseline passes 87 ClassIdentity
-probes and 75 Pending-media real GET probes. The
+The final coordinated Piwigo/MariaDB/HTTP baseline passes 108 ClassIdentity
+workflow probes and 75 Pending-media real GET probes. The
 Admin access matrix, CSRF/same-origin negatives, independent Principal shape,
 Claim/Invite lifecycle, Identity freeze, provisioning incident handling and
 secret scans are included. Supporting gates pass 12 workflow-lock checks, 40
@@ -195,5 +205,9 @@ residue, and live password rotation passes with credential revocation. Only a
 fresh empty-volume bootstrap rehearsal remains open for this local credential
 path.
 
-This is a usable minimum local business console, not production approval and
-not evidence that any pending page exists.
+The Phase 0 media regression also passes 290 authorization probes, 16
+small-photo/safe-preview probes and 38 state/path probes. Anonymous presentation
+passes 211 HTTP assertions and the Pending-media state machine passes 75 HTTP
+probes. This is a usable minimum local business console, not production
+approval; Spotlight, browser/touch QA, restore rehearsal and the remaining
+production gates are still open.

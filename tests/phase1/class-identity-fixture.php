@@ -76,6 +76,21 @@ function ciTestQuoted(string $value): string
     return "'" . pwg_db_real_escape_string($value) . "'";
 }
 
+/**
+ * Reset only the fixed-window limiter state used by this localhost synthetic
+ * runner.  The real HTTP suite intentionally exercises rejected attempts;
+ * retaining those buckets across retries would make a later run fail before
+ * it reaches the business flow.  This helper is never loaded by production
+ * requests and the suite is explicitly prohibited from using real accounts.
+ */
+function ciTestResetRateLimitBuckets(): void
+{
+    $table = \ClassIdentity\Repository::fromPiwigo()->table('rate_limit_bucket');
+    \ClassIdentity\Repository::fromPiwigo()->execute(
+        'DELETE FROM `' . $table . '` WHERE purpose IN (\'CLAIM\', \'FAMILY_INVITE\')',
+    );
+}
+
 /** @return array{id:int,username:string,status:string} */
 function ciTestCreateUnboundUser(string $username, string $password, string $status): array
 {
@@ -124,6 +139,7 @@ function ciTestCreateUnboundUser(string $username, string $password, string $sta
 
 function ciTestSetup(string $runId): never
 {
+    ciTestResetRateLimitBuckets();
     $names = ciTestNames($runId);
     $identity = \ClassIdentity\Repository::fromPiwigo()->table('identity');
     $existingIdentityCount = ciTestScalar(
@@ -232,6 +248,8 @@ function ciTestState(string $runId): never
     $token = $repository->table('token');
     $audit = $repository->table('audit_event');
     $operation = $repository->table('operation');
+    $submission = $repository->table('submission');
+    $archiveImage = $repository->table('archive_image');
     $webmasterId = (int) ($conf['webmaster_id'] ?? 0);
 
     $adminRows = query2array(
@@ -267,6 +285,15 @@ function ciTestState(string $runId): never
         . 'LEFT JOIN `' . $seat . '` s ON s.id = o.seat_id '
         . 'WHERE o.identity_id IN (' . $idList . ') ORDER BY o.id',
     );
+    $submissionRows = query2array(
+        'SELECT s.id, s.state, s.original_filename, s.storage_ref, s.thumbnail_ref, '
+        . 's.approved_image_id, s.mime_type, s.byte_size, s.width, s.height, '
+        . 's.suggested_date, s.date_precision, s.review_reason, '
+        . 'ai.era, ai.archive_date, ai.date_precision AS archive_date_precision '
+        . 'FROM `' . $submission . '` s LEFT JOIN `' . $archiveImage . '` ai '
+        . 'ON ai.source_submission_id = s.id WHERE s.identity_id IN (' . $idList . ') '
+        . 'ORDER BY s.id',
+    );
     $incidentUsername = $names['user_prefix'] . 'incident';
     $tombstoneRows = query2array(
         'SELECT u.id, u.username, '
@@ -282,6 +309,7 @@ function ciTestState(string $runId): never
         'tokens' => $tokenRows,
         'audit' => $auditRows,
         'operations' => $operationRows,
+        'submissions' => $submissionRows,
         'incident_tombstone' => count($tombstoneRows) === 1 ? $tombstoneRows[0] : $tombstoneRows,
         'csrf_identity_count' => ciTestScalar(
             'SELECT COUNT(*) FROM `' . $identity . '` WHERE roster_code LIKE '
@@ -607,6 +635,64 @@ function ciTestDeleteCoreUsers(array $ids, string $prefix, array $boundFixtureId
     }
 }
 
+/** @param list<int> $identityIds */
+function ciTestCleanupSubmissionMedia(array $identityIds, string $submission, string $archiveImage): void
+{
+    if ($identityIds === []) {
+        return;
+    }
+    $idList = implode(',', array_map('intval', $identityIds));
+    $rows = query2array(
+        'SELECT id, storage_ref, thumbnail_ref, approved_image_id FROM `' . $submission . '` '
+        . 'WHERE identity_id IN (' . $idList . ') ORDER BY id',
+    );
+    foreach ($rows as $row) {
+        $submissionId = (int) ($row['id'] ?? 0);
+        foreach (['storage_ref', 'thumbnail_ref'] as $field) {
+            $ref = (string) ($row[$field] ?? '');
+            if (preg_match('#\Aclass_identity_pending/[a-f0-9]{48}\.(?:jpg|jpeg|png|webp)\z#D', $ref) !== 1) {
+                ciTestFail('Cleanup refused an unsafe submission storage reference.');
+            }
+            $path = CI_TEST_PIWIGO_ROOT . '/_data/' . $ref;
+            if (is_link($path) || (file_exists($path) && (!is_file($path) || !unlink($path)))) {
+                ciTestFail('Cleanup could not safely remove a submission file.');
+            }
+            if (file_exists($path) || is_link($path)) {
+                ciTestFail('Submission file survived cleanup.');
+            }
+        }
+
+        $approvedImageId = (int) ($row['approved_image_id'] ?? 0);
+        if ($approvedImageId <= 0) {
+            continue;
+        }
+        $archiveRows = query2array(
+            'SELECT piwigo_image_id FROM `' . $archiveImage . '` '
+            . 'WHERE source_submission_id = ' . $submissionId,
+        );
+        if (count($archiveRows) !== 1 || (int) $archiveRows[0]['piwigo_image_id'] !== $approvedImageId) {
+            ciTestFail('Cleanup refused an ambiguous approved submission link.');
+        }
+        $imageRows = query2array('SELECT id, path FROM ' . IMAGES_TABLE . ' WHERE id = ' . $approvedImageId);
+        if (count($imageRows) !== 1) {
+            ciTestFail('Approved submission image is missing or ambiguous.');
+        }
+        $relative = preg_replace('#^\./#', '', (string) $imageRows[0]['path']);
+        if (!is_string($relative) || preg_match('#\A(?:upload|galleries)/[A-Za-z0-9_. /-]+\z#D', $relative) !== 1 || str_contains($relative, '..')) {
+            ciTestFail('Approved submission image path is unsafe.');
+        }
+        $sourcePath = CI_TEST_PIWIGO_ROOT . '/' . $relative;
+        if (delete_elements([$approvedImageId], true) !== 1) {
+            ciTestFail('Approved submission image cleanup failed.');
+        }
+        if (query2array('SELECT id FROM ' . IMAGES_TABLE . ' WHERE id = ' . $approvedImageId) !== []
+            || is_file($sourcePath) || is_link($sourcePath)
+        ) {
+            ciTestFail('Approved submission image survived cleanup.');
+        }
+    }
+}
+
 function ciTestCleanup(string $runId): never
 {
     $names = ciTestNames($runId);
@@ -618,6 +704,8 @@ function ciTestCleanup(string $runId): never
     $operation = $repository->table('operation');
     $token = $repository->table('token');
     $audit = $repository->table('audit_event');
+    $submission = $repository->table('submission');
+    $archiveImage = $repository->table('archive_image');
 
     $identityRows = query2array(
         'SELECT id, roster_code FROM `' . $identity . '` WHERE roster_code IN ('
@@ -675,10 +763,14 @@ function ciTestCleanup(string $runId): never
         $coreUserIds[] = (int) $row['id'];
     }
 
+    ciTestCleanupSubmissionMedia($identityIds, $submission, $archiveImage);
+
     $repository->transaction(static function (\ClassIdentity\Repository $tx) use (
-        $identity, $seat, $account, $principal, $operation, $token, $audit,
+        $identity, $seat, $account, $principal, $operation, $token, $audit, $submission, $archiveImage,
         $idList, $accountList, $principalList,
     ): void {
+        $tx->execute('DELETE FROM `' . $archiveImage . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
+        $tx->execute('DELETE FROM `' . $submission . '` WHERE identity_id IN (' . $idList . ')');
         $tx->execute(
         'DELETE FROM `' . $audit . '` WHERE target_identity_id IN (' . $idList . ') '
             . 'OR target_seat_id IN (SELECT id FROM `' . $seat . '` WHERE identity_id IN (' . $idList . ')) '
@@ -703,6 +795,7 @@ function ciTestCleanup(string $runId): never
     });
 
     ciTestDeleteCoreUsers($coreUserIds, $names['user_prefix'], $safeFixtureCoreIds);
+    ciTestResetRateLimitBuckets();
     invalidate_user_cache();
 
     $remainingIdentities = ciTestScalar(
@@ -714,9 +807,15 @@ function ciTestCleanup(string $runId): never
         'SELECT COUNT(*) FROM ' . USERS_TABLE . ' WHERE username LIKE '
         . ciTestQuoted($names['user_prefix'] . '%'),
     );
+    $remainingSubmissions = ciTestScalar(
+        'SELECT COUNT(*) FROM `' . $submission . '` WHERE identity_id IN (' . $idList . ')',
+    );
+    $remainingArchiveRows = ciTestScalar(
+        'SELECT COUNT(*) FROM `' . $archiveImage . '` WHERE source_submission_id NOT IN (SELECT id FROM `' . $submission . '`)',
+    );
     $expectedImageCount = getenv('CI_TEST_BASELINE_IMAGE_COUNT');
     $actualImageCount = ciTestScalar('SELECT COUNT(*) FROM ' . IMAGES_TABLE);
-    if ($remainingIdentities !== 0 || $remainingUsers !== 0) {
+    if ($remainingIdentities !== 0 || $remainingUsers !== 0 || $remainingSubmissions !== 0 || $remainingArchiveRows !== 0) {
         ciTestFail('Fixture cleanup was incomplete.');
     }
     if (is_string($expectedImageCount)

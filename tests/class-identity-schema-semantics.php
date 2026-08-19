@@ -22,6 +22,8 @@ const CI_SCHEMA_SUFFIXES = [
     'audit_event',
     'role_group',
     'rate_limit_bucket',
+    'submission',
+    'archive_image',
 ];
 
 function schemaTestFail(string $message): never
