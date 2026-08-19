@@ -124,9 +124,12 @@ final class ClassIdentityPublicController
         ];
 
         if ($method === 'POST') {
-            // Piwigo CSRF is mandatory; Origin is additionally mandatory for
-            // these credential-bearing forms. Neither Referer nor JS is used
-            // as an authorization signal.
+            // A per-session Piwigo CSRF token is mandatory for every public
+            // credential-bearing form. A concrete browser Origin is checked
+            // as a second signal; Chromium is permitted to send the opaque
+            // literal `null` for a same-document HTML form navigation, in
+            // which case the CSRF token remains the authorization proof.
+            // Neither Referer nor JS is used as an authorization signal.
             ClassIdentityHttp::requireMutation();
             self::requireExactOrigin();
 
@@ -500,13 +503,20 @@ final class ClassIdentityPublicController
     private static function requireExactOrigin(): void
     {
         $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
-        if (!is_string($origin) || $origin === '' || $origin === 'null') {
-            ClassIdentityHttp::abort(403, '请求来源未被允许');
-        }
-
         $fetchSite = $_SERVER['HTTP_SEC_FETCH_SITE'] ?? null;
         if (is_string($fetchSite) && $fetchSite !== '' && $fetchSite !== 'same-origin') {
             ClassIdentityHttp::abort(403, '请求来源未被允许');
+        }
+
+        // ClassIdentityHttp::requireMutation() has already verified the
+        // session-bound Piwigo CSRF token before this method is called.
+        // Chromium can legitimately send Origin: null (and omit
+        // Sec-Fetch-Site) for a same-document form navigation. Treat that
+        // opaque value like an absent Origin rather than blocking a real
+        // browser Claim/Invite flow. A concrete foreign Origin and an
+        // explicit cross-site Fetch Metadata value still fail closed above.
+        if (!is_string($origin) || $origin === '' || strtolower($origin) === 'null') {
+            return;
         }
 
         if (!ClassIdentityHttp::originMatchesConfiguredRoot($origin)) {

@@ -31,51 +31,71 @@ final class ClassIdentityAnonymousGovernanceService
     {
         $this->requireAdmin();
         global $prefixeTable;
-        $rows = $this->repository->fetchAll(
-            'SELECT s.`id` AS `seat_id`,s.`state` AS `seat_state`,s.`pseudonym_subject`,a.`pseudonym_key_version`,'
-            . 'a.`state` AS `account_state`,p.`piwigo_user_id` '
-            . 'FROM `' . $this->repository->table('seat') . '` s '
+        $commentsTable = $prefixeTable . 'comments';
+        $baseSelect = 'SELECT s.`id` AS `seat_id`,s.`state` AS `seat_state`,s.`pseudonym_subject`,a.`pseudonym_key_version`,'
+            . 'a.`state` AS `account_state`,p.`piwigo_user_id` ';
+        $baseJoin = 'FROM `' . $this->repository->table('seat') . '` s '
             . 'JOIN `' . $this->repository->table('account') . '` a ON a.`seat_id`=s.`id` AND a.`current_marker`=1 '
-            . 'JOIN `' . $this->repository->table('principal') . '` p ON p.`account_id`=a.`id` '
-            . "WHERE s.`seat_type`='ANONYMOUS' ORDER BY s.`id`",
-        );
-        $candidates = array_map(static fn(array $row): array => [
-            'subject' => (string) ($row['pseudonym_subject'] ?? ''),
-            'key_version' => (int) ($row['pseudonym_key_version'] ?? 0),
-        ], $rows);
+            . 'JOIN `' . $this->repository->table('principal') . '` p ON p.`account_id`=a.`id` ';
+        $baseWhere = "WHERE s.`seat_type`='ANONYMOUS' ";
+
+        if ($this->tableExists($commentsTable)) {
+            // An alias is intentionally scoped to its discussion context.
+            // Return one administrative row per comment-bearing image rather
+            // than silently picking MIN(image_id) for a Seat: otherwise an
+            // administrator cannot explicitly resolve/audit the alias they
+            // actually saw on another photo.
+            $rows = $this->repository->fetchAll(
+                $baseSelect
+                . ',c.`image_id` AS `context_image_id`,COUNT(c.`id`) AS `comment_count`,MAX(c.`date`) AS `last_comment_at` '
+                . $baseJoin
+                . 'LEFT JOIN `' . $commentsTable . '` c ON c.`author_id`=p.`piwigo_user_id` '
+                . $baseWhere
+                . 'GROUP BY s.`id`,s.`state`,s.`pseudonym_subject`,a.`pseudonym_key_version`,a.`state`,p.`piwigo_user_id`,c.`image_id` '
+                . 'ORDER BY s.`id` ASC,CASE WHEN c.`image_id` IS NULL THEN 1 ELSE 0 END ASC,c.`image_id` ASC',
+            );
+        } else {
+            // The locked Piwigo Core always has comments, but a missing table
+            // during an interrupted maintenance state must not create an
+            // invented alias or identity mapping.
+            $rows = $this->repository->fetchAll(
+                $baseSelect . ',NULL AS `context_image_id`,0 AS `comment_count`,NULL AS `last_comment_at` '
+                . $baseJoin . $baseWhere . 'ORDER BY s.`id` ASC',
+            );
+        }
+
+        $candidateMap = [];
+        foreach ($rows as $candidate) {
+            $subject = (string) ($candidate['pseudonym_subject'] ?? '');
+            $version = (int) ($candidate['pseudonym_key_version'] ?? 0);
+            if ($subject !== '' && $version > 0) {
+                $candidateMap[$version . ':' . bin2hex($subject)] = ['subject' => $subject, 'key_version' => $version];
+            }
+        }
+        $candidates = array_values($candidateMap);
         foreach ($rows as &$row) {
             $row['alias'] = '匿名席位';
             $row['context_label'] = '尚无可展示的照片上下文';
-            $row['comment_count'] = 0;
-            $row['last_comment_at'] = null;
-            $row['context_image_id'] = 0;
-            $userId = (int) ($row['piwigo_user_id'] ?? 0);
-            if ($userId > 0 && $this->tableExists($prefixeTable . 'comments')) {
-                $comment = $this->repository->fetchOne(
-                    'SELECT COUNT(*) AS `count`,MAX(`date`) AS `last_comment_at`,MIN(`image_id`) AS `image_id` FROM `' . $prefixeTable . 'comments` WHERE `author_id` = ?',
-                    [$userId],
-                ) ?? [];
-                $row['comment_count'] = (int) ($comment['count'] ?? 0);
-                $row['last_comment_at'] = $comment['last_comment_at'] ?? null;
-                $imageId = (int) ($comment['image_id'] ?? 0);
-                if ($imageId > 0) {
-                    $row['context_image_id'] = $imageId;
-                    $secret = getenv(((int) ($row['pseudonym_key_version'] ?? 1)) === 1
-                        ? 'CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET'
-                        : 'CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET_V' . (int) $row['pseudonym_key_version']);
-                    if (is_string($secret) && strlen($secret) >= 32 && strlen((string) $row['pseudonym_subject']) === 16) {
-                        $row['alias'] = AnonymousPresenter::deriveAlias(
-                            $secret,
-                            AnonymousPresenter::CONTEXT_PHOTO,
-                            $imageId,
-                            (string) $row['pseudonym_subject'],
-                            (int) ($row['pseudonym_key_version'] ?? 1),
-                            $candidates,
-                        );
-                        $row['context_label'] = '照片 #' . $imageId;
-                    }
-                    unset($secret);
+            $row['comment_count'] = (int) ($row['comment_count'] ?? 0);
+            $row['last_comment_at'] = $row['last_comment_at'] ?? null;
+            $imageId = (int) ($row['context_image_id'] ?? 0);
+            $row['context_image_id'] = $imageId;
+            if ($imageId > 0) {
+                $secret = getenv(((int) ($row['pseudonym_key_version'] ?? 1)) === 1
+                    ? 'CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET'
+                    : 'CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET_V' . (int) $row['pseudonym_key_version']);
+                if (is_string($secret) && strlen($secret) >= 32 && strlen((string) $row['pseudonym_subject']) === 16) {
+                    $row['alias'] = AnonymousPresenter::deriveAlias(
+                        $secret,
+                        AnonymousPresenter::CONTEXT_PHOTO,
+                        $imageId,
+                        (string) $row['pseudonym_subject'],
+                        (int) ($row['pseudonym_key_version'] ?? 1),
+                        $candidates,
+                    );
+                    $row['context_label'] = '照片 #' . $imageId;
                 }
+                unset($secret);
             }
             $row['seat_state_label'] = self::stateLabel((string) ($row['seat_state'] ?? ''));
             $row['account_state_label'] = self::stateLabel((string) ($row['account_state'] ?? ''));

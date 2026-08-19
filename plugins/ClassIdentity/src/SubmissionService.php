@@ -405,8 +405,9 @@ final class ClassIdentitySubmissionService
             throw new RuntimeException('submission_original_missing');
         }
 
+        require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
         require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
-        if (!function_exists('add_uploaded_file') || !function_exists('associate_images_to_categories')) {
+        if (!function_exists('add_uploaded_file') || !function_exists('associate_images_to_categories') || !function_exists('invalidate_user_cache')) {
             throw new RuntimeException('piwigo_upload_pipeline_unavailable');
         }
 
@@ -464,6 +465,15 @@ final class ClassIdentitySubmissionService
                 'result' => 'SUCCESS',
             ]);
         });
+
+        // Piwigo persists a per-user gallery cache. A Family account that
+        // browsed an otherwise-empty HERITAGE root before this approval can
+        // retain that root in its cached forbidden-category list even though
+        // its role already has the correct group ACL. Invalidate after the
+        // approved image and Archive metadata are committed, so the next
+        // refresh rebuilds permissions from the current association. This is
+        // a visibility-cache repair, not an authorization bypass.
+        invalidate_user_cache();
 
         $this->safeUnlink($this->resolveRef((string) $row['thumbnail_ref'], true));
     }

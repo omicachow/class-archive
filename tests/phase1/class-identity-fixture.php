@@ -168,8 +168,17 @@ function ciTestSetup(string $runId): never
         . 'JOIN ' . CATEGORIES_TABLE . " c ON c.id = ic.category_id "
         . "WHERE c.permalink = 'fixture-living-reunion' ORDER BY i.id LIMIT 1",
     );
+    $heritageRows = query2array(
+        'SELECT DISTINCT i.id FROM ' . IMAGES_TABLE . ' i '
+        . 'JOIN ' . IMAGE_CATEGORY_TABLE . ' ic ON ic.image_id = i.id '
+        . 'JOIN ' . CATEGORIES_TABLE . " c ON c.id = ic.category_id "
+        . "WHERE c.permalink = 'fixture-heritage-graduation' ORDER BY i.id LIMIT 1",
+    );
     if (count($livingRows) !== 1) {
         ciTestFail('Synthetic LIVING fixture photo is missing or ambiguous.');
+    }
+    if (count($heritageRows) !== 1 || (int) ($heritageRows[0]['id'] ?? 0) <= 0) {
+        ciTestFail('Synthetic HERITAGE fixture photo is missing or ambiguous.');
     }
     $storagePath = preg_replace('#^\./#', '', (string) $livingRows[0]['path']);
     if (!is_string($storagePath)
@@ -186,6 +195,7 @@ function ciTestSetup(string $runId): never
         'baseline_image_count' => ciTestScalar('SELECT COUNT(*) FROM ' . IMAGES_TABLE),
         'unbound_normal' => $normal,
         'unbound_admin' => $admin,
+        'heritage_image_id' => (int) $heritageRows[0]['id'],
         'living_image_id' => (int) $livingRows[0]['id'],
         'living_original_path' => $storagePath,
     ]);

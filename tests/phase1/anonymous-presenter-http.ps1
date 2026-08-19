@@ -16,6 +16,7 @@ $script:assertions = 0
 $script:runId = ''
 $script:fixtureReady = $false
 $script:gateEnabled = $false
+$script:presenterValidationPassed = $false
 $script:compose = @()
 $script:anonymousAliasPrefix = -join @([char]0x533F, [char]0x540D, ' ')
 $script:anonymousAccountLabel = -join @([char]0x533F, [char]0x540D, [char]0x8D26, [char]0x53F7)
@@ -75,7 +76,7 @@ function Get-PropertyValue {
 function Invoke-Fixture {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('setup', 'resolve', 'gate', 'assert-posted', 'cleanup', 'recover-orphan')]
+        [ValidateSet('setup', 'resolve', 'gate', 'assert-posted', 'cleanup', 'cleanup-ready', 'recover-orphan')]
         [string]$Action,
         [Parameter(Mandatory = $true)][string]$RunId,
         [string]$Value = ''
@@ -99,18 +100,50 @@ function Invoke-WS {
         [Parameter(Mandatory = $true)][Microsoft.PowerShell.Commands.WebRequestSession]$Session,
         [Parameter(Mandatory = $true)][hashtable]$Body
     )
-    try {
-        return Invoke-RestMethod -Uri $Uri -Method Post -Body $Body -WebSession $Session -TimeoutSec 30
+    # Use HttpWebRequest rather than Invoke-RestMethod so deliberate 403
+    # probes expose their generic JSON body consistently in both Windows
+    # PowerShell 5.1 and pwsh 7. Invoke-RestMethod disposes a pwsh response
+    # before its exception reaches a catch block.
+    $pairs = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($entry in $Body.GetEnumerator()) {
+        $name = [Uri]::EscapeDataString([string]$entry.Key)
+        $values = if ($entry.Value -is [System.Collections.IEnumerable] -and $entry.Value -isnot [string]) { @($entry.Value) } else { @($entry.Value) }
+        foreach ($value in $values) {
+            $pairs.Add($name + '=' + [Uri]::EscapeDataString([string]$value))
+        }
     }
-    catch [Net.WebException] {
-        if ($null -eq $_.Exception.Response) { throw }
-        $response = [Net.HttpWebResponse]$_.Exception.Response
+    $payload = [Text.Encoding]::UTF8.GetBytes(($pairs -join '&'))
+    $request = [Net.HttpWebRequest]::Create($Uri)
+    $request.Method = 'POST'
+    $request.ContentType = 'application/x-www-form-urlencoded; charset=utf-8'
+    $request.ContentLength = $payload.Length
+    $request.CookieContainer = $Session.Cookies
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    $request.UserAgent = 'ClassArchive-AnonymousPresenter-Regression/1.0'
+    try {
+        $stream = $request.GetRequestStream()
+        try { $stream.Write($payload, 0, $payload.Length) } finally { $stream.Dispose() }
+        $response = $null
+        try { $response = [Net.HttpWebResponse]$request.GetResponse() }
+        catch [Net.WebException] {
+            if ($null -eq $_.Exception.Response) { throw }
+            $response = [Net.HttpWebResponse]$_.Exception.Response
+        }
+        $statusCode = [int]$response.StatusCode
+        $contentType = [string]$response.ContentType
         try {
             $reader = [IO.StreamReader]::new($response.GetResponseStream(), [Text.Encoding]::UTF8)
             try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
         } finally { $response.Dispose() }
         try { return $json | ConvertFrom-Json }
-        catch { throw 'Piwigo WS returned a non-generic error response.' }
+        catch {
+            $method = if ($Body.ContainsKey('method')) { [string]$Body['method'] } else { 'unknown' }
+            throw "Piwigo WS returned a non-generic error response for $method (HTTP $statusCode, type=$contentType, bytes=$([Text.Encoding]::UTF8.GetByteCount([string]$json)))."
+        }
+    }
+    finally {
+        [Array]::Clear($payload, 0, $payload.Length)
     }
 }
 
@@ -405,6 +438,7 @@ try {
     Assert-True ([bool]$resolution.mapping_ok) 'SYSTEM_ADMIN could not resolve the context pseudonym.'
     Assert-True ([bool]$resolution.audit_ok) 'Anonymous resolution did not append a successful Audit event.'
     Assert-True ([bool]$resolution.audit_redacted) 'Anonymous resolution Audit contained a raw alias or identity credential.'
+    $script:presenterValidationPassed = $true
 }
 catch {
     if ($script:fixtureReady -and $script:runId -match '^[a-f0-9]{12}$') {
@@ -414,7 +448,8 @@ catch {
 }
 finally {
     if ($script:fixtureReady -and $script:runId -match '^[a-f0-9]{12}$') {
-        try { [void](Invoke-Fixture -Action cleanup -RunId $script:runId) }
+        $cleanupAction = if ($script:presenterValidationPassed) { 'cleanup-ready' } else { 'cleanup' }
+        try { [void](Invoke-Fixture -Action $cleanupAction -RunId $script:runId) }
         catch { [Console]::Error.WriteLine('ANONYMOUS_PRESENTER_HTTP: targeted fixture cleanup failed.') }
     } elseif ($script:runId -match '^[a-f0-9]{12}$') {
         try { [void](Invoke-Fixture -Action recover-orphan -RunId $script:runId) } catch {}

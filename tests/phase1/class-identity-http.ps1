@@ -530,9 +530,10 @@ try {
     $script:fixtureReady = $true
     $script:baselineImageCount = [int]$setup.baseline_image_count
     if ($script:baselineImageCount -lt 1) { Stop-Setup 'Synthetic image baseline is empty.' }
+    $heritageImageId = [int]$setup.heritage_image_id
     $livingImageId = [int]$setup.living_image_id
     $livingOriginalPath = [string]$setup.living_original_path
-    if ($livingImageId -lt 1 -or $livingOriginalPath -notmatch '^upload/[A-Za-z0-9_./-]+$') {
+    if ($heritageImageId -lt 1 -or $livingImageId -lt 1 -or $livingOriginalPath -notmatch '^upload/[A-Za-z0-9_./-]+$') {
         Stop-Setup 'Fixture returned an unsafe LIVING media reference.'
     }
 
@@ -724,6 +725,17 @@ try {
     Invoke-FamilyAcceptance -FamilyUri $familyUri -Origin $origin -InvitationCode $familyInvitationReissued -Username $familyUsername -Password $familyPassword -RealName "Synthetic Family $runUpper" -Label 'family/reissued-token-success'
     $familySession = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username $familyUsername -Password $familyPassword -Label 'login/family'
     if ($null -eq $familySession) { Stop-Setup 'Family session unavailable.' }
+
+    # Warm the real Piwigo Family gallery cache while the HERITAGE root has
+    # no direct uploaded image. The approval below must invalidate that cache
+    # so the newly approved root-associated image is immediately visible on a
+    # normal Family refresh, without requiring a new login.
+    $familyWarmHeritage = Invoke-Http -Uri ([Uri]::new($baseUri, "picture.php?/$heritageImageId")) -Session $familySession
+    Assert-Status -Response $familyWarmHeritage -Expected @(200) -Label 'submission/family-warm-existing-heritage' | Out-Null
+    $familyWarmMainTag = [regex]::Match($familyWarmHeritage.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
+    if (-not $familyWarmMainTag.Success) {
+        Add-Failure 'submission/family-warm-existing-heritage' 'Family gallery cache warm-up did not render an authenticated HERITAGE viewer.'
+    }
 
     # Family Submission: the upload is a real multipart HTTP request. The
     # source is a tiny synthetic PNG created only for this run; no fixture

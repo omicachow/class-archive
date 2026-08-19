@@ -309,3 +309,24 @@ the fixture state is removed.
 wsl.exe -d Ubuntu --cd $PWD -- docker compose --env-file .env.piwigo -f infra/docker-compose.yml exec -T --user nginx piwigo php /workspace/tests/class-identity-anonymous-presenter.php
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase1\anonymous-presenter-http.ps1
 ```
+
+## Phase 1.5 browser acceptance
+
+`phase1/browser-qa.ps1` uses a locally installed Chrome executable and
+Playwright to drive real page navigation and form submission at
+`127.0.0.1:8090`; it does not use a public network or a mock browser. It creates
+a random, short-lived synthetic SYSTEM_ADMIN and exercises a real Classmate
+Claim, Family invitation/registration/upload/review, Teacher Claim, Anonymous
+comments in two contexts, explicit admin resolution, Chinese management pages,
+and desktop/mobile layout checks. The test makes no use of the long-lived
+administrator password. All temporary credentials live only in ignored
+short-lived files and the outer cleanup restores the canonical `72/72/8`
+media baseline.
+
+```powershell
+.\infra\scripts\dev.ps1 browser-qa
+```
+
+The latest successful browser run reported 234 assertions and 11 synthetic-only
+screenshots. Full procedure, screenshots and scope limits are recorded in
+[`docs/browser-qa-report.md`](../docs/browser-qa-report.md).
