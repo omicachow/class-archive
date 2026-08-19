@@ -329,16 +329,31 @@ final class Access
         // Piwigo's native user/profile/group HTML controllers write Core
         // identity state directly. In particular admin/profile.php includes
         // profile.php after PHPWG_ROOT_PATH is defined, so the public
-        // loc_begin_profile hook is never emitted. Until a scoped,
-        // ClassIdentity-audited adapter explicitly opens one operation, deny
-        // these complete business routes even to SYSTEM_ADMIN. Technical Core
-        // maintenance pages remain available.
-        $managedIdentityPages = ['profile', 'user_list', 'group_list', 'user_perm'];
+        // loc_begin_profile hook is never emitted. These complete business
+        // routes must never reach Core's direct
+        // mutation controllers. A SYSTEM_ADMIN clicking a legacy menu item
+        // is sent to the audited Class Archive console; non-GET requests and
+        // every non-admin principal remain fail-closed with 403. Technical
+        // Core maintenance pages remain available.
+        $managedIdentityPages = [
+            'profile' => 'identities',
+            'user_list' => 'identities',
+            'group_list' => 'system',
+            'group_perm' => 'system',
+            'user_perm' => 'identities',
+        ];
+        $businessTab = $managedIdentityPages[$page] ?? null;
         if (
             self::isEnforcementEnabled()
-            && in_array($page, $managedIdentityPages, true)
+            && $businessTab !== null
             && !self::hasCoreMutationPermit()
         ) {
+            $method = isset($_SERVER['REQUEST_METHOD']) && is_string($_SERVER['REQUEST_METHOD'])
+                ? strtoupper($_SERVER['REQUEST_METHOD'])
+                : 'GET';
+            if (in_array($method, ['GET', 'HEAD'], true) && self::isActiveSystemAdmin()) {
+                self::redirectNativeBusinessRoute($businessTab);
+            }
             self::denyCurrentRequest(403);
         }
 
@@ -380,7 +395,7 @@ final class Access
     {
         if (self::isActiveSystemAdmin()) {
             $links[] = [
-                'NAME' => 'Class Archive 管理控制台',
+                'NAME' => '班级档案馆管理控制台',
                 'URL' => 'admin.php?page=plugin-ClassIdentity-dashboard',
             ];
         }
@@ -699,6 +714,25 @@ final class Access
         echo defined('IN_WS')
             ? '{"stat":"fail","err":403,"message":"Access denied"}'
             : 'Access denied.';
+        exit;
+    }
+
+    private static function redirectNativeBusinessRoute(string $tab): never
+    {
+        if (!in_array($tab, ['identities', 'system'], true)) {
+            self::denyCurrentRequest(403);
+        }
+
+        if (!headers_sent()) {
+            header(
+                'Location: ' . get_root_url() . 'admin.php?page=plugin-ClassIdentity-' . rawurlencode($tab),
+                true,
+                303
+            );
+            header('Cache-Control: no-store, private');
+            header('Referrer-Policy: no-referrer');
+        }
+
         exit;
     }
 }

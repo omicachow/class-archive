@@ -54,9 +54,12 @@ activation, My, login and MediaGuard. Database reads are used only to assert
 domain invariants; they are never accepted as proof that an HTTP actor was
 authorized.
 
-The final coordinated baseline passes **87 real HTTP probes**. This number
-belongs to the current test version; rerun and refresh it after adding/removing
-a probe.
+The last coordinated baseline exercised **87 real HTTP probes**. On the
+2026-08-19 public-sync rerun, the same script returned `FAIL` with 87 probes
+and one known `provisioning/stale-visible` health assertion: seeded
+long-running operation/account/Seat counts were not surfaced as a production
+blocker. Until that assertion is fixed and rerun, this suite is an active
+release gate rather than a passing release claim.
 
 HTTP tests never read a SYSTEM_ADMIN password. Their localhost-only helper
 starts from one fresh unauthenticated Piwigo cookie and, through an explicit
@@ -214,7 +217,7 @@ verifies that pre-existing lock-file bytes were neither truncated nor deleted.
 enter this same non-blocking gate for their complete prepare through finalize
 workflow.
 
-The final Windows PowerShell 5.1 aggregate exits zero with:
+The previously recorded Windows PowerShell 5.1 aggregate exited zero with:
 
 | Gate | Result |
 |---|---:|
@@ -269,9 +272,9 @@ Those static/protocol results are supplemented by live session, password-reset,
 Pending-media and complete HTTP runs. They still do not constitute a fresh
 empty-volume installation rehearsal or synthetic creation-failure injection.
 
-After the final aggregate, `test-phase0` again passes the 72-image / 72-original /
-8 multi-album model, media permission checks and 290 + 16 + 38 media HTTP
-probes. The PHP-FPM wrapper uses umask `0007`, so request-generated private
+After a future green aggregate, `test-phase0` must again pass the 72-image /
+72-original / 8 multi-album model, media permission checks and 290 + 16 + 38
+media HTTP probes. The PHP-FPM wrapper uses umask `0007`, so request-generated private
 files remain other-denied. This does not neutralize an explicit permissive
 `chmod`; Community upload remains inactive until a post-write `0660` policy and
 real upload regression pass.

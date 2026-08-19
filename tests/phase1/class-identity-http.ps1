@@ -213,6 +213,20 @@ function Assert-Status {
     return $true
 }
 
+function Assert-NativeBusinessRouteRedirect {
+    param(
+        [Parameter(Mandatory = $true)]$Response,
+        [Parameter(Mandatory = $true)][string]$ExpectedTab,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not (Assert-Status -Response $Response -Expected @(303) -Label $Label)) { return }
+    $location = [string]$Response.Location
+    $expected = "plugin-ClassIdentity-$ExpectedTab"
+    if ($location -notmatch [regex]::Escape($expected)) {
+        Add-Failure $Label "legacy route did not redirect to the Class Archive $ExpectedTab console"
+    }
+}
+
 function Test-ImageMagic {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes)
     $prefixes = @(
@@ -455,9 +469,10 @@ try {
     $guestSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     Assert-Status (Invoke-Http -Uri $adminDashboardUri -Session $guestSession) @(403) 'admin/guest-denied' | Out-Null
     Assert-Status (Invoke-Http -Uri $adminDashboardUri -Session $adminSession) @(200) 'admin/system-admin-allowed' | Out-Null
-    # A fail-closed native business-route denial deliberately revokes that
-    # request's session. Use isolated admin sessions so these negative probes
-    # cannot invalidate the business-console session used by later mutations.
+    # Legacy native identity pages are not allowed to reach Core mutation
+    # controllers. A SYSTEM_ADMIN GET is redirected to the audited business
+    # console; isolated sessions keep these compatibility probes independent
+    # from the business-console session used by later mutations.
     $coreProfileAdminLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $script:composeBase -AdminUsername $adminUsername
     $coreUsersAdminLease = New-ClassArchiveSystemAdminSession -BaseUri $baseUri -ComposeBase $script:composeBase -AdminUsername $adminUsername
     $coreProfileAdminSession = $coreProfileAdminLease.Session
@@ -465,8 +480,8 @@ try {
     if ($null -eq $coreProfileAdminSession -or $null -eq $coreUsersAdminSession) {
         Stop-Setup 'SYSTEM_ADMIN native-route probe sessions unavailable.'
     }
-    Assert-Status (Invoke-Http -Uri $coreAdminProfileUri -Session $coreProfileAdminSession) @(403) 'admin/core-profile-business-route-denied' | Out-Null
-    Assert-Status (Invoke-Http -Uri $coreAdminUsersUri -Session $coreUsersAdminSession) @(403) 'admin/core-user-list-business-route-denied' | Out-Null
+    Assert-NativeBusinessRouteRedirect (Invoke-Http -Uri $coreAdminProfileUri -Session $coreProfileAdminSession) 'identities' 'admin/core-profile-business-route-redirected'
+    Assert-NativeBusinessRouteRedirect (Invoke-Http -Uri $coreAdminUsersUri -Session $coreUsersAdminSession) 'identities' 'admin/core-user-list-business-route-redirected'
 
     # Admin and public credential-bearing mutations both reject missing CSRF
     # and cross-origin submissions. Mutation targets are later asserted absent.

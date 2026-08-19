@@ -465,10 +465,12 @@ group, auth-key and API-key methods. Direct calls to at least
 they originate from the plugin's audited internal operation. Native password or
 business-group changes are redirected to ClassIdentity so session/key revoke,
 saga state and Audit cannot be bypassed. The native Piwigo `profile`,
-`user_list`, `group_list` and `user_perm` business routes are currently denied
-even to SYSTEM_ADMIN unless an audited internal permit is active; technical
-Core maintenance pages remain available. A future scoped profile adapter must
-be implemented and tested before these routes can be reopened.
+`user_list`, `group_list` and `user_perm` business routes never reach Core's
+direct mutation controllers. A SYSTEM_ADMIN GET from a legacy menu item is
+redirected to the audited Class Archive `identities` or `system` console;
+POST/mutation requests and non-admin principals remain denied. Technical Core
+maintenance pages remain available. A future scoped profile adapter must be
+implemented and tested before any native business controller can be reopened.
 
 CapabilityGuard separately classifies Web API and direct picture/community
 mutations. Known reads and explicitly allowed role actions proceed to Core;

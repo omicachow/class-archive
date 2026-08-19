@@ -457,29 +457,7 @@ final class ClassIdentityPublicController
             ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
 
-        $originParts = parse_url($origin);
-        $rootParts = parse_url(get_absolute_root_url());
-        if (!is_array($originParts) || !is_array($rootParts)) {
-            ClassIdentityHttp::abort(403, '请求来源未被允许');
-        }
-        if (isset($originParts['user']) || isset($originParts['pass']) || isset($originParts['path'])
-            || isset($originParts['query']) || isset($originParts['fragment'])
-        ) {
-            ClassIdentityHttp::abort(403, '请求来源未被允许');
-        }
-
-        $originScheme = strtolower((string) ($originParts['scheme'] ?? ''));
-        $originHost = strtolower((string) ($originParts['host'] ?? ''));
-        $rootScheme = strtolower((string) ($rootParts['scheme'] ?? ''));
-        $rootHost = strtolower((string) ($rootParts['host'] ?? ''));
-        $originPort = isset($originParts['port']) ? (int) $originParts['port'] : self::defaultPort($originScheme);
-        $rootPort = isset($rootParts['port']) ? (int) $rootParts['port'] : self::defaultPort($rootScheme);
-
-        if ($originScheme === '' || $originHost === ''
-            || !hash_equals($rootScheme, $originScheme)
-            || !hash_equals($rootHost, $originHost)
-            || $originPort !== $rootPort
-        ) {
+        if (!ClassIdentityHttp::originMatchesConfiguredRoot($origin)) {
             ClassIdentityHttp::abort(403, '请求来源未被允许');
         }
     }
@@ -604,11 +582,6 @@ final class ClassIdentityPublicController
     private static function nullableText(mixed $value): ?string
     {
         return is_string($value) && $value !== '' ? $value : null;
-    }
-
-    private static function defaultPort(string $scheme): int
-    {
-        return $scheme === 'https' ? 443 : 80;
     }
 
     private static function consumePublicAttempt(

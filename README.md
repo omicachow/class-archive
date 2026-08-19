@@ -17,8 +17,10 @@ The engineering rule remains:
 ## Current state
 
 The photo-first Phase 0 media foundation and Phase 1 identity/control-plane
-foundation are runnable on this workstation. The final coordinated localhost
-Phase 1 and Phase 0 regressions pass on the current tree:
+foundation are runnable on this workstation. This is an active engineering
+baseline, not a production release. The latest public-sync verification is
+reported explicitly below so that a green historical baseline is not confused
+with the current working-tree result:
 
 - Piwigo Core 16.4.0 in the pinned official 16.4.0a container image.
 - MariaDB 11.8.8, both images locked by immutable digest.
@@ -50,6 +52,22 @@ Phase 1 and Phase 0 regressions pass on the current tree:
 - 72 deterministic synthetic images across private HERITAGE and LIVING album
   trees; no real class data is used.
 
+### Verification status at public sync (2026-08-19)
+
+- A direct run of `tests/phase1/class-identity-http.ps1` completed with
+  `FAIL`, 87 probes and one known failure:
+  `provisioning/stale-visible` did not expose the seeded long-running
+  operation/account/Seat counts as a production blocker. This is a health and
+  dashboard assertion; it is not evidence that the MediaGuard URL-authorization
+  boundary passed or failed.
+- The last coordinated Phase 0/Phase 1 baseline remains useful evidence, but
+  it must be rerun after source or runtime changes. The public repository does
+  not claim a release gate is green while the current stale-provisioning
+  assertion remains open.
+- Focused media, pending-media, anonymous-presenter and credential protocol
+  evidence is retained in the test and phase documents; each document labels
+  whether its result is a current run, a prior baseline, or still pending.
+
 The architecture decision is in
 [`docs/photo-first-architecture-decision.md`](docs/photo-first-architecture-decision.md).
 The implemented identity boundary and its remaining work are specified in
@@ -60,6 +78,11 @@ vendor-neutral deployment/coexistence gates are in
 [`docs/nas-deployment.md`](docs/nas-deployment.md).
 Historical HumHub evidence remains under `docs/evaluations/humhub/` and on the
 `codex/humhub-first-snapshot` branch.
+
+Public/private boundaries and the checklist for synchronizing future progress
+are in [`docs/public-development.md`](docs/public-development.md). Security
+reports belong in a private GitHub Security Advisory; see
+[`SECURITY.md`](SECURITY.md).
 
 > Development only: the former known-media-URL P0 blocker now passes a 290-probe
 > real HTTP matrix that verifies response bytes as well as status and headers.

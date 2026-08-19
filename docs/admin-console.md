@@ -123,10 +123,12 @@ those pages.
 
 Conversely, Piwigo's native `profile`, `user_list`, `group_list` and
 `user_perm` routes can mutate business identity state outside the ClassIdentity
-saga/Audit contract. They are currently denied even to SYSTEM_ADMIN unless the
-plugin holds a narrowly scoped internal permit. Technical pages that do not
-bypass ClassIdentity remain available. Reopening a blocked business route
-requires a dedicated audited adapter and negative HTTP tests.
+saga/Audit contract. A SYSTEM_ADMIN GET from one of these legacy menu items is
+redirected to the corresponding Class Archive console (`identities` or
+`system`); the native controller is never reached. POST/mutation requests and
+all non-admin principals remain HTTP 403. Technical pages that do not bypass
+ClassIdentity remain available. Reopening a blocked business route requires a
+dedicated audited adapter and negative HTTP tests.
 
 ## Audit and request safety
 

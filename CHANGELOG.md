@@ -5,6 +5,20 @@ committed separately.
 
 ## Unreleased
 
+### Public synchronization status — 2026-08-19
+
+- Audited the reachable Git history and current tracked tree before public
+  synchronization. No real names, photos, mailboxes, credentials, database
+  dumps, NAS paths or deployment keys are tracked; generated fixtures remain
+  synthetic and runtime secrets stay in ignored local files.
+- The latest direct ClassIdentity HTTP run is intentionally recorded as
+  `FAIL` (87 probes, one `provisioning/stale-visible` health assertion). The
+  historical all-green coordinated baseline is retained as evidence, but is
+  not presented as current release approval.
+- Added the public-development and security boundary documents. Future work is
+  synchronized as source-only commits; private deployment data is never used
+  as a fixture or release artifact.
+
 ### Phase 1 ClassIdentity and independent administrator control plane
 
 - Set the private gallery's active/default language to Simplified Chinese
@@ -76,10 +90,11 @@ committed separately.
   maintenance HTTP 11 probes, runtime surface 45 probes / 352 assertions,
   enforcement-fault HTTP 116 assertions, capability HTTP 43 assertions,
   Pending-media HTTP 75 probes and anonymous-presentation HTTP 211 assertions.
-- The coordinated current-tree `test-phase1` and `test-phase0` runs both exit
-  zero. Phase 0 preserves 72 images / 72 originals / 8 multi-album images and
-  passes permissions, UI, access, MediaGuard 290, tiny-preview 16 and mutable
-  state 38 probes; the opt-in database-outage state suite passes 40 probes.
+- A prior coordinated current-tree `test-phase1` and `test-phase0` baseline
+  exited zero and preserved 72 images / 72 originals / 8 multi-album images.
+  The 2026-08-19 public-sync rerun is not green because the
+  `provisioning/stale-visible` health assertion remains open; rerun the full
+  aggregate after fixing it before treating these counts as release approval.
 - Added project `LICENSE` (`GPL-2.0-or-later`) and `NOTICE` with third-party
   ownership/license boundaries.
 - Kept production blocked on Admin MFA, persisted digest-bound MediaGuard HTTP

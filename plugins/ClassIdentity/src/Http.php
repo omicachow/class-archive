@@ -247,6 +247,60 @@ final class ClassIdentityHttp
         }
     }
 
+    /**
+     * Validate a browser Origin against the configured site origin.
+     *
+     * Local development commonly switches between localhost and
+     * 127.0.0.1. They are accepted only as an explicit loopback alias pair;
+     * arbitrary Host/Origin values never become trusted by this convenience.
+     */
+    public static function originMatchesConfiguredRoot(string $origin): bool
+    {
+        if ($origin === '' || strtolower($origin) === 'null') {
+            return false;
+        }
+
+        $originParts = parse_url($origin);
+        $rootParts = parse_url(get_absolute_root_url());
+        if (!is_array($originParts) || !is_array($rootParts)) {
+            return false;
+        }
+        if (
+            isset($originParts['user']) || isset($originParts['pass'])
+            || isset($originParts['path']) || isset($originParts['query'])
+            || isset($originParts['fragment'])
+        ) {
+            return false;
+        }
+
+        $originScheme = strtolower((string) ($originParts['scheme'] ?? ''));
+        $originHost = strtolower((string) ($originParts['host'] ?? ''));
+        $rootScheme = strtolower((string) ($rootParts['scheme'] ?? ''));
+        $rootHost = strtolower((string) ($rootParts['host'] ?? ''));
+        $originPort = isset($originParts['port'])
+            ? (int) $originParts['port']
+            : self::defaultPort($originScheme);
+        $rootPort = isset($rootParts['port'])
+            ? (int) $rootParts['port']
+            : self::defaultPort($rootScheme);
+
+        if (
+            $originScheme === '' || $originHost === ''
+            || !hash_equals($rootScheme, $originScheme)
+            || $rootPort !== $originPort
+        ) {
+            return false;
+        }
+
+        if (hash_equals($rootHost, $originHost)) {
+            return true;
+        }
+
+        $loopbackHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
+        return in_array($rootHost, $loopbackHosts, true)
+            && in_array($originHost, $loopbackHosts, true);
+    }
+
     public static function requireReason(string $field = 'reason'): string
     {
         $reason = $_POST[$field] ?? null;
@@ -386,24 +440,7 @@ final class ClassIdentityHttp
             self::abort(403, '请求来源未被允许');
         }
 
-        $originParts = parse_url($origin);
-        $rootParts = parse_url(get_absolute_root_url());
-        if (!is_array($originParts) || !is_array($rootParts)) {
-            self::abort(403, '请求来源未被允许');
-        }
-
-        $originScheme = strtolower((string) ($originParts['scheme'] ?? ''));
-        $originHost = strtolower((string) ($originParts['host'] ?? ''));
-        $originPort = isset($originParts['port']) ? (int) $originParts['port'] : self::defaultPort($originScheme);
-        $rootScheme = strtolower((string) ($rootParts['scheme'] ?? ''));
-        $rootHost = strtolower((string) ($rootParts['host'] ?? ''));
-        $rootPort = isset($rootParts['port']) ? (int) $rootParts['port'] : self::defaultPort($rootScheme);
-
-        if ($originScheme === '' || $originHost === ''
-            || !hash_equals($rootScheme, $originScheme)
-            || !hash_equals($rootHost, $originHost)
-            || $rootPort !== $originPort
-        ) {
+        if (!self::originMatchesConfiguredRoot($origin)) {
             self::abort(403, '请求来源未被允许');
         }
     }
