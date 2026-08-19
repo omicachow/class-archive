@@ -18,6 +18,7 @@ defined('CLASS_IDENTITY_PATH') or define(
 defined('CLASS_IDENTITY_VERSION') or define('CLASS_IDENTITY_VERSION', '0.1.0');
 
 require_once CLASS_IDENTITY_PATH . 'src/Repository.php';
+require_once CLASS_IDENTITY_PATH . 'src/Schema.php';
 require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
