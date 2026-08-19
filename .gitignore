@@ -37,6 +37,9 @@ tests/fixtures/generated-images/
 .codex_tmp/
 .idea/
 .vscode/
+.immich-spike/
+infra/immich-spike/.env
+infra/immich-spike/source/
 .phpunit.result.cache
 vendor/
 

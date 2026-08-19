@@ -1,0 +1,90 @@
+# Phase 2 experimental stack. It has no connection to the Piwigo network and
+# must only be started after verify-immich-spike.ps1 accepts the upstream lock.
+name: class-archive-immich-spike
+
+services:
+  immich-server:
+    profiles: ["immich-spike"]
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:?Set IMMICH_VERSION in infra/immich-spike/.env}
+    env_file: ${IMMICH_SPIKE_ENV_FILE:-.env}
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Deliberately no host port. A future Class Archive Gateway will be the
+    # only localhost listener and will issue MediaGuard URLs after policy
+    # filtering. Direct Immich routes must never reach a browser.
+    expose:
+      - "2283"
+    volumes:
+      # Immich-owned cache/index data. This is never a Piwigo original mount.
+      - immich_upload:/data
+      # The only Piwigo originals exposed to the spike. Both mounts are
+      # read-only and no Piwigo database, data, derivative or script volume is
+      # available in this compose project.
+      - piwigo_uploads:/external/piwigo-upload:ro
+      - piwigo_galleries:/external/piwigo-galleries:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks: [immich_internal]
+    restart: "no"
+
+  immich-machine-learning:
+    profiles: ["immich-ml"]
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:?Set IMMICH_VERSION in infra/immich-spike/.env}
+    env_file: ${IMMICH_SPIKE_ENV_FILE:-.env}
+    volumes:
+      - immich_model_cache:/cache
+    networks: [immich_internal]
+    restart: "no"
+
+  redis:
+    profiles: ["immich-spike"]
+    image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+    networks: [immich_internal]
+    restart: "no"
+
+  database:
+    profiles: ["immich-spike"]
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    environment:
+      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD:?Set IMMICH_DB_PASSWORD in infra/immich-spike/.env}
+      POSTGRES_USER: ${IMMICH_DB_USERNAME:-postgres}
+      POSTGRES_DB: ${IMMICH_DB_DATABASE_NAME:-immich}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      - immich_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --dbname=$${POSTGRES_DB} --username=$${POSTGRES_USER} || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+    shm_size: 128mb
+    networks: [immich_internal]
+    restart: "no"
+
+networks:
+  immich_internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  # Persistent state belonging solely to the disposable Immich spike.
+  immich_upload:
+    name: class_archive_immich_spike_upload
+  immich_model_cache:
+    name: class_archive_immich_spike_model_cache
+  immich_db:
+    name: class_archive_immich_spike_db
+  # Existing Piwigo originals, deliberately read-only in the server service.
+  piwigo_uploads:
+    external: true
+    name: ${PIWIGO_UPLOADS_VOLUME:?Set PIWIGO_UPLOADS_VOLUME in infra/immich-spike/.env}
+  piwigo_galleries:
+    external: true
+    name: ${PIWIGO_GALLERIES_VOLUME:?Set PIWIGO_GALLERIES_VOLUME in infra/immich-spike/.env}

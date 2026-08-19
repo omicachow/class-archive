@@ -1,0 +1,44 @@
+{
+  "lock_version": 1,
+  "upstream": {
+    "repository": "https://github.com/immich-app/immich.git",
+    "version": "v3.1.0",
+    "commit": "8aa95c67470a02a8ddedf03c2e52963af33065ff",
+    "license": "AGPL-3.0-only",
+    "commit_verification": "git_ls_remote_tag_2026-08-19",
+    "source_checkout": "PENDING_LOCAL_CLONE"
+  },
+  "images": {
+    "immich_server": {
+      "reference": "ghcr.io/immich-app/immich-server:v3.1.0",
+      "digest": null,
+      "status": "PENDING_LOCAL_PULL_AND_DIGEST_VERIFICATION"
+    },
+    "immich_machine_learning": {
+      "reference": "ghcr.io/immich-app/immich-machine-learning:v3.1.0",
+      "digest": null,
+      "status": "PENDING_LOCAL_PULL_AND_DIGEST_VERIFICATION"
+    },
+    "postgres": {
+      "reference": "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0",
+      "digest": "sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23"
+    },
+    "valkey": {
+      "reference": "docker.io/valkey/valkey:9",
+      "digest": "sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411"
+    }
+  },
+  "admission": {
+    "synthetic_media_only": true,
+    "localhost_only": true,
+    "piwigo_original_mounts_read_only": true,
+    "piwigo_database_mount": "FORBIDDEN",
+    "piwigo_data_mount": "FORBIDDEN",
+    "browser_direct_immich_media": "FORBIDDEN"
+  },
+  "local_acquisition": {
+    "status": "BLOCKED_BY_UPSTREAM_TRANSFER_FAILURE",
+    "detail": "2026-08-19: git clone reset during transfer and ghcr image pull did not complete; no Immich image or source checkout is present locally.",
+    "effect": "No Immich service may be started. Runtime feasibility remains pending."
+  }
+}
