@@ -1035,6 +1035,7 @@ SQL);
             'rate_limit_bucket',
             'submission',
             'archive_image',
+            'photo',
         ];
         $missing = [];
         try {
@@ -1576,6 +1577,7 @@ SQL, 'ii', [$id, $id]) ?? 0);
             'rate_limit_bucket',
             'submission',
             'archive_image',
+            'photo',
         ];
         if (!in_array($suffix, $allowed, true)) {
             throw new InvalidArgumentException('class_identity_unknown_table');

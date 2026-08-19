@@ -24,6 +24,7 @@ const CI_SCHEMA_SUFFIXES = [
     'rate_limit_bucket',
     'submission',
     'archive_image',
+    'photo',
 ];
 
 function schemaTestFail(string $message): never

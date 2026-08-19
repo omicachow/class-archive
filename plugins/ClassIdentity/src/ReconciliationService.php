@@ -86,6 +86,7 @@ final class ReconciliationService
 
         $submissionTable = '`' . $this->prefix . 'class_identity_submission`';
         $archiveTable = '`' . $this->prefix . 'class_identity_archive_image`';
+        $photoTable = '`' . $this->prefix . 'class_identity_photo`';
         $submissions = $this->all(
             'SELECT `id`,`state`,`storage_ref`,`thumbnail_ref`,`approved_image_id`,`reviewed_at` FROM ' . $submissionTable . ' ORDER BY `id` ASC'
         );
@@ -140,6 +141,51 @@ final class ReconciliationService
             $issues[] = self::issue('ARCHIVE_METADATA_IMAGE_MISSING', 'MANUAL_REVIEW', 'archive:' . (int) ($row['id'] ?? 0));
         }
 
+        // Canonical mappings are created lazily by the future gateway so an
+        // existing Piwigo-only installation stays healthy while Immich is
+        // absent. Once a map exists, however, any uncertain target, checksum
+        // or reference is a manual-review issue rather than an automatic
+        // rebind. The opaque UUID is hashed in the report to avoid turning the
+        // maintenance artifact into a public identifier source.
+        $photoMappings = $this->all(
+            'SELECT `class_photo_id`,`piwigo_image_id`,`source_submission_id`,`media_checksum`,`media_reference`,`state` '
+            . 'FROM ' . $photoTable . ' ORDER BY `created_at` ASC'
+        );
+        foreach ($photoMappings as $mapping) {
+            $subject = 'photo:' . hash('sha256', (string) ($mapping['class_photo_id'] ?? ''));
+            $state = (string) ($mapping['state'] ?? '');
+            $imageId = $mapping['piwigo_image_id'] === null ? 0 : (int) $mapping['piwigo_image_id'];
+            $submissionId = $mapping['source_submission_id'] === null ? 0 : (int) $mapping['source_submission_id'];
+            if ($state === 'PENDING') {
+                $pending = $submissionId > 0
+                    ? $this->all('SELECT `state`,`storage_ref` FROM ' . $submissionTable . ' WHERE `id` = ' . $submissionId . ' LIMIT 1')
+                    : [];
+                if (count($pending) !== 1 || (string) ($pending[0]['state'] ?? '') !== 'PENDING') {
+                    $issues[] = self::issue('CANONICAL_PENDING_MAPPING_INVALID', 'MANUAL_REVIEW', $subject);
+                }
+                continue;
+            }
+            if (!in_array($state, ['ACTIVE', 'STALE', 'RETIRED'], true) || $imageId <= 0 || !isset($imageById[$imageId])) {
+                $issues[] = self::issue('CANONICAL_PHOTO_MAPPING_TARGET_INVALID', 'MANUAL_REVIEW', $subject);
+                continue;
+            }
+            if ($state !== 'ACTIVE') {
+                $issues[] = self::issue('CANONICAL_PHOTO_MAPPING_NOT_ACTIVE', 'MANUAL_REVIEW', $subject);
+                continue;
+            }
+            $reference = self::normalizePiwigoPath((string) ($mapping['media_reference'] ?? ''));
+            $file = $reference === null ? null : self::existingPiwigoFile($reference);
+            $checksum = is_string($file) ? hash_file('sha256', $file) : false;
+            if (
+                $reference === null
+                || $reference !== $imageById[$imageId]
+                || !is_string($checksum)
+                || !hash_equals((string) ($mapping['media_checksum'] ?? ''), hex2bin($checksum) ?: '')
+            ) {
+                $issues[] = self::issue('CANONICAL_PHOTO_MAPPING_DRIFT', 'MANUAL_REVIEW', $subject);
+            }
+        }
+
         foreach (self::discoverOriginals() as $path) {
             if (!isset($managedPaths[$path])) {
                 $issues[] = self::issue('UNMANAGED_ORIGINAL', 'QUARANTINE', 'file:' . hash('sha256', $path));
@@ -162,6 +208,7 @@ final class ReconciliationService
             'cleanup_candidates' => $candidates,
             'derivative' => $derivative,
             'checked_images' => count($images),
+            'canonical_photo_mappings' => count($photoMappings),
         ];
     }
 

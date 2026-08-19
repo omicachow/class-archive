@@ -398,6 +398,7 @@ SQL, [$piwigoUserId]);
             'rate_limit_bucket',
             'submission',
             'archive_image',
+            'photo',
         ];
     }
 }

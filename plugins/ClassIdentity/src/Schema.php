@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 5;
+    public const CURRENT_VERSION = 6;
 
     private const COLLATION = 'utf8mb4_unicode_ci';
 
@@ -181,6 +181,11 @@ final class Schema
                 'name' => '0005_submissions_archive_metadata',
                 'signature' => 'v1:family-pending-submission:admin-review:heritage-only:archive-date-precision:innodb:utf8mb4',
                 'method' => 'migrationSubmissionsAndArchive',
+            ],
+            6 => [
+                'name' => '0006_class_archive_photo_mapping',
+                'signature' => 'v1:opaque-class-photo-uuid:piwigo-reference:nullable-immich-link:pending-provenance:fail-closed-state:innodb:utf8mb4',
+                'method' => 'migrationClassArchivePhotoMapping',
             ],
         ];
     }
@@ -588,6 +593,54 @@ SQL);
         ]);
     }
 
+    /**
+     * Canonical ClassArchivePhoto mapping.
+     *
+     * Piwigo image tables are MyISAM in the pinned runtime, so an FK to a
+     * Piwigo image row is neither possible nor claimed here. The mapping keeps
+     * an opaque UUID independent of both Piwigo and Immich ids; reconciliation
+     * verifies that the external Piwigo row/file still agrees before any API
+     * projection uses it. Pending records may point only to the already-owned
+     * InnoDB submission row and can never carry an Immich linkage.
+     */
+    private function migrationClassArchivePhotoMapping(): void
+    {
+        $photo = $this->quotedTable('photo');
+        $submission = $this->quotedTable('submission');
+        // MariaDB/InnoDB foreign-key names are schema-global.  The prefix
+        // suffix keeps a disposable semantic-test schema from colliding with
+        // the live v6 constraint while the fingerprint deliberately checks
+        // FK meaning rather than a deployment-specific constraint name.
+        $submissionForeignKey = 'fk_ci_photo_submission_' . substr(hash('sha256', $this->table('photo')), 0, 12);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$photo} (
+  `class_photo_id` BINARY(16) NOT NULL,
+  `piwigo_image_id` MEDIUMINT(8) UNSIGNED NULL,
+  `source_submission_id` BIGINT UNSIGNED NULL,
+  `immich_asset_id` CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  `media_checksum` BINARY(32) NOT NULL,
+  `media_reference` VARCHAR(512) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`class_photo_id`),
+  UNIQUE KEY `uq_ci_photo_piwigo_image` (`piwigo_image_id`),
+  UNIQUE KEY `uq_ci_photo_submission` (`source_submission_id`),
+  UNIQUE KEY `uq_ci_photo_immich_asset` (`immich_asset_id`),
+  KEY `idx_ci_photo_state_updated` (`state`, `updated_at`),
+  CONSTRAINT `{$submissionForeignKey}` FOREIGN KEY (`source_submission_id`) REFERENCES {$submission} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_photo_state` CHECK (`state` IN ('PENDING', 'ACTIVE', 'STALE', 'RETIRED')),
+  CONSTRAINT `chk_ci_photo_target` CHECK ((`state` = 'PENDING' AND `piwigo_image_id` IS NULL AND `source_submission_id` IS NOT NULL AND `immich_asset_id` IS NULL) OR (`state` IN ('ACTIVE', 'STALE', 'RETIRED') AND `piwigo_image_id` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('photo', [
+            'class_photo_id', 'piwigo_image_id', 'source_submission_id', 'immich_asset_id',
+            'media_checksum', 'media_reference', 'state', 'created_at', 'updated_at',
+        ]);
+    }
+
     private function ensureMigrationLedger(): void
     {
         $ledger = $this->quotedTable('migration');
@@ -771,6 +824,9 @@ SQL);
             'rate_limit_bucket' => 'e5717a295f89b6554ff8c6a2c8e526433c7de4922a5344e1c82578829787577a',
             'submission' => '7f6b4832baf74dd5ccdfbeffe20fb849e1cd8e3e7b32f324869efd1b34bb9c28',
             'archive_image' => '591fd3a21b5f9bd559a00913f7ff13e4115608b460f78452b40cddad3acc4c7a',
+            // Generated from the locked MariaDB 11.8.8 information_schema
+            // contract by tests/phase2/class-photo-schema-semantics.php.
+            'photo' => 'd165182447f6d8eef53add07cca881edd8b9273e5ba56411a81c959aaebd42e4',
         ];
     }
 
@@ -1066,6 +1122,7 @@ SQL);
             'rate_limit_bucket',
             'submission',
             'archive_image',
+            'photo',
         ];
     }
 

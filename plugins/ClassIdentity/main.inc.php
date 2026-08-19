@@ -19,6 +19,8 @@ defined('CLASS_IDENTITY_VERSION') or define('CLASS_IDENTITY_VERSION', '0.1.0');
 
 require_once CLASS_IDENTITY_PATH . 'src/Repository.php';
 require_once CLASS_IDENTITY_PATH . 'src/Schema.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhoto.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhotoMappingService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
@@ -32,6 +34,10 @@ require_once CLASS_IDENTITY_PATH . 'src/MediaAttestation.php';
 require_once CLASS_IDENTITY_PATH . 'src/ReconciliationService.php';
 require_once CLASS_IDENTITY_PATH . 'src/MaintenanceStatus.php';
 require_once CLASS_IDENTITY_PATH . 'src/BackupRestoreEvidence.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/Contracts.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayPolicy.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayService.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/PiwigoGatewayAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {

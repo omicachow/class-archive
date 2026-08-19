@@ -260,6 +260,7 @@ function ciTestState(string $runId): never
     $operation = $repository->table('operation');
     $submission = $repository->table('submission');
     $archiveImage = $repository->table('archive_image');
+    $photo = $repository->table('photo');
     $webmasterId = (int) ($conf['webmaster_id'] ?? 0);
 
     $adminRows = query2array(
@@ -716,6 +717,7 @@ function ciTestCleanup(string $runId): never
     $audit = $repository->table('audit_event');
     $submission = $repository->table('submission');
     $archiveImage = $repository->table('archive_image');
+    $photo = $repository->table('photo');
 
     $identityRows = query2array(
         'SELECT id, roster_code FROM `' . $identity . '` WHERE roster_code IN ('
@@ -776,9 +778,10 @@ function ciTestCleanup(string $runId): never
     ciTestCleanupSubmissionMedia($identityIds, $submission, $archiveImage);
 
     $repository->transaction(static function (\ClassIdentity\Repository $tx) use (
-        $identity, $seat, $account, $principal, $operation, $token, $audit, $submission, $archiveImage,
+        $identity, $seat, $account, $principal, $operation, $token, $audit, $submission, $archiveImage, $photo,
         $idList, $accountList, $principalList,
     ): void {
+        $tx->execute('DELETE FROM `' . $photo . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $archiveImage . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $submission . '` WHERE identity_id IN (' . $idList . ')');
         $tx->execute(
@@ -823,9 +826,12 @@ function ciTestCleanup(string $runId): never
     $remainingArchiveRows = ciTestScalar(
         'SELECT COUNT(*) FROM `' . $archiveImage . '` WHERE source_submission_id NOT IN (SELECT id FROM `' . $submission . '`)',
     );
+    $remainingPhotoRows = ciTestScalar(
+        'SELECT COUNT(*) FROM `' . $photo . '` WHERE source_submission_id NOT IN (SELECT id FROM `' . $submission . '`) AND source_submission_id IS NOT NULL',
+    );
     $expectedImageCount = getenv('CI_TEST_BASELINE_IMAGE_COUNT');
     $actualImageCount = ciTestScalar('SELECT COUNT(*) FROM ' . IMAGES_TABLE);
-    if ($remainingIdentities !== 0 || $remainingUsers !== 0 || $remainingSubmissions !== 0 || $remainingArchiveRows !== 0) {
+    if ($remainingIdentities !== 0 || $remainingUsers !== 0 || $remainingSubmissions !== 0 || $remainingArchiveRows !== 0 || $remainingPhotoRows !== 0) {
         ciTestFail('Fixture cleanup was incomplete.');
     }
     if (is_string($expectedImageCount)

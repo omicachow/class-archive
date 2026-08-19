@@ -23,6 +23,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
         'required' => [
             'main.inc.php', 'maintain.class.php', 'admin.php',
             'src/Schema.php', 'src/Repository.php', 'src/Audit.php',
+            'src/ClassArchivePhoto.php', 'src/ClassArchivePhotoMappingService.php',
             'src/Access.php', 'src/CoreAdapter.php', 'src/CapabilityGuard.php',
             'src/RateLimiter.php', 'src/ProvisioningService.php',
             'src/AdminService.php', 'src/AnonymousPresenter.php',
@@ -31,6 +32,8 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/AnonymousGovernanceService.php', 'src/MediaAttestation.php',
             'src/ReconciliationService.php', 'src/MaintenanceStatus.php',
             'src/BackupRestoreEvidence.php',
+            'src/Gateway/Contracts.php', 'src/Gateway/GatewayPolicy.php',
+            'src/Gateway/GatewayService.php', 'src/Gateway/PiwigoGatewayAdapter.php',
         ],
     ],
 ];

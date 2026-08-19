@@ -1,0 +1,138 @@
+# Class Archive Gateway 合约（Phase 2 预运行态）
+
+## 证据等级
+
+本文件只描述当前已实现的 Class Archive 自有边界。以下等级绝不混用：
+
+| 项目 | 当前等级 | 含义 |
+| --- | --- | --- |
+| `ClassArchivePhoto` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
+| Gateway policy、列表、时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
+| Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
+| Immich Adapter、技术用户、外部图库扫描 | 未开始 | Gateway 尚不会连接实际 Immich runtime |
+| 浏览器 API/UI | 未开始 | 当前 `/api` 合约尚未绑定到 HTTP 路由 |
+
+因此只有 [`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1)
+可表述为 `RUNTIME_TESTED`，且仅限隔离启动；本文件的 Gateway 合约仍不得表述为
+Immich integration 或 `BROWSER_E2E_TESTED`。
+
+## Canonical ClassArchivePhoto
+
+`ClassArchivePhoto` 是唯一的公开照片身份：RFC 4122 v4 UUID。它不是
+Piwigo `image_id`，也不是未来 Immich `asset_id`。
+
+`class_identity_photo` 使用以下受控内部映射：
+
+```text
+class_photo_id (opaque UUID)
+    -> piwigo_image_id (internal, nullable only while PENDING)
+    -> immich_asset_id (internal, nullable)
+    -> media_checksum + media_reference (internal reconciliation provenance)
+```
+
+映射状态为：
+
+- `PENDING`：仅关联 Family Submission；只允许 `SYSTEM_ADMIN`。
+- `ACTIVE`：有且仅有一个 Piwigo image target，可供 Gateway 投影。
+- `STALE` / `RETIRED`：不会被任何 Gateway 列表、计数或聚合投影。
+
+如果一个已激活映射的文件校验和或安全存储引用改变，服务会先把该行
+标记为 `STALE`，再拒绝继续使用它；不会把原 UUID 静默重绑定到不同媒体。
+Piwigo 的 MyISAM 图片表不能使用 InnoDB FK，因此该外部关系由 Gateway
+读取时的 checksum/path 验证与 Reconciliation 共同核对。
+
+Family 投稿在写入 `PENDING` submission 时创建私有映射；审核通过后在
+现有 Piwigo 上传管线创建图片、关联相册和 Archive metadata 的同一
+ClassIdentity 事务中提升为 `ACTIVE`。拒绝则移除未发布的 PENDING 映射，
+但保留 Submission 与 Audit 历史。
+
+该映射不负责文件传输，也不产生新的静态 URL。
+
+## Adapter 边界
+
+```text
+ClassIdentityAdapter
+    -> 已认证 ClassIdentity Principal（只投影 role）
+
+PiwigoGatewayAdapter
+    -> Piwigo/Archive 的内部候选照片
+    -> 校验原图、checksum、ClassArchivePhoto 映射
+
+GatewayPolicy
+    -> 先按 role + era + state 过滤
+
+ImmichAdapter
+    -> 只接收已过滤的 ClassArchivePhoto UUID 集合
+    -> 返回候选成员关系，Gateway 重新计算可见计数
+```
+
+`NullImmichAdapter` 表示 **Gateway→Immich bridge** 明确 `UNAVAILABLE`，即使
+独立 Immich container 已完成 isolated boot 也一样；它不会建立 socket、不会模拟
+Immich 内容，也不会把空结果称为 Immich E2E。
+
+## 未来 HTTP 合约
+
+下列路由已经作为代码常量和 contract test 定义，但尚未公开绑定：
+
+| 路由 | 当前用途 |
+| --- | --- |
+| `GET /api/me` | 只返回业务 role；不返回 Account / Seat / Principal / Piwigo user id |
+| `GET /api/photos` | 过滤后的卡片列表与重新计算的 `total` |
+| `GET /api/photos/{id}` | opaque UUID 照片 metadata；隐藏与不存在统一为无结果 |
+| `GET /api/timeline` | 过滤后再分组、再计算每组数量 |
+| `GET /api/albums` | 过滤后再聚合相册数量 |
+| `GET /api/search` | 过滤后才做匹配与返回数量 |
+| `GET /api/people` | 只使用可见 UUID，交集后重算每个人的照片数 |
+| `GET /api/memories` | 只使用可见 UUID，交集后重算每条回忆的照片数 |
+
+API public projection 不包含：`piwigo_image_id`、`immich_asset_id`、
+`media_checksum`、`media_reference`、Piwigo category/user id、ClassIdentity
+principal/account/seat/identity id。
+
+## 强制 ACL 与侧信道规则
+
+| Principal | HERITAGE | LIVING | PENDING |
+| --- | ---: | ---: | ---: |
+| `CLASSMATE` | allow | allow | deny |
+| `TEACHER` | allow | allow | deny |
+| `ANONYMOUS` | allow | allow | deny |
+| `FAMILY` | allow | deny | deny |
+| `SYSTEM_ADMIN` | allow | allow | allow |
+| 缺失 / 异常 | deny | deny | deny |
+
+Gateway 的 Adapter 接口没有“未经授权 aggregate count”方法。每一种
+`total`、timeline group、album、search、People、Memories 都先调用同一个
+`GatewayPolicy::filterVisible()`，再计算数值。故 FAMILY 不会因 LIVING
+出现于原始候选集而获得缩略图、asset id、搜索命中、人物计数或相册数量。
+
+## 媒体交付边界
+
+当前 public projection 只返回 `MEDIAGUARD_REQUIRED`，不返回新的媒体
+字节 URL。未来的 opaque `/api/photos/{id}/media` dispatcher 必须在内部
+解析 UUID 后继续进入现有 MediaGuard / Nginx X-Accel-Redirect 路径；它
+不得读取文件、不得直连 Immich asset endpoint，也不得把 UUID 当作授权
+凭据。此 dispatcher 尚未实现，因此不存在误报的 runtime evidence。
+
+## 运行与测试
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-contract
+```
+
+该命令仅运行以下本地测试：
+
+- `CLASS_ARCHIVE_PHOTO_SCHEMA=PASS`：锁定 MariaDB 11.8.8 semantic digest。
+- `CLASS_ARCHIVE_PHOTO_MAPPING=PASS`：临时、精确清理的 MariaDB 映射测试。
+- `GATEWAY_CONTRACT=PASS`：synthetic Adapter policy/aggregation/redaction 测试。
+
+它不启动 Immich、不访问公网、不上传真实图片，也不构成 Runtime 或 Browser
+验收。
+
+已启动时可单独运行：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-runtime
+```
+
+该门只检查隔离 runtime，不能替代上面的 Gateway contract 或未来的真实 Immich
+Adapter / Browser 集成。

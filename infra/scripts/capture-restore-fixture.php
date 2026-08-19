@@ -112,6 +112,7 @@ $tables = [
     'operation' => 'SELECT `id`,`operation_type`,`state`,`seat_id`,`account_id`,`core_user_id`,`completed_at`,`last_error_code` FROM `' . $ci . 'operation` ORDER BY `id` ASC',
     'submission' => 'SELECT `id`,`seat_id`,`state`,`approved_image_id`,`reviewed_at`,`date_precision` FROM `' . $ci . 'submission` ORDER BY `id` ASC',
     'archive_image' => 'SELECT `id`,`piwigo_image_id`,`era`,`source_submission_id`,`date_precision`,`official` FROM `' . $ci . 'archive_image` ORDER BY `id` ASC',
+    'photo' => 'SELECT HEX(`class_photo_id`) AS `class_photo_id`,`piwigo_image_id`,`source_submission_id`,HEX(`media_checksum`) AS `media_checksum`,`state` FROM `' . $ci . 'photo` ORDER BY `created_at` ASC',
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
 ];
 $summary = [];

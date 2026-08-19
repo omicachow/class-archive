@@ -6,6 +6,8 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
 use ClassIdentity\Access;
 use ClassIdentity\Audit;
+use ClassIdentity\ClassArchivePhoto;
+use ClassIdentity\ClassArchivePhotoMappingService;
 use ClassIdentity\Repository;
 
 /**
@@ -110,6 +112,11 @@ final class ClassIdentitySubmissionService
                     [$seatId, $accountId, $principalId, $identityId, $originalName, $storageRef, $thumbnailRef, $mime, $extension, $size, $sha256, $width, $height, $date, $precision, $album, $notes],
                 );
                 $id = $repository->lastInsertId();
+                (new ClassArchivePhotoMappingService($repository))->createPendingSubmissionMapping(
+                    $id,
+                    bin2hex($sha256),
+                    $storageRef,
+                );
                 (new Audit($repository))->append([
                     'actor_principal_id' => $principalId,
                     'actor_user_id' => $userId,
@@ -373,6 +380,7 @@ final class ClassIdentitySubmissionService
 
         if (!$approve) {
             $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason): void {
+                (new ClassArchivePhotoMappingService($repository))->discardPendingSubmissionMapping($submissionId);
                 $changed = $repository->execute(
                     'UPDATE `' . $repository->table('submission') . '` SET `state`=\'REJECTED\',`reviewed_at`=UTC_TIMESTAMP(6),'
                     . '`reviewed_by_principal_id`=?,`review_reason`=?,`updated_at`=UTC_TIMESTAMP(6) WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id`=?',
@@ -432,14 +440,21 @@ final class ClassIdentitySubmissionService
         }
         associate_images_to_categories([$imageId], [$albumId]);
         $this->chmodApprovedOriginal($imageId);
+        [$approvedChecksum, $approvedReference] = $this->approvedMediaReferenceAndChecksum($imageId);
 
         $eventLabel = self::boundedText($eventLabel, 190) ?? null;
-        $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $eventLabel): void {
+        $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $eventLabel, $approvedChecksum, $approvedReference): void {
             $repository->execute(
                 'INSERT INTO `' . $repository->table('archive_image') . '` '
                 . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) '
                 . 'VALUES (?, \'HERITAGE\', ?, ?, \'UNKNOWN\', ?, 1, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
                 [$imageId, $archiveDate, $precision, $eventLabel, $submissionId],
+            );
+            (new ClassArchivePhotoMappingService($repository))->promotePendingMapping(
+                $submissionId,
+                $imageId,
+                $approvedChecksum,
+                $approvedReference,
             );
             $changed = $repository->execute(
                 'UPDATE `' . $repository->table('submission') . '` SET `state`=\'APPROVED\',`reviewed_at`=UTC_TIMESTAMP(6),'
@@ -635,6 +650,39 @@ final class ClassIdentitySubmissionService
         if (((int) (@fileperms($path) & 0777)) !== 0660) {
             throw new RuntimeException('piwigo_original_permissions_failed');
         }
+    }
+
+    /** @return array{0:string,1:string} SHA-256 hex and safe Piwigo reference. */
+    private function approvedMediaReferenceAndChecksum(int $imageId): array
+    {
+        global $prefixeTable;
+
+        $row = $this->repository->fetchOne(
+            'SELECT `path` FROM `' . $prefixeTable . 'images` WHERE `id` = ? LIMIT 1',
+            [$imageId],
+        );
+        if ($row === null) {
+            throw new RuntimeException('piwigo_image_missing');
+        }
+        $reference = ClassArchivePhoto::normalizeMediaReference((string) ($row['path'] ?? ''));
+        $path = PHPWG_ROOT_PATH . $reference;
+        $root = PHPWG_ROOT_PATH . (str_starts_with($reference, 'upload/') ? 'upload' : 'galleries');
+        $rootReal = realpath($root);
+        $fileReal = realpath($path);
+        if ($rootReal === false || $fileReal === false || is_link($path) || !is_file($fileReal)) {
+            throw new RuntimeException('piwigo_image_media_unavailable');
+        }
+        $rootPrefix = rtrim(str_replace('\\', '/', $rootReal), '/') . '/';
+        if (!str_starts_with(str_replace('\\', '/', $fileReal), $rootPrefix)) {
+            throw new RuntimeException('piwigo_image_media_untrusted');
+        }
+        $checksum = hash_file('sha256', $fileReal);
+        if (!is_string($checksum)) {
+            throw new RuntimeException('piwigo_image_checksum_failed');
+        }
+        ClassArchivePhoto::checksumToBinary($checksum);
+
+        return [$checksum, $reference];
     }
 
     private function safeUnlink(string $path): void
