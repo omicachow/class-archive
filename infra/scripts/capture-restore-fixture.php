@@ -72,6 +72,24 @@ function fixturePhysicalOriginals(mysqli $db, string $prefix): array
     return ['count' => $count, 'sha256' => hash_final($hash)];
 }
 
+/** @return array{count:int,sha256:string} */
+function fixturePersistentLifecycleScript(): array
+{
+    $path = '/usr/local/bin/scripts/user.sh';
+    if (!is_file($path) || is_link($path)) {
+        fixtureFail('lifecycle_script_missing');
+    }
+    $digest = hash_file('sha256', $path);
+    $mode = @fileperms($path);
+    if (!is_string($digest) || !is_int($mode) || ($mode & 0777) !== 0755) {
+        fixtureFail('lifecycle_script_invalid');
+    }
+    return [
+        'count' => 1,
+        'sha256' => hash('sha256', 'user.sh' . "\0" . ($mode & 0777) . "\0" . $digest . "\n"),
+    ];
+}
+
 fixturePrepareRuntime();
 ob_start();
 require PHPWG_ROOT_PATH . 'include/common.inc.php';
@@ -101,6 +119,7 @@ foreach ($tables as $name => $query) {
     $summary[$name] = fixtureRows($mysqli, $query);
 }
 $summary['physical_originals'] = fixturePhysicalOriginals($mysqli, $prefixeTable);
+$summary['persistent_lifecycle_script'] = fixturePersistentLifecycleScript();
 $multi = $mysqli->query('SELECT COUNT(*) AS `count` FROM (SELECT `image_id` FROM `' . $prefixeTable . 'image_category` GROUP BY `image_id` HAVING COUNT(*) > 1) x');
 if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null) {
     fixtureFail('multi_album_query_failed');

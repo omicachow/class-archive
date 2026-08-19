@@ -73,7 +73,7 @@ $assert($presenterReset >= 0 && $presenterReset < $atomicReplace, 'changed Class
 $assert(substr_count($installer, 'resetAnonymousPresenterReadiness();') === 1, 'presenter reset must occur only on the replacement path');
 $assert(str_contains($installer, 'class_identity_anon_presenter_ready'), 'installer must reset the exact persisted presenter gate');
 $assert(str_contains($prepare, "posix_geteuid() !== 0"), 'ownership bridge must require container root');
-$assert(str_contains($prepare, '($mode & 0777) === 0660'), 'ownership bridge must require the exact normalized historical mode');
+$assert(str_contains($prepare, 'in_array(($mode & 0777), [0660, 0670], true)'), 'ownership bridge must accept only the two exact observed normalized modes');
 $assert(str_contains($prepare, "\$uid === (int) (\$directory['uid'] ?? -2)"), 'normalized marker owner must match the persistent directory');
 $assert(str_contains($prepare, 'rename($temporary, CLASS_ARCHIVE_PREPARE_MARKER)'), 'ownership bridge must atomically publish its staged inode');
 $assert(str_contains($prepare, 'chown($temporary, $nginxUid)'), 'ownership bridge may chown only its newly staged inode');

@@ -15,6 +15,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
         'required' => [
             'main.inc.php', 'media-gateway.php', 'derivative-generator.php',
             'identity-derivative-fallback.php', 'src/MediaGuard.php',
+            'src/MediaFilePolicy.php',
         ],
     ],
     'ClassIdentity' => [

@@ -18,6 +18,7 @@ defined('CLASS_ARCHIVE_POLICY_PATH') or define(
 defined('CLASS_ARCHIVE_POLICY_VERSION') or define('CLASS_ARCHIVE_POLICY_VERSION', '0.1.0');
 
 require_once CLASS_ARCHIVE_POLICY_PATH . 'src/MediaGuard.php';
+require_once CLASS_ARCHIVE_POLICY_PATH . 'src/MediaFilePolicy.php';
 
 /**
  * This hook is deliberately small. Nginx routes every media byte path through
@@ -27,3 +28,9 @@ require_once CLASS_ARCHIVE_POLICY_PATH . 'src/MediaGuard.php';
 add_event_handler('init', static function (): void {
     $GLOBALS['class_archive_policy_runtime']['media_guard'] = 'loaded';
 });
+
+// Piwigo Core applies 0644 after each upload. Tighten the resulting original
+// and optional format file before control returns to the caller. This protects
+// direct Core uploads as well as the ClassIdentity approval path.
+add_event_handler('loc_end_add_uploaded_file', [ClassArchiveMediaFilePolicy::class, 'normalizeUploadedFile'], 100);
+add_event_handler('loc_end_add_format', [ClassArchiveMediaFilePolicy::class, 'normalizeUploadedFormat'], 100);

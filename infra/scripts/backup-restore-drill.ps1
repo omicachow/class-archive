@@ -39,6 +39,32 @@ function Invoke-Dev {
     }
 }
 
+function Invoke-DevWithEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Action,
+        [Parameter(Mandatory = $true)][string]$ArtifactName
+    )
+    # A deliberately failing nested gate writes its summary to stderr. Treat
+    # that as evidence, not as a PowerShell-native terminating error, so the
+    # exact output reaches the ignored drill artifact before we fail this
+    # destructive recovery run.
+    $priorErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'infra\scripts\dev.ps1') $Action 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $priorErrorPreference
+    }
+    $artifact = Join-Path $workRoot $ArtifactName
+    [IO.File]::WriteAllText($artifact, (($lines | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $lines | ForEach-Object { Write-Output $_ }
+    if ($exitCode -ne 0) {
+        throw "Project verification failed: $Action (see $ArtifactName)."
+    }
+}
+
 function Get-RestoreFixture {
     $output = @(& "$env:SystemRoot\System32\wsl.exe" @($composeBase + @(
         'exec', '-T', '--user', 'nginx', 'piwigo',
@@ -174,6 +200,21 @@ try {
     }
     if (-not $httpReady) { throw 'Piwigo did not return localhost HTTP 200 after restore.' }
 
+    # A first 200 can arrive while the image is still completing its lifecycle
+    # hook. Require Docker's own health contract as well so the subsequent
+    # media and browser-facing regression suite never races the restored
+    # persistent-script normalization.
+    $piwigoHealthy = $false
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        $containerId = (& "$env:SystemRoot\System32\wsl.exe" @($composeBase + @('ps', '-q', 'piwigo'))).Trim()
+        if ($LASTEXITCODE -eq 0 -and $containerId) {
+            $state = (& "$env:SystemRoot\System32\wsl.exe" -d Ubuntu -- docker inspect --format '{{.State.Health.Status}}' $containerId).Trim()
+            if ($LASTEXITCODE -eq 0 -and $state -eq 'healthy') { $piwigoHealthy = $true; break }
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $piwigoHealthy) { throw 'Piwigo did not become healthy after restore.' }
+
     Invoke-Dev 'baseline-verify'
     $after = Get-RestoreFixture
     Assert-CanonicalFixture -Fixture $after
@@ -189,8 +230,8 @@ try {
         "--fixture-sha256=$($after.fixture_sha256)",
         "--rto-seconds=$rtoSeconds"
     )
-    Invoke-Dev 'test-phase0'
-    Invoke-Dev 'test-phase1'
+    Invoke-DevWithEvidence -Action 'test-phase0' -ArtifactName 'phase0-after-restore.log'
+    Invoke-DevWithEvidence -Action 'test-phase1' -ArtifactName 'phase1-after-restore.log'
     $result = [ordered]@{
         backup_restore = 'PASS'
         bundle = $bundle

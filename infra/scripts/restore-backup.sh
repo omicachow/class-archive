@@ -23,16 +23,16 @@ esac
 
 bundle="/backup/$CLASS_ARCHIVE_RESTORE_BUNDLE"
 [ -d "$bundle" ] && [ ! -L "$bundle" ] || fail restore_bundle_missing
-for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz COMPLETE MANIFEST.json SHA256SUMS; do
+for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json SHA256SUMS; do
   [ -f "$bundle/$name" ] && [ ! -L "$bundle/$name" ] || fail restore_bundle_incomplete
 done
 
 manifest="$bundle/SHA256SUMS"
-expected_count=6
+expected_count=7
 actual_count=$(wc -l < "$manifest" | tr -d '[:space:]')
-valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
+valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|scripts\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
 [ "$actual_count" = "$expected_count" ] && [ "$valid_count" = "$expected_count" ] || fail restore_manifest_invalid
-for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz COMPLETE MANIFEST.json; do
+for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json; do
   grep -Eq "^[0-9a-f]{64}  $name$" "$manifest" || fail restore_manifest_invalid
 done
 (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1) || fail restore_checksum_failed
@@ -47,6 +47,7 @@ assert_archive_safe() {
 assert_archive_safe "$bundle/piwigo-data.tar.gz"
 assert_archive_safe "$bundle/uploads.tar.gz"
 assert_archive_safe "$bundle/galleries.tar.gz"
+assert_archive_safe "$bundle/scripts.tar.gz"
 
 if [ "${CLASS_ARCHIVE_RESTORE_PRECHECK:-}" = true ]; then
   printf '%s\n' "BACKUP_RESTORE_PRECHECK=PASS bundle=$CLASS_ARCHIVE_RESTORE_BUNDLE"
@@ -70,4 +71,5 @@ gzip -dc "$bundle/database.sql.gz" | mariadb --host=db --user=root --password="$
 tar -C /target/piwigo --no-same-owner -xzf "$bundle/piwigo-data.tar.gz" || fail restore_piwigo_data_failed
 tar -C /target/uploads --no-same-owner -xzf "$bundle/uploads.tar.gz" || fail restore_uploads_failed
 tar -C /target/galleries --no-same-owner -xzf "$bundle/galleries.tar.gz" || fail restore_galleries_failed
+tar -C /target/scripts --no-same-owner -xzf "$bundle/scripts.tar.gz" || fail restore_scripts_failed
 printf '%s\n' "BACKUP_RESTORE=PASS bundle=$CLASS_ARCHIVE_RESTORE_BUNDLE"

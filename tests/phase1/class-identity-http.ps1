@@ -330,6 +330,23 @@ function ConvertTo-AbsoluteUri {
     return [Uri]::new($BaseUri, [Net.WebUtility]::HtmlDecode($Reference))
 }
 
+function Get-EffectiveImageSourceMatch {
+    param([AllowEmptyString()][string]$ImageTag)
+
+    # Bootstrap Darkroom keeps a transparent placeholder in `src` while a
+    # derivative is absent. The lazy target is the protected media URL, so
+    # prefer it when proving Family/freeze authorization after a cold cache.
+    foreach ($attribute in @('data-src', 'data-lazy', 'src')) {
+        $candidate = [regex]::Match(
+            $ImageTag,
+            ('\b' + [regex]::Escape($attribute) + '=["'']([^"'']+)["'']'),
+            'IgnoreCase'
+        )
+        if ($candidate.Success) { return $candidate }
+    }
+    return $null
+}
+
 function Get-CsrfToken {
     param([Parameter(Mandatory = $true)]$Response, [Parameter(Mandatory = $true)][string]$Label)
     if (-not (Assert-Status -Response $Response -Expected @(200) -Label $Label)) { return $null }
@@ -794,7 +811,7 @@ try {
     $approvedPicture = Invoke-Http -Uri ([Uri]::new($baseUri, "picture.php?/$approvedImageId")) -Session $familySession
     Assert-Status -Response $approvedPicture -Expected @(200) -Label 'submission/family-approved-view' | Out-Null
     $approvedMainTag = [regex]::Match($approvedPicture.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
-    $approvedPreview = if ($approvedMainTag.Success) { [regex]::Match($approvedMainTag.Value, '\bsrc=["'']([^"'']+)["'']', 'IgnoreCase') } else { $null }
+    $approvedPreview = if ($approvedMainTag.Success) { Get-EffectiveImageSourceMatch -ImageTag $approvedMainTag.Value } else { $null }
     $approvedPreviewUri = $null
     if ($null -eq $approvedPreview -or -not $approvedPreview.Success) {
         Add-Failure 'submission/family-approved-view' 'Approved HERITAGE viewer did not expose a protected preview.'
@@ -1013,7 +1030,7 @@ try {
     $picture = Invoke-Http -Uri $pictureUri -Session $classmateSession
     Assert-Status $picture @(200) 'media/classmate-living-viewer' | Out-Null
     $mainTag = [regex]::Match($picture.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
-    $previewMatch = if ($mainTag.Success) { [regex]::Match($mainTag.Value, '\bsrc=["'']([^"'']+)["'']', 'IgnoreCase') } else { $null }
+    $previewMatch = if ($mainTag.Success) { Get-EffectiveImageSourceMatch -ImageTag $mainTag.Value } else { $null }
     if ($null -eq $previewMatch -or -not $previewMatch.Success) {
         Add-Pending 'media/living-preview' 'Piwigo viewer did not expose the mature protected preview URL'
         Stop-Setup 'Known LIVING preview URL unavailable.'

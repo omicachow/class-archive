@@ -89,6 +89,7 @@ services:
               "$${partial_bundle}/piwigo-data.tar.gz" \
               "$${partial_bundle}/uploads.tar.gz" \
               "$${partial_bundle}/galleries.tar.gz" \
+              "$${partial_bundle}/scripts.tar.gz" \
               "$${partial_bundle}/COMPLETE" \
               "$${partial_bundle}/MANIFEST.json" \
               "$${partial_bundle}/SHA256SUMS"
@@ -121,10 +122,15 @@ services:
         tar -C /source/piwigo -czf "$${partial_bundle}/piwigo-data.tar.gz" .
         tar -C /source/uploads -czf "$${partial_bundle}/uploads.tar.gz" .
         tar -C /source/galleries -czf "$${partial_bundle}/galleries.tar.gz" .
+        # This volume contains the pinned container lifecycle script that
+        # restores private media permissions on startup. It is application
+        # state, not an image-layer convenience, so a destructive restore
+        # must restore it byte-for-byte with the other durable volumes.
+        tar -C /source/scripts -czf "$${partial_bundle}/scripts.tar.gz" .
         printf 'completed_at=%s\n' "$${stamp}" > "$${partial_bundle}/COMPLETE"
-        printf '{"format":2,"created_at":"%s","files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
+        printf '{"format":3,"created_at":"%s","files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
         cd "$${partial_bundle}"
-        sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz COMPLETE MANIFEST.json > SHA256SUMS
+        sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json > SHA256SUMS
         sha256sum -c SHA256SUMS
         cd /backup
         mv "$${partial_bundle}" "$${bundle}"
@@ -142,6 +148,7 @@ services:
       - piwigo_data:/source/piwigo:ro
       - piwigo_uploads:/source/uploads:ro
       - piwigo_galleries:/source/galleries:ro
+      - piwigo_scripts:/source/scripts:ro
     networks:
       - app
 

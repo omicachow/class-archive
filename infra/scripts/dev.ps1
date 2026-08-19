@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'test-access', 'test-phase0', 'test-phase1', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -115,6 +115,19 @@ function Invoke-ClassArchiveMaintenancePrepare {
     }
 }
 
+function Restore-PiwigoPersistentUserScript {
+    # Narrow root-only repair for the one pinned lifecycle hook stored in the
+    # persistent scripts volume. It also normalizes existing private media
+    # modes; it never accepts a caller-supplied source or destination path.
+    & wsl.exe @($composeArguments + @(
+        'exec', '-T', '--user', 'root', 'piwigo',
+        '/bin/ash', '/workspace/infra/scripts/restore-piwigo-user-script.sh'
+    ))
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not restore and run the pinned Piwigo media-permission hook.'
+    }
+}
+
 if ($Action -eq 'up' -or $Action -eq 'stop' -or $Action -eq 'down') {
     Start-KeepAlive
 }
@@ -194,6 +207,10 @@ switch ($Action) {
             'php', '/workspace/tests/fixtures/seed-piwigo.php'
         )
     }
+    'normalize-media-permissions' {
+        Restore-PiwigoPersistentUserScript
+        exit 0
+    }
     'test-phase0' {
         & wsl.exe @($composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
@@ -230,6 +247,11 @@ switch ($Action) {
         & wsl.exe @($composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/class-identity-maintenance-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase1/media-file-policy.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & wsl.exe @($composeArguments + @(
@@ -391,6 +413,7 @@ try {
         # A successful installer intentionally leaves nginx in durable maintenance.
         # Restart clears PHP-FPM/opcache; every failure below returns with the exact
         # marker still present. No direct online bootstrap path exists in dev.ps1.
+        Restore-PiwigoPersistentUserScript
         & wsl.exe @($composeArguments + @('restart', 'piwigo'))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Wait-ClassArchiveMaintenanceReady

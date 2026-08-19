@@ -88,12 +88,19 @@ function classifyMarker(string $path, int $nginxUid, int $nginxGid): array
         $state = 'TRUSTED';
     } else {
         $directory = @lstat(CLASS_ARCHIVE_PREPARE_DATA);
+        // The pinned image recursively grants the nginx account rwx through
+        // an ACL during every startup. On a regular persistent data inode,
+        // Linux exposes that ACL mask as 0670 even though neither the marker
+        // content nor `other` permissions have changed. Accept only this
+        // exact, observed normalization alongside the original 0660 state;
+        // both still require the data-directory owner/group, regular file,
+        // single link and exact marker bytes above.
         if (
             is_array($directory)
             && $uid > 0
             && $uid === (int) ($directory['uid'] ?? -2)
             && $gid === (int) ($directory['gid'] ?? -2)
-            && ($mode & 0777) === 0660
+            && in_array(($mode & 0777), [0660, 0670], true)
         ) {
             $state = 'NORMALIZED';
         }

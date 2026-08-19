@@ -62,21 +62,22 @@ verified_files=0
 if [ -n "$latest_bundle" ]; then
   bundle_name=$latest_name
   manifest="$latest_bundle/SHA256SUMS"
-  expected_count=5
+  expected_count=6
   actual_count=$(wc -l < "$manifest" | tr -d '[:space:]')
   manifest_file=0
   if grep -Eq '^[0-9a-f]{64}  MANIFEST\.json$' "$manifest"; then
     manifest_file=1
   fi
   if [ "$manifest_file" = 1 ]; then
-    expected_count=6
+    expected_count=7
   fi
-  valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
+  valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|scripts\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
   if [ "$actual_count" = "$expected_count" ] && [ "$valid_count" = "$expected_count" ] \
      && grep -Eq '^[0-9a-f]{64}  database\.sql\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  piwigo-data\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  uploads\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  galleries\.tar\.gz$' "$manifest" \
+     && grep -Eq '^[0-9a-f]{64}  scripts\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  COMPLETE$' "$manifest" \
      && { [ "$manifest_file" = 0 ] || grep -Eq '^[0-9a-f]{64}  MANIFEST\.json$' "$manifest"; } \
      && (cd "$latest_bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
