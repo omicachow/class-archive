@@ -171,6 +171,92 @@ final class ClassIdentitySubmissionService
         return $rows;
     }
 
+    /**
+     * Conservatively remove only aged binaries belonging to already rejected
+     * submissions. This is deliberately not exposed by a web route: the
+     * maintenance runner calls it after an explicit retention period and
+     * keeps the submission plus its audit history intact.
+     *
+     * @return array{retention_days:int,apply:bool,eligible:int,deleted:int,missing:int,failed:int,entries:list<array{submission_id:int,kind:string,result:string}>}
+     */
+    public function cleanupRejectedBinaries(int $retentionDays, bool $apply = false): array
+    {
+        if ($retentionDays < 7 || $retentionDays > 3650) {
+            throw new InvalidArgumentException('rejected_binary_retention_invalid');
+        }
+        $cutoff = gmdate('Y-m-d H:i:s', time() - $retentionDays * 86400);
+        $rows = $this->repository->fetchAll(
+            'SELECT `id`,`identity_id`,`seat_id`,`storage_ref`,`thumbnail_ref` '
+            . 'FROM `' . $this->repository->table('submission') . '` '
+            . "WHERE `state` = 'REJECTED' AND `reviewed_at` IS NOT NULL AND `reviewed_at` <= ? "
+            . 'ORDER BY `id` ASC LIMIT 1000',
+            [$cutoff],
+        );
+
+        $result = [
+            'retention_days' => $retentionDays,
+            'apply' => $apply,
+            'eligible' => 0,
+            'deleted' => 0,
+            'missing' => 0,
+            'failed' => 0,
+            'entries' => [],
+        ];
+        foreach ($rows as $row) {
+            $submissionId = (int) ($row['id'] ?? 0);
+            if ($submissionId <= 0) {
+                continue;
+            }
+            foreach (['original' => 'storage_ref', 'thumbnail' => 'thumbnail_ref'] as $kind => $field) {
+                try {
+                    $path = $this->resolveRef((string) ($row[$field] ?? ''), false);
+                } catch (Throwable) {
+                    $result['failed']++;
+                    $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'INVALID_REFERENCE'];
+                    continue;
+                }
+                if (!is_file($path)) {
+                    $result['missing']++;
+                    $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'ALREADY_MISSING'];
+                    continue;
+                }
+                if (is_link($path)) {
+                    $result['failed']++;
+                    $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'UNTRUSTED_PATH'];
+                    continue;
+                }
+                $result['eligible']++;
+                if (!$apply) {
+                    $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'DRY_RUN'];
+                    continue;
+                }
+                if (!@unlink($path) || is_file($path)) {
+                    $result['failed']++;
+                    $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'DELETE_FAILED'];
+                    continue;
+                }
+                $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $kind): void {
+                    (new Audit($repository))->append([
+                        'actor_kind' => 'SYSTEM_MAINTENANCE',
+                        'action' => 'REJECTED_BINARY_CLEANUP',
+                        'target_type' => 'SUBMISSION_BINARY',
+                        'target_id' => $submissionId . ':' . $kind,
+                        'target_identity_id' => (int) ($row['identity_id'] ?? 0),
+                        'target_seat_id' => (int) ($row['seat_id'] ?? 0),
+                        'old_value' => ['state' => 'REJECTED', 'submission_id' => $submissionId],
+                        'new_value' => ['state' => 'REJECTED', 'submission_id' => $submissionId, 'result' => 'BINARY_DELETED'],
+                        'reason' => '定期清理超过保留期的已拒绝投稿二进制',
+                        'result' => 'SUCCESS',
+                    ]);
+                });
+                $result['deleted']++;
+                $result['entries'][] = ['submission_id' => $submissionId, 'kind' => $kind, 'result' => 'DELETED'];
+            }
+        }
+
+        return $result;
+    }
+
     private static function relationshipLabel(string $relationship): string
     {
         return match (strtoupper($relationship)) {

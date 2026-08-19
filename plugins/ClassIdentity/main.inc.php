@@ -27,6 +27,9 @@ require_once CLASS_IDENTITY_PATH . 'src/AnonymousResolutionService.php';
 require_once CLASS_IDENTITY_PATH . 'src/SubmissionService.php';
 require_once CLASS_IDENTITY_PATH . 'src/ArchiveService.php';
 require_once CLASS_IDENTITY_PATH . 'src/AnonymousGovernanceService.php';
+require_once CLASS_IDENTITY_PATH . 'src/MediaAttestation.php';
+require_once CLASS_IDENTITY_PATH . 'src/ReconciliationService.php';
+require_once CLASS_IDENTITY_PATH . 'src/MaintenanceStatus.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {

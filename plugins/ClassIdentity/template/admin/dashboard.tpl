@@ -20,6 +20,8 @@
   <h3>系统门禁</h3>
   <div class="ca-admin__grid">
     <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.media_guard_label|escape:'html'}</div><div class="ca-admin__label">媒体访问防护</div></div>
+    <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.media_attestation_label|escape:'html'}</div><div class="ca-admin__label">媒体访问安全验证</div></div>
+    <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.reconciliation_label|escape:'html'}</div><div class="ca-admin__label">数据一致性</div></div>
     <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.database_label|escape:'html'}</div><div class="ca-admin__label">数据库</div></div>
     <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.migration_label|escape:'html'}</div><div class="ca-admin__label">身份系统迁移</div></div>
     <div class="ca-admin__card"><div class="ca-admin__metric">{$CA_DASHBOARD.failed_manual_operations|escape:'html'} / {$CA_DASHBOARD.compensation_required_accounts|escape:'html'}</div><div class="ca-admin__label">人工处理失败 / 待补偿账号</div></div>

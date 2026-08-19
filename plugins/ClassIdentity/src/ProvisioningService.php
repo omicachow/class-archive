@@ -965,6 +965,77 @@ final class ProvisioningService
         }
     }
 
+    /**
+     * Expire only family invitations whose token, seat generation and
+     * invitation state still agree. This is a maintenance-only transition;
+     * it does not discover or expose any claim credential.
+     *
+     * @return array{scanned:int,expired:int,skipped:int}
+     */
+    public function expireDueFamilyInvitations(): array
+    {
+        return $this->repository->transaction(function (Repository $repository): array {
+            $rows = $repository->fetchAll(
+                'SELECT t.`id`,t.`seat_id`,t.`generation`,s.`identity_id`,s.`state` AS `seat_state`,s.`invite_generation` '
+                . 'FROM `' . $repository->table('token') . '` t '
+                . 'JOIN `' . $repository->table('seat') . '` s ON s.`id` = t.`seat_id` '
+                . "WHERE t.`purpose` = 'FAMILY_INVITE' AND t.`state` = 'ISSUED' "
+                . 'AND t.`expires_at` <= UTC_TIMESTAMP(6) ORDER BY t.`id` ASC LIMIT 1000 FOR UPDATE',
+            );
+            $result = ['scanned' => count($rows), 'expired' => 0, 'skipped' => 0];
+            foreach ($rows as $row) {
+                $tokenId = (int) ($row['id'] ?? 0);
+                $seatId = (int) ($row['seat_id'] ?? 0);
+                $identityId = (int) ($row['identity_id'] ?? 0);
+                $generation = (int) ($row['generation'] ?? 0);
+                if (
+                    $tokenId <= 0
+                    || $seatId <= 0
+                    || $identityId <= 0
+                    || $generation <= 0
+                    || ($row['seat_state'] ?? null) !== 'INVITED'
+                    || (int) ($row['invite_generation'] ?? 0) !== $generation
+                ) {
+                    $result['skipped']++;
+                    continue;
+                }
+                $tokenChanged = $repository->execute(
+                    'UPDATE `' . $repository->table('token') . '` '
+                    . "SET `state` = 'EXPIRED' WHERE `id` = ? AND `state` = 'ISSUED' AND `purpose` = 'FAMILY_INVITE' "
+                    . 'AND `generation` = ? AND `expires_at` <= UTC_TIMESTAMP(6)',
+                    [$tokenId, $generation],
+                );
+                if ($tokenChanged !== 1) {
+                    $result['skipped']++;
+                    continue;
+                }
+                $seatChanged = $repository->execute(
+                    'UPDATE `' . $repository->table('seat') . '` '
+                    . "SET `state` = 'AVAILABLE', `updated_at` = UTC_TIMESTAMP(6), `lock_version` = `lock_version` + 1 "
+                    . "WHERE `id` = ? AND `state` = 'INVITED' AND `invite_generation` = ?",
+                    [$seatId, $generation],
+                );
+                if ($seatChanged !== 1) {
+                    throw new \RuntimeException('family_invitation_expire_seat_drift');
+                }
+                $this->audit->append([
+                    'actor_kind' => 'SYSTEM_MAINTENANCE',
+                    'action' => 'FAMILY_INVITATION_EXPIRE',
+                    'target_type' => 'TOKEN',
+                    'target_id' => (string) $tokenId,
+                    'target_identity_id' => $identityId,
+                    'target_seat_id' => $seatId,
+                    'old_value' => ['state' => 'ISSUED', 'seat_state' => 'INVITED', 'generation' => $generation],
+                    'new_value' => ['state' => 'EXPIRED', 'seat_state' => 'AVAILABLE', 'generation' => $generation],
+                    'reason' => '定期回收过期家庭邀请席位',
+                    'result' => 'SUCCESS',
+                ]);
+                $result['expired']++;
+            }
+            return $result;
+        });
+    }
+
     private function expireIssuedFamilyInvitationsForIdentity(
         Repository $repository,
         int $identityId,

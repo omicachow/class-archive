@@ -97,6 +97,8 @@ SQL) ?? [];
             'production_blocked' => (bool) $health['production_blocked'],
             'media_guard' => (string) $health['media_guard'],
             'media_guard_label' => (string) ($health['media_guard_label'] ?? $health['media_guard']),
+            'media_attestation_label' => (string) ($health['media_attestation_label'] ?? '需要重新验证'),
+            'reconciliation_label' => (string) ($health['reconciliation_label'] ?? '需要重新检查'),
             'database' => (string) $health['database'],
             'database_label' => (string) ($health['database_label'] ?? $health['database']),
             'migration' => (string) $health['migration'],
@@ -979,6 +981,8 @@ SQL);
             'SUBMISSION_CREATE' => '提交班级历史照片',
             'SUBMISSION_APPROVE' => '通过投稿',
             'SUBMISSION_REJECT' => '拒绝投稿',
+            'REJECTED_BINARY_CLEANUP' => '清理已拒绝投稿二进制',
+            'FAMILY_INVITATION_EXPIRE' => '回收过期家庭邀请',
             'ARCHIVE_METADATA_UPDATE' => '更新档案信息',
             'ANONYMOUS_ENABLE' => '恢复匿名席位',
             'ANONYMOUS_DISABLE' => '禁用匿名席位',
@@ -998,6 +1002,7 @@ SQL);
             'IDENTITY' => '成员身份',
             'SEAT' => '席位',
             'TOKEN' => '邀请 / 认领凭据',
+            'SUBMISSION_BINARY' => '投稿二进制',
             default => $target === '' ? '未记录对象' : '其他对象',
         };
     }
@@ -1006,7 +1011,7 @@ SQL);
     {
         return match ($result) {
             'SUCCESS' => '已完成',
-            'FAILURE' => '失败',
+            'FAILED', 'FAILURE' => '失败',
             'DENIED' => '已拒绝',
             default => '未记录',
         };
@@ -1140,6 +1145,44 @@ SQL);
         $derivativePath = PHPWG_ROOT_PATH . '_data/i';
         $derivativeWritable = is_dir($derivativePath) && is_writable($derivativePath);
 
+        try {
+            $mediaAttestation = \ClassIdentity\MediaAttestation::status();
+        } catch (Throwable) {
+            $mediaAttestation = [
+                'state' => 'MISSING',
+                'label' => '需要重新验证',
+                'message' => '媒体访问安全验证记录无法读取。',
+                'timestamp' => null,
+                'probe_count' => 0,
+            ];
+        }
+        try {
+            $reconciliation = \ClassIdentity\ReconciliationService::status();
+        } catch (Throwable) {
+            $reconciliation = [
+                'state' => 'MISSING',
+                'label' => '需要重新检查',
+                'message' => '数据一致性检查记录无法读取。',
+                'timestamp' => null,
+                'issue_count' => 0,
+            ];
+        }
+        try {
+            $maintenance = \ClassIdentity\MaintenanceStatus::status();
+        } catch (Throwable) {
+            $maintenance = [
+                'state' => 'MISSING',
+                'label' => '需要重新执行',
+                'message' => '后台维护记录无法读取。',
+                'timestamp' => null,
+                'tasks' => [],
+            ];
+        }
+        $maintenanceTasks = is_array($maintenance['tasks'] ?? null) ? $maintenance['tasks'] : [];
+        $backupFreshness = is_array($maintenanceTasks['backup_freshness'] ?? null)
+            ? $maintenanceTasks['backup_freshness']
+            : ['state' => 'MISSING', 'label' => '未找到', 'timestamp' => null];
+
         $productionBlockers = [];
         if ($database !== 'Healthy') {
             $productionBlockers[] = 'DATABASE';
@@ -1150,11 +1193,12 @@ SQL);
         if ($mediaGuard === 'FAIL') {
             $productionBlockers[] = 'MEDIA_GUARD';
         }
-        // The live HTTP matrix passes in development, but this process cannot
-        // infer that result from config strings. A future signed/digest-bound
-        // attestation must be present before the dashboard itself may call the
-        // external delivery gate PASS after an upgrade.
-        $productionBlockers[] = 'MEDIA_GUARD_HTTP_ATTESTATION';
+        if (($mediaAttestation['state'] ?? null) !== 'VERIFIED') {
+            $productionBlockers[] = 'MEDIA_GUARD_HTTP_ATTESTATION';
+        }
+        if (($reconciliation['state'] ?? null) !== 'CLEAR') {
+            $productionBlockers[] = 'RECONCILIATION';
+        }
         if (!$identityEnforcement) {
             $productionBlockers[] = 'IDENTITY_ENFORCEMENT';
         }
@@ -1190,7 +1234,21 @@ SQL);
             'database_label' => $database === 'Healthy' ? '正常' : '异常',
             'media_guard' => $mediaGuard,
             'media_guard_label' => $mediaGuard === 'CONFIGURED' ? '已配置' : '未通过',
-            'media_guard_http_attestation' => 'Not persisted',
+            'media_guard_http_attestation' => (string) ($mediaAttestation['state'] ?? 'MISSING'),
+            'media_attestation_label' => (string) ($mediaAttestation['label'] ?? '需要重新验证'),
+            'media_attestation_message' => (string) ($mediaAttestation['message'] ?? ''),
+            'media_attestation_timestamp' => $mediaAttestation['timestamp'] ?? null,
+            'media_attestation_commit' => $mediaAttestation['commit'] ?? null,
+            'media_attestation_probes' => (int) ($mediaAttestation['probe_count'] ?? 0),
+            'reconciliation' => (string) ($reconciliation['state'] ?? 'MISSING'),
+            'reconciliation_label' => (string) ($reconciliation['label'] ?? '需要重新检查'),
+            'reconciliation_message' => (string) ($reconciliation['message'] ?? ''),
+            'reconciliation_timestamp' => $reconciliation['timestamp'] ?? null,
+            'reconciliation_issue_count' => (int) ($reconciliation['issue_count'] ?? 0),
+            'maintenance' => (string) ($maintenance['state'] ?? 'MISSING'),
+            'maintenance_label' => (string) ($maintenance['label'] ?? '需要重新执行'),
+            'maintenance_message' => (string) ($maintenance['message'] ?? ''),
+            'maintenance_timestamp' => $maintenance['timestamp'] ?? null,
             'identity_enforcement' => $identityEnforcement ? 'ENFORCED' : 'DISABLED',
             'identity_enforcement_label' => $identityEnforcement ? '已启用' : '已停用',
             'anonymous_presenter' => $anonymousPresenterReady ? 'READY' : 'FAIL',
@@ -1215,9 +1273,11 @@ SQL);
             'storage_total' => is_numeric($storageTotal) ? self::humanBytes((int) $storageTotal) : 'Unknown',
             'storage_free' => is_numeric($storageFree) ? self::humanBytes((int) $storageFree) : 'Unknown',
             'derivative_cache' => $derivativeWritable ? 'Writable' : 'Error',
-            'backup_last_success' => 'Not configured',
-            'backup_last_failure' => 'Unknown',
-            'cron_jobs' => 'Not configured',
+            'backup_last_success' => ($backupFreshness['state'] ?? null) === 'FRESH'
+                ? ('已校验 · ' . (string) ($backupFreshness['timestamp'] ?? ''))
+                : (string) ($backupFreshness['label'] ?? '未找到'),
+            'backup_last_failure' => ($backupFreshness['state'] ?? null) === 'INVALID' ? '备份校验失败' : '无记录',
+            'cron_jobs' => (string) ($maintenance['label'] ?? '需要重新执行'),
             'plugin_version' => defined('CLASS_IDENTITY_VERSION') ? (string) CLASS_IDENTITY_VERSION : 'Unknown',
             'core_version' => defined('PHPWG_VERSION') ? (string) PHPWG_VERSION : 'Unknown',
         ];
@@ -1230,6 +1290,7 @@ SQL);
             'MIGRATION' => '数据迁移',
             'MEDIA_GUARD' => '媒体访问防护',
             'MEDIA_GUARD_HTTP_ATTESTATION' => '媒体 HTTP 回归证明',
+            'RECONCILIATION' => '数据一致性',
             'IDENTITY_ENFORCEMENT' => '身份权限强制',
             'SYSTEM_ADMIN' => '系统管理员',
             'ROLE_GROUP_MAPPING' => '角色映射',

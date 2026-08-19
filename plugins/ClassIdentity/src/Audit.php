@@ -103,6 +103,7 @@ final class Audit
         'ANONYMOUS_DISABLE',
         'SUBMISSION_REJECT',
         'SUBMISSION_APPROVE',
+        'REJECTED_BINARY_CLEANUP',
         'ARCHIVE_METADATA_UPDATE',
         'ANONYMOUS_ENABLE',
         'ERA_CHANGE',
