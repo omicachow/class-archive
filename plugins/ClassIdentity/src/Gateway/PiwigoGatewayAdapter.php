@@ -91,6 +91,7 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
                 $takenAt,
                 $albums,
                 (string) (($row['name'] ?? '') . "\n" . ($row['event_label'] ?? '')),
+                (int) ($row['id'] ?? 0),
             );
         }
 

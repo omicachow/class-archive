@@ -59,6 +59,38 @@ final class ClassArchiveMediaGuard
         };
     }
 
+    /**
+     * Resolve a server-side canonical photo mapping into the same guarded
+     * delivery request used by Piwigo's public media URLs. The numeric Piwigo
+     * id never reaches the browser: callers must first establish visibility
+     * from a ClassArchivePhoto UUID, then pass the private mapping here.
+     *
+     * @return array{request: ClassArchiveMediaRequest, image: array<string, mixed>}
+     */
+    public static function resolveCanonicalDelivery(int $imageId, string $variant): array
+    {
+        if ($imageId <= 0 || !in_array($variant, ['thumbnail', 'preview', 'original'], true)) {
+            throw new DomainException('canonical_delivery_invalid');
+        }
+
+        $image = self::findImageById($imageId);
+        $source = self::databasePathToRelative((string) $image['path']);
+
+        return match ($variant) {
+            'thumbnail' => self::resolveDerivativeForType($image, $source, self::thumbnailDerivativeType()),
+            'preview' => self::resolveSafePreview($image, $source),
+            'original' => [
+                'request' => new ClassArchiveMediaRequest(
+                    $imageId,
+                    'original',
+                    $source,
+                    '/_class_archive_internal/source/' . self::encodePath($source),
+                ),
+                'image' => $image,
+            ],
+        };
+    }
+
     public static function authorize(ClassArchiveMediaRequest $request, array $image): ClassArchiveMediaDecision
     {
         global $conf, $user;
@@ -305,13 +337,22 @@ final class ClassArchiveMediaGuard
         global $conf;
 
         $type = (string) ($conf['class_archive_safe_preview_type'] ?? IMG_XLARGE);
+        return self::resolveDerivativeForType($image, $source, $type);
+    }
+
+    /**
+     * @param array<string, mixed> $image
+     * @return array{request: ClassArchiveMediaRequest, image: array<string, mixed>}
+     */
+    private static function resolveDerivativeForType(array $image, string $source, string $type): array
+    {
         $definedTypes = ImageStdParams::get_defined_type_map();
         if (!isset($definedTypes[$type])) {
-            throw new DomainException('safe_preview_type_unavailable');
+            throw new DomainException('canonical_derivative_type_unavailable');
         }
         $token = derivative_to_url($type);
         if (!is_string($token) || !preg_match('/\A[A-Za-z0-9_]+\z/D', $token)) {
-            throw new DomainException('safe_preview_token_invalid');
+            throw new DomainException('canonical_derivative_token_invalid');
         }
 
         $relativeDerivative = self::derivativePathFromSource($source, $token);
@@ -331,6 +372,14 @@ final class ClassArchiveMediaGuard
             ),
             'image' => $image,
         ];
+    }
+
+    private static function thumbnailDerivativeType(): string
+    {
+        if (!defined('IMG_THUMB') || !is_string(IMG_THUMB) || IMG_THUMB === '') {
+            throw new DomainException('canonical_thumbnail_type_unavailable');
+        }
+        return IMG_THUMB;
     }
 
     private static function derivativePathFromSource(string $source, string $token): string

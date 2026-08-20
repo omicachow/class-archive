@@ -191,12 +191,19 @@ try {
     foreach (['/api/photos', '/api/timeline', '/api/albums', '/api/people', '/api/search', '/api/photos/{id}', '/api/me', '/api/memories'] as $route) {
         $assert(($routes[$route]['method'] ?? null) === 'GET' && ($routes[$route]['evidence'] ?? null) === 'CONTRACT_TESTED', 'route_contract_' . $route);
     }
+    $assert(
+        ($routes['/api/photos/{id}/media/{thumbnail|preview|original}']['method'] ?? null) === 'GET, HEAD'
+        && ($routes['/api/photos/{id}/media/{thumbnail|preview|original}']['evidence'] ?? null) === 'CONTRACT_TESTED',
+        'route_contract_canonical_media',
+    );
     $assert(GatewayRouteContract::publiclyBound() === true, 'routes_are_explicitly_http_bound');
 
     $family = $gatewayFor(Access::ROLE_FAMILY);
     $familyPhotos = $family->photos();
     $assert($familyPhotos['total'] === 1 && $familyPhotos['items'][0]['id'] === $heritageId, 'family_heritage_only');
     $assert($family->photo($livingId) === null, 'family_hidden_photo_indistinguishable');
+    $assert($family->mediaCandidate($heritageId)?->id() === $heritageId, 'family_canonical_media_candidate_visible');
+    $assert($family->mediaCandidate($livingId) === null, 'family_canonical_media_candidate_hidden');
     $familyTimeline = $family->timeline();
     $assert($familyTimeline['total'] === 1 && $familyTimeline['groups'][0]['total'] === 1, 'family_timeline_filtered_before_count');
     $familyAlbums = $family->albums();

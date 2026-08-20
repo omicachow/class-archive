@@ -49,6 +49,12 @@ memory 对 Classmate 聚合为 2 张、对 Family 聚合为 1 张；它不证明
 以验证本机 archive SHA-256、source 版本、compose digest pin 和本地 Docker
 repo digest；该脚本不下载或启动容器。
 
+2026-08-20 另以 source 中声明的 `pnpm@11.13.1` 执行了严格 `--frozen-lockfile`
+依赖安装（先禁用 lifecycle scripts），再按上游 workspace 顺序构建
+`@immich/sdk` 与 `immich-web`。两步均成功，产物只留在 ignored 的官方 source 工作副本。
+这是 `STATIC` 上游构建证据：它证明固定 source/lock 可以编译，**不**证明浏览器身份、
+Gateway compatibility、媒体 ACL 或 Web runtime 已通过。
+
 ## 架构边界
 
 Immich 不会成为 Class Archive 的身份、权限或媒体真相：

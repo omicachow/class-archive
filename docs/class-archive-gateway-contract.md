@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `ClassArchivePhoto` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
 | Gateway policy、列表、时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
-| 同源 `/api` Piwigo Gateway | `RUNTIME_TESTED` | 真实 localhost Piwigo + MariaDB + ClassIdentity 运行态；29 次 HTTP 请求、584 个 ACL / 聚合 / DTO / 输入断言通过 |
+| 同源 `/api` Piwigo Gateway | `RUNTIME_TESTED` | 真实 localhost Piwigo + MariaDB + ClassIdentity 运行态；37 次 HTTP 请求、631 个 ACL / 聚合 / DTO / 输入 / canonical MediaGuard delivery 断言通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
 | Immich technical user / external-library lifecycle | `RUNTIME_TESTED` | ephemeral internal user、read-only synthetic scan、asset count gate、spike reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary bridge → real pinned Immich v3.1.0; Classmate/FAMILY aggregation, internal-network isolation, no-media route and cleanup passed |
@@ -81,16 +81,18 @@ finally 会撤销配置、删除 bridge credential 和 asset bindings，再将 I
 ## 当前同源只读 HTTP API
 
 下列路由已经由 Piwigo Nginx 的严格同源 rewrite 绑定到
-`GatewayHttpController`。Controller 只允许 `GET`，解析固定 route/query allowlist，要求
+`GatewayHttpController`。Controller 只允许 `GET` / `HEAD`，解析固定 route/query allowlist，要求
 每请求重新解析 ClassIdentity principal，并返回 private/no-store JSON；未知 principal、
 映射、文件、来源或序列化状态均拒绝或以 generic 503 fail closed。它没有 CORS，也没有
-任何 Immich proxy、media URL 或媒体字节出口。
+任何 Immich proxy；唯一的 canonical media route 只会重新进入既有 MediaGuard / Nginx
+X-Accel-Redirect 交付链。
 
 | 路由 | 当前用途 |
 | --- | --- |
 | `GET /api/me` | 只返回业务 role；不返回 Account / Seat / Principal / Piwigo user id |
 | `GET /api/photos` | 过滤后的卡片列表与重新计算的 `total` |
 | `GET /api/photos/{id}` | opaque UUID 照片 metadata；隐藏与不存在统一为无结果 |
+| `GET` / `HEAD /api/photos/{id}/media/{thumbnail\|preview\|original}` | UUID 只在服务端映射；先做 Gateway 可见性过滤，再由 MediaGuard 重做媒体授权，最后由 nginx internal X-Accel 传输 |
 | `GET /api/timeline` | 过滤后再分组、再计算每组数量 |
 | `GET /api/albums` | 过滤后再聚合相册数量 |
 | `GET /api/search` | 过滤后才做匹配与返回数量 |
@@ -124,11 +126,14 @@ Gateway 的 Adapter 接口没有“未经授权 aggregate count”方法。每�
 
 ## 媒体交付边界
 
-当前 public projection 只返回 `MEDIAGUARD_REQUIRED`，不返回新的媒体
-字节 URL。未来的 opaque `/api/photos/{id}/media` dispatcher 必须在内部
-解析 UUID 后继续进入现有 MediaGuard / Nginx X-Accel-Redirect 路径；它
-不得读取文件、不得直连 Immich asset endpoint，也不得把 UUID 当作授权
-凭据。此 dispatcher 尚未实现，因此不存在误报的 runtime evidence。
+public projection 仍只返回 `MEDIAGUARD_REQUIRED`，不返回 Piwigo image id、
+Immich asset id、路径或后台 byte URL。客户端若要显示媒体，只能请求
+`/api/photos/{opaque-uuid}/media/{thumbnail|preview|original}`。该入口先在
+`GatewayService` 中把 UUID 与当前可见候选匹配，再将私有 Piwigo id 仅在服务端交给
+`ClassArchiveMediaGuard::resolveCanonicalDelivery()`；MediaGuard 仍重验 physical-path
+唯一性、Community Pending、Era、principal、Piwigo ACL 与 original policy，成功后仅发
+internal `X-Accel-Redirect`。UUID 不是授权凭据，已注销、冻结、撤权或无权限角色的旧 URL
+均会重新被拒绝；Immich asset endpoint 永远不参与交付。
 
 ## 运行与测试
 
@@ -152,7 +157,8 @@ Gateway 的 Adapter 接口没有“未经授权 aggregate count”方法。每�
 此门是独立的 `RUNTIME_TESTED` 证据：真实 Piwigo + MariaDB + HTTP session 下验证
 `CLASSMATE` / `TEACHER` / `ANONYMOUS` 可见两个 Era、`FAMILY` 只见 HERITAGE，并对
 列表 total、单图 UUID、Timeline、Albums、Search、People、Memories、重复 query、跨域
-Origin、方法和 DTO 敏感字段运行 29 次请求 / 584 个断言。它明确输出
+Origin、方法和 DTO 敏感字段，以及 canonical thumbnail / preview / original、HEAD、Range、
+隐藏 LIVING 与 Guest 媒体拒绝运行 37 次请求 / 631 个断言。它明确输出
 `IMMICH_ADAPTER=UNAVAILABLE_NOT_SIMULATED`，所以绝不构成 Immich Adapter、Immich
 Web 或浏览器 E2E 证据。
 

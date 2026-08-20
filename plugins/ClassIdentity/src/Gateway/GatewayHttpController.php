@@ -11,12 +11,13 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 /**
  * Same-origin Class Archive Gateway HTTP boundary.
  *
- * This controller intentionally has no media endpoint. Every photo projection
- * carries only the explicit MEDIAGUARD_REQUIRED delivery contract, so neither
- * Piwigo nor Immich byte URLs can accidentally become a new authorization
- * path. The handler exits from Piwigo's loc_begin_index hook before template
- * work begins and returns generic failures on every uncertain identity,
- * mapping, source or serialization condition.
+ * Every public photo projection carries only the explicit MEDIAGUARD_REQUIRED
+ * contract. Its canonical UUID media route resolves the private Piwigo mapping
+ * only after Gateway visibility filtering and then re-enters MediaGuard, so
+ * neither a Piwigo nor Immich byte URL becomes an authorization path. The
+ * handler exits from Piwigo's loc_begin_index hook before template work begins
+ * and returns generic failures on every uncertain identity, mapping, source or
+ * serialization condition.
  */
 final class GatewayHttpController
 {
@@ -72,14 +73,14 @@ final class GatewayHttpController
         }
 
         self::setSecurityHeaders();
-        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
-            header('Allow: GET');
+        if (!in_array(strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')), ['GET', 'HEAD'], true)) {
+            header('Allow: GET, HEAD');
             self::respond(405, ['error' => '仅支持读取请求']);
         }
         self::requireSameOriginWhenPresent();
 
         try {
-            [$route, $photoId, $searchQuery] = self::parseRoute($segments);
+            [$route, $photoId, $searchQuery, $mediaVariant] = self::parseRoute($segments);
             $gateway = new GatewayService(
                 new ClassIdentityAdapter(),
                 PiwigoGatewayAdapter::fromPiwigo(),
@@ -87,6 +88,7 @@ final class GatewayHttpController
             );
             $response = match ($route) {
                 'photos' => $photoId === null ? $gateway->photos() : self::knownPhoto($gateway, $photoId),
+                'media' => self::deliverMedia($gateway, (string) $photoId, (string) $mediaVariant),
                 'timeline' => $gateway->timeline(),
                 'albums' => $gateway->albums(),
                 'people' => $gateway->people(),
@@ -115,7 +117,7 @@ final class GatewayHttpController
         }
     }
 
-    /** @return array{0:string,1:?string,2:?string} */
+    /** @return array{0:string,1:?string,2:?string,3:?string} */
     private static function parseRoute(array $segments): array
     {
         if ($segments === []) {
@@ -128,19 +130,31 @@ final class GatewayHttpController
 
         if (in_array($route, self::SIMPLE_ROUTES, true) && count($segments) === 1) {
             self::requireExactQuery([]);
-            return [$route, null, null];
+            return [$route, null, null, null];
         }
         if ($route === 'photos' && count($segments) === 2 && is_string($segments[1])) {
             ClassArchivePhoto::idToBinary($segments[1]);
             self::requireExactQuery([]);
-            return ['photos', $segments[1], null];
+            return ['photos', $segments[1], null, null];
+        }
+        if (
+            $route === 'photos'
+            && count($segments) === 4
+            && is_string($segments[1])
+            && ($segments[2] ?? null) === 'media'
+            && is_string($segments[3])
+            && in_array($segments[3], ['thumbnail', 'preview', 'original'], true)
+        ) {
+            ClassArchivePhoto::idToBinary($segments[1]);
+            self::requireExactQuery([]);
+            return ['media', $segments[1], null, $segments[3]];
         }
         if ($route === 'search' && count($segments) === 1) {
             $query = self::requireExactQuery(['q'])['q'] ?? null;
             if (!is_string($query)) {
                 throw new \InvalidArgumentException('class_archive_gateway_search_missing');
             }
-            return ['search', null, $query];
+            return ['search', null, $query, null];
         }
 
         throw new \RuntimeException('class_archive_gateway_route_not_found');
@@ -200,6 +214,38 @@ final class GatewayHttpController
         return $photo;
     }
 
+    private static function deliverMedia(GatewayService $gateway, string $classPhotoId, string $variant): never
+    {
+        $candidate = $gateway->mediaCandidate($classPhotoId);
+        if ($candidate === null) {
+            throw new \RuntimeException('class_archive_gateway_photo_not_found');
+        }
+        if (!class_exists('ClassArchiveMediaGuard', false)) {
+            throw new \RuntimeException('class_archive_gateway_media_guard_unavailable');
+        }
+
+        try {
+            $resolved = \ClassArchiveMediaGuard::resolveCanonicalDelivery(
+                $candidate->piwigoImageIdForDelivery(),
+                $variant,
+            );
+            $request = $resolved['request'];
+            \ClassArchiveMediaGuard::assertDeliveryTarget($request);
+            $decision = \ClassArchiveMediaGuard::authorize($request, $resolved['image']);
+        } catch (\DomainException) {
+            throw new \RuntimeException('class_archive_gateway_media_unavailable');
+        }
+        if (!$decision->allowed) {
+            self::respondMediaDeny(403);
+        }
+
+        self::setMediaHeaders();
+        http_response_code(200);
+        header('Content-Type: ' . self::mediaContentType($request->internalUri));
+        header('X-Accel-Redirect: ' . $request->internalUri);
+        exit;
+    }
+
     private static function requireSameOriginWhenPresent(): void
     {
         $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
@@ -219,6 +265,37 @@ final class GatewayHttpController
         header('Vary: Cookie', false);
         header('X-Content-Type-Options: nosniff');
         header('Referrer-Policy: no-referrer');
+    }
+
+    private static function setMediaHeaders(): void
+    {
+        \ClassIdentityHttp::noStore();
+        header('Vary: Cookie', false);
+        header('X-Content-Type-Options: nosniff');
+        header('Referrer-Policy: no-referrer');
+    }
+
+    private static function respondMediaDeny(int $status): never
+    {
+        self::setMediaHeaders();
+        http_response_code($status);
+        header('Content-Type: text/plain; charset=utf-8');
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'HEAD') {
+            echo $status === 404 ? 'Media not found.' : 'Media access denied.';
+        }
+        exit;
+    }
+
+    private static function mediaContentType(string $path): string
+    {
+        return match (strtolower(pathinfo(rawurldecode($path), PATHINFO_EXTENSION))) {
+            'jpg', 'jpeg', 'jpe' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            'tif', 'tiff' => 'image/tiff',
+            default => 'application/octet-stream',
+        };
     }
 
     /** @param array<string,mixed> $payload */

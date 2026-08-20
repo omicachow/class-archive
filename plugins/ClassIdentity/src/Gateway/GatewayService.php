@@ -10,10 +10,10 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  * Class Archive Gateway application boundary.
  *
  * It is shared by the same-origin, read-only Piwigo HTTP controller and by
- * the contract tests. It has no media endpoint: opaque canonical ids remain
- * metadata only until a future dispatcher can resolve them into the existing
- * MediaGuard/X-Accel delivery path. This is intentionally not an Immich API
- * adapter and does not create an Immich runtime claim.
+ * the contract tests. Public projections remain metadata-only; the controller
+ * may use an internal visible candidate to dispatch a canonical UUID through
+ * the existing MediaGuard/X-Accel delivery path. This is intentionally not an
+ * Immich API adapter and does not create an Immich runtime claim.
  */
 final class GatewayService
 {
@@ -50,6 +50,23 @@ final class GatewayService
             }
         }
         // Never distinguish hidden from unknown canonical ids.
+        return null;
+    }
+
+    /**
+     * Resolve a canonical id only after the same policy filter that feeds all
+     * public aggregates. The internal candidate retains the private Piwigo
+     * mapping for the MediaGuard dispatcher, but callers must never serialize
+     * it or use it as a browser identity.
+     */
+    public function mediaCandidate(string $classPhotoId): ?GatewayPhotoCandidate
+    {
+        foreach ($this->visiblePhotos() as $photo) {
+            if (hash_equals($photo->id(), $classPhotoId)) {
+                return $photo;
+            }
+        }
+        // Never distinguish a hidden canonical id from an unknown one.
         return null;
     }
 
@@ -215,9 +232,10 @@ final class GatewayService
 }
 
 /**
- * Exact public API contract. The route list is intentionally metadata-only:
- * each caller must still provide a resolved ClassIdentity Principal and the
- * Piwigo adapter must validate source/mapping consistency on every request.
+ * Exact public API contract. Metadata routes expose no backend media identity;
+ * the canonical media route still requires a resolved ClassIdentity Principal,
+ * an already visible candidate and a fresh MediaGuard authorization before
+ * nginx can transfer any bytes.
  */
 final class GatewayRouteContract
 {
@@ -231,6 +249,7 @@ final class GatewayRouteContract
             '/api/people' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/search' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/photos/{id}' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
+            '/api/photos/{id}/media/{thumbnail|preview|original}' => ['method' => 'GET, HEAD', 'evidence' => 'CONTRACT_TESTED'],
             '/api/me' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/memories' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
         ];

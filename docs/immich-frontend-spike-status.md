@@ -58,8 +58,9 @@ Immich 登录、API key 或 library。
 | 项目 | 证据等级 | 当前结论 |
 | --- | --- | --- |
 | 官方 tag / source archive / Server 与 ML image | `STATIC` | 已校验官方 GitHub / GHCR 固定来源与 digest |
-| `ClassArchivePhoto` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、映射和 39 项 policy/side-channel 合约通过 |
-| 同源 Class Archive Gateway HTTP | `RUNTIME_TESTED` | Piwigo + ClassIdentity 的 29 次真实 localhost 请求、584 个断言；Family 的列表、单图、Timeline、Albums、Search 均在聚合前过滤 LIVING |
+| 固定上游 `immich-web` build | `STATIC` | 使用上游声明的 pnpm 11.13.1、冻结 lockfile，先构建 `@immich/sdk` 后成功构建 Web；产物仅在 ignored source 工作副本 |
+| `ClassArchivePhoto` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、映射和 42 项 policy/side-channel / canonical-delivery 合约通过 |
+| 同源 Class Archive Gateway HTTP | `RUNTIME_TESTED` | Piwigo + ClassIdentity 的 37 次真实 localhost 请求、631 个断言；Family 的列表、单图、Timeline、Albums、Search 均在聚合前过滤 LIVING，canonical UUID thumbnail / preview / original 继续由 MediaGuard 交付 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
 | Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary `BridgeImmichAdapter` 通过固定 internal-only bridge 查询真实 Immich；651 个断言 / 5 个 HTTP probes 验证 Classmate=2、Family=1 的 memory 聚合、People 空结果、无 media route、DTO 脱敏、原图 SHA-256 与完整 cleanup |
@@ -91,9 +92,10 @@ Immich user/library/asset 作为产品数据。
 ```
 
 这个门只会访问 `127.0.0.1` 上的 Piwigo / ClassIdentity：它不会启动 Immich、不会
-调用 Immich API，也不会返回媒体 URL 或字节。测试会用现有四个 synthetic Seat fixture
-轮换临时密码、建立可撤销的 SYSTEM_ADMIN session lease，并在 finally 中撤销会话与再次
-轮换凭据。Canonical 映射是长期 Class Archive 数据，不会被该读 API 测试删除。
+调用 Immich API。metadata DTO 不返回后台媒体 URL；canonical UUID 媒体入口只会重新进入
+已有 MediaGuard / Nginx X-Accel 路径。测试会用现有四个 synthetic Seat fixture 轮换临时
+密码、建立可撤销的 SYSTEM_ADMIN session lease，并在 finally 中撤销会话与再次轮换凭据。
+Canonical 映射是长期 Class Archive 数据，不会被该读 API 测试删除。
 
 可重复执行真实但可丢弃的 Gateway bridge runtime gate：
 
@@ -112,7 +114,7 @@ Piwigo original mount、没有 Piwigo/Immich database mount，也没有媒体路
 ## 尚未完成，不能伪称通过
 
 - Timeline / People / Smart Search 的 Family side-channel 真实运行时验证；
-- Immich Web fork、中文品牌、法律通知和 Gateway 媒体 URL 改写；
+- Immich Web fork、中文品牌、法律通知和 Immich Web asset-API compatibility 层；
 - ML/CPU 结果、性能和 browser E2E 截图。
 
 因此当前状态为：

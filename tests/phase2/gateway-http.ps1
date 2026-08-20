@@ -163,6 +163,95 @@ function Invoke-Gateway {
     }
 }
 
+function Invoke-GatewayMedia {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$Uri,
+        [Parameter(Mandatory = $true)][Microsoft.PowerShell.Commands.WebRequestSession]$Session,
+        [ValidateSet('GET', 'HEAD')][string]$Method = 'GET',
+        [switch]$Range32
+    )
+
+    $script:probes++
+    $request = [Net.HttpWebRequest]::Create($Uri)
+    $request.Method = $Method
+    $request.AllowAutoRedirect = $false
+    $request.CookieContainer = $Session.Cookies
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    $request.UserAgent = 'ClassArchive-Gateway-Media-Regression/1.0'
+    if ($Range32) { $request.AddRange(0, 31) }
+
+    $response = $null
+    try {
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+    }
+    catch [Net.WebException] {
+        if ($null -eq $_.Exception.Response) { throw 'Gateway media request failed without an HTTP response.' }
+        $response = [Net.HttpWebResponse]$_.Exception.Response
+    }
+    try {
+        $headers = @{}
+        foreach ($key in $response.Headers.AllKeys) { $headers[$key] = [string]$response.Headers[$key] }
+        $bytes = [byte[]]@()
+        $stream = $response.GetResponseStream()
+        if ($null -ne $stream) {
+            try {
+                $buffer = New-Object byte[] 64
+                try {
+                    $read = $stream.Read($buffer, 0, $buffer.Length)
+                    if ($read -gt 0) {
+                        $bytes = New-Object byte[] $read
+                        [Array]::Copy($buffer, $bytes, $read)
+                    }
+                }
+                finally { [Array]::Clear($buffer, 0, $buffer.Length) }
+            }
+            finally { $stream.Dispose() }
+        }
+        return [pscustomobject]@{
+            Status = [int]$response.StatusCode
+            ContentType = [string]$response.ContentType
+            CacheControl = [string]$response.Headers['Cache-Control']
+            ContentRange = [string]$response.Headers['Content-Range']
+            Headers = $headers
+            Bytes = $bytes
+        }
+    }
+    finally {
+        if ($null -ne $response) { $response.Dispose() }
+    }
+}
+
+function Assert-MediaAllow {
+    param($Response, [Parameter(Mandatory = $true)][int]$Status, [Parameter(Mandatory = $true)][string]$Label)
+
+    Assert-True ($Response.Status -eq $Status) "$Label returned HTTP $($Response.Status), expected $Status."
+    Assert-True ($Response.ContentType -like 'image/*') "$Label did not return image content."
+    Assert-True ($Response.CacheControl -like '*no-store*') "$Label response was cacheable."
+    Assert-True (-not $Response.Headers.ContainsKey('X-Accel-Redirect')) "$Label exposed an internal X-Accel path."
+    Assert-True (-not (($Response.Headers.Values -join "`n") -match 'action\.php\?id=|piwigo_image_id|immich_asset_id|/_data/|/upload/|/galleries/')) "$Label exposed a backend media identifier."
+}
+
+function Assert-ImageMagic {
+    param([byte[]]$Bytes, [Parameter(Mandatory = $true)][string]$Label)
+
+    $isJpeg = $Bytes.Length -ge 3 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8 -and $Bytes[2] -eq 0xFF
+    $isPng = $Bytes.Length -ge 8 -and $Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47
+    $isGif = $Bytes.Length -ge 6 -and [Text.Encoding]::ASCII.GetString($Bytes, 0, 6) -in @('GIF87a', 'GIF89a')
+    $isWebp = $Bytes.Length -ge 12 -and [Text.Encoding]::ASCII.GetString($Bytes, 0, 4) -eq 'RIFF' -and [Text.Encoding]::ASCII.GetString($Bytes, 8, 4) -eq 'WEBP'
+    Assert-True ($isJpeg -or $isPng -or $isGif -or $isWebp) "$Label did not return image magic bytes."
+}
+
+function Assert-MediaDeny {
+    param($Response, [Parameter(Mandatory = $true)][int]$Status, [Parameter(Mandatory = $true)][string]$Label)
+
+    Assert-True ($Response.Status -eq $Status) "$Label returned HTTP $($Response.Status), expected $Status."
+    Assert-True ($Response.ContentType -notlike 'image/*') "$Label returned an image content type."
+    Assert-True ($Response.CacheControl -like '*no-store*') "$Label response was cacheable."
+    Assert-True (-not ($Response.Bytes.Length -ge 3 -and $Response.Bytes[0] -eq 0xFF -and $Response.Bytes[1] -eq 0xD8 -and $Response.Bytes[2] -eq 0xFF)) "$Label leaked JPEG bytes."
+    Assert-True (-not ($Response.Bytes.Length -ge 8 -and $Response.Bytes[0] -eq 0x89 -and $Response.Bytes[1] -eq 0x50 -and $Response.Bytes[2] -eq 0x4E -and $Response.Bytes[3] -eq 0x47)) "$Label leaked PNG bytes."
+}
+
 function Get-Json {
     param($Response, [Parameter(Mandatory = $true)][string]$Label)
 
@@ -274,6 +363,30 @@ try {
     Assert-True ($heritage.Count -eq 1) 'Synthetic fixture did not provide a HERITAGE Gateway candidate.'
     $livingId = [string]$living[0].id
     $heritageId = [string]$heritage[0].id
+
+    $familyHeritageThumbnail = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/thumbnail")) -Session $sessions['FAMILY']
+    Assert-MediaAllow -Response $familyHeritageThumbnail -Status 200 -Label 'family canonical heritage thumbnail'
+    Assert-ImageMagic -Bytes $familyHeritageThumbnail.Bytes -Label 'family canonical heritage thumbnail'
+    $familyHeritagePreview = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/preview")) -Session $sessions['FAMILY']
+    Assert-MediaAllow -Response $familyHeritagePreview -Status 200 -Label 'family canonical heritage preview'
+    Assert-ImageMagic -Bytes $familyHeritagePreview.Bytes -Label 'family canonical heritage preview'
+    $familyHeritageRange = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/thumbnail")) -Session $sessions['FAMILY'] -Range32
+    Assert-MediaAllow -Response $familyHeritageRange -Status 206 -Label 'family canonical heritage thumbnail range'
+    Assert-True ($familyHeritageRange.ContentRange -match '^bytes 0-31/\d+$') 'Family canonical thumbnail Range response did not preserve the requested byte range.'
+    Assert-True ($familyHeritageRange.Bytes.Length -eq 32) 'Family canonical thumbnail Range response did not return exactly 32 bytes.'
+    Assert-ImageMagic -Bytes $familyHeritageRange.Bytes -Label 'family canonical heritage thumbnail range'
+    $familyHeritageHead = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/thumbnail")) -Session $sessions['FAMILY'] -Method HEAD
+    Assert-MediaAllow -Response $familyHeritageHead -Status 200 -Label 'family canonical heritage thumbnail head'
+    Assert-True ($familyHeritageHead.Bytes.Length -eq 0) 'Family canonical thumbnail HEAD response unexpectedly contained bytes.'
+    $familyHeritageOriginal = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/original")) -Session $sessions['FAMILY']
+    Assert-MediaDeny -Response $familyHeritageOriginal -Status 403 -Label 'family canonical heritage original'
+    $familyLivingMedia = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$livingId/media/thumbnail")) -Session $sessions['FAMILY']
+    Assert-MediaDeny -Response $familyLivingMedia -Status 404 -Label 'family canonical living thumbnail'
+    $guestHeritageMedia = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$heritageId/media/thumbnail")) -Session $sessions['GUEST']
+    Assert-MediaDeny -Response $guestHeritageMedia -Status 403 -Label 'guest canonical heritage thumbnail'
+    $classmateLivingMedia = Invoke-GatewayMedia -Uri ([Uri]::new($baseUri, "api/photos/$livingId/media/preview")) -Session $sessions['CLASSMATE']
+    Assert-MediaAllow -Response $classmateLivingMedia -Status 200 -Label 'classmate canonical living preview'
+    Assert-ImageMagic -Bytes $classmateLivingMedia.Bytes -Label 'classmate canonical living preview'
 
     $familyHidden = Invoke-Gateway -Uri ([Uri]::new($baseUri, "api/photos/$livingId")) -Session $sessions['FAMILY']
     Assert-PrivateJson $familyHidden 404 'family hidden photo'
@@ -407,5 +520,5 @@ Write-Output 'CLASS_ARCHIVE_GATEWAY_HTTP=PASS evidence=RUNTIME_TESTED'
 Write-Output "HTTP_PROBES=$script:probes"
 Write-Output "ASSERTIONS=$script:assertions"
 Write-Output 'ROLE_ERA_AGGREGATION_FILTERING=PASS'
-Write-Output 'GATEWAY_METADATA_ONLY_MEDIAGUARD_REQUIRED=PASS'
+Write-Output 'GATEWAY_CANONICAL_MEDIA_MEDIAGUARD=PASS'
 Write-Output 'IMMICH_ADAPTER=UNAVAILABLE_NOT_SIMULATED'

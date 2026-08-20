@@ -106,6 +106,7 @@ final class GatewayPhotoCandidate
         private readonly ?string $takenAt,
         array $albumLabels = [],
         private readonly string $searchText = '',
+        private readonly int $piwigoImageId = 0,
     ) {
         ClassArchivePhoto::idToBinary($classPhotoId);
         if ($era !== null && !in_array($era, ['HERITAGE', 'LIVING'], true)) {
@@ -154,6 +155,18 @@ final class GatewayPhotoCandidate
         return $this->mappingState;
     }
 
+    /**
+     * Private delivery bridge only. This value is intentionally absent from
+     * publicProjection(); Class Archive UUID remains the browser identity.
+     */
+    public function piwigoImageIdForDelivery(): int
+    {
+        if ($this->piwigoImageId <= 0) {
+            throw new \RuntimeException('class_archive_gateway_delivery_mapping_unavailable');
+        }
+        return $this->piwigoImageId;
+    }
+
     /** @return list<string> */
     public function albumLabels(): array
     {
@@ -177,9 +190,9 @@ final class GatewayPhotoCandidate
             'title' => $this->title,
             'taken_at' => $this->takenAt,
             'albums' => $this->albumLabels,
-            // This is an explicit delivery contract, not a newly implemented
-            // byte URL. The future route must look up this opaque id and then
-            // call the existing MediaGuard path; it may never bypass it.
+            // This is an explicit delivery contract, not a backend byte URL.
+            // A client may construct the canonical UUID media route, which
+            // still looks up this opaque id and calls MediaGuard server-side.
             'media' => ['delivery' => 'MEDIAGUARD_REQUIRED'],
         ];
     }
