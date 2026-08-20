@@ -70,8 +70,8 @@
     "browser_direct_immich_media": "FORBIDDEN"
   },
   "local_acquisition": {
-    "status": "OFFICIAL_SOURCE_AND_CORE_IMAGES_AVAILABLE_EPHEMERAL_EXTERNAL_LIBRARY_RUNTIME_TESTED",
+    "status": "OFFICIAL_SOURCE_AND_CORE_IMAGES_AVAILABLE_ISOLATED_GATEWAY_BRIDGE_RUNTIME_TESTED",
     "detail": "2026-08-19: GitHub REST tag ref, official codeload archive, GHCR manifests and local linux/amd64 pulls were verified. The original git clone failure is superseded; no third-party source, proxy image or floating tag was used.",
-    "effect": "The pinned Server, PostgreSQL and Valkey have passed an isolated internal-network boot gate: healthy server, internal ping, no host port, read-only Piwigo original volumes and unchanged Piwigo original SHA-256. A second disposable runtime gate created the first internal technical user and a read-only external library, scanned synthetic originals, confirmed the indexed asset count, then reset only the spike database and upload volumes and verified the empty state. No technical credential, library or asset remains; no Gateway connection, Web integration, ML index or browser integration exists."
+    "effect": "The pinned Server, PostgreSQL and Valkey have passed an isolated internal-network boot gate: healthy server, internal ping, no host port, read-only Piwigo original volumes and unchanged Piwigo original SHA-256. A second disposable runtime gate created the first internal technical user and a read-only external library, scanned synthetic originals, confirmed the indexed asset count, then reset only the spike database and upload volumes and verified the empty state. A third disposable bridge gate bound two canonical synthetic mappings and verified policy-filtered Classmate/FAMILY metadata aggregation through a fixed internal bridge, with no bridge media route, no host port and final empty-spike/original-hash verification. No technical credential, library, asset or binding remains; Web integration, ML index and browser integration do not exist."
   }
 }

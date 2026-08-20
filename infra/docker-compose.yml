@@ -59,6 +59,10 @@ services:
       - ../tests:/workspace/tests:ro
     networks:
       - app
+      # This internal-only network carries the narrow Class Archive ->
+      # Immich metadata bridge when its explicitly opt-in spike profile is
+      # running. Piwigo never joins the Immich service network directly.
+      - immich_gateway
 
   backup:
     image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
@@ -195,6 +199,10 @@ services:
 networks:
   app:
     driver: bridge
+  immich_gateway:
+    name: class_archive_immich_gateway
+    driver: bridge
+    internal: true
 
 volumes:
   piwigo_data:

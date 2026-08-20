@@ -38,6 +38,7 @@ require_once CLASS_IDENTITY_PATH . 'src/Gateway/Contracts.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayPolicy.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/PiwigoGatewayAdapter.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/BridgeImmichAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayHttpController.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
 

@@ -10,12 +10,58 @@ function fail(string $message): never
     exit(1);
 }
 
-$password = getenv('CLASS_ARCHIVE_FIXTURE_PASSWORD');
-if (!is_string($password) || strlen($password) < 24) {
-    fail('A transient 24+ character fixture password is required.');
-}
 if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
     fail('Refusing to provision fixtures as root.');
+}
+
+/**
+ * Accept the legacy per-exec environment value for existing gates, or a
+ * short-lived private file for callers that must keep the value out of the
+ * Docker exec argument list. The file path is deliberately narrow and is
+ * deleted immediately after an exact ownership/mode read.
+ */
+function transientFixturePassword(): string
+{
+    $environment = getenv('CLASS_ARCHIVE_FIXTURE_PASSWORD');
+    $file = getenv('CLASS_ARCHIVE_FIXTURE_PASSWORD_FILE');
+    $hasEnvironment = is_string($environment) && $environment !== '';
+    $hasFile = is_string($file) && $file !== '';
+    if ($hasEnvironment === $hasFile) {
+        fail('Exactly one transient fixture password source is required.');
+    }
+    if ($hasEnvironment) {
+        return $environment;
+    }
+    if (
+        !is_string($file)
+        || preg_match('/\A\/tmp\/class-archive-fixture-password-[a-f0-9]{16}\.txt\z/D', $file) !== 1
+        || is_link($file)
+    ) {
+        fail('Fixture password file path is invalid.');
+    }
+    clearstatcache(true, $file);
+    $stat = @lstat($file);
+    if (
+        !is_array($stat)
+        || (($stat['mode'] ?? 0) & 0170000) !== 0100000
+        || (($stat['mode'] ?? 0) & 0777) !== 0600
+        || (int) ($stat['nlink'] ?? 0) !== 1
+        || (function_exists('posix_geteuid') && (int) ($stat['uid'] ?? -1) !== posix_geteuid())
+        || (int) ($stat['size'] ?? 0) < 24
+        || (int) ($stat['size'] ?? 0) > 192
+    ) {
+        fail('Fixture password file is invalid.');
+    }
+    $password = file_get_contents($file);
+    if (!is_string($password) || !unlink($file) || file_exists($file) || is_link($file)) {
+        fail('Fixture password file cannot be consumed safely.');
+    }
+    return $password;
+}
+
+$password = transientFixturePassword();
+if (strlen($password) < 24 || strlen($password) > 190 || str_contains($password, "\0")) {
+    fail('A transient 24+ character fixture password is required.');
 }
 
 chdir(PIWIGO_ROOT) || fail('Cannot enter Piwigo root.');

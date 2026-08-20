@@ -49,8 +49,9 @@ technical user、一座 library 与不少于当前 Piwigo image count 的 asset�
 network。测试凭据只在 owner-only 临时文件中存在，并在 finally 删除；没有保留可复用
 Immich 登录、API key 或 library。
 
-这严格是 `RUNTIME_TESTED` 的**内部索引生命周期**，不是 Gateway、Web fork 或浏览器
-验收，更不表示浏览器能访问 Immich。
+这严格是 `RUNTIME_TESTED` 的**内部索引生命周期**，不是 Web fork 或浏览器
+验收，更不表示浏览器能访问 Immich。随后已在同一 synthetic-only 隔离模型中完成一次
+真实 Gateway→Immich metadata bridge gate；具体边界见下表。
 
 ## 当前证据等级
 
@@ -61,7 +62,8 @@ Immich 登录、API key 或 library。
 | 同源 Class Archive Gateway HTTP | `RUNTIME_TESTED` | Piwigo + ClassIdentity 的 29 次真实 localhost 请求、584 个断言；Family 的列表、单图、Timeline、Albums、Search 均在聚合前过滤 LIVING |
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
 | Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
-| Immich Adapter / Web fork / Browser | 未开始 | Gateway 仍使用 `NullImmichAdapter`；浏览器无法直达 Immich，也没有 Web E2E 结论 |
+| Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary `BridgeImmichAdapter` 通过固定 internal-only bridge 查询真实 Immich；651 个断言 / 5 个 HTTP probes 验证 Classmate=2、Family=1 的 memory 聚合、People 空结果、无 media route、DTO 脱敏、原图 SHA-256 与完整 cleanup |
+| Immich Web fork / Browser | 未开始 | 浏览器无法直达 Immich；没有 Web shell、Web fork 或 browser E2E 结论 |
 
 可重复执行运行时隔离门：
 
@@ -93,11 +95,22 @@ Immich user/library/asset 作为产品数据。
 轮换临时密码、建立可撤销的 SYSTEM_ADMIN session lease，并在 finally 中撤销会话与再次
 轮换凭据。Canonical 映射是长期 Class Archive 数据，不会被该读 API 测试删除。
 
+可重复执行真实但可丢弃的 Gateway bridge runtime gate：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-gateway-bridge
+```
+
+它会在 internal-only Docker network 中短暂启动 bridge。bridge 没有 host port、没有
+Piwigo original mount、没有 Piwigo/Immich database mount，也没有媒体路由。Class Archive
+只在 `GatewayPolicy` 过滤之后发送已绑定的 opaque canonical UUID；bridge 已启用时可见
+集合必须拥有完整有效 binding，任何缺失或异常都会以 generic 503 fail closed，而不会返回
+部分 People/Memory 聚合。Immich asset id、Piwigo image id、路径和 checksum 永不进入浏览器 DTO。测试结束后 bridge config/token、
+两条临时 asset binding、technical user/library/index 和 spike volumes 都会被精确撤销，
+并再次核对 72 张 Piwigo synthetic originals 的 SHA-256。
+
 ## 尚未完成，不能伪称通过
 
-- Hidden Technical User 的受控 provisioning 与仅 Gateway 可用的内部凭据；
-- 外部图库扫描、ClassArchivePhoto ↔ Immich asset linkage；
-- Gateway → Immich runtime adapter、ClassArchivePhoto ↔ Immich asset linkage；
 - Timeline / People / Smart Search 的 Family side-channel 真实运行时验证；
 - Immich Web fork、中文品牌、法律通知和 Gateway 媒体 URL 改写；
 - ML/CPU 结果、性能和 browser E2E 截图。
@@ -105,7 +118,10 @@ Immich user/library/asset 作为产品数据。
 因此当前状态为：
 
 ```text
-IMMICH_RUNTIME=PASS_EPHEMERAL_TECHNICAL_LIBRARY_LIFECYCLE
+IMMICH_RUNTIME=PASS_ISOLATED_GATEWAY_BRIDGE
+CANONICAL_PHOTO_MAPPING=PASS
+GATEWAY_CONTRACT=PASS
+ACL_AGGREGATION_FILTERING=PASS
 IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E
 IMMICH_FRONTEND_FEASIBLE=PENDING_GATEWAY_WEB_E2E
 PRODUCTION_READY=NO

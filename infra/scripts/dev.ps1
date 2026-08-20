@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -362,6 +362,14 @@ switch ($Action) {
         # proves the fresh state again. It never creates a browser endpoint.
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase2\immich-external-library-runtime.ps1')
+        exit $LASTEXITCODE
+    }
+    'test-phase2-immich-gateway-bridge' {
+        # This is an opt-in, disposable RUNTIME_TESTED bridge gate. It keeps
+        # Immich internal, uses a temporary technical user/library plus two
+        # canonical mappings, and restores the spike back to an empty state.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\immich-gateway-bridge-runtime.ps1')
         exit $LASTEXITCODE
     }
     'browser-qa' {

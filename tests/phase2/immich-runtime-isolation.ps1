@@ -34,7 +34,9 @@ function Assert-Exact([bool]$condition, [string]$reason) {
 }
 
 function Invoke-UbuntuDocker([string[]]$arguments) {
-    $lines = @(& wsl.exe -d Ubuntu -- docker @arguments 2>&1)
+    # Preserve Docker arguments exactly. WSL's shell-forwarding form corrupts
+    # Go templates and shell payloads used by this isolation gate.
+    $lines = @(& wsl.exe -d Ubuntu --exec docker @arguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw ('docker_command_failed_' + ($arguments -join '_'))
     }

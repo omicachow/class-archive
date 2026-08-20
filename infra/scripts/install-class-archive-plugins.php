@@ -34,7 +34,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/BackupRestoreEvidence.php',
             'src/Gateway/Contracts.php', 'src/Gateway/GatewayPolicy.php',
             'src/Gateway/GatewayService.php', 'src/Gateway/PiwigoGatewayAdapter.php',
-            'src/Gateway/GatewayHttpController.php',
+            'src/Gateway/BridgeImmichAdapter.php', 'src/Gateway/GatewayHttpController.php',
         ],
     ],
 ];

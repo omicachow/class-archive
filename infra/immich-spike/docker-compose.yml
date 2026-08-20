@@ -42,6 +42,67 @@ services:
     networks: [immich_internal]
     restart: "no"
 
+  # This is deliberately not an Immich Web proxy. It is a tiny, metadata-only
+  # adapter that is started only by the explicit integration-test profile. It
+  # receives policy-filtered canonical/photo bindings from Piwigo and can call
+  # only the fixed internal Immich API. It exposes no host port, no media
+  # endpoint, and has no mount to Piwigo originals or either application DB.
+  immich-gateway:
+    profiles: ["immich-gateway-integration"]
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa
+    entrypoint: ["node", "/bridge/server.mjs"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      IMMICH_GATEWAY_SECRET_FILE: /run/secrets/bridge.json
+    depends_on:
+      immich-server:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      - ./bridge:/bridge:ro
+      # The runner copies a one-time bridge credential into the companion
+      # stager's private volume. Avoid a Windows host bind here:
+      # Docker Desktop cannot reliably read an owner-only Windows file without
+      # weakening its ACL. This service has read-only access to that volume.
+      - immich_gateway_secret:/run/secrets:ro
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    networks:
+      immich_internal: {}
+      # Match the fixed authority in BridgeImmichAdapter. The alias lives only
+      # on the internal Piwigo↔bridge network; it is neither a host listener
+      # nor a caller-controlled destination.
+      class_archive_gateway:
+        aliases: [class-archive-immich-gateway]
+    restart: "no"
+
+  # No network and no host bind. The test runner starts this service only long
+  # enough to receive a one-time JSON credential over docker exec stdin, set
+  # its mode to 0600, and then start immich-gateway. `down --volumes` removes
+  # the entire volume on both success and failure.
+  immich-gateway-secret-stager:
+    profiles: ["immich-gateway-integration"]
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa
+    entrypoint: ["sh", "-lc", "trap 'exit 0' INT TERM; while :; do sleep 3600; done"]
+    # Docker initializes a named volume as root-owned. This one-purpose
+    # stager needs CAP_CHOWN only to give its one secret file to the
+    # unprivileged bridge account; it has no network or host mount.
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    volumes:
+      - immich_gateway_secret:/run/secrets:rw
+    network_mode: "none"
+    restart: "no"
+
   redis:
     profiles: ["immich-spike"]
     image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
@@ -76,6 +137,9 @@ networks:
   immich_internal:
     driver: bridge
     internal: true
+  class_archive_gateway:
+    external: true
+    name: class_archive_immich_gateway
 
 volumes:
   # Persistent state belonging solely to the disposable Immich spike.
@@ -85,6 +149,10 @@ volumes:
     name: class_archive_immich_spike_model_cache
   immich_db:
     name: class_archive_immich_spike_db
+  # Per-run secret staging volume. It contains no originals and is deleted by
+  # the runtime reset; do not reuse it for configuration or durable state.
+  immich_gateway_secret:
+    name: class_archive_immich_gateway_secret
   # Existing Piwigo originals, deliberately read-only in the server service.
   piwigo_uploads:
     external: true

@@ -83,7 +83,7 @@ final class GatewayHttpController
             $gateway = new GatewayService(
                 new ClassIdentityAdapter(),
                 PiwigoGatewayAdapter::fromPiwigo(),
-                new NullImmichAdapter(),
+                BridgeImmichAdapter::configuredOrNull(),
             );
             $response = match ($route) {
                 'photos' => $photoId === null ? $gateway->photos() : self::knownPhoto($gateway, $photoId),

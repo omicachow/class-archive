@@ -124,6 +124,13 @@ try {
     $bound = $service->findByClassPhotoId((string) $first['class_photo_id']);
     $assert(($bound['immich_asset_id'] ?? null) === $assetId, 'future_immich_link_internal_only');
     $second = $service->ensurePiwigoMapping($secondId, $checksum, 'upload/contract-second-' . $run . '.jpg');
+    $complete = $service->activeImmichAssetBindings([(string) $first['class_photo_id']]);
+    $assert(($complete[(string) $first['class_photo_id']] ?? null) === $assetId, 'complete_immich_binding_lookup');
+    $expects(
+        static fn () => $service->activeImmichAssetBindings([(string) $first['class_photo_id'], (string) $second['class_photo_id']]),
+        'class_archive_photo_immich_binding_incomplete',
+        'partial_immich_binding_fails_closed',
+    );
     $expectsDuplicate(
         static fn () => $service->bindImmichAsset((string) $second['class_photo_id'], $assetId),
         'immich_asset_unique',

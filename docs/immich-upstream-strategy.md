@@ -8,7 +8,7 @@
 | release tag | `v3.1.0` |
 | source commit | `8aa95c67470a02a8ddedf03c2e52963af33065ff` |
 | 许可证 | GNU AGPL-3.0-only |
-| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server 与 ephemeral technical-user/external-library lifecycle runtime 已通过 |
+| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server、ephemeral technical-user/external-library lifecycle 和 Gateway→Immich metadata bridge runtime 已通过 |
 
 精确镜像引用和摘要记录于
 [`infra/immich-spike/immich-upstream.lock.json`](../infra/immich-spike/immich-upstream.lock.json)。
@@ -41,7 +41,9 @@ dependency images 已取得；真实 Server runtime 已另由两个 runtime gate
   空状态与 original SHA-256。
 
 第二项只证明上游 v3.1.0 可在本隔离模型下执行 external-library 生命周期；其技术用户
-和 asset index 都已随 spike volume reset 清除。它不证明 Gateway ACL、Web integration
+和 asset index 都已随 spike volume reset 清除。第三个独立 bridge runtime gate 已验证
+Class Archive 在 policy filtering 后经固定 internal-only adapter 查询真实 Immich，且同一
+memory 对 Classmate 聚合为 2 张、对 Family 聚合为 1 张；它不证明 Web integration
 或 Photo UI 已通过。
 可重复运行 [`verify-supply-chain.ps1`](../infra/immich-spike/verify-supply-chain.ps1)
 以验证本机 archive SHA-256、source 版本、compose digest pin 和本地 Docker
@@ -69,7 +71,10 @@ presentation compatibility only
   注册、用户管理、API key、Partner Sharing 或管理员界面。
 - 已建立不可公开的 `ClassArchivePhoto UUID → piwigo_image_id / nullable immich_asset_id /
   canonical physical path / SHA-256` 映射。Piwigo ID 和 Immich asset ID 都不是
-  公共 canonical identity；Immich link 仍为 nullable，且没有 Gateway→Immich adapter。
+  公共 canonical identity；Immich link 仍为 nullable。未接入 bridge 时 nullable link 不
+  影响 Class Archive；bridge 启用后，metadata-only adapter 只发送 policy-filtered、已
+  绑定的 canonical UUID 集合，并要求该可见集合完整绑定。任一缺失/异常都 generic 503
+  fail closed，不产生部分 People/Memory 聚合。
 - 所有 Timeline、People、Search、Memories、计数和缩略图结果都要在 Gateway
   进入浏览器前按 ClassArchivePolicy 过滤。Family 永远不得通过 count、People
   或 Search 侧信道得知 LIVING。
@@ -104,8 +109,8 @@ presentation compatibility only
 ## 当前结论
 
 `IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E`。官方 source archive 与
-Server / ML 镜像已取得并校验，isolated Server 以及 ephemeral technical-user /
-external-library runtime lifecycle 已通过；Class Archive 自有同源 Gateway 已对
-Piwigo + ClassIdentity 跑过真实 ACL/聚合 HTTP 回归，但 Gateway runtime adapter、
-Immich asset linkage、Web integration 和浏览器仍未验证。当前不暴露 Immich 端口给
-浏览器，也不接触真实照片或 NAS。
+Server / ML 镜像已取得并校验，isolated Server、ephemeral technical-user /
+external-library lifecycle 以及 Gateway→Immich metadata bridge 都已跑过真实运行时
+验证；Class Archive 自有同源 Gateway 已对 Piwigo + ClassIdentity 跑过真实 ACL/聚合
+HTTP 回归。Web integration、Photo UI、浏览器、ML、Smart Search 和 People 的非空
+真实运行时结果仍未验证。当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。

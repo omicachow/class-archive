@@ -11,13 +11,15 @@
 | 同源 `/api` Piwigo Gateway | `RUNTIME_TESTED` | 真实 localhost Piwigo + MariaDB + ClassIdentity 运行态；29 次 HTTP 请求、584 个 ACL / 聚合 / DTO / 输入断言通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
 | Immich technical user / external-library lifecycle | `RUNTIME_TESTED` | ephemeral internal user、read-only synthetic scan、asset count gate、spike reset 后空状态复验 |
-| Immich Adapter / Gateway runtime query | 未开始 | Gateway 尚不会连接实际 Immich runtime |
+| Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary bridge → real pinned Immich v3.1.0; Classmate/FAMILY aggregation, internal-network isolation, no-media route and cleanup passed |
 | 浏览器 API/UI | 未开始 | `/api` 已有同源 JSON 边界，但没有 Photo UI / Immich Web E2E |
 
 [`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1) 与
 [`immich-external-library-runtime.ps1`](../tests/phase2/immich-external-library-runtime.ps1)
-可分别表述为 `RUNTIME_TESTED` 的隔离启动和可丢弃 external-library lifecycle；本文件的
-Gateway 合约仍不得表述为 Immich Adapter integration 或 `BROWSER_E2E_TESTED`。
+可分别表述为 `RUNTIME_TESTED` 的隔离启动和可丢弃 external-library lifecycle。
+[`immich-gateway-bridge-runtime.ps1`](../tests/phase2/immich-gateway-bridge-runtime.ps1)
+进一步验证了真正的 `Piwigo Gateway → isolated bridge → Immich` metadata path；它仍
+绝不是 `BROWSER_E2E_TESTED`，也没有公开 Immich Web 或媒体端点。
 
 ## Canonical ClassArchivePhoto
 
@@ -69,9 +71,12 @@ ImmichAdapter
     -> 返回候选成员关系，Gateway 重新计算可见计数
 ```
 
-`NullImmichAdapter` 表示 **Gateway→Immich bridge** 明确 `UNAVAILABLE`，即使
-独立 Immich container 已完成 isolated boot 也一样；它不会建立 socket、不会模拟
-Immich 内容，也不会把空结果称为 Immich E2E。
+正常关闭状态下，`NullImmichAdapter` 表示 **Gateway→Immich bridge** 明确
+`UNAVAILABLE`：它不会建立 socket、不会模拟 Immich 内容，也不会把空结果称为
+Immich E2E。运行时 bridge gate 会短暂启用 `BridgeImmichAdapter`，只把已经通过
+`GatewayPolicy` 的 canonical UUID 与内部 asset binding 交给固定内部 bridge；gate
+finally 会撤销配置、删除 bridge credential 和 asset bindings，再将 Immich spike
+复原为空状态。
 
 ## 当前同源只读 HTTP API
 
@@ -168,3 +173,16 @@ Adapter / Browser 集成。
 external library，扫描 synthetic originals 后销毁并重建仅属于 spike 的 volumes。它不保留
 technical credentials、library 或 asset，也不把 Gateway 的 `NullImmichAdapter` 变成已实现
 的 runtime adapter。
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-gateway-bridge
+```
+
+该门是 `RUNTIME_TESTED` 的实际 bridge integration：它重置 spike、建立一次性 internal
+technical user 和 read-only external library、只绑定两张现有 synthetic canonical photos，
+再以真实 Classmate 与 Family HTTP session 调用 `/api/memories` 和 `/api/people`。同一
+Immich memory 对 Classmate 聚合为 2 张、对 Family 只聚合为 1 张；所有 Piwigo image id、
+Immich asset id、storage reference、checksum 与媒体 URL 都必须不出现在 public DTO。它还
+断言 `/api/media` 不存在、bridge 没有 host port、bridge 不挂载 Piwigo originals，并在
+finally 验证 Immich state 为空、Piwigo original SHA-256 不变。最近一次结果为 651 项断言、
+5 个 HTTP probes 通过。

@@ -57,3 +57,17 @@ host port：
 ```
 
 这仍不是 Gateway、Web fork、ML 或 browser E2E 验收；浏览器仍不能直接访问 Immich。
+
+下面的第三个受控门会短暂建立一个**metadata-only** Class Archive bridge。它只接收
+已经过 Gateway policy 过滤且已绑定的 canonical photo UUID，向固定的 internal-only
+Immich bridge 查询 People/Memory candidate memberships；它没有媒体 route、没有 host
+port、没有 Piwigo original/数据库 mount。测试会验证同一 Immich memory 对 Classmate 与
+Family 的重算可见数量不同，不会泄露 Piwigo/Immich internal ID、path 或 checksum，并在
+finally 清除 bridge credential/config/binding 与 spike volumes：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-gateway-bridge
+```
+
+这已经是 `RUNTIME_TESTED` 的 adapter integration，但仍不是 Immich Web fork、ML 或
+browser E2E；浏览器仍不能直接访问 Immich。

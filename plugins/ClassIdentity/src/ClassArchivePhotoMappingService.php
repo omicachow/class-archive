@@ -58,6 +58,64 @@ final class ClassArchivePhotoMappingService
     }
 
     /**
+     * Resolve only complete, active canonical-to-Immich bindings for a
+     * policy-approved set. This is intentionally an all-or-nothing lookup:
+     * a partial external index must make enrichment unavailable rather than
+     * silently produce a count derived from an unknown subset.
+     *
+     * @param list<string> $classPhotoIds
+     * @return array<string,string> canonical UUID => internal Immich asset UUID
+     */
+    public function activeImmichAssetBindings(array $classPhotoIds): array
+    {
+        if ($classPhotoIds === []) {
+            return [];
+        }
+        if (count($classPhotoIds) > 500) {
+            throw new \InvalidArgumentException('class_archive_photo_immich_binding_batch_invalid');
+        }
+
+        $binaryIds = [];
+        $expected = [];
+        foreach ($classPhotoIds as $classPhotoId) {
+            if (!is_string($classPhotoId)) {
+                throw new \InvalidArgumentException('class_archive_photo_id_invalid');
+            }
+            $binaryId = ClassArchivePhoto::idToBinary($classPhotoId);
+            if (isset($expected[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_photo_immich_binding_duplicate');
+            }
+            $expected[$classPhotoId] = true;
+            $binaryIds[] = $binaryId;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($binaryIds), '?'));
+        $rows = $this->repository->fetchAll(
+            'SELECT `class_photo_id`,`piwigo_image_id`,`source_submission_id`,`immich_asset_id`,'
+            . '`media_checksum`,`media_reference`,`state`,`created_at`,`updated_at` '
+            . 'FROM `' . $this->repository->table('photo') . '` '
+            . 'WHERE `class_photo_id` IN (' . $placeholders . ') AND `state` = ? AND `immich_asset_id` IS NOT NULL',
+            array_merge($binaryIds, [ClassArchivePhoto::STATE_ACTIVE]),
+        );
+
+        $result = [];
+        foreach ($rows as $row) {
+            $mapping = self::hydrate($row);
+            $classPhotoId = (string) $mapping['class_photo_id'];
+            $assetId = $mapping['immich_asset_id'] ?? null;
+            if (!isset($expected[$classPhotoId]) || !is_string($assetId) || isset($result[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_photo_immich_binding_invalid');
+            }
+            $result[$classPhotoId] = $assetId;
+        }
+        if (count($result) !== count($expected)) {
+            throw new \RuntimeException('class_archive_photo_immich_binding_incomplete');
+        }
+
+        return $result;
+    }
+
+    /**
      * Create a mapping for an already accepted Piwigo image or return the
      * existing verified mapping. A changed file digest/reference marks the
      * existing mapping STALE and refuses to continue instead of silently
