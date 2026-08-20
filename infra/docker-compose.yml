@@ -32,6 +32,15 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${CLASS_ARCHIVE_HTTP_PORT:-8090}:80"
+      # The compatibility Web service itself has no host port. This separate
+      # loopback listener is an nginx front proxy so Piwigo's IP-bound session
+      # check still sees the browser's original source address.
+      - "127.0.0.1:8091:8081"
+    expose:
+      # Only the narrow, internal BFF→Gateway server listens here. It is not
+      # mapped to a host port and rejects requests without the fixed proxy
+      # header set by the compatibility BFF.
+      - "8088"
     environment:
       TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
       PIWIGO_UID: ${PIWIGO_UID:-1000}

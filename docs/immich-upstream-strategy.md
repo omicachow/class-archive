@@ -85,8 +85,9 @@ presentation compatibility only
   进入浏览器前按 ClassArchivePolicy 过滤。Family 永远不得通过 count、People
   或 Search 侧信道得知 LIVING。
 - 浏览器媒体继续走已验证的 MediaGuard；Immich 原图、缩略图与 asset endpoint
-  不对浏览器开放。当前 Immich Server 连 localhost host port 也没有；之后只由
-  经过 Gateway 的受控 localhost listener 提供 Web shell。
+  不对浏览器开放。Immich Server 连 localhost host port 也没有。已验证 Web shell
+  只经 `127.0.0.1:8091 -> Piwigo nginx -> internal compatibility BFF -> Gateway`
+  提供兼容 API 和 `X-Accel-Redirect` 文件交付。
 
 ## 上游变更分类
 
@@ -114,9 +115,11 @@ presentation compatibility only
 
 ## 当前结论
 
-`IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E`。官方 source archive 与
-Server / ML 镜像已取得并校验，isolated Server、ephemeral technical-user /
+`IMMICH_WEB_FORK_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_COMPAT_SPIKE`。官方 source
+archive 与 Server / ML 镜像已取得并校验，isolated Server、ephemeral technical-user /
 external-library lifecycle 以及 Gateway→Immich metadata bridge 都已跑过真实运行时
 验证；Class Archive 自有同源 Gateway 已对 Piwigo + ClassIdentity 跑过真实 ACL/聚合
-HTTP 回归。Web integration、Photo UI、浏览器、ML、Smart Search 和 People 的非空
-真实运行时结果仍未验证。当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。
+HTTP 回归。官方未修改 Web build 现在由窄 BFF projection 在真实 Chromium 中显示
+Classmate synthetic Timeline 与 Viewer；它没有 Immich 登录、写 API 或直连媒体。
+People、Smart Search 的非空 Immich index、ML、Family 独立 browser E2E 和生产部署
+仍未验证。当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。

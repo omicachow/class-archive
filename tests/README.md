@@ -330,3 +330,29 @@ media baseline.
 The latest successful browser run reported 234 assertions and 11 synthetic-only
 screenshots. Full procedure, screenshots and scope limits are recorded in
 [`docs/browser-qa-report.md`](../docs/browser-qa-report.md).
+
+## Phase 2: Immich Web compatibility boundary
+
+`phase2/immich-web-compat-http.ps1` is a localhost-only `RUNTIME_TESTED`
+gate for the verified upstream Immich Web static build. It verifies the narrow
+`127.0.0.1:8091 -> Piwigo nginx -> internal compatibility process -> internal
+Gateway -> MediaGuard` topology, immutable official image digest, read-only
+compatibility mounts, no compatibility host port, and the absence of an
+Immich/Piwigo database or original-file mount. It then exercises real Piwigo
+fixture sessions for Guest, Classmate, Teacher, Family, Anonymous and
+SYSTEM_ADMIN. It proves canonical UUID DTO redaction, Family aggregate/search/
+album/thumbnail LIVING exclusion, Family Heritage thumbnail allow and original
+deny, Classmate LIVING preview allow, exact `HEAD`/`Range`, bounded request
+input, Piwigo sign-in redirection, and the AGPL notice endpoint. It starts no
+Immich browser account, asset, library, API key or duplicate original.
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-web-compat
+```
+
+The current focused run reports `HTTP_PROBES=34` and `ASSERTIONS=325`. This is
+not a statement that Immich owns authorization or that browser UI has passed:
+browser screenshots and interactions are independently labelled
+`BROWSER_E2E_TESTED`. People and Memories deliberately return empty data until
+a canonical aggregate adapter can demonstrate policy filtering instead of
+inventing or leaking memberships.

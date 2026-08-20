@@ -9,19 +9,22 @@
 - 只使用当前 72 张合成照片；
 - Piwigo 的 `uploads` / `galleries` 仅以 `:ro` 挂载；
 - 没有 Piwigo 数据库、`piwigo_data`、derivative 或 scripts 挂载；
-- 当前不映射任何 host port；未来如因受控 Gateway shell 必须新增 listener，
-  也只能映射到 `127.0.0.1`；
+- Immich Server、ML、PostgreSQL、Valkey 与 compatibility process 都不映射 host
+  port；Web shell 仅由 Piwigo nginx 的 `127.0.0.1:8091` 入口转发；
 - 浏览器不能直达任何 Immich original/thumbnail endpoint。媒体必须继续经过
   Class Archive Gateway 与 MediaGuard。
 
-本 compose 项目位于独立网络 `immich_internal`，不接入 Piwigo 的 compose
-网络。`immich_upload`、`immich_db` 和 `immich_model_cache` 都是可丢弃的
-spike 状态；它们不得承载 Piwigo 原图。
+Immich Server、ML、PostgreSQL、Valkey 位于独立的 internal-only
+`immich_internal` 网络，不接入 Piwigo compose 网络。只读 Web compatibility
+process 不接入 `immich_internal`；它仅加入单独的 `class_archive_immich_gateway`
+网络，并且只能到 Piwigo 的窄 `:8088` Gateway。`immich_upload`、`immich_db`
+和 `immich_model_cache` 都是可丢弃 spike 状态；它们不得承载 Piwigo 原图。
 
 Immich Server 刻意没有 host port，连 `127.0.0.1` 也不直接发布。这可以防止
-浏览器意外访问 Immich asset/original endpoint。后续只有经 Class Archive
-Gateway 的 localhost listener 才能提供 Web shell；它必须先完成
-ClassIdentity/Policy 过滤和 MediaGuard URL 改写。
+浏览器意外访问 Immich asset/original endpoint。当前已验证的 Web shell 仍不
+暴露 Immich：浏览器只到 Piwigo nginx `127.0.0.1:8091`，再经过 Class Archive
+Gateway、ClassIdentity/Policy 和 MediaGuard。详见
+[`web-compat/README.md`](web-compat/README.md)。
 
 不要直接执行 `docker compose up`。使用后续的受控验证脚本；它会在任何
 来源、媒体只读或 localhost 约束不满足时拒绝启动。
@@ -71,3 +74,14 @@ finally 清除 bridge credential/config/binding 与 spike volumes：
 
 这已经是 `RUNTIME_TESTED` 的 adapter integration，但仍不是 Immich Web fork、ML 或
 browser E2E；浏览器仍不能直接访问 Immich。
+
+受控的 Web compatibility 边界使用官方未修改的 Web build、Class Archive 的
+canonical UUID API 与 MediaGuard。它没有 Immich 浏览器登录、用户管理、原图挂载或
+host port；它的实际 localhost HTTP 回归如下：
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-web-compat
+```
+
+该脚本只证明 `RUNTIME_TESTED` 兼容协议、隔离与 ACL；浏览器交互截图和 visual QA
+必须单独标记为 `BROWSER_E2E_TESTED`。

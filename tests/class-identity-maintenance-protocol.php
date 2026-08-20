@@ -103,11 +103,11 @@ $assert(!str_contains($mediaGuard, 'USER_GROUP_TABLE'), 'MediaGuard must not fal
 $assert(!str_contains($mediaGuard, 'GROUPS_TABLE'), 'MediaGuard must not resolve business roles from Core groups');
 
 $assert(!str_contains($dev, "'php', '/workspace/infra/scripts/bootstrap-class-identity.php'"), 'dev must not expose direct online bootstrap');
-$restart = $position($dev, "@('restart', 'piwigo')");
+$recreate = $position($dev, "@('up', '-d', '--force-recreate', '--no-deps', 'piwigo')");
 $ready = $lastPosition($dev, 'Wait-ClassArchiveMaintenanceReady');
 $verify = $position($dev, "'--verify-runtime'");
 $finalize = $position($dev, "'--finalize-maintenance'");
-$assert($restart >= 0 && $restart < $verify, 'restart must precede runtime verification');
+$assert($recreate >= 0 && $recreate < $verify, 'fail-closed Piwigo recreation must precede runtime verification');
 $assert($ready >= 0 && $ready < $verify, 'maintenance readiness must precede runtime verification');
 $assert($verify >= 0 && $verify < $finalize, 'runtime verification must precede independent finalization');
 $assert(str_contains($dev, "if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"), 'orchestrator failures must stop before finalization');

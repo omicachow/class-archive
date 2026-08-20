@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'test-phase2-immich-web-compat', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -372,6 +372,14 @@ switch ($Action) {
             (Join-Path $projectRoot 'tests\phase2\immich-gateway-bridge-runtime.ps1')
         exit $LASTEXITCODE
     }
+    'test-phase2-immich-web-compat' {
+        # This exercises the isolated official Web build through the narrow
+        # Class Archive compatibility boundary. It is RUNTIME_TESTED only;
+        # browser interaction is separately reported by browser QA evidence.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\immich-web-compat-http.ps1')
+        exit $LASTEXITCODE
+    }
     'browser-qa' {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase1\browser-qa.ps1')
@@ -472,7 +480,11 @@ try {
         # Restart clears PHP-FPM/opcache; every failure below returns with the exact
         # marker still present. No direct online bootstrap path exists in dev.ps1.
         Restore-PiwigoPersistentUserScript
-        & wsl.exe @($composeArguments + @('restart', 'piwigo'))
+        # A plain container restart does not apply compose-level changes such as
+        # loopback port mappings. Recreate only Piwigo while the durable
+        # maintenance marker is still present, so nginx/PHP-FPM/opcache and the
+        # container network surface move forward as one fail-closed step.
+        & wsl.exe @($composeArguments + @('up', '-d', '--force-recreate', '--no-deps', 'piwigo'))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Wait-ClassArchiveMaintenanceReady
         # Restart may normalize the marker to the exact persistent-volume form.

@@ -64,7 +64,8 @@ Immich 登录、API key 或 library。
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
 | Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary `BridgeImmichAdapter` 通过固定 internal-only bridge 查询真实 Immich；651 个断言 / 5 个 HTTP probes 验证 Classmate=2、Family=1 的 memory 聚合、People 空结果、无 media route、DTO 脱敏、原图 SHA-256 与完整 cleanup |
-| Immich Web fork / Browser | 未开始 | 浏览器无法直达 Immich；没有 Web shell、Web fork 或 browser E2E 结论 |
+| Immich Web compatibility HTTP | `RUNTIME_TESTED` | 固定 upstream Web build 经 `127.0.0.1:8091 -> Piwigo nginx -> internal BFF -> canonical Gateway -> MediaGuard` 的 34 个真实 HTTP probes / 325 项断言；无 Immich host port、无原图 byte relay、无 Immich 登录 |
+| Immich Web compatibility Browser | `BROWSER_E2E_TESTED`（有限） | 真 Chromium 打开合成 Classmate 时间线与照片查看器：桌面 19 张、390×844 移动端 27 张缩略图均成功加载；无可见 LIVING/媒体错误、横向溢出或受限入口。到期 session 自动回到 Class Archive 登录页。Family 浏览器路径尚未单独重新录制；其 ACL 已由 runtime HTTP gate 覆盖 |
 
 可重复执行运行时隔离门：
 
@@ -111,11 +112,41 @@ Piwigo original mount、没有 Piwigo/Immich database mount，也没有媒体路
 两条临时 asset binding、technical user/library/index 和 spike volumes 都会被精确撤销，
 并再次核对 72 张 Piwigo synthetic originals 的 SHA-256。
 
+## 已完成的 Web compatibility 边界
+
+Web 并非把浏览器交给 Immich Server。已验证的路径是：
+
+```text
+Browser (127.0.0.1:8091)
+  -> Piwigo nginx :8081
+  -> internal Web compatibility process :3000
+  -> internal Gateway :8088
+  -> ClassIdentity / ClassArchivePolicy / MediaGuard
+  -> nginx X-Accel-Redirect
+```
+
+compatibility process 仅把 policy-filtered canonical UUID DTO 投影为上游 Web
+所需的只读响应。它没有 Piwigo/Immich DB、Piwigo original/derivative 或
+credential mount，也不加入 Immich internal network。媒体成功时必须带安全
+`X-Accel-Redirect`，由外层 nginx 传输；Node 不读取或缓存媒体字节。
+
+官方 upstream build 保持未修改。响应注入仅做可逆 presentation compatibility：
+中文“班级相册”品牌、受限写入/账号入口隐藏、过期 Piwigo session 返回真实登录页，及
+含 AGPL-3.0-only 与固定 commit 的“开源许可”页面。它没有 service worker/offline
+cache 或 realtime socket，不能把这些未实现能力描述为通过。
+
+真实浏览器截图只含合成素材，存于 ignored 路径：
+
+- `.codex-work/screenshots/phase2-web-compat/02-immich-timeline-desktop.png`
+- `.codex-work/screenshots/phase2-web-compat/03-immich-timeline-mobile.png`
+- `.codex-work/screenshots/phase2-web-compat/04-immich-viewer-desktop.png`
+
 ## 尚未完成，不能伪称通过
 
-- Timeline / People / Smart Search 的 Family side-channel 真实运行时验证；
-- Immich Web fork、中文品牌、法律通知和 Immich Web asset-API compatibility 层；
-- ML/CPU 结果、性能和 browser E2E 截图。
+- 真实非空 People / Memories / ML / CLIP / face clustering；
+- Smart Search 的 Immich index 结果接入 canonical aggregate adapter；
+- Family 浏览器交互录像级验收（runtime ACL、count、thumbnail、Search 过滤已通过）；
+- 性能基线、离线缓存与 realtime 设计（当前刻意不启用）。
 
 因此当前状态为：
 
@@ -124,7 +155,9 @@ IMMICH_RUNTIME=PASS_ISOLATED_GATEWAY_BRIDGE
 CANONICAL_PHOTO_MAPPING=PASS
 GATEWAY_CONTRACT=PASS
 ACL_AGGREGATION_FILTERING=PASS
-IMMICH_WEB_FORK_FEASIBLE=PENDING_GATEWAY_WEB_E2E
-IMMICH_FRONTEND_FEASIBLE=PENDING_GATEWAY_WEB_E2E
+IMMICH_WEB_COMPAT_RUNTIME=PASS
+IMMICH_WEB_BROWSER_E2E=PARTIAL_PASS_CLASSMATE_TIMELINE_VIEWER
+IMMICH_WEB_FORK_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_COMPAT_SPIKE
+IMMICH_FRONTEND_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_TIMELINE_SPIKE
 PRODUCTION_READY=NO
 ```

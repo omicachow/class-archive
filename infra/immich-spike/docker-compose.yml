@@ -103,6 +103,47 @@ services:
     network_mode: "none"
     restart: "no"
 
+  # Local-only Web compatibility spike. The service serves the verified
+  # upstream static build but receives no Immich/Piwigo database or original
+  # mount. It can call only the policy-enforcing Piwigo Gateway on the narrow
+  # internal network. It is not an Immich Web reverse proxy.
+  immich-web-compat:
+    profiles: ["immich-web-compat"]
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa
+    entrypoint: ["node", "/compat/server.mjs"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CLASS_ARCHIVE_WEB_COMPAT_PORT: "3000"
+      CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT: "8091"
+      CLASS_ARCHIVE_WEB_ROOT: /web
+      # This port exists only on the Piwigo↔BFF internal network. Piwigo nginx
+      # is the loopback-bound public listener and preserves the original
+      # client address for Piwigo's IP-bound session validation.
+      CLASS_ARCHIVE_GATEWAY_ORIGIN: http://piwigo:8088
+    expose:
+      - "3000"
+    volumes:
+      - ./web-compat:/compat:ro
+      - ./source/official-v3.1.0/web/build:/web:ro
+      # Override the upstream image's declared writable /data VOLUME with a
+      # tracked, empty, read-only directory. The compatibility process never
+      # needs an Immich data directory, so Docker must not allocate a durable
+      # anonymous volume merely because the base image declares one.
+      - ./web-compat/empty-data:/data:ro
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/healthz').then(function(r){process.exit(r.status === 200 ? 0 : 1)}).catch(function(){process.exit(1)})\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks: [class_archive_gateway]
+    restart: "no"
+
   redis:
     profiles: ["immich-spike"]
     image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411

@@ -46,6 +46,35 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase1\browser-q
 
 截图本体不进入 Git；本报告只记录可复跑的命令、边界和结果。
 
+## Phase 2 Web compatibility 补充验收
+
+2026-08-21 使用真实 Chromium 对 `127.0.0.1:8091` 的隔离 Web compatibility
+shell 进行了**有限**浏览器验收。它不是 Immich Server 浏览器登录：已有 Classmate
+Piwigo session 经 Piwigo nginx、内部 compatibility process、canonical Gateway 与
+MediaGuard 渲染官方未修改 Web build。
+
+- 1440px 桌面 Timeline 实际加载 19 张合成缩略图；
+- 390×844 移动端实际加载 27 张合成缩略图，`scrollWidth == clientWidth`，未发现可见
+  可点击元素越出视口；
+- 打开一张照片进入 Viewer 后，媒体正常加载且无“加载图片时出错”；
+- 可见品牌为“班级相册”，受限写入/账号入口、Immich logo 和存储配额均未显示；
+- 经凭据轮换使旧 session 失效后，Web shell 自动回到真实 Class Archive 登录页，
+  不显示上游 HTTP 401 堆栈。
+
+对应截图同样只含合成图像，存于 Git 忽略目录
+`C:\Users\Omica\Documents\ChatGPT\班级相册开发\.codex-work\screenshots\phase2-web-compat\`：
+
+| 文件 | 内容 |
+|---|---|
+| `02-immich-timeline-desktop.png` | 桌面 Timeline |
+| `03-immich-timeline-mobile.png` | 移动端 Timeline |
+| `04-immich-viewer-desktop.png` | 照片 Viewer |
+
+这只是 `BROWSER_E2E_TESTED` 的 Classmate Timeline/Viewer 证据。Family 的 Web
+交互尚未单独重新录制；其列表、聚合、搜索、thumbnail、original、HEAD 和 Range ACL
+由 34-probe / 325-assertion 的 `RUNTIME_TESTED` compatibility HTTP gate 覆盖。People
+和 Memories 当前有意返回空集合，非空 Immich index/ML 功能仍未通过浏览器验收。
+
 ## 已知边界
 
 - 此测试检查实际页面加载、表单提交、点击、中文文案与无横向溢出，不替代人工无障碍审阅或跨浏览器兼容性矩阵；
