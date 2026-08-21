@@ -121,5 +121,5 @@ external-library lifecycle 以及 Gateway→Immich metadata bridge 都已跑过�
 验证；Class Archive 自有同源 Gateway 已对 Piwigo + ClassIdentity 跑过真实 ACL/聚合
 HTTP 回归。官方未修改 Web build 现在由窄 BFF projection 在真实 Chromium 中显示
 Classmate synthetic Timeline 与 Viewer；它没有 Immich 登录、写 API 或直连媒体。
-People、Smart Search 的非空 Immich index、ML、Family 独立 browser E2E 和生产部署
-仍未验证。当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。
+People、Smart Search 的非空 Immich index 与 ML、以及生产部署仍未验证。Family 的
+compatibility 浏览器验收已单独通过；当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。
