@@ -82,11 +82,27 @@ function Detach-ImmichOriginalMounts {
         throw 'Refusing to detach an unexpected Immich container.'
     }
     $mounts = @($record.Mounts)
+    # Docker represents the timezone bind mount alongside named volumes.  Under
+    # StrictMode, do not dereference a `Name` property on that bind object:
+    # examine the property bag and accept only the two explicit read-only
+    # volume mounts that form the original-media boundary.
     $uploadMount = @($mounts | Where-Object {
-        $_.Name -eq 'class_archive_piwigo_uploads' -and $_.Destination -eq '/external/piwigo-upload' -and $_.RW -eq $false
+        $type = $_.PSObject.Properties['Type']
+        $name = $_.PSObject.Properties['Name']
+        $destination = $_.PSObject.Properties['Destination']
+        $readWrite = $_.PSObject.Properties['RW']
+        $null -ne $type -and $null -ne $name -and $null -ne $destination -and $null -ne $readWrite -and
+        $type.Value -eq 'volume' -and $name.Value -eq 'class_archive_piwigo_uploads' -and
+        $destination.Value -eq '/external/piwigo-upload' -and $readWrite.Value -eq $false
     })
     $galleryMount = @($mounts | Where-Object {
-        $_.Name -eq 'class_archive_piwigo_galleries' -and $_.Destination -eq '/external/piwigo-galleries' -and $_.RW -eq $false
+        $type = $_.PSObject.Properties['Type']
+        $name = $_.PSObject.Properties['Name']
+        $destination = $_.PSObject.Properties['Destination']
+        $readWrite = $_.PSObject.Properties['RW']
+        $null -ne $type -and $null -ne $name -and $null -ne $destination -and $null -ne $readWrite -and
+        $type.Value -eq 'volume' -and $name.Value -eq 'class_archive_piwigo_galleries' -and
+        $destination.Value -eq '/external/piwigo-galleries' -and $readWrite.Value -eq $false
     })
     if ($uploadMount.Count -ne 1 -or $galleryMount.Count -ne 1) {
         throw 'Immich original mount is not the expected read-only boundary.'
