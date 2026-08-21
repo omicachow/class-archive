@@ -19,6 +19,17 @@ $composeBase = @(
     '--env-file', '.env.piwigo',
     '-f', 'infra/docker-compose.yml'
 )
+$spikeComposeBase = @(
+    '-d', 'Ubuntu',
+    '--cd', $projectRoot,
+    '--',
+    'docker', 'compose',
+    '--project-directory', 'infra/immich-spike',
+    '--env-file', 'infra/immich-spike/.env',
+    '-f', 'infra/immich-spike/docker-compose.yml',
+    '--profile', 'immich-spike'
+)
+$immichServerContainer = 'class-archive-immich-spike-immich-server-1'
 $runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $workRoot = Join-Path $projectRoot ('.codex-work\backup-restore-drill\' + $runStamp)
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
@@ -29,6 +40,77 @@ function Invoke-Compose {
     if ($LASTEXITCODE -ne 0) {
         throw "Docker Compose command failed: $($Arguments -join ' ')"
     }
+}
+
+function Invoke-ImmichSpikeCompose {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    & "$env:SystemRoot\System32\wsl.exe" @($spikeComposeBase + $Arguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Immich spike compose command failed: $($Arguments -join ' ')"
+    }
+}
+
+function Get-DockerInspectOrNull {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $raw = @(& "$env:SystemRoot\System32\wsl.exe" -d Ubuntu -- docker inspect $Name 2>&1)
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($code -ne 0) { return $null }
+    $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+    if ($parsed.Count -ne 1) { throw 'Docker inspect result was ambiguous.' }
+    return $parsed[0]
+}
+
+function Detach-ImmichOriginalMounts {
+    # Immich is intentionally read-only, but Docker still treats its live or
+    # stopped container as a holder of the two Piwigo original volumes. A
+    # destructive Piwigo restore must first remove only that disposable
+    # container; it never removes Immich DB/upload/model state or any Piwigo
+    # volume outside the drill's explicit list.
+    $record = Get-DockerInspectOrNull -Name $immichServerContainer
+    if ($null -eq $record) { return @{ Detached = $false; WasRunning = $false } }
+    if (
+        $record.Config.Labels.'com.docker.compose.project' -ne 'class-archive-immich-spike' -or
+        $record.Config.Labels.'com.docker.compose.service' -ne 'immich-server'
+    ) {
+        throw 'Refusing to detach an unexpected Immich container.'
+    }
+    $mounts = @($record.Mounts)
+    $uploadMount = @($mounts | Where-Object {
+        $_.Name -eq 'class_archive_piwigo_uploads' -and $_.Destination -eq '/external/piwigo-upload' -and $_.RW -eq $false
+    })
+    $galleryMount = @($mounts | Where-Object {
+        $_.Name -eq 'class_archive_piwigo_galleries' -and $_.Destination -eq '/external/piwigo-galleries' -and $_.RW -eq $false
+    })
+    if ($uploadMount.Count -ne 1 -or $galleryMount.Count -ne 1) {
+        throw 'Immich original mount is not the expected read-only boundary.'
+    }
+    $wasRunning = [bool]$record.State.Running
+    Invoke-ImmichSpikeCompose -Arguments @('rm', '-s', '-f', 'immich-server')
+    if ($null -ne (Get-DockerInspectOrNull -Name $immichServerContainer)) {
+        throw 'Immich original-mount container was not detached.'
+    }
+    return @{ Detached = $true; WasRunning = $wasRunning }
+}
+
+function Restore-ImmichOriginalMounts {
+    param([Parameter(Mandatory = $true)][hashtable]$State)
+    if (-not [bool]$State.Detached -or -not [bool]$State.WasRunning) { return }
+    Invoke-ImmichSpikeCompose -Arguments @('up', '-d', 'immich-server')
+    for ($attempt = 1; $attempt -le 90; $attempt++) {
+        $record = Get-DockerInspectOrNull -Name $immichServerContainer
+        if ($null -ne $record -and $record.State.Running -eq $true -and $record.State.Health.Status -eq 'healthy') {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw 'Immich server did not return healthy after the Piwigo restore.'
 }
 
 function Invoke-Dev {
@@ -129,6 +211,7 @@ $targetVolumes = @(
 $backupVolume = @{ Name = 'class_archive_piwigo_backups'; Logical = 'backups' }
 $destructionStarted = $false
 $serviceRtoStart = $null
+$immichMountState = @{ Detached = $false; WasRunning = $false }
 
 try {
     Invoke-Dev 'baseline-verify'
@@ -159,6 +242,12 @@ try {
 
     foreach ($volume in $targetVolumes) { Assert-ExpectedVolume -Name $volume.Name -LogicalName $volume.Logical }
     Assert-ExpectedVolume -Name $backupVolume.Name -LogicalName $backupVolume.Logical
+
+    # The isolated Immich server may be running during a local frontend spike.
+    # It has the Piwigo originals mounted read-only, yet Docker rightfully
+    # refuses any volume removal until that one disposable container is
+    # detached. The identity/ACL stack is not involved in this pause.
+    $immichMountState = Detach-ImmichOriginalMounts
 
     Invoke-Compose -Arguments @('stop', 'piwigo', 'db')
     Invoke-Compose -Arguments @('rm', '-s', '-f', 'piwigo', 'db')
@@ -215,6 +304,8 @@ try {
     }
     if (-not $piwigoHealthy) { throw 'Piwigo did not become healthy after restore.' }
 
+    Restore-ImmichOriginalMounts -State $immichMountState
+
     Invoke-Dev 'baseline-verify'
     $after = Get-RestoreFixture
     Assert-CanonicalFixture -Fixture $after
@@ -250,6 +341,7 @@ catch {
     [void](Save-JsonArtifact -Name 'result.json' -Value $failure)
     if (-not $destructionStarted) {
         try { Invoke-Compose -Arguments @('up', '-d', 'db', 'piwigo') } catch { }
+        try { Restore-ImmichOriginalMounts -State $immichMountState } catch { }
     }
     throw
 }

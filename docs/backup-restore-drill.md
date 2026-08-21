@@ -32,11 +32,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 
 1. 记录确定性恢复指纹；
 2. 创建并独立审核完整备份；
-3. 停止 Piwigo/MariaDB，且只删除本 Compose 带标签的合成卷；
+3. 若 isolated Immich server 正在只读挂载 Piwigo 原图，先验证其 compose 标签、目标路径和 `:ro` 挂载后，仅移除该可丢弃 server container；随后停止 Piwigo/MariaDB，且只删除本 Compose 带标签的合成卷；
 4. 从指定备份恢复，等待 HTTP 与 Docker healthcheck；
 5. 比较恢复前后指纹；
 6. 跑完整 Phase 0 与 Phase 1 回归；
-7. 将运行证据写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
+7. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
+8. 将运行证据写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
 
 2026-08-19 的最近一次完整演练结果为：
 
