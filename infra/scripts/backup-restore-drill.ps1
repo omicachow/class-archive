@@ -108,7 +108,9 @@ function Detach-ImmichOriginalMounts {
         throw 'Immich original mount is not the expected read-only boundary.'
     }
     $wasRunning = [bool]$record.State.Running
-    Invoke-ImmichSpikeCompose -Arguments @('rm', '-s', '-f', 'immich-server')
+    # Compose writes progress text to stdout.  Suppress that implementation
+    # detail here so this function returns exactly one state hashtable.
+    $null = Invoke-ImmichSpikeCompose -Arguments @('rm', '-s', '-f', 'immich-server')
     if ($null -ne (Get-DockerInspectOrNull -Name $immichServerContainer)) {
         throw 'Immich original-mount container was not detached.'
     }
@@ -118,7 +120,7 @@ function Detach-ImmichOriginalMounts {
 function Restore-ImmichOriginalMounts {
     param([Parameter(Mandatory = $true)][hashtable]$State)
     if (-not [bool]$State.Detached -or -not [bool]$State.WasRunning) { return }
-    Invoke-ImmichSpikeCompose -Arguments @('up', '-d', 'immich-server')
+    $null = Invoke-ImmichSpikeCompose -Arguments @('up', '-d', 'immich-server')
     for ($attempt = 1; $attempt -le 90; $attempt++) {
         $record = Get-DockerInspectOrNull -Name $immichServerContainer
         if ($null -ne $record -and $record.State.Running -eq $true -and $record.State.Health.Status -eq 'healthy') {
