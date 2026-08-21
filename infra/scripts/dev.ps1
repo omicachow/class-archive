@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'test-phase2-immich-web-compat', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-performance-contract', 'test-phase2-archive-timeline-runtime', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'test-phase2-immich-web-compat', 'phase2-ml-readiness', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -325,6 +325,16 @@ switch ($Action) {
         # external network.
         & wsl.exe @($composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/class-person-timeline-schema-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/archive-date-source-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/phase2/class-photo-schema-semantics.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -345,6 +355,22 @@ switch ($Action) {
         # not constitute browser or Immich-adapter E2E evidence.
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase2\gateway-http.ps1')
+        exit $LASTEXITCODE
+    }
+    'test-phase2-performance-contract' {
+        # Memory-only scale benchmark for the Gateway projection code. This
+        # does not misrepresent 5k/20k as an HTTP, browser or ML benchmark.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase2/gateway-performance-contract.php'
+        ))
+        exit $LASTEXITCODE
+    }
+    'test-phase2-archive-timeline-runtime' {
+        # A real localhost BFF projection test. It changes only four known
+        # synthetic archive metadata rows and restores them in finally.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\archive-timeline-runtime.ps1')
         exit $LASTEXITCODE
     }
     'test-phase2-runtime' {
@@ -378,6 +404,14 @@ switch ($Action) {
         # browser interaction is separately reported by browser QA evidence.
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase2\immich-web-compat-http.ps1')
+        exit $LASTEXITCODE
+    }
+    'phase2-ml-readiness' {
+        # Diagnostic only: a BLOCKED offline-model result is intentionally
+        # reported as state, while callers requiring ML execution must invoke
+        # the script with -RequireReady and stop on its nonzero exit code.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase2\immich-ml-artifact-readiness.ps1')
         exit $LASTEXITCODE
     }
     'browser-qa' {

@@ -59,13 +59,16 @@ Immich 登录、API key 或 library。
 | --- | --- | --- |
 | 官方 tag / source archive / Server 与 ML image | `STATIC` | 已校验官方 GitHub / GHCR 固定来源与 digest |
 | 固定上游 `immich-web` build | `STATIC` | 使用上游声明的 pnpm 11.13.1、冻结 lockfile，先构建 `@immich/sdk` 后成功构建 Web；产物仅在 ignored source 工作副本 |
-| `ClassArchivePhoto` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、映射和 42 项 policy/side-channel / canonical-delivery 合约通过 |
+| `ClassArchivePhoto` / `ClassArchivePerson` schema / Gateway policy / 聚合过滤 | `CONTRACT_TESTED` | MariaDB semantic、opaque person mapping、日期来源和 56 项 policy/side-channel / canonical-delivery 合约通过 |
 | 同源 Class Archive Gateway HTTP | `RUNTIME_TESTED` | Piwigo + ClassIdentity 的 37 次真实 localhost 请求、631 个断言；Family 的列表、单图、Timeline、Albums、Search 均在聚合前过滤 LIVING，canonical UUID thumbnail / preview / original 继续由 MediaGuard 交付 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | healthy、internal `pong`、无 host port、Piwigo RO mounts、original SHA-256 不变 |
 | Immich technical user / external library / asset scan | `RUNTIME_TESTED` | ephemeral internal admin、只读 external-library scan、asset count gate、spike volumes reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary `BridgeImmichAdapter` 通过固定 internal-only bridge 查询真实 Immich；651 个断言 / 5 个 HTTP probes 验证 Classmate=2、Family=1 的 memory 聚合、People 空结果、无 media route、DTO 脱敏、原图 SHA-256 与完整 cleanup |
-| Immich Web compatibility HTTP | `RUNTIME_TESTED` | 固定 upstream Web build 经 `127.0.0.1:8091 -> Piwigo nginx -> internal BFF -> canonical Gateway -> MediaGuard` 的 34 个真实 HTTP probes / 325 项断言；无 Immich host port、无原图 byte relay、无 Immich 登录 |
-| Immich Web compatibility Browser | `BROWSER_E2E_TESTED`（有限） | 真 Chromium 打开合成 Classmate 时间线与照片查看器：桌面 19 张、390×844 移动端 27 张缩略图均成功加载；无可见 LIVING/媒体错误、横向溢出或受限入口。到期 session 自动回到 Class Archive 登录页。Family 浏览器路径尚未单独重新录制；其 ACL 已由 runtime HTTP gate 覆盖 |
+| Immich Web compatibility HTTP | `RUNTIME_TESTED` | 固定 upstream Web build 经 `127.0.0.1:8091 -> Piwigo nginx -> internal BFF -> canonical Gateway -> MediaGuard` 的 40 个真实 HTTP probes / 582 项断言；无 Immich host port、无原图 byte relay、无 Immich 登录 |
+| Archive-aware timeline | `RUNTIME_TESTED` | 真实 localhost BFF fixture 暂时投影五条 Heritage metadata：精确日期、月份、经人工核验 EXIF 年份、事件和未知日期；逐条还原，无 original 或相册关系变更 |
+| Immich Web compatibility Browser | `BROWSER_E2E_TESTED` | 真 Chromium 覆盖 Classmate、Family、Teacher、Anonymous、真实管理台 freeze/revoke、desktop / 390×844 / 125%：Family 36 张 Heritage、已知 Living thumbnail/HEAD/Range/viewer 均 404；Teacher/Anonymous 72 张可见；所有媒体继续走 MediaGuard |
+| People / Face / Smart Search | `BLOCKED_OFFLINE_MODEL_ARTIFACTS` | ML 容器 healthy 不代表模型可运行；current model cache 无校验离线 manifest，禁止 runtime 下载。People 保持空投影，smart-search fail closed 503 |
+| 5k / 20k Gateway scale | `CONTRACT_TESTED` | 真实 Gateway projection 的内存 fixture；不宣称 DB/HTTP/browser/ML runtime 性能。完整 distinct-original fixture 尚未执行 |
 
 可重复执行运行时隔离门：
 
@@ -137,16 +140,20 @@ cache 或 realtime socket，不能把这些未实现能力描述为通过。
 
 真实浏览器截图只含合成素材，存于 ignored 路径：
 
-- `.codex-work/screenshots/phase2-web-compat/02-immich-timeline-desktop.png`
-- `.codex-work/screenshots/phase2-web-compat/03-immich-timeline-mobile.png`
-- `.codex-work/screenshots/phase2-web-compat/04-immich-viewer-desktop.png`
+- `.codex-work/screenshots/phase2-1/01-classmate-desktop.png`
+- `.codex-work/screenshots/phase2-1/03-family-archive-timeline.png`
+- `.codex-work/screenshots/phase2-1/04-teacher-archive-timeline.png`
+- `.codex-work/screenshots/phase2-1/05-anonymous-archive-timeline.png`
+- `.codex-work/screenshots/phase2-1/06-admin-freeze-revoke.png`
+- `.codex-work/screenshots/phase2-1/07-family-mobile-archive-timeline.png`
+- `.codex-work/screenshots/phase2-1/09-family-viewer.png`
 
 ## 尚未完成，不能伪称通过
 
-- 真实非空 People / Memories / ML / CLIP / face clustering；
-- Smart Search 的 Immich index 结果接入 canonical aggregate adapter；
-- Family 浏览器交互录像级验收（runtime ACL、count、thumbnail、Search 过滤已通过）；
-- 性能基线、离线缓存与 realtime 设计（当前刻意不启用）。
+- 真实非空 People / Face clustering / CLIP Smart Search：离线模型制品尚未受控导入；
+- People、Person detail、Smart Search 的真实 Immich runtime UI：当前只能作为 fail-closed unavailable；
+- 5k / 20k distinct physical synthetic originals 的 DB / HTTP / Chrome / ML 性能门；
+- Memories、离线缓存与 realtime 设计（当前刻意不启用）。
 
 因此当前状态为：
 
@@ -156,7 +163,13 @@ CANONICAL_PHOTO_MAPPING=PASS
 GATEWAY_CONTRACT=PASS
 ACL_AGGREGATION_FILTERING=PASS
 IMMICH_WEB_COMPAT_RUNTIME=PASS
-IMMICH_WEB_BROWSER_E2E=PARTIAL_PASS_CLASSMATE_TIMELINE_VIEWER
+IMMICH_WEB_BROWSER_E2E=PASS_ROLE_AND_FREEZE_COVERAGE
+PEOPLE_RUNTIME=BLOCKED_OFFLINE_MODEL_ARTIFACTS
+SMART_SEARCH=BLOCKED_OFFLINE_MODEL_ARTIFACTS
+ARCHIVE_TIMELINE=PASS
+PERFORMANCE_5K=CONTRACT_TESTED_NOT_RUNTIME
+PERFORMANCE_20K=CONTRACT_TESTED_NOT_RUNTIME
+PHOTO_BETA_READY=NO
 IMMICH_WEB_FORK_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_COMPAT_SPIKE
 IMMICH_FRONTEND_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_TIMELINE_SPIKE
 PRODUCTION_READY=NO
