@@ -19,16 +19,16 @@ Family policy 先过滤 LIVING 后的 P50 / P95 / Max（毫秒）：
 
 | assets | projection | P50 | P95 | Max |
 | ---: | --- | ---: | ---: | ---: |
-| 5,000 | `/photos` equivalent | 1.954 | 2.671 | 2.671 |
-| 5,000 | `/timeline` equivalent | 2.288 | 2.728 | 2.728 |
-| 5,000 | `/albums` equivalent | 1.208 | 1.341 | 1.341 |
-| 5,000 | `/people` count/cover projection | 10.061 | 12.408 | 12.408 |
-| 5,000 | smart-search result re-projection | 1.100 | 1.320 | 1.320 |
-| 20,000 | `/photos` equivalent | 5.769 | 10.395 | 10.395 |
-| 20,000 | `/timeline` equivalent | 9.462 | 16.689 | 16.689 |
-| 20,000 | `/albums` equivalent | 4.153 | 5.326 | 5.326 |
-| 20,000 | `/people` count/cover projection | 46.143 | 69.382 | 69.382 |
-| 20,000 | smart-search result re-projection | 5.086 | 6.121 | 6.121 |
+| 5,000 | `/photos` equivalent | 2.346 | 4.187 | 4.187 |
+| 5,000 | `/timeline` equivalent | 3.583 | 4.165 | 4.165 |
+| 5,000 | `/albums` equivalent | 1.866 | 2.133 | 2.133 |
+| 5,000 | `/people` count/cover projection | 14.450 | 17.105 | 17.105 |
+| 5,000 | smart-search result re-projection | 1.113 | 1.168 | 1.168 |
+| 20,000 | `/photos` equivalent | 6.805 | 10.433 | 10.433 |
+| 20,000 | `/timeline` equivalent | 15.457 | 20.931 | 20.931 |
+| 20,000 | `/albums` equivalent | 7.253 | 8.352 | 8.352 |
+| 20,000 | `/people` count/cover projection | 63.779 | 77.747 | 77.747 |
+| 20,000 | smart-search result re-projection | 9.575 | 10.002 | 10.002 |
 
 Peak PHP process memory was about 12 MiB for 5k and 44 MiB for 20k. The
 benchmark intentionally returns only canonical UUID candidates and recomputes counts after policy filtering.
