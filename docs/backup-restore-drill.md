@@ -39,16 +39,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 7. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
 8. 将运行证据写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
 
-2026-08-19 的最近一次完整演练结果为：
+2026-08-22（本机，UTC 备份时间 2026-08-21）的最近一次完整演练结果为：
 
 | 项目 | 结果 |
 |---|---|
-| 备份包 | `class-archive-20260819T092426Z` |
-| 确定性恢复指纹 | `56058dc80fc7cfb987ee45832acaf7280a846aa267f866584fdc9c26a5473a62` |
+| 备份包 | `class-archive-20260821T183327Z` |
+| 确定性恢复指纹 | `ed7931477144dbd279e3c49c75a763c9aa9d0a648fca8d2ef09f57040addd8e8` |
 | 基线 | `72/72/8` 恢复前后一致 |
 | Phase 0 | PASS |
 | Phase 1 | PASS |
-| 从删除卷开始的粗略 RTO | 40 秒 |
+| 从删除卷开始的粗略 RTO | 71 秒 |
 
 RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 
