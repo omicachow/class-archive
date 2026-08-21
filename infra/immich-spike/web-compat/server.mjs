@@ -29,6 +29,7 @@ if (gatewayOrigin !== expectedGatewayOrigin) {
 const publicOrigin = `http://127.0.0.1:${publicPort}`;
 const allowedHost = `127.0.0.1:${publicPort}`;
 const knownRoles = new Set(['CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS', 'SYSTEM_ADMIN']);
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const staticTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.gif', 'image/gif'],
@@ -131,12 +132,21 @@ const webCompatBootstrap = `<script>
   };
   const ensureLegalNotice = () => {
     const navbar = document.querySelector('#dashboard-navbar');
-    if (!navbar || document.getElementById('class-archive-legal-notice')) return;
+    if (!navbar) return;
+    if (!document.getElementById('class-archive-timeline-link')) {
+      const timeline = document.createElement('a');
+      timeline.id = 'class-archive-timeline-link';
+      timeline.href = '/class-archive-timeline';
+      timeline.textContent = '档案时间轴';
+      timeline.style.cssText = 'margin-left:auto;margin-right:.75rem;font-size:.875rem;color:var(--immich-primary,#4257d6);white-space:nowrap';
+      navbar.append(timeline);
+    }
+    if (document.getElementById('class-archive-legal-notice')) return;
     const link = document.createElement('a');
     link.id = 'class-archive-legal-notice';
     link.href = '/class-archive-about';
     link.textContent = '开源许可';
-    link.style.cssText = 'margin-left:auto;margin-right:1rem;font-size:.75rem;color:var(--immich-primary,#4257d6);white-space:nowrap';
+    link.style.cssText = 'margin-right:1rem;font-size:.75rem;color:var(--immich-primary,#4257d6);white-space:nowrap';
     navbar.append(link);
   };
   const applyReadOnlySurfaces = () => {
@@ -172,6 +182,83 @@ const legalNoticeHtml = `<!doctype html>
 <p>固定上游提交：<code>8aa95c67470a02a8ddedf03c2e52963af33065ff</code>。</p>
 <p>本页面不表示 Immich 是班级档案馆的身份、权限或媒体授权来源。</p></main>
 </body></html>`;
+
+// This is deliberately a small, separate projection rather than an attempt to
+// force archive semantics into Immich's fileCreatedAt model. It is populated
+// exclusively from /api/timeline, whose groups come from Class Archive's
+// evidence-aware archive date fields. The DOM renderer uses textContent for
+// all persisted labels; an archive event name never becomes HTML.
+const archiveTimelineHtml = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>档案时间轴 | 班级相册</title><style>
+body{margin:0;background:#f7f8fb;color:#1f2937;font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:28px 20px 56px}header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}h1{margin:0;font-size:26px}.back{color:#3656c5;text-decoration:none}.note{margin:8px 0 28px;color:#596579}.group{margin:30px 0}.group h2{font-size:18px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:14px}.card{border:0;background:transparent;text-align:left;padding:0;color:inherit;cursor:pointer}.thumb{display:block;width:100%;aspect-ratio:1.35;object-fit:cover;border-radius:10px;background:#e5e7eb}.title{display:block;margin-top:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}.meta{display:block;margin-top:2px;color:#667085;font-size:12px}.empty,.error{border:1px solid #d8deea;border-radius:10px;padding:18px;background:#fff}.error{color:#a12b2b}@media(max-width:460px){main{padding:20px 14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}
+</style></head><body><main><header><h1>档案时间轴</h1><a class="back" href="/photos">返回照片</a></header><p class="note">按已确认的档案日期、活动和日期精度整理；不会把上传时间当作拍摄时间。</p><section id="timeline" aria-live="polite"><p class="empty">正在载入档案时间轴…</p></section></main><script>
+(() => {
+  const root = document.getElementById('timeline');
+  const text = (tag, value, className) => { const node = document.createElement(tag); node.textContent = value; if (className) node.className = className; return node; };
+  const mediaUrl = (id) => '/api/assets/' + encodeURIComponent(id) + '/thumbnail?size=thumbnail';
+  const render = (payload) => {
+    root.replaceChildren();
+    if (!payload || !Array.isArray(payload.groups) || payload.groups.length === 0) { root.append(text('p', '暂无可查看的档案照片。', 'empty')); return; }
+    for (const group of payload.groups) {
+      const section = document.createElement('section'); section.className = 'group';
+      section.append(text('h2', group.label + '（' + group.total + ' 张）'));
+      const grid = document.createElement('div'); grid.className = 'grid';
+      for (const photo of group.items) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'card';
+        button.addEventListener('click', () => { location.assign('/class-archive-photo/' + encodeURIComponent(photo.id)); });
+        const image = document.createElement('img'); image.className = 'thumb'; image.loading = 'lazy'; image.src = mediaUrl(photo.id); image.alt = photo.title || '班级照片';
+        button.append(image, text('span', photo.title || '班级照片', 'title'), text('span', photo.archive_date.label, 'meta'));
+        grid.append(button);
+      }
+      section.append(grid); root.append(section);
+    }
+  };
+  fetch('/api/class-archive/timeline', { credentials: 'same-origin' }).then(async (response) => {
+    if (!response.ok) throw new Error('timeline_unavailable'); return response.json();
+  }).then(render).catch(() => { root.replaceChildren(text('p', '档案时间轴暂时无法安全确认，请稍后重试。', 'error')); });
+})();
+</script></body></html>`;
+
+function archivePhotoHtml(photoId) {
+  // `photoId` has already passed assertUuid() before interpolation. This
+  // deliberately small viewer does not ask the upstream Immich SPA to infer a
+  // capture date from technical fields; it reads the same archive projection
+  // as the timeline and asks the canonical BFF media endpoint for a preview.
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>查看照片 | 班级相册</title><style>
+body{margin:0;background:#111827;color:#f8fafc;font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif}main{max-width:1180px;margin:0 auto;padding:22px 18px 40px}.back{color:#c7d2fe;text-decoration:none}.layout{margin-top:18px;display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,320px);gap:22px}.image-wrap{min-height:300px;display:grid;place-items:center;background:#0b1220;border-radius:12px;overflow:hidden}.image-wrap img{display:block;max-width:100%;max-height:78vh;object-fit:contain}.meta{background:#1f2937;border-radius:12px;padding:18px}.meta h1{font-size:20px;margin:0 0 12px}.meta p{margin:7px 0;color:#d1d5db}.label{color:#9ca3af}.error{background:#7f1d1d;padding:14px;border-radius:10px}@media(max-width:700px){main{padding:16px 12px}.layout{grid-template-columns:1fr;gap:12px}.image-wrap{min-height:220px}.image-wrap img{max-height:62vh}}
+</style></head><body><main><a class="back" href="/class-archive-timeline">返回档案时间轴</a><div class="layout"><section class="image-wrap" id="image-wrap" aria-live="polite"><p>正在载入照片…</p></section><aside class="meta"><h1 id="title">班级照片</h1><p><span class="label">档案时间：</span><span id="date">正在载入…</span></p><p><span class="label">日期精度：</span><span id="precision">正在载入…</span></p><p><span class="label">日期来源：</span><span id="source">正在载入…</span></p></aside></div></main><script>
+(() => {
+  const photoId = '${photoId}';
+  const error = (message) => { const root=document.getElementById('image-wrap'); root.replaceChildren(); const p=document.createElement('p');p.className='error';p.textContent=message;root.append(p); };
+  const set = (id, value) => { document.getElementById(id).textContent=value; };
+  const archiveItem = async () => {
+    const response = await fetch('/api/class-archive/timeline', {credentials:'same-origin',cache:'no-store'});
+    if (!response.ok) throw new Error('timeline_unavailable');
+    const timeline = await response.json();
+    for (const group of timeline.groups || []) for (const item of group.items || []) if (item.id === photoId) return item;
+    throw new Error('photo_not_visible');
+  };
+  Promise.all([
+    fetch('/api/assets/' + encodeURIComponent(photoId), {credentials:'same-origin',cache:'no-store'}), archiveItem(),
+  ]).then(async ([assetResponse, archive]) => {
+    if (!assetResponse.ok) throw new Error('photo_unavailable');
+    const asset = await assetResponse.json();
+    set('title', asset.originalFileName || archive.title || '班级照片');
+    set('date', archive.archive_date.label);
+    set('precision', archive.archive_date.precision);
+    set('source', archive.archive_date.source);
+    const image = document.createElement('img'); image.alt=asset.originalFileName || archive.title || '班级照片';
+    image.addEventListener('error', () => error('照片预览暂时无法安全确认，请稍后重试。'), {once:true});
+    image.src='/api/assets/' + encodeURIComponent(photoId) + '/thumbnail?size=preview';
+    const root=document.getElementById('image-wrap');root.replaceChildren(image);
+  }).catch(() => error('照片暂时无法安全确认，请返回后重试。'));
+})();
+</script></body></html>`;
+}
 
 function parsePort(value) {
   if (!/^[1-9][0-9]{0,4}$/.test(value)) {
@@ -484,10 +571,90 @@ function assertUuid(id) {
 }
 
 function photoDate(photo) {
-  const date = typeof photo?.taken_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at)
-    ? photo.taken_at
-    : '1970-01-01';
-  return `${date}T12:00:00.000Z`;
+  // The upstream compatibility shape has several mandatory-looking date
+  // fields. Returning upload/import time (or a placeholder epoch) would
+  // incorrectly turn technical file metadata into a claimed capture date.
+  // Only a confirmed day-level archive value is representable in that shape.
+  if (
+    typeof photo?.taken_at !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at)
+    || !['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'].includes(photo?.date_source)
+    || !['EXACT', 'DAY'].includes(photo?.date_precision)
+  ) {
+    return null;
+  }
+  return `${photo.taken_at}T12:00:00.000Z`;
+}
+
+function archiveDateProjection(photo) {
+  const precision = typeof photo?.date_precision === 'string' ? photo.date_precision : 'UNKNOWN';
+  const source = typeof photo?.date_source === 'string' ? photo.date_source : 'UNKNOWN';
+  const takenAt = typeof photo?.taken_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at) ? photo.taken_at : null;
+  const event = typeof photo?.event_label === 'string' && photo.event_label.length > 0 && photo.event_label.length <= 190 ? photo.event_label : null;
+  const precisionLabels = Object.freeze({
+    EXACT: '日期精确', DAY: '日期精确', MONTH: '仅确定到月份', TERM: '仅确定学期',
+    YEAR: '仅确定年份', EVENT_ONLY: '仅确定活动', UNKNOWN: '日期未知',
+  });
+  const sourceLabels = Object.freeze({
+    ARCHIVE_CONFIRMED: '档案确认日期', EVENT_INFERENCE: '档案事件推定', EXIF_TRUSTED: '已核验 EXIF 日期', UNKNOWN: '日期来源未确认',
+  });
+  let label = '日期未知';
+  if (takenAt && ['EXACT', 'DAY'].includes(precision)) {
+    label = `${takenAt.slice(0, 4)}年${takenAt.slice(5, 7)}月${takenAt.slice(8, 10)}日`;
+  } else if (takenAt && precision === 'MONTH') {
+    label = `${takenAt.slice(0, 4)}年${takenAt.slice(5, 7)}月`;
+  } else if (takenAt && precision === 'YEAR') {
+    label = `${takenAt.slice(0, 4)}年`;
+  } else if (event) {
+    label = event;
+  }
+  return {
+    label,
+    precision: precisionLabels[precision] ?? precisionLabels.UNKNOWN,
+    source: sourceLabels[source] ?? sourceLabels.UNKNOWN,
+  };
+}
+
+function archiveTimelineProjection(payload) {
+  const groups = Array.isArray(payload?.groups) ? payload.groups : null;
+  if (!groups || !Number.isInteger(payload?.total) || payload.total < 0) {
+    throw new GatewayResponseError(503);
+  }
+  const keys = new Set();
+  const photoIds = new Set();
+  let total = 0;
+  const output = groups.map((group) => {
+    if (!group || typeof group !== 'object' || typeof group.key !== 'string' || typeof group.label !== 'string'
+      || group.label.length < 1 || group.label.length > 190 || !Number.isInteger(group.total) || group.total < 1
+      || !['MONTH', 'YEAR', 'EVENT', 'UNKNOWN'].includes(group.kind) || !Array.isArray(group.items) || keys.has(group.key)) {
+      throw new GatewayResponseError(503);
+    }
+    const keyMatchesKind = (group.kind === 'MONTH' && /^month:\d{4}-\d{2}$/.test(group.key))
+      || (group.kind === 'YEAR' && /^year:\d{4}$/.test(group.key))
+      || (group.kind === 'EVENT' && /^event:[0-9a-f]{64}$/.test(group.key))
+      || (group.kind === 'UNKNOWN' && group.key === 'unknown');
+    if (!keyMatchesKind || (group.kind === 'UNKNOWN' && groups.indexOf(group) !== groups.length - 1)) {
+      throw new GatewayResponseError(503);
+    }
+    keys.add(group.key);
+    const items = group.items.map((photo) => {
+      const id = assertUuid(photo?.id);
+      if (photoIds.has(id)) {
+        throw new GatewayResponseError(503);
+      }
+      photoIds.add(id);
+      const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
+      return { id, title, archive_date: archiveDateProjection(photo) };
+    });
+    if (items.length !== group.total) {
+      throw new GatewayResponseError(503);
+    }
+    total += items.length;
+    return { key: group.key, label: group.label, kind: group.kind, total: group.total, items };
+  });
+  if (total !== payload.total) {
+    throw new GatewayResponseError(503);
+  }
+  return { total, groups: output };
 }
 
 function compatibleAssetOwner(role) {
@@ -518,6 +685,9 @@ function compatibleAsset(photo, role) {
     originalFileName: title,
     originalMimeType: 'image/jpeg',
     thumbhash: null,
+    // Unknown/month/year/event-only archive dates stay null in the generic
+    // Immich-shaped object. They are rendered with their real precision by
+    // /class-archive-timeline instead of being silently rounded to a day.
     fileCreatedAt: date,
     fileModifiedAt: date,
     localDateTime: date,
@@ -621,6 +791,58 @@ function compatibleAlbums(payload, role) {
       startDate: null, endDate: null, lastModifiedAssetTimestamp: null, assetCount: entry.total, order: 'desc',
       isActivityEnabled: false, contributorCounts: [],
     }));
+}
+
+function gatewayPeople(payload) {
+  if (payload?.available === false && payload?.total === 0 && Array.isArray(payload?.items) && payload.items.length === 0) {
+    return [];
+  }
+  if (payload?.available !== true || !Array.isArray(payload?.items) || !Number.isInteger(payload?.total) || payload.total !== payload.items.length) {
+    throw new GatewayResponseError(503);
+  }
+  const ids = new Set();
+  return payload.items.map((entry) => {
+    if (
+      !entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !UUID_V4.test(entry.id)
+      || typeof entry.label !== 'string' || entry.label.length < 1 || entry.label.length > 190
+      || !Number.isInteger(entry.photo_count) || entry.photo_count < 1
+      || typeof entry.cover_photo_id !== 'string' || !UUID_V4.test(entry.cover_photo_id)
+      || ids.has(entry.id)
+    ) {
+      throw new GatewayResponseError(503);
+    }
+    ids.add(entry.id);
+    return entry;
+  });
+}
+
+function compatiblePerson(person, role) {
+  if (!person || typeof person !== 'object' || typeof person.id !== 'string' || !UUID_V4.test(person.id)
+    || typeof person.label !== 'string' || person.label.length < 1 || person.label.length > 190
+    || typeof person.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)) {
+    throw new GatewayResponseError(503);
+  }
+  // Thumbnail bytes remain a canonical asset request, which re-enters the
+  // Gateway and MediaGuard. There is no Immich thumbnail URL in this object.
+  return {
+    id: person.id,
+    name: person.label,
+    birthDate: null,
+    thumbnailPath: `/api/people/${person.id}/thumbnail`,
+    isHidden: false,
+    isFavorite: false,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+function compatiblePeople(payload, role) {
+  const people = gatewayPeople(payload);
+  return {
+    hasNextPage: false,
+    hidden: 0,
+    total: people.length,
+    people: people.map((person) => compatiblePerson(person, role)),
+  };
 }
 
 function compatibleSearch(photos, role) {
@@ -788,8 +1010,17 @@ async function handleApi(request, response, url, clientAddress) {
     }
     if (url.pathname === '/api/server/features') {
       exactQuery(url, new Set());
+      let enrichmentAvailable = false;
+      try {
+        const people = await gatewayJson(request, '/api/people', clientAddress);
+        enrichmentAvailable = people?.available === true;
+      } catch {
+        // The metadata-only bridge is optional for the base compatibility
+        // shell. Do not advertise an unavailable ML feature as usable.
+        enrichmentAvailable = false;
+      }
       respondJson(response, request.method, 200, {
-        smartSearch: false, facialRecognition: false, duplicateDetection: false, map: false, reverseGeocoding: false,
+        smartSearch: enrichmentAvailable, facialRecognition: enrichmentAvailable, duplicateDetection: false, map: false, reverseGeocoding: false,
         importFaces: false, sidecar: false, search: true, trash: false, oauth: false, oauthAutoLaunch: false,
         ocr: false, passwordLogin: false, configFile: false, email: false,
       });
@@ -830,8 +1061,16 @@ async function handleApi(request, response, url, clientAddress) {
       const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
       const groups = Array.isArray(timeline?.groups) ? timeline.groups : [];
       const result = groups
-        .filter((group) => typeof group?.key === 'string' && /^\d{4}-\d{2}$/.test(group.key) && Number.isInteger(group?.total))
-        .map((group) => ({ timeBucket: `${group.key}-01T00:00:00.000Z`, count: group.total }));
+        .filter((group) => typeof group?.key === 'string' && /^month:\d{4}-\d{2}$/.test(group.key) && Array.isArray(group?.items))
+        .map((group) => {
+          // The generic Immich timeline is only safe for confirmed day-level
+          // dates. Month/year/event/unknown assets remain available through
+          // the Class Archive timeline projection rather than being rounded
+          // to an invented calendar day.
+          const items = group.items.filter((photo) => photoDate(photo) !== null);
+          return { timeBucket: `${group.key.slice('month:'.length)}-01T00:00:00.000Z`, count: items.length };
+        })
+        .filter((group) => group.count > 0);
       respondJson(response, request.method, 200, result);
       return;
     }
@@ -847,9 +1086,15 @@ async function handleApi(request, response, url, clientAddress) {
       }
       const requestedMonth = parseMonth(timeBucket);
       const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
-      const group = Array.isArray(timeline?.groups) ? timeline.groups.find((entry) => entry?.key === requestedMonth) : null;
-      const photos = Array.isArray(group?.items) ? group.items : [];
+      const group = Array.isArray(timeline?.groups) ? timeline.groups.find((entry) => entry?.key === `month:${requestedMonth}`) : null;
+      const photos = Array.isArray(group?.items) ? group.items.filter((photo) => photoDate(photo) !== null) : [];
       respondJson(response, request.method, 200, timeBucketResponse(photos, role));
+      return;
+    }
+    if (url.pathname === '/api/class-archive/timeline') {
+      exactQuery(url, new Set());
+      const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
+      respondJson(response, request.method, 200, archiveTimelineProjection(timeline));
       return;
     }
     if (url.pathname === '/api/albums') {
@@ -868,9 +1113,8 @@ async function handleApi(request, response, url, clientAddress) {
     }
     if (url.pathname === '/api/people') {
       exactQuery(url, new Set(['closestAssetId', 'closestPersonId', 'page', 'size', 'withHidden']));
-      // Same rule as memories: an empty, honest result is safer than a count
-      // from an adapter that does not yet carry filtered canonical membership.
-      respondJson(response, request.method, 200, { hasNextPage: false, hidden: 0, people: [], total: 0 });
+      const people = await gatewayJson(request, '/api/people', clientAddress);
+      respondJson(response, request.method, 200, compatiblePeople(people, role));
       return;
     }
     if (isSearch) {
@@ -879,10 +1123,52 @@ async function handleApi(request, response, url, clientAddress) {
       if (!source || typeof source !== 'object' || Array.isArray(source)) {
         throw new TypeError('class_archive_web_compat_search_body_invalid');
       }
+      const personIds = source.personIds;
+      if (url.pathname === '/api/search/metadata' && Array.isArray(personIds)) {
+        if (personIds.length !== 1 || typeof personIds[0] !== 'string' || !UUID_V4.test(personIds[0])) {
+          throw new TypeError('class_archive_web_compat_person_search_invalid');
+        }
+        const person = await gatewayJson(request, `/api/people/${personIds[0].toLowerCase()}`, clientAddress);
+        const items = Array.isArray(person?.items) ? person.items : null;
+        if (!items) {
+          throw new GatewayResponseError(503);
+        }
+        respondJson(response, request.method, 200, compatibleSearch(items, role));
+        return;
+      }
       const query = searchTermFromBody(source);
-      const results = await gatewayJson(request, `/api/search?q=${encodeURIComponent(query)}`, clientAddress);
+      const path = url.pathname.endsWith('/smart') ? '/api/search/smart' : '/api/search';
+      const results = await gatewayJson(request, `${path}?q=${encodeURIComponent(query)}`, clientAddress);
       const photos = Array.isArray(results?.items) ? results.items : [];
       respondJson(response, request.method, 200, compatibleSearch(photos, role));
+      return;
+    }
+
+    const personStatisticsMatch = /^\/api\/people\/([0-9a-f-]{36})\/statistics$/.exec(url.pathname);
+    if (personStatisticsMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personStatisticsMatch[1])}`, clientAddress);
+      if (!Number.isInteger(person?.photo_count) || person.photo_count < 1) {
+        throw new GatewayResponseError(503);
+      }
+      respondJson(response, request.method, 200, { assets: person.photo_count });
+      return;
+    }
+    const personThumbnailMatch = /^\/api\/people\/([0-9a-f-]{36})\/thumbnail$/.exec(url.pathname);
+    if (personThumbnailMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personThumbnailMatch[1])}`, clientAddress);
+      if (typeof person?.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)) {
+        throw new GatewayResponseError(503);
+      }
+      await proxyCanonicalMedia(request, response, person.cover_photo_id.toLowerCase(), 'thumbnail', clientAddress);
+      return;
+    }
+    const personMatch = /^\/api\/people\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (personMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personMatch[1])}`, clientAddress);
+      respondJson(response, request.method, 200, compatiblePerson(person, role));
       return;
     }
 
@@ -972,6 +1258,42 @@ async function serveApplication(request, response, url) {
   }
   if (url.pathname === '/auth/login' || url.pathname === '/auth/register' || url.pathname === '/auth/change-password') {
     redirectToPiwigoLogin(request, response);
+    return;
+  }
+  if (url.pathname === '/class-archive-timeline') {
+    // Unlike the static legal notice, this page contains a live, role-filtered
+    // archive projection. It must not become a shell shortcut around the
+    // Piwigo session check.
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', archiveTimelineHtml, { html: true });
+    return;
+  }
+  const archivePhotoMatch = /^\/class-archive-photo\/([0-9a-f-]{36})$/i.exec(url.pathname);
+  if (archivePhotoMatch) {
+    const photoId = assertUuid(archivePhotoMatch[1]);
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    try {
+      // Do not return a distinct viewer shell for a known-but-hidden UUID.
+      // This policy check is metadata-only; the actual preview still makes its
+      // own canonical MediaGuard request in the browser.
+      const photo = await gatewayJson(request, `/api/photos/${photoId}`, clientAddress);
+      assertUuid(photo?.id);
+    } catch (error) {
+      const status = error instanceof GatewayResponseError && error.status === 404 ? 404 : 503;
+      respond(response, request.method, status, 'text/plain; charset=utf-8', status === 404 ? '资源不存在' : '数据暂时无法安全确认', { html: true });
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', archivePhotoHtml(photoId), { html: true });
     return;
   }
 

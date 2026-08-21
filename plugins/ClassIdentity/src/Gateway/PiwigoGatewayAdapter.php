@@ -47,8 +47,8 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
         $living = $this->rootId('class-archive-living');
         $p = $this->piwigoPrefix;
         $rows = $this->repository->fetchAll(
-            'SELECT i.`id`, i.`path`, i.`name`, i.`date_available`, '
-            . 'ai.`archive_date`, ai.`event_label`, '
+            'SELECT i.`id`, i.`path`, i.`name`, '
+            . 'ai.`archive_date`, ai.`date_precision`, ai.`date_source`, ai.`event_label`, '
             . 'MAX(CASE WHEN (ic.`category_id` = ? OR FIND_IN_SET(?, c.`uppercats`) > 0) THEN 1 ELSE 0 END) AS `is_heritage`, '
             . 'MAX(CASE WHEN (ic.`category_id` = ? OR FIND_IN_SET(?, c.`uppercats`) > 0) THEN 1 ELSE 0 END) AS `is_living`, '
             . 'GROUP_CONCAT(DISTINCT c.`name` ORDER BY c.`name` SEPARATOR "\\n") AS `album_names` '
@@ -56,9 +56,11 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
             . 'JOIN `' . $p . 'image_category` ic ON ic.`image_id` = i.`id` '
             . 'JOIN `' . $p . 'categories` c ON c.`id` = ic.`category_id` '
             . 'LEFT JOIN `' . $this->repository->table('archive_image') . '` ai ON ai.`piwigo_image_id` = i.`id` '
-            . 'GROUP BY i.`id`, i.`path`, i.`name`, i.`date_available`, ai.`archive_date`, ai.`event_label` '
+            . 'GROUP BY i.`id`, i.`path`, i.`name`, ai.`archive_date`, ai.`date_precision`, ai.`date_source`, ai.`event_label` '
             . 'HAVING `is_heritage` = 1 OR `is_living` = 1 '
-            . 'ORDER BY COALESCE(ai.`archive_date`, DATE(i.`date_available`)) DESC, i.`id` DESC',
+            // Piwigo date_available records publication/import time. It is
+            // never a capture-date fallback for a historical archive.
+            . 'ORDER BY ai.`archive_date` IS NULL ASC, ai.`archive_date` DESC, i.`id` DESC',
             [$heritage, $heritage, $living, $living],
         );
         $result = [];
@@ -80,8 +82,16 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
             $albums = is_string($row['album_names'] ?? null) && $row['album_names'] !== ''
                 ? explode("\n", (string) $row['album_names'])
                 : [];
-            $takenAt = $row['archive_date'] ?? $row['date_available'] ?? null;
-            $takenAt = is_string($takenAt) ? substr($takenAt, 0, 10) : null;
+            $precision = strtoupper((string) ($row['date_precision'] ?? 'UNKNOWN'));
+            $source = strtoupper((string) ($row['date_source'] ?? 'UNKNOWN'));
+            $archiveDate = $row['archive_date'] ?? null;
+            $takenAt = is_string($archiveDate) ? substr($archiveDate, 0, 10) : null;
+            if (
+                !in_array($source, ['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'], true)
+                || !in_array($precision, ['EXACT', 'DAY', 'MONTH', 'YEAR'], true)
+            ) {
+                $takenAt = null;
+            }
             $result[] = new GatewayPhotoCandidate(
                 (string) $mapping['class_photo_id'],
                 $isHeritage ? 'HERITAGE' : 'LIVING',
@@ -92,6 +102,9 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
                 $albums,
                 (string) (($row['name'] ?? '') . "\n" . ($row['event_label'] ?? '')),
                 (int) ($row['id'] ?? 0),
+                $precision,
+                $source,
+                self::nullableText($row['event_label'] ?? null, 190),
             );
         }
 

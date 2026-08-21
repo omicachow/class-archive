@@ -83,7 +83,7 @@ function authorize(request) {
   if (candidate.length !== expected.length || !timingSafeEqual(candidate, expected)) fail('unauthorized', 403);
 }
 
-async function readJson(request) {
+async function readJson(request, route) {
   const contentType = String(request.headers['content-type'] ?? '');
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) fail('content_type_invalid', 400);
   const chunks = [];
@@ -99,11 +99,16 @@ async function readJson(request) {
   } catch {
     fail('request_json_invalid', 400);
   }
-  if (!isExactKeys(value, ['assets']) || !Array.isArray(value.assets) || value.assets.length < 1 || value.assets.length > MAX_ASSETS) {
+  const expectedKeys = route === '/v1/search' ? ['assets', 'query'] : ['assets'];
+  if (!isExactKeys(value, expectedKeys) || !Array.isArray(value.assets) || value.assets.length < 1 || value.assets.length > MAX_ASSETS) {
     fail('request_shape_invalid', 400);
+  }
+  if (route === '/v1/search' && (typeof value.query !== 'string' || value.query.trim() === '' || value.query.length > 190 || value.query.includes('\u0000'))) {
+    fail('query_invalid', 400);
   }
 
   const mapping = new Map();
+  const canonicalIds = new Set();
   for (const item of value.assets) {
     if (!isExactKeys(item, ['class_photo_id', 'immich_asset_id'])) fail('asset_shape_invalid', 400);
     const classPhotoId = item.class_photo_id;
@@ -111,10 +116,11 @@ async function readJson(request) {
     if (typeof classPhotoId !== 'string' || typeof assetId !== 'string' || !UUID_V4.test(classPhotoId) || !UUID_V4.test(assetId)) {
       fail('asset_value_invalid', 400);
     }
-    if (mapping.has(assetId) || [...mapping.values()].includes(classPhotoId)) fail('asset_duplicate', 400);
+    if (mapping.has(assetId) || canonicalIds.has(classPhotoId)) fail('asset_duplicate', 400);
     mapping.set(assetId, classPhotoId);
+    canonicalIds.add(classPhotoId);
   }
-  return mapping;
+  return { allowed: mapping, query: route === '/v1/search' ? value.query.trim() : null };
 }
 
 async function immich(path, method = 'GET', body = undefined) {
@@ -208,20 +214,28 @@ async function people(allowed) {
   const people = response?.people;
   if (!Array.isArray(people) || people.length > 500) fail('immich_people_invalid');
   const result = [];
-  let ordinal = 1;
   for (const person of people) {
     const id = person?.id;
     if (typeof id !== 'string' || !UUID_V4.test(id)) fail('immich_person_id_invalid');
     const assets = assetIdsFromResponse(await immich('/search/metadata', 'POST', { personIds: [id], page: 1, size: 1000 }));
     const classPhotoIds = canonicalIds(assets, allowed);
     if (classPhotoIds.length > 0) {
-      // Use a local ordinal, not the upstream person name or id. Identity and
-      // visible membership stay wholly inside Class Archive policy.
-      result.push({ label: `人物 ${ordinal}`, class_photo_ids: classPhotoIds });
-      ordinal += 1;
+      // This upstream UUID travels only over the private bridge to the
+      // ClassArchivePerson mapper. It is never sent to the browser; the
+      // public gateway replaces it with a fresh opaque Class Archive UUID.
+      result.push({ immich_person_id: id, class_photo_ids: classPhotoIds });
     }
   }
   return result;
+}
+
+async function smartSearch(allowed, query) {
+  const response = await immich('/search/smart', 'POST', { query, page: 1, size: MAX_ASSETS });
+  const assetIds = assetIdsFromResponse(response);
+  // Only mapped, policy-approved canonical ids leave this private boundary.
+  // The public Gateway recomputes its visible count and pagination over this
+  // already bounded membership list; Immich's total/cursor never cross.
+  return canonicalIds(assetIds, allowed);
 }
 
 function respond(response, status, value) {
@@ -237,12 +251,17 @@ function respond(response, status, value) {
 
 const server = createServer(async (request, response) => {
   try {
-    if (request.method !== 'POST' || !['/v1/people', '/v1/memories'].includes(request.url ?? '')) {
+    const route = request.url ?? '';
+    if (request.method !== 'POST' || !['/v1/people', '/v1/memories', '/v1/search'].includes(route)) {
       fail('route_not_found', 404);
     }
     authorize(request);
-    const allowed = await readJson(request);
-    const items = request.url === '/v1/people' ? await people(allowed) : await memories(allowed);
+    const payload = await readJson(request, route);
+    if (route === '/v1/search') {
+      respond(response, 200, { class_photo_ids: await smartSearch(payload.allowed, payload.query) });
+      return;
+    }
+    const items = route === '/v1/people' ? await people(payload.allowed) : await memories(payload.allowed);
     respond(response, 200, { items });
   } catch (error) {
     const status = error instanceof BridgeError ? error.status : 503;

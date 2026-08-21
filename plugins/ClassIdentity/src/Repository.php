@@ -399,6 +399,7 @@ SQL, [$piwigoUserId]);
             'submission',
             'archive_image',
             'photo',
+            'person',
         ];
     }
 }

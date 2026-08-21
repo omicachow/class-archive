@@ -64,6 +64,7 @@ final class Audit
         'height',
         'date_precision',
         'date_confidence',
+        'date_source',
         'suggested_date',
         'archive_date',
         'event_label',

@@ -6,13 +6,13 @@
 
 | 项目 | 当前等级 | 含义 |
 | --- | --- | --- |
-| `ClassArchivePhoto` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
-| Gateway policy、列表、时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
+| `ClassArchivePhoto` / `ClassArchivePerson` UUID、MariaDB 映射 schema、Adapter 接口 | `STATIC` | 已经源码和 MariaDB semantic fingerprint 检查 |
+| Gateway policy、列表、档案时间线、相册、搜索、People、Memories 过滤 | `CONTRACT_TESTED` | synthetic Adapter + 本地 MariaDB 合约测试通过 |
 | 同源 `/api` Piwigo Gateway | `RUNTIME_TESTED` | 真实 localhost Piwigo + MariaDB + ClassIdentity 运行态；37 次 HTTP 请求、631 个 ACL / 聚合 / DTO / 输入 / canonical MediaGuard delivery 断言通过 |
 | Immich Server isolated boot | `RUNTIME_TESTED` | internal `pong`、无 host port、read-only originals 与 SHA-256 不变 |
 | Immich technical user / external-library lifecycle | `RUNTIME_TESTED` | ephemeral internal user、read-only synthetic scan、asset count gate、spike reset 后空状态复验 |
 | Immich Adapter / Gateway runtime query | `RUNTIME_TESTED` | temporary bridge → real pinned Immich v3.1.0; Classmate/FAMILY aggregation, internal-network isolation, no-media route and cleanup passed |
-| 浏览器 API/UI | 未开始 | `/api` 已有同源 JSON 边界，但没有 Photo UI / Immich Web E2E |
+| 浏览器 API/UI | `BROWSER_E2E_TESTED` | 真 Chromium 覆盖四种普通角色及 freeze/revoke；People/Smart Search 因离线模型缺失保持 unavailable，而非伪造 UI 通过 |
 
 [`immich-runtime-isolation.ps1`](../tests/phase2/immich-runtime-isolation.ps1) 与
 [`immich-external-library-runtime.ps1`](../tests/phase2/immich-external-library-runtime.ps1)
@@ -97,7 +97,9 @@ X-Accel-Redirect 交付链。
 | `GET /api/albums` | 过滤后再聚合相册数量 |
 | `GET /api/search` | 过滤后才做匹配与返回数量 |
 | `GET /api/people` | 只使用可见 UUID，交集后重算每个人的照片数 |
+| `GET /api/people/{id}` | 只返回当前 principal 可见的 opaque ClassArchivePerson；隐藏与不存在统一为无结果 |
 | `GET /api/memories` | 只使用可见 UUID，交集后重算每条回忆的照片数 |
+| `GET /api/search/smart?q=...` | 仅在 internal Immich adapter 可用时接收结果，再按 canonical 可见集重新投影；否则 generic fail closed |
 
 API public projection 不包含：`piwigo_image_id`、`immich_asset_id`、
 `media_checksum`、`media_reference`、Piwigo category/user id、ClassIdentity
@@ -144,6 +146,8 @@ internal `X-Accel-Redirect`。UUID 不是授权凭据，已注销、冻结、撤
 该命令仅运行以下本地测试：
 
 - `CLASS_ARCHIVE_PHOTO_SCHEMA=PASS`：锁定 MariaDB 11.8.8 semantic digest。
+- `CLASS_ARCHIVE_TIMELINE_SCHEMA=PASS`：锁定 archive source / opaque person mapping 的 migration digest。
+- `ARCHIVE_DATE_SOURCE_SEMANTICS=PASS`：拒绝未核验 EXIF、上传时间伪装和来源/精度不匹配。
 - `CLASS_ARCHIVE_PHOTO_MAPPING=PASS`：临时、精确清理的 MariaDB 映射测试。
 - `GATEWAY_CONTRACT=PASS`：synthetic Adapter policy/aggregation/redaction 测试。
 

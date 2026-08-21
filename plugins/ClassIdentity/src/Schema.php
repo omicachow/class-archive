@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 6;
+    public const CURRENT_VERSION = 7;
 
     private const COLLATION = 'utf8mb4_unicode_ci';
 
@@ -186,6 +186,11 @@ final class Schema
                 'name' => '0006_class_archive_photo_mapping',
                 'signature' => 'v1:opaque-class-photo-uuid:piwigo-reference:nullable-immich-link:pending-provenance:fail-closed-state:innodb:utf8mb4',
                 'method' => 'migrationClassArchivePhotoMapping',
+            ],
+            7 => [
+                'name' => '0007_timeline_source_person_mapping',
+                'signature' => 'v1:archive-date-source:no-upload-time-fallback:opaque-ai-cluster-person:optional-identity-link:innodb:utf8mb4',
+                'method' => 'migrationTimelineSourceAndPersonMapping',
             ],
         ];
     }
@@ -641,6 +646,66 @@ SQL);
         ]);
     }
 
+    /**
+     * Archive dates are business evidence, not Piwigo import timestamps.
+     *
+     * The ClassArchivePerson record keeps a deliberately opaque adapter
+     * mapping for Immich face clusters.  Its optional roster relation is a
+     * future curation choice; no facial-recognition result can create it.
+     */
+    private function migrationTimelineSourceAndPersonMapping(): void
+    {
+        $archive = $this->quotedTable('archive_image');
+        $person = $this->quotedTable('person');
+        $identity = $this->quotedTable('identity');
+        $identityForeignKey = 'fk_ci_person_identity_' . substr(hash('sha256', $this->table('person')), 0, 12);
+
+        $this->ensureColumn(
+            'archive_image',
+            'date_source',
+            'ALTER TABLE ' . $archive . ' ADD COLUMN `date_source` VARCHAR(24) NOT NULL DEFAULT \'UNKNOWN\' AFTER `date_confidence`',
+        );
+        $this->ensureIndex(
+            'archive_image',
+            'idx_ci_archive_date_source',
+            'ALTER TABLE ' . $archive . ' ADD KEY `idx_ci_archive_date_source` (`date_source`,`archive_date`)',
+        );
+        $this->ensureCheckConstraint(
+            'archive_image',
+            'chk_ci_archive_date_source',
+            'ALTER TABLE ' . $archive . " ADD CONSTRAINT `chk_ci_archive_date_source` CHECK (`date_source` IN ('ARCHIVE_CONFIRMED', 'EVENT_INFERENCE', 'EXIF_TRUSTED', 'UNKNOWN'))",
+        );
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$person} (
+  `class_person_id` BINARY(16) NOT NULL,
+  `immich_person_id` CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  `display_name` VARCHAR(190) NULL,
+  `classmate_identity_id` BIGINT UNSIGNED NULL,
+  `source_kind` VARCHAR(24) NOT NULL DEFAULT 'IMMICH_CLUSTER',
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`class_person_id`),
+  UNIQUE KEY `uq_ci_person_immich` (`immich_person_id`),
+  KEY `idx_ci_person_identity` (`classmate_identity_id`,`state`),
+  KEY `idx_ci_person_state_updated` (`state`,`updated_at`),
+  CONSTRAINT `{$identityForeignKey}` FOREIGN KEY (`classmate_identity_id`) REFERENCES {$identity} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_person_source` CHECK (`source_kind` IN ('IMMICH_CLUSTER', 'MANUAL')),
+  CONSTRAINT `chk_ci_person_state` CHECK (`state` IN ('ACTIVE', 'STALE', 'RETIRED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('archive_image', [
+            'id', 'piwigo_image_id', 'era', 'archive_date', 'date_precision',
+            'date_confidence', 'date_source', 'event_label', 'official', 'source_submission_id',
+        ]);
+        $this->assertTable('person', [
+            'class_person_id', 'immich_person_id', 'display_name', 'classmate_identity_id',
+            'source_kind', 'state', 'created_at', 'updated_at',
+        ]);
+    }
+
     private function ensureMigrationLedger(): void
     {
         $ledger = $this->quotedTable('migration');
@@ -747,6 +812,16 @@ SQL);
         }
     }
 
+    private function ensureCheckConstraint(string $table, string $constraint, string $ddl): void
+    {
+        if (!$this->constraintExists($table, $constraint, 'CHECK')) {
+            $this->executeRaw($ddl);
+        }
+        if (!$this->constraintExists($table, $constraint, 'CHECK')) {
+            throw new \RuntimeException('class_identity_missing_check_constraint_' . $table . '_' . $constraint);
+        }
+    }
+
     private function columnExists(string $table, string $column): bool
     {
         return $this->informationSchemaExists(
@@ -823,10 +898,13 @@ SQL);
             'role_group' => '51cbc79121f83b63cbf70c538cc77194f9b726a54f9f893731d8412fdc1ceee4',
             'rate_limit_bucket' => 'e5717a295f89b6554ff8c6a2c8e526433c7de4922a5344e1c82578829787577a',
             'submission' => '7f6b4832baf74dd5ccdfbeffe20fb849e1cd8e3e7b32f324869efd1b34bb9c28',
-            'archive_image' => '591fd3a21b5f9bd559a00913f7ff13e4115608b460f78452b40cddad3acc4c7a',
+            'archive_image' => '68c63c66f6ddba6063fdb5b1ee41be95b44f2916d632a35d8931700a46fecb6e',
             // Generated from the locked MariaDB 11.8.8 information_schema
             // contract by tests/phase2/class-photo-schema-semantics.php.
             'photo' => 'd165182447f6d8eef53add07cca881edd8b9273e5ba56411a81c959aaebd42e4',
+            // Generated before migration by the isolated semantic fixture in
+            // tests/phase2/class-person-timeline-schema-semantics.php.
+            'person' => '2a168b8aa4e61a766ea39ae93a3f66295c8e756b339a010947e8d04c17f7f2d6',
         ];
     }
 
@@ -1123,6 +1201,7 @@ SQL);
             'submission',
             'archive_image',
             'photo',
+            'person',
         ];
     }
 

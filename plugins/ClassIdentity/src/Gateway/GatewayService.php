@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ClassIdentity\Gateway;
 
+use ClassIdentity\ClassArchivePerson;
+
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
 /**
@@ -77,12 +79,21 @@ final class GatewayService
         $groups = [];
         foreach ($visible as $photo) {
             $projection = $photo->publicProjection();
-            $date = $projection['taken_at'];
-            $key = is_string($date) ? substr($date, 0, 7) : 'unknown';
+            $bucket = $photo->timelineBucket();
+            $key = $bucket['key'];
             $groups[$key]['key'] = $key;
+            $groups[$key]['label'] = $bucket['label'];
+            $groups[$key]['kind'] = $bucket['kind'];
             $groups[$key]['items'][] = $projection;
         }
-        krsort($groups, SORT_STRING);
+        uasort($groups, static function (array $left, array $right): int {
+            $leftUnknown = ($left['kind'] ?? '') === 'UNKNOWN';
+            $rightUnknown = ($right['kind'] ?? '') === 'UNKNOWN';
+            if ($leftUnknown !== $rightUnknown) {
+                return $leftUnknown ? 1 : -1;
+            }
+            return strcmp((string) ($right['key'] ?? ''), (string) ($left['key'] ?? ''));
+        });
         foreach ($groups as &$group) {
             $group['total'] = count($group['items']);
         }
@@ -128,21 +139,60 @@ final class GatewayService
     /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
     public function people(): array
     {
-        $visible = $this->visiblePhotos();
-        if ($this->immich->availability() !== 'AVAILABLE') {
-            return ['available' => false, 'total' => 0, 'items' => []];
-        }
-        $allowed = self::allowedIdSet($visible);
+        $projection = $this->visiblePeople();
         $items = [];
-        foreach ($this->immich->peopleForVisiblePhotos(array_keys($allowed)) as $candidate) {
-            if (!$candidate instanceof GatewayPersonCandidate) {
-                throw new \RuntimeException('class_archive_gateway_people_candidate_invalid');
+        foreach ($projection['items'] as $item) {
+            if (is_array($item)) {
+                unset($item['items']);
+                $items[] = $item;
             }
-            $count = self::intersectionCount($candidate->classPhotoIds(), $allowed);
-            if ($count === 0) {
-                continue;
+        }
+        return ['available' => $projection['available'], 'total' => count($items), 'items' => $items];
+    }
+
+    /** @return array<string,mixed>|null */
+    public function person(string $classPersonId): ?array
+    {
+        ClassArchivePerson::idToBinary($classPersonId);
+        $projection = $this->visiblePeople();
+        foreach ($projection['items'] as $item) {
+            if (is_array($item) && isset($item['id']) && is_string($item['id']) && hash_equals($item['id'], $classPersonId)) {
+                return $item;
             }
-            $items[] = ['label' => $candidate->label(), 'photo_count' => $count];
+        }
+        // Never distinguish an inaccessible cluster from an unknown id.
+        return null;
+    }
+
+    /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
+    public function smartSearch(string $query): array
+    {
+        $query = $this->normalizeQuery($query);
+        if ($this->immich->availability() !== 'AVAILABLE') {
+            throw new \RuntimeException('class_archive_gateway_smart_search_unavailable');
+        }
+        $visible = $this->visiblePhotos();
+        $allowed = self::allowedIdSet($visible);
+        if ($allowed === []) {
+            return ['available' => true, 'total' => 0, 'items' => []];
+        }
+        $byId = [];
+        foreach ($visible as $photo) {
+            $byId[$photo->id()] = $photo;
+        }
+        $seen = [];
+        $items = [];
+        foreach ($this->immich->smartSearchForVisiblePhotos(array_keys($allowed), $query) as $classPhotoId) {
+            if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_gateway_smart_search_response_invalid');
+            }
+            if (!isset($byId[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_gateway_smart_search_response_invalid');
+            }
+            if (!isset($seen[$classPhotoId])) {
+                $seen[$classPhotoId] = true;
+                $items[] = $byId[$classPhotoId]->publicProjection();
+            }
         }
 
         return ['available' => true, 'total' => count($items), 'items' => $items];
@@ -184,6 +234,76 @@ final class GatewayService
         } catch (\Throwable $error) {
             throw new \RuntimeException('class_archive_gateway_source_unavailable', 0, $error);
         }
+    }
+
+    /**
+     * @return array{available:bool,items:list<array<string,mixed>>}
+     */
+    private function visiblePeople(): array
+    {
+        $visible = $this->visiblePhotos();
+        if ($this->immich->availability() !== 'AVAILABLE') {
+            return ['available' => false, 'items' => []];
+        }
+        $allowed = self::allowedIdSet($visible);
+        if ($allowed === []) {
+            return ['available' => true, 'items' => []];
+        }
+        $photosById = [];
+        foreach ($visible as $photo) {
+            $photosById[$photo->id()] = $photo;
+        }
+        /** @var array<string,array{candidate:GatewayPersonCandidate,members:array<string,true>}> $people */
+        $people = [];
+        foreach ($this->immich->peopleForVisiblePhotos(array_keys($allowed)) as $candidate) {
+            if (!$candidate instanceof GatewayPersonCandidate) {
+                throw new \RuntimeException('class_archive_gateway_people_candidate_invalid');
+            }
+            $id = $candidate->id();
+            if (!isset($people[$id])) {
+                $people[$id] = ['candidate' => $candidate, 'members' => []];
+            } elseif (!hash_equals($people[$id]['candidate']->label(), $candidate->label())) {
+                throw new \RuntimeException('class_archive_gateway_people_candidate_ambiguous');
+            }
+            foreach ($candidate->classPhotoIds() as $classPhotoId) {
+                if (!isset($allowed[$classPhotoId])) {
+                    throw new \RuntimeException('class_archive_gateway_people_response_invalid');
+                }
+                $people[$id]['members'][$classPhotoId] = true;
+            }
+        }
+        ksort($people, SORT_STRING);
+        $items = [];
+        $ordinal = 0;
+        foreach ($people as $id => $person) {
+            $memberIds = $person['members'];
+            if ($memberIds === []) {
+                continue;
+            }
+            $photos = [];
+            foreach ($visible as $photo) {
+                if (isset($memberIds[$photo->id()])) {
+                    $photos[] = $photo->publicProjection();
+                }
+            }
+            if ($photos === []) {
+                continue;
+            }
+            ++$ordinal;
+            $label = $person['candidate']->label();
+            if ($label === '人物') {
+                $label = '人物 ' . $ordinal;
+            }
+            $items[] = [
+                'id' => $id,
+                'label' => $label,
+                'photo_count' => count($photos),
+                'cover_photo_id' => (string) $photos[0]['id'],
+                'items' => $photos,
+            ];
+        }
+
+        return ['available' => true, 'items' => $items];
     }
 
     private function principal(): GatewayPrincipal
@@ -247,7 +367,9 @@ final class GatewayRouteContract
             '/api/timeline' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/albums' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/people' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
+            '/api/people/{id}' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/search' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
+            '/api/search/smart' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/photos/{id}' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/photos/{id}/media/{thumbnail|preview|original}' => ['method' => 'GET, HEAD', 'evidence' => 'CONTRACT_TESTED'],
             '/api/me' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],

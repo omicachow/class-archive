@@ -183,6 +183,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     isset($_POST['archive_date']) && is_string($_POST['archive_date']) ? trim($_POST['archive_date']) : null,
                     isset($_POST['date_precision']) && is_string($_POST['date_precision']) ? $_POST['date_precision'] : 'UNKNOWN',
                     isset($_POST['date_confidence']) && is_string($_POST['date_confidence']) ? $_POST['date_confidence'] : 'UNKNOWN',
+                    isset($_POST['date_source']) && is_string($_POST['date_source']) ? $_POST['date_source'] : 'UNKNOWN',
                     isset($_POST['event_label']) && is_string($_POST['event_label']) ? $_POST['event_label'] : null,
                     isset($_POST['official']) && (string) $_POST['official'] === '1',
                     $albumId,

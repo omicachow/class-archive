@@ -443,12 +443,13 @@ final class ClassIdentitySubmissionService
         [$approvedChecksum, $approvedReference] = $this->approvedMediaReferenceAndChecksum($imageId);
 
         $eventLabel = self::boundedText($eventLabel, 190) ?? null;
-        $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $eventLabel, $approvedChecksum, $approvedReference): void {
+        $dateSource = self::archiveDateSource($archiveDate, $precision, $eventLabel);
+        $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $dateSource, $eventLabel, $approvedChecksum, $approvedReference): void {
             $repository->execute(
                 'INSERT INTO `' . $repository->table('archive_image') . '` '
-                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) '
-                . 'VALUES (?, \'HERITAGE\', ?, ?, \'UNKNOWN\', ?, 1, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
-                [$imageId, $archiveDate, $precision, $eventLabel, $submissionId],
+                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) '
+                . 'VALUES (?, \'HERITAGE\', ?, ?, \'UNKNOWN\', ?, ?, 1, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
+                [$imageId, $archiveDate, $precision, $dateSource, $eventLabel, $submissionId],
             );
             (new ClassArchivePhotoMappingService($repository))->promotePendingMapping(
                 $submissionId,
@@ -475,7 +476,7 @@ final class ClassIdentitySubmissionService
                 'target_identity_id' => (int) $row['identity_id'],
                 'target_seat_id' => (int) $row['seat_id'],
                 'old_value' => ['state' => 'PENDING'],
-                'new_value' => ['state' => 'APPROVED', 'piwigo_image_id' => $imageId, 'era' => 'HERITAGE', 'date_precision' => $precision],
+                'new_value' => ['state' => 'APPROVED', 'piwigo_image_id' => $imageId, 'era' => 'HERITAGE', 'date_precision' => $precision, 'date_source' => $dateSource],
                 'reason' => $reason,
                 'result' => 'SUCCESS',
             ]);
@@ -721,6 +722,17 @@ final class ClassIdentitySubmissionService
             throw new InvalidArgumentException('archive_date_precision_mismatch');
         }
         return $date;
+    }
+
+    private static function archiveDateSource(?string $archiveDate, string $precision, ?string $eventLabel): string
+    {
+        if ($archiveDate !== null && in_array($precision, ['EXACT', 'DAY', 'MONTH', 'YEAR'], true)) {
+            return 'ARCHIVE_CONFIRMED';
+        }
+        if ($eventLabel !== null && in_array($precision, ['TERM', 'EVENT_ONLY'], true)) {
+            return 'EVENT_INFERENCE';
+        }
+        return 'UNKNOWN';
     }
 
     private static function boundedText(?string $value, int $max): ?string

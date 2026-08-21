@@ -6,6 +6,7 @@ namespace ClassIdentity\Gateway;
 
 use ClassIdentity\Access;
 use ClassIdentity\ClassArchivePhoto;
+use ClassIdentity\ClassArchivePerson;
 
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
@@ -86,6 +87,16 @@ interface ImmichAdapter
      * @return list<GatewayMemoryCandidate>
      */
     public function memoriesForVisiblePhotos(array $visibleClassPhotoIds): array;
+
+    /**
+     * Return only candidate canonical ids for a real semantic query. The
+     * gateway recomputes both items and counts after policy filtering; no
+     * upstream total, asset id, thumbnail, or cursor crosses this boundary.
+     *
+     * @param list<string> $visibleClassPhotoIds
+     * @return list<string>
+     */
+    public function smartSearchForVisiblePhotos(array $visibleClassPhotoIds, string $query): array;
 }
 
 /**
@@ -107,6 +118,9 @@ final class GatewayPhotoCandidate
         array $albumLabels = [],
         private readonly string $searchText = '',
         private readonly int $piwigoImageId = 0,
+        private readonly string $datePrecision = 'UNKNOWN',
+        private readonly string $dateSource = 'UNKNOWN',
+        private readonly ?string $eventLabel = null,
     ) {
         ClassArchivePhoto::idToBinary($classPhotoId);
         if ($era !== null && !in_array($era, ['HERITAGE', 'LIVING'], true)) {
@@ -120,6 +134,15 @@ final class GatewayPhotoCandidate
         }
         if ($takenAt !== null && preg_match('/\A\d{4}-\d{2}-\d{2}\z/D', $takenAt) !== 1) {
             throw new \InvalidArgumentException('class_archive_gateway_taken_at_invalid');
+        }
+        if (!in_array($datePrecision, ['EXACT', 'DAY', 'MONTH', 'TERM', 'YEAR', 'EVENT_ONLY', 'UNKNOWN'], true)) {
+            throw new \InvalidArgumentException('class_archive_gateway_date_precision_invalid');
+        }
+        if (!in_array($dateSource, ['ARCHIVE_CONFIRMED', 'EVENT_INFERENCE', 'EXIF_TRUSTED', 'UNKNOWN'], true)) {
+            throw new \InvalidArgumentException('class_archive_gateway_date_source_invalid');
+        }
+        if ($eventLabel !== null && ($eventLabel === '' || strlen($eventLabel) > 190 || str_contains($eventLabel, "\0"))) {
+            throw new \InvalidArgumentException('class_archive_gateway_event_label_invalid');
         }
         $normalizedAlbums = [];
         foreach ($albumLabels as $label) {
@@ -181,6 +204,37 @@ final class GatewayPhotoCandidate
         return self::contains($this->searchText . "\n" . ($this->title ?? ''), $query);
     }
 
+    /**
+     * A chronology projection deliberately never falls back to Piwigo's
+     * import/upload time. Values are emitted only when Class Archive records
+     * an evidence source suitable for the declared precision.
+     *
+     * @return array{key:string,label:string,kind:string}
+     */
+    public function timelineBucket(): array
+    {
+        if (
+            in_array($this->dateSource, ['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'], true)
+            && $this->takenAt !== null
+            && in_array($this->datePrecision, ['EXACT', 'DAY', 'MONTH'], true)
+        ) {
+            $month = substr($this->takenAt, 0, 7);
+            return ['key' => 'month:' . $month, 'label' => substr($month, 0, 4) . '年' . substr($month, 5, 2) . '月', 'kind' => 'MONTH'];
+        }
+        if (
+            in_array($this->dateSource, ['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'], true)
+            && $this->takenAt !== null
+            && $this->datePrecision === 'YEAR'
+        ) {
+            $year = substr($this->takenAt, 0, 4);
+            return ['key' => 'year:' . $year, 'label' => $year . '年', 'kind' => 'YEAR'];
+        }
+        if ($this->dateSource === 'EVENT_INFERENCE' && $this->eventLabel !== null) {
+            return ['key' => 'event:' . hash('sha256', $this->eventLabel), 'label' => $this->eventLabel, 'kind' => 'EVENT'];
+        }
+        return ['key' => 'unknown', 'label' => '日期未知', 'kind' => 'UNKNOWN'];
+    }
+
     /** @return array<string, mixed> */
     public function publicProjection(): array
     {
@@ -189,6 +243,9 @@ final class GatewayPhotoCandidate
             'era' => $this->era,
             'title' => $this->title,
             'taken_at' => $this->takenAt,
+            'date_precision' => $this->datePrecision,
+            'date_source' => $this->dateSource,
+            'event_label' => $this->eventLabel,
             'albums' => $this->albumLabels,
             // This is an explicit delivery contract, not a backend byte URL.
             // A client may construct the canonical UUID media route, which
@@ -211,10 +268,12 @@ final class GatewayPersonCandidate
 {
     /** @param list<string> $classPhotoIds */
     public function __construct(
-        private readonly string $label,
+        private readonly string $classPersonId,
+        private readonly ?string $label,
         private readonly array $classPhotoIds,
     ) {
-        if ($label === '' || strlen($label) > 190 || str_contains($label, "\0")) {
+        ClassArchivePerson::idToBinary($classPersonId);
+        if ($label !== null && ($label === '' || strlen($label) > 190 || str_contains($label, "\0"))) {
             throw new \InvalidArgumentException('class_archive_gateway_person_label_invalid');
         }
         foreach ($classPhotoIds as $id) {
@@ -227,7 +286,12 @@ final class GatewayPersonCandidate
 
     public function label(): string
     {
-        return $this->label;
+        return $this->label ?? '人物';
+    }
+
+    public function id(): string
+    {
+        return $this->classPersonId;
     }
 
     /** @return list<string> */
@@ -285,6 +349,12 @@ final class NullImmichAdapter implements ImmichAdapter
     public function memoriesForVisiblePhotos(array $visibleClassPhotoIds): array
     {
         unset($visibleClassPhotoIds);
+        return [];
+    }
+
+    public function smartSearchForVisiblePhotos(array $visibleClassPhotoIds, string $query): array
+    {
+        unset($visibleClassPhotoIds, $query);
         return [];
     }
 }

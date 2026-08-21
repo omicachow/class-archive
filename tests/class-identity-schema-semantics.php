@@ -25,6 +25,7 @@ const CI_SCHEMA_SUFFIXES = [
     'submission',
     'archive_image',
     'photo',
+    'person',
 ];
 
 function schemaTestFail(string $message): never

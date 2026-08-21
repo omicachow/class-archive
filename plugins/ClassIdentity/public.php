@@ -12,6 +12,8 @@ use ClassIdentity\Repository;
 require_once CLASS_IDENTITY_PATH . 'src/Repository.php';
 require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhoto.php';
 require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhotoMappingService.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePerson.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePersonMappingService.php';
 require_once CLASS_IDENTITY_PATH . 'src/RateLimiter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';

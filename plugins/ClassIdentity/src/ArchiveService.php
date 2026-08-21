@@ -13,6 +13,7 @@ final class ClassIdentityArchiveService
 {
     private const PRECISIONS = ['EXACT', 'DAY', 'MONTH', 'TERM', 'YEAR', 'EVENT_ONLY', 'UNKNOWN'];
     private const CONFIDENCES = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+    private const DATE_SOURCES = ['ARCHIVE_CONFIRMED', 'EVENT_INFERENCE', 'EXIF_TRUSTED', 'UNKNOWN'];
 
     private Repository $repository;
 
@@ -107,7 +108,7 @@ final class ClassIdentityArchiveService
         $living = $this->rootId('class-archive-living');
         $rows = $this->repository->fetchAll(
             'SELECT DISTINCT i.`id` AS `image_id`,i.`file`,i.`width`,i.`height`,i.`date_available`, '
-            . 'ai.`era`,ai.`archive_date`,ai.`date_precision`,ai.`date_confidence`,ai.`event_label`,ai.`official`, '
+            . 'ai.`era`,ai.`archive_date`,ai.`date_precision`,ai.`date_confidence`,ai.`date_source`,ai.`event_label`,ai.`official`, '
             . 's.`id` AS `submission_id`,s.`original_filename`,s.`state` AS `submission_state`, '
             . 'ci.`roster_code`,ci.`real_name`,a.`family_relationship` '
             . 'FROM `' . $prefixeTable . 'images` i '
@@ -125,6 +126,7 @@ final class ClassIdentityArchiveService
             $row['era_label'] = self::eraLabel((string) ($row['era'] ?? ''));
             $row['precision_label'] = self::precisionLabel((string) ($row['date_precision'] ?? 'UNKNOWN'));
             $row['confidence_label'] = self::confidenceLabel((string) ($row['date_confidence'] ?? 'UNKNOWN'));
+            $row['date_source_label'] = self::dateSourceLabel((string) ($row['date_source'] ?? 'UNKNOWN'));
             $row['submission_state_label'] = match ((string) ($row['submission_state'] ?? '')) {
                 'PENDING' => '待审核',
                 'APPROVED' => '已通过',
@@ -136,7 +138,7 @@ final class ClassIdentityArchiveService
         return $rows;
     }
 
-    public function saveMetadata(int $adminUserId, int $imageId, string $era, ?string $archiveDate, string $precision, string $confidence, ?string $eventLabel, bool $official, ?int $albumId, string $reason): void
+    public function saveMetadata(int $adminUserId, int $imageId, string $era, ?string $archiveDate, string $precision, string $confidence, ?string $dateSource, ?string $eventLabel, bool $official, ?int $albumId, string $reason): void
     {
         $admin = $this->requireAdmin($adminUserId);
         $era = strtoupper(trim($era));
@@ -150,6 +152,7 @@ final class ClassIdentityArchiveService
         }
         $archiveDate = self::normalizeDate($archiveDate, $precision);
         $eventLabel = self::boundedText($eventLabel, 190);
+        $dateSource = self::normalizeDateSource($dateSource, $archiveDate, $precision, $confidence, $eventLabel);
         $reason = Audit::validateReason($reason, true);
         if ($reason === null) {
             throw new InvalidArgumentException('class_identity_audit_reason_required');
@@ -158,18 +161,18 @@ final class ClassIdentityArchiveService
         $selectedAlbum = $this->requireEraAlbum($era, $albumId);
         global $prefixeTable;
 
-        $this->repository->transaction(function (Repository $repository) use ($admin, $imageId, $era, $archiveDate, $precision, $confidence, $eventLabel, $official, $reason): void {
+        $this->repository->transaction(function (Repository $repository) use ($admin, $imageId, $era, $archiveDate, $precision, $confidence, $dateSource, $eventLabel, $official, $reason): void {
             $before = $repository->fetchOne(
-                'SELECT `era`,`archive_date`,`date_precision`,`date_confidence`,`event_label`,`official` FROM `' . $repository->table('archive_image') . '` WHERE `piwigo_image_id` = ? FOR UPDATE',
+                'SELECT `era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official` FROM `' . $repository->table('archive_image') . '` WHERE `piwigo_image_id` = ? FOR UPDATE',
                 [$imageId],
             );
             $repository->execute(
                 'INSERT INTO `' . $repository->table('archive_image') . '` '
-                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`event_label`,`official`,`created_at`,`updated_at`) '
-                . 'VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)) '
+                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`created_at`,`updated_at`) '
+                . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)) '
                 . 'ON DUPLICATE KEY UPDATE `era`=VALUES(`era`),`archive_date`=VALUES(`archive_date`),`date_precision`=VALUES(`date_precision`),'
-                . '`date_confidence`=VALUES(`date_confidence`),`event_label`=VALUES(`event_label`),`official`=VALUES(`official`),`updated_at`=UTC_TIMESTAMP(6)',
-                [$imageId, $era, $archiveDate, $precision, $confidence, $eventLabel, $official ? 1 : 0],
+                . '`date_confidence`=VALUES(`date_confidence`),`date_source`=VALUES(`date_source`),`event_label`=VALUES(`event_label`),`official`=VALUES(`official`),`updated_at`=UTC_TIMESTAMP(6)',
+                [$imageId, $era, $archiveDate, $precision, $confidence, $dateSource, $eventLabel, $official ? 1 : 0],
             );
             (new Audit($repository))->append([
                 'actor_principal_id' => (int) $admin['principal_id'],
@@ -184,6 +187,7 @@ final class ClassIdentityArchiveService
                     'archive_date' => $archiveDate,
                     'date_precision' => $precision,
                     'date_confidence' => $confidence,
+                    'date_source' => $dateSource,
                     'event_label' => $eventLabel,
                     'official' => $official ? 1 : 0,
                 ],
@@ -229,6 +233,16 @@ final class ClassIdentityArchiveService
             'MEDIUM' => '中可信',
             'LOW' => '低可信',
             default => '未评估',
+        };
+    }
+
+    public static function dateSourceLabel(string $source): string
+    {
+        return match ($source) {
+            'ARCHIVE_CONFIRMED' => '档案确认日期',
+            'EVENT_INFERENCE' => '档案事件推定',
+            'EXIF_TRUSTED' => '已核验 EXIF 日期',
+            default => '日期来源未确认',
         };
     }
 
@@ -303,6 +317,39 @@ final class ClassIdentityArchiveService
             throw new InvalidArgumentException('archive_date_precision_mismatch');
         }
         return $date;
+    }
+
+    /**
+     * A source is curator-supplied evidence, never a silent upload-time or
+     * unverified EXIF fallback.  In particular, EXIF_TRUSTED requires a
+     * human-confirmed high-confidence record before it can affect timeline
+     * ordering or user-visible chronology.
+     */
+    private static function normalizeDateSource(?string $source, ?string $archiveDate, string $precision, string $confidence, ?string $eventLabel): string
+    {
+        $source = strtoupper(trim((string) $source));
+        if (!in_array($source, self::DATE_SOURCES, true)) {
+            throw new InvalidArgumentException('archive_date_source_invalid');
+        }
+        if ($source === 'UNKNOWN') {
+            if ($archiveDate !== null || $precision !== 'UNKNOWN' || $eventLabel !== null) {
+                throw new InvalidArgumentException('archive_date_source_evidence_mismatch');
+            }
+            return $source;
+        }
+        if (in_array($source, ['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'], true)) {
+            if ($archiveDate === null || !in_array($precision, ['EXACT', 'DAY', 'MONTH', 'YEAR'], true)) {
+                throw new InvalidArgumentException('archive_date_source_evidence_mismatch');
+            }
+            if ($source === 'EXIF_TRUSTED' && $confidence !== 'HIGH') {
+                throw new InvalidArgumentException('archive_date_source_exif_requires_high_confidence');
+            }
+            return $source;
+        }
+        if ($archiveDate !== null || $eventLabel === null || !in_array($precision, ['TERM', 'EVENT_ONLY'], true)) {
+            throw new InvalidArgumentException('archive_date_source_evidence_mismatch');
+        }
+        return 'EVENT_INFERENCE';
     }
 
     private static function boundedText(?string $value, int $max): ?string

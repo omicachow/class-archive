@@ -6,6 +6,8 @@ namespace ClassIdentity\Gateway;
 
 use ClassIdentity\ClassArchivePhoto;
 use ClassIdentity\ClassArchivePhotoMappingService;
+use ClassIdentity\ClassArchivePerson;
+use ClassIdentity\ClassArchivePersonMappingService;
 
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
@@ -27,6 +29,7 @@ final class BridgeImmichAdapter implements ImmichAdapter
 
     private function __construct(
         private readonly ClassArchivePhotoMappingService $mapping,
+        private readonly ClassArchivePersonMappingService $personMapping,
         private readonly string $token,
     ) {
     }
@@ -43,7 +46,11 @@ final class BridgeImmichAdapter implements ImmichAdapter
             throw new \RuntimeException('class_archive_immich_bridge_enablement_invalid');
         }
 
-        return new self(ClassArchivePhotoMappingService::fromPiwigo(), self::loadToken());
+        return new self(
+            ClassArchivePhotoMappingService::fromPiwigo(),
+            ClassArchivePersonMappingService::fromPiwigo(),
+            self::loadToken(),
+        );
     }
 
     public function availability(): string
@@ -57,7 +64,16 @@ final class BridgeImmichAdapter implements ImmichAdapter
         $items = $this->requestCandidates('/people', $visibleClassPhotoIds);
         $result = [];
         foreach ($items as $item) {
-            $result[] = new GatewayPersonCandidate($item['label'], $item['class_photo_ids']);
+            $immichPersonId = $item['immich_person_id'] ?? null;
+            if (!is_string($immichPersonId)) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $mapped = $this->personMapping->ensureImmichCluster($immichPersonId);
+            $result[] = new GatewayPersonCandidate(
+                (string) $mapped['class_person_id'],
+                $mapped['display_name'] ?? null,
+                $item['class_photo_ids'],
+            );
         }
         return $result;
     }
@@ -73,9 +89,38 @@ final class BridgeImmichAdapter implements ImmichAdapter
         return $result;
     }
 
+    /** @param list<string> $visibleClassPhotoIds @return list<string> */
+    public function smartSearchForVisiblePhotos(array $visibleClassPhotoIds, string $query): array
+    {
+        $query = trim($query);
+        if ($query === '' || strlen($query) > 190 || str_contains($query, "\0")) {
+            throw new \InvalidArgumentException('class_archive_immich_bridge_search_invalid');
+        }
+        $result = [];
+        foreach ($this->boundAssetBatches($visibleClassPhotoIds) as $batch) {
+            $decoded = $this->post('/search', ['query' => $query, 'assets' => $batch]);
+            $ids = $decoded['class_photo_ids'] ?? null;
+            if (!is_array($ids) || count($ids) > 500) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $allowed = [];
+            foreach ($batch as $asset) {
+                $allowed[(string) $asset['class_photo_id']] = true;
+            }
+            foreach ($ids as $classPhotoId) {
+                if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId])) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                ClassArchivePhoto::idToBinary($classPhotoId);
+                $result[] = $classPhotoId;
+            }
+        }
+        return $result;
+    }
+
     /**
      * @param list<string> $visibleClassPhotoIds
-     * @return list<array{label:string,class_photo_ids:list<string>}>
+     * @return list<array{label?:string,immich_person_id?:string,class_photo_ids:list<string>}>
      */
     private function requestCandidates(string $endpoint, array $visibleClassPhotoIds): array
     {
@@ -85,54 +130,98 @@ final class BridgeImmichAdapter implements ImmichAdapter
         if ($visibleClassPhotoIds === []) {
             return [];
         }
-        $bindings = $this->mapping->activeImmichAssetBindings($visibleClassPhotoIds);
-        $allowed = [];
-        $assets = [];
-        foreach ($visibleClassPhotoIds as $classPhotoId) {
-            if (!is_string($classPhotoId) || !isset($bindings[$classPhotoId])) {
-                throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
-            }
-            ClassArchivePhoto::idToBinary($classPhotoId);
-            $assetId = ClassArchivePhoto::normalizeImmichAssetId($bindings[$classPhotoId]);
-            if ($assetId === null || isset($allowed[$classPhotoId])) {
-                throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
-            }
-            $allowed[$classPhotoId] = true;
-            $assets[] = ['class_photo_id' => $classPhotoId, 'immich_asset_id' => $assetId];
-        }
-
-        $decoded = $this->post($endpoint, ['assets' => $assets]);
-        $items = $decoded['items'] ?? null;
-        if (!is_array($items) || count($items) > 500) {
-            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
-        }
         $result = [];
-        foreach ($items as $item) {
-            if (!is_array($item)) {
+        foreach ($this->boundAssetBatches($visibleClassPhotoIds) as $assets) {
+            $allowed = [];
+            foreach ($assets as $asset) {
+                $allowed[(string) $asset['class_photo_id']] = true;
+            }
+            $decoded = $this->post($endpoint, ['assets' => $assets]);
+            $items = $decoded['items'] ?? null;
+            if (!is_array($items) || count($items) > 500) {
                 throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
             }
-            $label = $item['label'] ?? null;
-            $ids = $item['class_photo_ids'] ?? null;
-            if (!is_string($label) || $label === '' || strlen($label) > 190 || str_contains($label, "\0") || !is_array($ids)) {
-                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
-            }
-            $seen = [];
-            $normalized = [];
-            foreach ($ids as $classPhotoId) {
-                if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId]) || isset($seen[$classPhotoId])) {
+            foreach ($items as $item) {
+                if (!is_array($item)) {
                     throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
                 }
-                ClassArchivePhoto::idToBinary($classPhotoId);
-                $seen[$classPhotoId] = true;
-                $normalized[] = $classPhotoId;
+                $ids = $item['class_photo_ids'] ?? null;
+                if (!is_array($ids)) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                $normalized = $this->normalizeCandidateIds($ids, $allowed);
+                if ($endpoint === '/people') {
+                    $immichPersonId = $item['immich_person_id'] ?? null;
+                    if (!is_string($immichPersonId)) {
+                        throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                    }
+                    $result[] = [
+                        'immich_person_id' => ClassArchivePerson::normalizeImmichPersonId($immichPersonId),
+                        'class_photo_ids' => $normalized,
+                    ];
+                    continue;
+                }
+                $label = $item['label'] ?? null;
+                if (!is_string($label) || $label === '' || strlen($label) > 190 || str_contains($label, "\0")) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                $result[] = ['label' => $label, 'class_photo_ids' => $normalized];
             }
-            if ($normalized === []) {
-                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
-            }
-            $result[] = ['label' => $label, 'class_photo_ids' => $normalized];
+        }
+        if (count($result) > 5000) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
         }
 
         return $result;
+    }
+
+    /** @param list<string> $visibleClassPhotoIds @return list<list<array{class_photo_id:string,immich_asset_id:string}>> */
+    private function boundAssetBatches(array $visibleClassPhotoIds): array
+    {
+        if (count($visibleClassPhotoIds) > 20000) {
+            throw new \InvalidArgumentException('class_archive_immich_bridge_batch_too_large');
+        }
+        $seen = [];
+        $batches = [];
+        foreach (array_chunk($visibleClassPhotoIds, 500) as $ids) {
+            $bindings = $this->mapping->activeImmichAssetBindings($ids);
+            $assets = [];
+            foreach ($ids as $classPhotoId) {
+                if (!is_string($classPhotoId) || isset($seen[$classPhotoId]) || !isset($bindings[$classPhotoId])) {
+                    throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
+                }
+                ClassArchivePhoto::idToBinary($classPhotoId);
+                $assetId = ClassArchivePhoto::normalizeImmichAssetId($bindings[$classPhotoId]);
+                if ($assetId === null) {
+                    throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
+                }
+                $seen[$classPhotoId] = true;
+                $assets[] = ['class_photo_id' => $classPhotoId, 'immich_asset_id' => $assetId];
+            }
+            if ($assets !== []) {
+                $batches[] = $assets;
+            }
+        }
+        return $batches;
+    }
+
+    /** @param list<mixed> $ids @param array<string,true> $allowed @return list<string> */
+    private function normalizeCandidateIds(array $ids, array $allowed): array
+    {
+        $seen = [];
+        $normalized = [];
+        foreach ($ids as $classPhotoId) {
+            if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId]) || isset($seen[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            ClassArchivePhoto::idToBinary($classPhotoId);
+            $seen[$classPhotoId] = true;
+            $normalized[] = $classPhotoId;
+        }
+        if ($normalized === []) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+        }
+        return $normalized;
     }
 
     /** @return array<string,mixed> */

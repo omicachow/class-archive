@@ -115,6 +115,19 @@ try {
     $failures[] = 'structured value final defense: reached persistence';
 }
 
+// Archive date provenance is operational metadata, not a secret. It must be
+// allowed through the same final audit-value allowlist that protects passwords
+// and raw claim material; otherwise approval would create a Core image and
+// then roll back the ClassIdentity transaction.
+try {
+    $encoder = new ReflectionMethod(Audit::class, 'encodeValue');
+    $encoder->setAccessible(true);
+    $encoded = $encoder->invoke($audit, ['date_source' => 'ARCHIVE_CONFIRMED'], 'new_value');
+    assertSameValue('{"date_source":"ARCHIVE_CONFIRMED"}', $encoded, 'archive date source audit value');
+} catch (Throwable $error) {
+    $failures[] = 'archive date source audit value: rejected';
+}
+
 if ($failures !== []) {
     fwrite(STDERR, 'CLASS_IDENTITY_AUDIT_REASON=FAIL assertions=' . $passed . ' failures=' . count($failures) . "\n");
     foreach ($failures as $failure) {

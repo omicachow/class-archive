@@ -1036,6 +1036,7 @@ SQL);
             'submission',
             'archive_image',
             'photo',
+            'person',
         ];
         $missing = [];
         try {
@@ -1578,6 +1579,7 @@ SQL, 'ii', [$id, $id]) ?? 0);
             'submission',
             'archive_image',
             'photo',
+            'person',
         ];
         if (!in_array($suffix, $allowed, true)) {
             throw new InvalidArgumentException('class_identity_unknown_table');

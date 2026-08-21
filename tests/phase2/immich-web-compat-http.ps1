@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$KeepRunning
 )
@@ -401,6 +401,12 @@ try {
     $classmateLegalNotice = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-about')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmateLegalNotice -Status 200 -Label 'classmate legal notice'
     Assert-True ($classmateLegalNotice.ContentType -like 'text/html*' -and $classmateLegalNotice.Text.Contains('GNU AGPL-3.0-only') -and $classmateLegalNotice.Text.Contains('8aa95c67470a02a8ddedf03c2e52963af33065ff')) 'classmate_legal_notice_invalid'
+    $guestArchiveTimeline = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-timeline')) -Session $sessions['GUEST']
+    Assert-PrivateResponse -Response $guestArchiveTimeline -Status 303 -Label 'guest archive timeline'
+    Assert-True ($guestArchiveTimeline.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'guest_archive_timeline_login_redirect_invalid'
+    $classmateArchiveTimelinePage = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-timeline')) -Session $sessions['CLASSMATE']
+    Assert-PrivateResponse -Response $classmateArchiveTimelinePage -Status 200 -Label 'classmate archive timeline page'
+    Assert-True ($classmateArchiveTimelinePage.ContentType -like 'text/html*' -and $classmateArchiveTimelinePage.Text.Contains('档案时间轴') -and $classmateArchiveTimelinePage.Text.Contains('/api/class-archive/timeline')) 'classmate_archive_timeline_page_invalid'
     $authRoute = Invoke-Http -Uri ([Uri]::new($compatUri, 'auth/login')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $authRoute -Status 303 -Label 'upstream login route'
     Assert-True ($authRoute.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'upstream_login_route_not_redirected'
@@ -425,17 +431,49 @@ try {
     $livingId = [string]$living[0].id
     $heritageId = [string]$heritage[0].id
     Assert-True ([int]$classmatePayload.total -gt [int]$familyPayload.total) 'gateway fixture did not distinguish family visibility'
+    $classmateArchivePhotoPage = Invoke-Http -Uri ([Uri]::new($compatUri, "class-archive-photo/$heritageId")) -Session $sessions['CLASSMATE']
+    Assert-PrivateResponse -Response $classmateArchivePhotoPage -Status 200 -Label 'classmate archive photo viewer'
+    Assert-True ($classmateArchivePhotoPage.ContentType -like 'text/html*' -and $classmateArchivePhotoPage.Text.Contains('/api/assets/') -and $classmateArchivePhotoPage.Text.Contains('/thumbnail?size=preview')) 'classmate_archive_photo_viewer_invalid'
+    $familyLivingViewer = Invoke-Http -Uri ([Uri]::new($compatUri, "class-archive-photo/$livingId")) -Session $sessions['FAMILY']
+    Assert-PrivateResponse -Response $familyLivingViewer -Status 404 -Label 'family living archive photo viewer'
+    Assert-True ($familyLivingViewer.ContentType -notlike 'image/*' -and -not $familyLivingViewer.Text.Contains($livingId)) 'family_living_archive_viewer_leaked_hidden_uuid'
 
     $compatClassmateBuckets = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/timeline/buckets')) -Session $sessions['CLASSMATE']
     $compatFamilyBuckets = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/timeline/buckets')) -Session $sessions['FAMILY']
     $classmateBuckets = Assert-Json -Response $compatClassmateBuckets -Status 200 -Label 'classmate timeline buckets'
     $familyBuckets = Assert-Json -Response $compatFamilyBuckets -Status 200 -Label 'family timeline buckets'
-    $classmateTotal = @($classmateBuckets | Measure-Object -Property count -Sum).Sum
-    $familyTotal = @($familyBuckets | Measure-Object -Property count -Sum).Sum
-    Assert-True ([int]$classmateTotal -eq [int]$classmatePayload.total) 'classmate timeline aggregation not policy filtered'
-    Assert-True ([int]$familyTotal -eq [int]$familyPayload.total) 'family timeline aggregation not policy filtered'
-    Assert-True ([int]$familyTotal -lt [int]$classmateTotal) 'family timeline count leaked living media'
+    $classmateTotal = 0
+    foreach ($bucket in @($classmateBuckets)) {
+        if ($null -ne $bucket) { $classmateTotal += [int]$bucket.count }
+    }
+    $familyTotal = 0
+    foreach ($bucket in @($familyBuckets)) {
+        if ($null -ne $bucket) { $familyTotal += [int]$bucket.count }
+    }
+    # The generic Immich-shaped endpoint only receives confirmed day-level
+    # archive dates. It must be a subset, never an upload-time fallback. The
+    # complete precision-aware projection is asserted below.
+    Assert-True ([int]$classmateTotal -le [int]$classmatePayload.total) 'classmate generic timeline invented unconfirmed dates'
+    Assert-True ([int]$familyTotal -le [int]$familyPayload.total) 'family generic timeline invented unconfirmed dates'
     Assert-NoBackendLeak -Text $compatFamilyBuckets.Text -Label 'family timeline buckets'
+
+    $classmateArchiveTimeline = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/class-archive/timeline')) -Session $sessions['CLASSMATE']
+    $familyArchiveTimeline = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/class-archive/timeline')) -Session $sessions['FAMILY']
+    $classmateArchivePayload = Assert-Json -Response $classmateArchiveTimeline -Status 200 -Label 'classmate archive timeline projection'
+    $familyArchivePayload = Assert-Json -Response $familyArchiveTimeline -Status 200 -Label 'family archive timeline projection'
+    Assert-True ([int]$classmateArchivePayload.total -eq [int]$classmatePayload.total) 'classmate archive timeline aggregation not policy filtered'
+    Assert-True ([int]$familyArchivePayload.total -eq [int]$familyPayload.total) 'family archive timeline aggregation not policy filtered'
+    Assert-True ([int]$familyArchivePayload.total -lt [int]$classmateArchivePayload.total) 'family archive timeline count leaked living media'
+    $classmateArchiveItems = @($classmateArchivePayload.groups | ForEach-Object { @($_.items) })
+    $familyArchiveItems = @($familyArchivePayload.groups | ForEach-Object { @($_.items) })
+    Assert-True ($classmateArchiveItems.Count -eq [int]$classmateArchivePayload.total -and $familyArchiveItems.Count -eq [int]$familyArchivePayload.total) 'archive timeline item count inconsistent'
+    Assert-True (-not (@($familyArchiveItems | Where-Object { [string]$_.id -eq $livingId }).Count -gt 0)) 'family archive timeline exposed living id'
+    foreach ($item in $classmateArchiveItems) {
+        Assert-True ($item.archive_date.label -is [string] -and $item.archive_date.precision -is [string] -and $item.archive_date.source -is [string]) 'archive timeline date projection missing chinese labels'
+        Assert-True (-not ([string]$item.archive_date.precision -match '^(EXACT|DAY|MONTH|TERM|YEAR|EVENT_ONLY|UNKNOWN)$')) 'archive timeline exposed precision enum'
+        Assert-True (-not ([string]$item.archive_date.source -match '^(ARCHIVE_CONFIRMED|EVENT_INFERENCE|EXIF_TRUSTED|UNKNOWN)$')) 'archive timeline exposed source enum'
+    }
+    Assert-NoBackendLeak -Text $familyArchiveTimeline.Text -Label 'family archive timeline projection'
 
     $familyAlbums = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/albums')) -Session $sessions['FAMILY']
     $familyAlbumPayload = Assert-Json -Response $familyAlbums -Status 200 -Label 'family compatibility albums'
@@ -527,4 +565,4 @@ Write-Output "HTTP_PROBES=$script:probes"
 Write-Output "ASSERTIONS=$script:assertions"
 Write-Output 'IMMICH_WEB_COMPAT_POLICY=CLASS_ARCHIVE_GATEWAY_MEDIAGUARD'
 Write-Output 'IMMICH_WEB_AUTHORITY=CLASS_ARCHIVE_ONLY'
-Write-Output 'IMMICH_WEB_BROWSER_E2E=NOT_YET_TESTED'
+Write-Output 'IMMICH_WEB_BROWSER_E2E=SEPARATE_SUITE_REQUIRED'

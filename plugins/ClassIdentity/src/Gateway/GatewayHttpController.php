@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ClassIdentity\Gateway;
 
 use ClassIdentity\ClassArchivePhoto;
+use ClassIdentity\ClassArchivePerson;
 
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
@@ -91,9 +92,10 @@ final class GatewayHttpController
                 'media' => self::deliverMedia($gateway, (string) $photoId, (string) $mediaVariant),
                 'timeline' => $gateway->timeline(),
                 'albums' => $gateway->albums(),
-                'people' => $gateway->people(),
+                'people' => $photoId === null ? $gateway->people() : self::knownPerson($gateway, $photoId),
                 'memories' => $gateway->memories(),
                 'search' => $gateway->search($searchQuery ?? ''),
+                'smart-search' => $gateway->smartSearch($searchQuery ?? ''),
                 'me' => $gateway->me(),
                 default => throw new \InvalidArgumentException('class_archive_gateway_route_invalid'),
             };
@@ -106,6 +108,9 @@ final class GatewayHttpController
                 self::respond(403, ['error' => '禁止访问']);
             }
             if ($code === 'class_archive_gateway_photo_not_found') {
+                self::respond(404, ['error' => '资源不存在']);
+            }
+            if ($code === 'class_archive_gateway_person_not_found') {
                 self::respond(404, ['error' => '资源不存在']);
             }
             if ($code === 'class_archive_gateway_route_not_found') {
@@ -137,6 +142,11 @@ final class GatewayHttpController
             self::requireExactQuery([]);
             return ['photos', $segments[1], null, null];
         }
+        if ($route === 'people' && count($segments) === 2 && is_string($segments[1])) {
+            ClassArchivePerson::idToBinary($segments[1]);
+            self::requireExactQuery([]);
+            return ['people', $segments[1], null, null];
+        }
         if (
             $route === 'photos'
             && count($segments) === 4
@@ -155,6 +165,13 @@ final class GatewayHttpController
                 throw new \InvalidArgumentException('class_archive_gateway_search_missing');
             }
             return ['search', null, $query, null];
+        }
+        if ($route === 'search' && count($segments) === 2 && $segments[1] === 'smart') {
+            $query = self::requireExactQuery(['q'])['q'] ?? null;
+            if (!is_string($query)) {
+                throw new \InvalidArgumentException('class_archive_gateway_search_missing');
+            }
+            return ['smart-search', null, $query, null];
         }
 
         throw new \RuntimeException('class_archive_gateway_route_not_found');
@@ -212,6 +229,16 @@ final class GatewayHttpController
             throw new \RuntimeException('class_archive_gateway_photo_not_found');
         }
         return $photo;
+    }
+
+    /** @return array<string,mixed> */
+    private static function knownPerson(GatewayService $gateway, string $classPersonId): array
+    {
+        $person = $gateway->person($classPersonId);
+        if ($person === null) {
+            throw new \RuntimeException('class_archive_gateway_person_not_found');
+        }
+        return $person;
     }
 
     private static function deliverMedia(GatewayService $gateway, string $classPhotoId, string $variant): never
