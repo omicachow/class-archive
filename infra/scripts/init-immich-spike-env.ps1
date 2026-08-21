@@ -36,19 +36,28 @@ function Get-LocalEnvValue([string]$path, [string]$name, [string]$fallback) {
 function New-AlphaNumericSecret([int]$length) {
     $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
     $bytes = New-Object byte[] ($length * 2)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    # Windows PowerShell 5.1 hosts the .NET Framework API, which does not
+    # provide the newer static RandomNumberGenerator.Fill method. Use the
+    # compatible CSPRNG instance API so the local secret bootstrap remains
+    # cryptographically strong on both Windows PowerShell and pwsh.
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
     $characters = New-Object char[] $length
     $offset = 0
-    for ($index = 0; $index -lt $length; $index++) {
-        while ($bytes[$offset] -ge (256 - (256 % $alphabet.Length))) {
-            $offset++
-            if ($offset -ge $bytes.Length) {
-                [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-                $offset = 0
+    try {
+        for ($index = 0; $index -lt $length; $index++) {
+            while ($bytes[$offset] -ge (256 - (256 % $alphabet.Length))) {
+                $offset++
+                if ($offset -ge $bytes.Length) {
+                    $rng.GetBytes($bytes)
+                    $offset = 0
+                }
             }
+            $characters[$index] = $alphabet[$bytes[$offset] % $alphabet.Length]
+            $offset++
         }
-        $characters[$index] = $alphabet[$bytes[$offset] % $alphabet.Length]
-        $offset++
+    } finally {
+        $rng.Dispose()
     }
     return -join $characters
 }
