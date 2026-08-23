@@ -124,6 +124,8 @@ try {
     $encoder->setAccessible(true);
     $encoded = $encoder->invoke($audit, ['date_source' => 'ARCHIVE_CONFIRMED'], 'new_value');
     assertSameValue('{"date_source":"ARCHIVE_CONFIRMED"}', $encoded, 'archive date source audit value');
+    $album = $encoder->invoke($audit, ['era' => 'HERITAGE', 'name' => '毕业（私有 QA）', 'official' => 1], 'new_value');
+    assertSameValue('{"era":"HERITAGE","name":"毕业（私有 QA）","official":1}', $album, 'archive album name audit value');
 } catch (Throwable $error) {
     $failures[] = 'archive date source audit value: rejected';
 }

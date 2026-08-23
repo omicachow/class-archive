@@ -54,6 +54,7 @@ final class Audit
         'piwigo_user_id',
         'piwigo_group_id',
         'group_name',
+        'name',
         'enabled',
         'auth_epoch',
         'era',
