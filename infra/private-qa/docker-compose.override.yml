@@ -1,0 +1,101 @@
+services:
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-qa
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_DATA_QA
+      CLASS_ARCHIVE_PRIVATE_REAL_QA: "1"
+    volumes:
+      # These are ignored, deliberately prepared importer inputs. The original
+      # source directory is never accepted by the runner or mounted here.
+      - type: bind
+        source: ${PRIVATE_QA_STAGING_PATH:?Set PRIVATE_QA_STAGING_PATH in the ignored private-QA env file}
+        target: /private-real-qa/staging
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PRIVATE_QA_SELECTION_MANIFEST_PATH:?Set PRIVATE_QA_SELECTION_MANIFEST_PATH in the ignored private-QA env file}
+        target: /private-real-qa/selection/private-selection-manifest.json
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  restore:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  app:
+    internal: true
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_gateway:
+    labels:
+      com.classarchive.scope: private-real-qa
+
+volumes:
+  piwigo_data:
+    labels:
+      com.classarchive.scope: private-real-qa
+  piwigo_uploads:
+    labels:
+      com.classarchive.scope: private-real-qa
+  piwigo_galleries:
+    labels:
+      com.classarchive.scope: private-real-qa
+  piwigo_derivatives:
+    labels:
+      com.classarchive.scope: private-real-qa
+  piwigo_db:
+    labels:
+      com.classarchive.scope: private-real-qa
+  piwigo_scripts:
+    labels:
+      com.classarchive.scope: private-real-qa
+  backups:
+    labels:
+      com.classarchive.scope: private-real-qa

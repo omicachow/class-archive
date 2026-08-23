@@ -76,13 +76,24 @@ function Wait-ClassArchiveMaintenanceReady {
     # fail-closed output plus the later CLI runtime verifier is the readiness
     # contract. The normal Docker healthcheck resumes after finalization.
     for ($attempt = 1; $attempt -le 60; $attempt++) {
-        $probeLines = @(& wsl.exe @($composeArguments + @(
-            'exec', '-T', 'piwigo',
-            'curl', '--silent', '--show-error',
-            '--write-out', 'CLASS_ARCHIVE_STATUS:%{http_code}',
-            'http://127.0.0.1/'
-        )) 2>&1)
-        $probeExit = $LASTEXITCODE
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            # A just-recreated container can refuse the first few loopback
+            # connections. Windows PowerShell promotes native stderr to a
+            # terminating ErrorRecord under Stop, so keep this expected retry
+            # condition inside the bounded readiness loop.
+            $ErrorActionPreference = 'Continue'
+            $probeLines = @(& wsl.exe @($composeArguments + @(
+                'exec', '-T', 'piwigo',
+                'curl', '--silent', '--show-error',
+                '--write-out', 'CLASS_ARCHIVE_STATUS:%{http_code}',
+                'http://127.0.0.1/'
+            )) 2>&1)
+            $probeExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
         if (
             $probeExit -eq 0 `
             -and $probeLines.Count -eq 2 `

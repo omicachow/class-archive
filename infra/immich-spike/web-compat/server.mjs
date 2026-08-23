@@ -1,7 +1,8 @@
 /**
  * Class Archive's deliberately small Immich Web compatibility boundary.
  *
- * It serves the verified, unmodified upstream Immich Web static build only
+ * It serves the owned Class Archive photo surface, with the verified and
+ * unmodified upstream Immich Web build retained as a compatibility fallback,
  * on the loopback-bound spike port. It never exposes the internal Immich
  * server, PostgreSQL, Valkey, Piwigo database, Piwigo paths, Piwigo image ids,
  * Immich asset ids, or an original-file mount. Browser requests are mapped to
@@ -19,6 +20,17 @@ import { extname, resolve, sep } from 'node:path';
 const port = parsePort(process.env.CLASS_ARCHIVE_WEB_COMPAT_PORT ?? '3000');
 const publicPort = parsePort(process.env.CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT ?? '8091');
 const webRoot = resolve(process.env.CLASS_ARCHIVE_WEB_ROOT ?? '/web');
+// The owned Class Archive photo surface is a separate, reviewable static tree.
+// In the isolated container it is mounted read-only at /photo-ui; keeping the
+// root configurable also lets the contract suite point at the checkout without
+// granting the BFF access to any host media directory.
+const photoUiRoot = resolve(process.env.CLASS_ARCHIVE_PHOTO_UI_ROOT ?? '/photo-ui');
+// Core navigation leaves the BFF only through a bounded redirect allowlist.
+// There is deliberately no guessed/default core port: private QA and future
+// deployments can choose their own loopback mapping without rebuilding UI.
+const corePublicPort = process.env.CLASS_ARCHIVE_CORE_PUBLIC_PORT === undefined
+  ? null
+  : parsePort(process.env.CLASS_ARCHIVE_CORE_PUBLIC_PORT);
 const gatewayOrigin = process.env.CLASS_ARCHIVE_GATEWAY_ORIGIN ?? 'http://piwigo:8088';
 const expectedGatewayOrigin = 'http://piwigo:8088';
 
@@ -46,6 +58,17 @@ const staticTypes = new Map([
   ['.webp', 'image/webp'],
   ['.woff', 'font/woff'],
   ['.woff2', 'font/woff2'],
+]);
+const photoUiStaticPaths = new Map([
+  ['/photo-ui/app.css', 'app.css'],
+  ['/photo-ui/app.js', 'app.js'],
+  ['/photo-ui/i18n.js', 'i18n.js'],
+]);
+const photoUiRootRoutes = new Set(['/photos', '/people', '/search', '/albums', '/memories', '/my']);
+const coreRedirectTargets = new Map([
+  ['/class-archive-core/login', '/identification.php'],
+  ['/class-archive-core/home', '/'],
+  ['/class-archive-core/identity', '/index.php?/class-identity/my'],
 ]);
 
 const compatiblePreferences = Object.freeze({
@@ -575,6 +598,36 @@ async function readStatic(pathname) {
   } catch {
     return null;
   }
+}
+
+async function readPhotoUiFile(fileName) {
+  if (!/^[a-z0-9.-]{1,64}$/i.test(fileName)) {
+    return null;
+  }
+  const candidate = resolve(photoUiRoot, fileName);
+  if (candidate === photoUiRoot || !candidate.startsWith(`${photoUiRoot}${sep}`)) {
+    return null;
+  }
+  try {
+    const entry = await lstat(candidate);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 2_000_000) {
+      return null;
+    }
+    return {
+      body: await readFile(candidate),
+      type: staticTypes.get(extname(candidate).toLowerCase()) ?? 'application/octet-stream',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isPhotoUiRoute(pathname) {
+  if (photoUiRootRoutes.has(pathname)) {
+    return true;
+  }
+  const detail = /^\/(?:photos|people)\/([0-9a-f-]{36})$/i.exec(pathname);
+  return detail !== null && UUID_V4.test(detail[1]);
 }
 
 function sessionCookie(request) {
@@ -1123,6 +1176,7 @@ function compatiblePerson(person, role) {
   return {
     id: person.id,
     name: person.label,
+    photoCount: person.photo_count,
     birthDate: null,
     thumbnailPath: `/api/people/${person.id}/thumbnail`,
     isHidden: false,
@@ -1192,7 +1246,18 @@ function redirectToPiwigoLogin(request, response) {
   setSecurityHeaders(response);
   clearCompatibilityCookie(response);
   response.statusCode = 303;
-  response.setHeader('Location', 'http://127.0.0.1:8090/identification.php');
+  response.setHeader('Location', '/class-archive-core/login');
+  response.end();
+}
+
+function redirectToPiwigoCore(request, response, target) {
+  if (corePublicPort === null) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Core interface unavailable.');
+    return;
+  }
+  setSecurityHeaders(response);
+  response.statusCode = 303;
+  response.setHeader('Location', `http://127.0.0.1:${corePublicPort}${target}`);
   response.end();
 }
 
@@ -1588,12 +1653,89 @@ async function serveApplication(request, response, url) {
     respond(response, request.method, 200, 'text/css; charset=utf-8', webCompatCss);
     return;
   }
+  const photoUiStaticFile = photoUiStaticPaths.get(url.pathname);
+  if (photoUiStaticFile) {
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
+      return;
+    }
+    const asset = await readPhotoUiFile(photoUiStaticFile);
+    if (!asset) {
+      respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+      return;
+    }
+    respond(response, request.method, 200, asset.type, asset.body);
+    return;
+  }
+  const coreRedirectTarget = coreRedirectTargets.get(url.pathname);
+  if (coreRedirectTarget) {
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
+      return;
+    }
+    redirectToPiwigoCore(request, response, coreRedirectTarget);
+    return;
+  }
   if (url.pathname === '/class-archive-about') {
     respond(response, request.method, 200, 'text/html; charset=utf-8', legalNoticeHtml, { html: true });
     return;
   }
   if (url.pathname === '/auth/login' || url.pathname === '/auth/register' || url.pathname === '/auth/change-password') {
     redirectToPiwigoLogin(request, response);
+    return;
+  }
+  if (url.pathname === '/') {
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    response.setHeader('Location', '/photos');
+    respond(response, request.method, 302, 'text/plain; charset=utf-8', '');
+    return;
+  }
+  if (isPhotoUiRoute(url.pathname)) {
+    // The document is not an authorization result. Require the current
+    // ClassIdentity principal before returning it, then let every metadata and
+    // media request independently re-enter the Gateway and MediaGuard.
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    const photoDetail = /^\/photos\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    const personDetail = /^\/people\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    try {
+      if (photoDetail) {
+        const photoId = assertUuid(photoDetail[1]);
+        const photo = await gatewayJson(request, `/api/photos/${photoId}`, clientAddress);
+        if (assertUuid(photo?.id) !== photoId) throw new GatewayResponseError(503);
+      }
+      if (personDetail) {
+        const personId = assertUuid(personDetail[1]);
+        archivePersonProjection(await gatewayJson(request, `/api/people/${personId}`, clientAddress));
+      }
+    } catch (error) {
+      const status = error instanceof GatewayResponseError && error.status === 404 ? 404 : 503;
+      respond(response, request.method, status, 'text/plain; charset=utf-8', status === 404 ? '资源不存在' : '数据暂时无法安全确认', { html: true });
+      return;
+    }
+    const document = await readPhotoUiFile('index.html');
+    if (!document) {
+      respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', document.body, { html: true });
     return;
   }
   if (url.pathname === '/class-archive-timeline') {

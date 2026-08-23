@@ -1,6 +1,6 @@
 # Phase 2 experimental stack. It has no connection to the Piwigo network and
 # must only be started after verify-immich-spike.ps1 accepts the upstream lock.
-name: class-archive-immich-spike
+name: ${IMMICH_COMPOSE_PROJECT_NAME:-class-archive-immich-spike}
 
 services:
   immich-server:
@@ -150,8 +150,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       CLASS_ARCHIVE_WEB_COMPAT_PORT: "3000"
-      CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT: "8091"
+      CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT: "${CLASS_ARCHIVE_COMPAT_HTTP_PORT:-8091}"
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: "${CLASS_ARCHIVE_CORE_PUBLIC_PORT:-8090}"
       CLASS_ARCHIVE_WEB_ROOT: /web
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
       # This port exists only on the Piwigo↔BFF internal network. Piwigo nginx
       # is the loopback-bound public listener and preserves the original
       # client address for Piwigo's IP-bound session validation.
@@ -160,6 +162,7 @@ services:
       - "3000"
     volumes:
       - ./web-compat:/compat:ro
+      - ./photo-ui:/photo-ui:ro
       - ./source/official-v3.1.0/web/build:/web:ro
       # Override the upstream image's declared writable /data VOLUME with a
       # tracked, empty, read-only directory. The compatibility process never
@@ -219,20 +222,20 @@ networks:
     internal: true
   class_archive_gateway:
     external: true
-    name: class_archive_immich_gateway
+    name: ${CLASS_ARCHIVE_GATEWAY_NETWORK:-class_archive_immich_gateway}
 
 volumes:
   # Persistent state belonging solely to the disposable Immich spike.
   immich_upload:
-    name: class_archive_immich_spike_upload
+    name: ${IMMICH_UPLOAD_VOLUME:-class_archive_immich_spike_upload}
   immich_model_cache:
-    name: class_archive_immich_spike_model_cache
+    name: ${IMMICH_MODEL_CACHE_VOLUME:-class_archive_immich_spike_model_cache}
   immich_db:
-    name: class_archive_immich_spike_db
+    name: ${IMMICH_DB_VOLUME:-class_archive_immich_spike_db}
   # Per-run secret staging volume. It contains no originals and is deleted by
   # the runtime reset; do not reuse it for configuration or durable state.
   immich_gateway_secret:
-    name: class_archive_immich_gateway_secret
+    name: ${IMMICH_GATEWAY_SECRET_VOLUME:-class_archive_immich_gateway_secret}
   # Existing Piwigo originals, deliberately read-only in the server service.
   piwigo_uploads:
     external: true

@@ -35,7 +35,7 @@ services:
       # The compatibility Web service itself has no host port. This separate
       # loopback listener is an nginx front proxy so Piwigo's IP-bound session
       # check still sees the browser's original source address.
-      - "127.0.0.1:8091:8081"
+      - "127.0.0.1:${CLASS_ARCHIVE_COMPAT_HTTP_PORT:-8091}:8081"
     expose:
       # Only the narrow, internal BFF→Gateway server listens here. It is not
       # mapped to a host port and rejects requests without the fixed proxy
@@ -215,7 +215,7 @@ networks:
   app:
     driver: bridge
   immich_gateway:
-    name: class_archive_immich_gateway
+    name: ${CLASS_ARCHIVE_GATEWAY_NETWORK:-class_archive_immich_gateway}
     driver: bridge
     internal: true
 
