@@ -187,6 +187,9 @@ TZ=Asia/Shanghai
     Assert-True ([string](Property (Property (Property $defaultImmich 'networks') 'class_archive_gateway') 'name') -eq 'class_archive_immich_gateway') 'default_immich_gateway_changed'
     $defaultWeb = Property (Property $defaultImmich 'services') 'immich-web-compat'
     Assert-True ([string](Property (Property $defaultWeb 'environment') 'CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT') -eq '8091') 'default_compat_port_changed'
+    $nginxConfig = [IO.File]::ReadAllText((Join-Path $projectRoot 'infra\piwigo-nginx\nginx.conf'))
+    Assert-True ($nginxConfig.Contains('proxy_set_header Host $http_host;')) 'compat_proxy_did_not_preserve_loopback_port'
+    Assert-True (-not $nginxConfig.Contains('proxy_set_header Host "127.0.0.1:8091";')) 'compat_proxy_still_hardcodes_default_port'
 
     Write-Output "PRIVATE_QA_CONFIG_TEST=PASS assertions=$script:assertions evidence=CONFIG_ONLY"
     exit 0

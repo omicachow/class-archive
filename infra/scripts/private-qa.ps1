@@ -117,7 +117,7 @@ function Assert-ExactValue([hashtable]$Values, [string]$Name, [string]$Expected,
 
 function Assert-Secret([hashtable]$Values, [string]$Name, [string]$Code) {
     $value = Require-Value $Values $Name $Code
-    if ($value.Length -lt 32 -or $value.Length -gt 190 -or $value -notmatch '^[A-Za-z0-9_-]+$' -or $value.Contains('__')) {
+    if ($value.Length -lt 32 -or $value.Length -gt 190 -or $value -notmatch '^[A-Za-z0-9_-]+$' -or $value -match '^__.*__$') {
         Stop-PrivateQa $Code
     }
 }
