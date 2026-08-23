@@ -304,10 +304,12 @@ function Assert-PiwigoConfig([object]$Config, [string]$StagingWsl, [string]$Sele
     if ([string](Get-PropertyValue $Config 'name') -ne $piwigoProject) { Stop-PrivateQa 'piwigo_project_invalid' }
     Assert-PortBindings $Config
     Assert-NetworkConfig $Config 'immich_gateway'
-    foreach ($network in (Get-PropertyValue $Config 'networks').PSObject.Properties) {
-        if ((Get-PropertyValue $network.Value 'internal') -ne $true) {
-            Stop-PrivateQa ('piwigo_network_not_internal_' + $network.Name)
-        }
+    $piwigoNetworks = Get-PropertyValue $Config 'networks'
+    if ((Get-PropertyValue (Get-PropertyValue $piwigoNetworks 'app') 'internal') -eq $true) {
+        Stop-PrivateQa 'piwigo_loopback_ingress_network_invalid'
+    }
+    if ((Get-PropertyValue (Get-PropertyValue $piwigoNetworks 'immich_gateway') 'internal') -ne $true) {
+        Stop-PrivateQa 'piwigo_gateway_network_not_internal'
     }
     Assert-VolumeConfig $Config @{
         piwigo_data = 'class_archive_private_qa_piwigo_data'

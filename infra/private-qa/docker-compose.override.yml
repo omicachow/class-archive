@@ -70,7 +70,10 @@ services:
 
 networks:
   app:
-    internal: true
+    # Docker requires a non-internal bridge to publish the two explicit IPv4
+    # loopback listeners. No other private service publishes a host port,
+    # SMTP remains disabled, and the Immich gateway network stays internal.
+    internal: false
     labels:
       com.classarchive.scope: private-real-qa
   immich_gateway:
