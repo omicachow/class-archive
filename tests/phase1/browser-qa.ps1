@@ -11,9 +11,12 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envPath = Join-Path $projectRoot '.env.piwigo'
-$node = 'C:\Users\Omica\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-$nodeModules = 'C:\Users\Omica\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
-$chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$bundledDependencies = Join-Path $userProfile '.cache\codex-runtimes\codex-primary-runtime\dependencies'
+$node = if ($env:CLASS_ARCHIVE_BROWSER_QA_NODE) { $env:CLASS_ARCHIVE_BROWSER_QA_NODE } else { Join-Path $bundledDependencies 'node\bin\node.exe' }
+$nodeModules = if ($env:CLASS_ARCHIVE_BROWSER_QA_NODE_MODULES) { $env:CLASS_ARCHIVE_BROWSER_QA_NODE_MODULES } else { Join-Path $bundledDependencies 'node\node_modules' }
+$chrome = if ($env:CLASS_ARCHIVE_BROWSER_QA_CHROME) { $env:CLASS_ARCHIVE_BROWSER_QA_CHROME } else { Join-Path $programFiles 'Google\Chrome\Application\chrome.exe' }
 $script:runId = ''
 $script:adminCreated = $false
 $script:commentContextsPrepared = $false

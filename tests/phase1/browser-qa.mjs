@@ -19,6 +19,7 @@ const required = [
   'CLASS_ARCHIVE_BROWSER_QA_HERITAGE_IMAGE_ID',
   'CLASS_ARCHIVE_BROWSER_QA_LIVING_IMAGE_ID',
   'CLASS_ARCHIVE_BROWSER_QA_SCREENSHOT_DIR',
+  'CLASS_ARCHIVE_BROWSER_QA_CHROME',
 ];
 for (const name of required) {
   if (!process.env[name]) {
@@ -36,7 +37,7 @@ if (baseUrl.hostname !== '127.0.0.1' && baseUrl.hostname !== 'localhost') {
 }
 const screenshots = path.resolve(process.env.CLASS_ARCHIVE_BROWSER_QA_SCREENSHOT_DIR);
 const profileDir = path.resolve(process.env.CLASS_ARCHIVE_BROWSER_QA_PROFILE_DIR || path.join(path.dirname(screenshots), 'browser-profile-' + runId));
-const chromePath = process.env.CLASS_ARCHIVE_BROWSER_QA_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const chromePath = process.env.CLASS_ARCHIVE_BROWSER_QA_CHROME;
 const ids = {
   heritage: Number.parseInt(process.env.CLASS_ARCHIVE_BROWSER_QA_HERITAGE_IMAGE_ID, 10),
   living: Number.parseInt(process.env.CLASS_ARCHIVE_BROWSER_QA_LIVING_IMAGE_ID, 10),

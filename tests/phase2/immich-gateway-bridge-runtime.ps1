@@ -32,9 +32,12 @@ if ($BrowserE2E.IsPresent -and -not $useRuntimePeopleSearch) {
 $piwigoFixturePath = if ($useRuntimePeopleSearch) { 'tests/phase2/immich-people-fixture.php' } else { 'tests/phase2/immich-gateway-fixture.php' }
 $nodeFixturePath = if ($useRuntimePeopleSearch) { 'tests/phase2/immich-people-search-runtime.mjs' } else { 'tests/phase2/immich-gateway-runtime.mjs' }
 $browserFixturePath = 'tests/phase2/immich-people-search-browser.mjs'
-$browserNode = 'C:\Users\Omica\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-$browserNodeModules = 'C:\Users\Omica\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
-$browserChrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$bundledDependencies = Join-Path $userProfile '.cache\codex-runtimes\codex-primary-runtime\dependencies'
+$browserNode = if ($env:CLASS_ARCHIVE_PHASE2_BROWSER_NODE) { $env:CLASS_ARCHIVE_PHASE2_BROWSER_NODE } else { Join-Path $bundledDependencies 'node\bin\node.exe' }
+$browserNodeModules = if ($env:CLASS_ARCHIVE_PHASE2_BROWSER_NODE_MODULES) { $env:CLASS_ARCHIVE_PHASE2_BROWSER_NODE_MODULES } else { Join-Path $bundledDependencies 'node\node_modules' }
+$browserChrome = if ($env:CLASS_ARCHIVE_PHASE2_BROWSER_CHROME) { $env:CLASS_ARCHIVE_PHASE2_BROWSER_CHROME } else { Join-Path $programFiles 'Google\Chrome\Application\chrome.exe' }
 $piwigoFixtureEnvironment = if ($useRuntimePeopleSearch) { 'CLASS_ARCHIVE_ALLOW_IMMICH_PEOPLE_FIXTURE=1' } else { 'CLASS_ARCHIVE_ALLOW_IMMICH_GATEWAY_FIXTURE=1' }
 $piwigoFixtureUser = if ($useRuntimePeopleSearch) { '1000:1000' } else { 'nginx' }
 $piwigoFixtureFile = if ($useRuntimePeopleSearch) { '/workspace/tests/phase2/immich-people-fixture.php' } else { '/workspace/tests/phase2/immich-gateway-fixture.php' }

@@ -28,7 +28,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase1\browser-q
 
 截图只包含合成身份和合成图片，保存在 Git 忽略目录：
 
-`C:\Users\Omica\Documents\ChatGPT\班级相册开发\.codex-work\screenshots\phase1.5\`
+`.codex-work/screenshots/phase1.5/`
 
 | 文件 | 内容 |
 |---|---|
@@ -62,7 +62,7 @@ MediaGuard 渲染官方未修改 Web build。
   不显示上游 HTTP 401 堆栈。
 
 对应截图同样只含合成图像，存于 Git 忽略目录
-`C:\Users\Omica\Documents\ChatGPT\班级相册开发\.codex-work\screenshots\phase2-web-compat\`：
+`.codex-work/screenshots/phase2-web-compat/`：
 
 | 文件 | 内容 |
 |---|---|

@@ -15,16 +15,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reject private artifact names
-        shell: bash
+      - name: Verify public Git boundary
+        shell: pwsh
+        env:
+          PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
         run: |
-          set -euo pipefail
-          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' | grep -Ev '(^|/)\.env\.example$|^tests/fixtures/phase2-synthetic/fictional-cast-(classroom|night-cake|outdoor|playground|portraits)\.png$' || true)"
-          if [[ -n "$forbidden" ]]; then
-            printf '%s\n' "Tracked private artifacts are not allowed:" >&2
-            printf '%s\n' "$forbidden" >&2
-            exit 1
+          & ./infra/scripts/verify-public-boundary.ps1 -Mode Head
+
+          $base = ''
+          if ($env:PUBLIC_BOUNDARY_PR_BASE -match '^[0-9a-fA-F]{40,64}$') {
+            $base = $env:PUBLIC_BOUNDARY_PR_BASE
+          } elseif ($env:PUBLIC_BOUNDARY_PUSH_BASE -match '^[0-9a-fA-F]{40,64}$' -and $env:PUBLIC_BOUNDARY_PUSH_BASE -notmatch '^0+$') {
+            $base = $env:PUBLIC_BOUNDARY_PUSH_BASE
+          }
+          if ($base -ne '') {
+            & ./infra/scripts/verify-public-boundary.ps1 -Mode Outgoing -BaseRef $base
+          } else {
+            Write-Output 'PUBLIC_BOUNDARY_OUTGOING=SKIP reason=base_unavailable'
           fi
+
+      - name: Verify public boundary protocol
+        shell: pwsh
+        run: ./tests/public-boundary-protocol.ps1
 
       - name: Verify pinned fictional ML fixtures
         shell: bash
@@ -40,6 +53,9 @@ jobs:
 
       - name: Reject high-risk credential material
         shell: bash
+        env:
+          PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           gh_prefix="gh""o_"
@@ -47,7 +63,31 @@ jobs:
           key_marker="BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY"
           aws_prefix="AKIA[0-9A-Z]{16}"
           pattern="${gh_prefix}[A-Za-z0-9]{20,}|${pat_prefix}[A-Za-z0-9_]{20,}|${aws_prefix}|${key_marker}"
-          if git grep -n -I -E "$pattern" -- .; then
-            echo "High-risk credential material found in tracked content." >&2
+          base=""
+          if [[ "${PUBLIC_BOUNDARY_PR_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+            base="$PUBLIC_BOUNDARY_PR_BASE"
+          elif [[ "${PUBLIC_BOUNDARY_PUSH_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]] && [[ ! "$PUBLIC_BOUNDARY_PUSH_BASE" =~ ^0+$ ]]; then
+            base="$PUBLIC_BOUNDARY_PUSH_BASE"
+          fi
+          if [[ -n "$base" ]]; then
+            mapfile -t commits < <(git rev-list --reverse "$base..HEAD")
+          else
+            commits=(HEAD)
+          fi
+          contaminated=0
+          for commit in "${commits[@]}"; do
+            if git grep -q -I -E "$pattern" "$commit" -- .; then
+              contaminated=$((contaminated + 1))
+            else
+              code=$?
+              if (( code > 1 )); then
+                printf 'PUBLIC_CREDENTIAL_GATE=FAIL reason=scan_error count=1\n' >&2
+                exit 1
+              fi
+            fi
+          done
+          if (( contaminated > 0 )); then
+            printf 'PUBLIC_CREDENTIAL_GATE=FAIL reason=high_risk_material count=%d\n' "$contaminated" >&2
             exit 1
           fi
+          printf 'PUBLIC_CREDENTIAL_GATE=PASS commits=%d\n' "${#commits[@]}"
