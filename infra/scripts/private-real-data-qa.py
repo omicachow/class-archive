@@ -317,6 +317,33 @@ def percent(numerator: int, denominator: int) -> float:
     return round(100.0 * numerator / denominator, 2) if denominator else 0.0
 
 
+def file_timestamp_reliability(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimate whether filesystem mtimes can stand in for capture dates.
+
+    The estimate is deliberately conservative: filesystem timestamps are never
+    promoted to archive dates.  A large collection written in one short window
+    is strong evidence of a transfer/export timestamp rather than photography.
+    """
+
+    timestamps = sorted(record["mtime_ns"] for record in records if isinstance(record.get("mtime_ns"), int))
+    if not timestamps:
+        return {
+            "rating": "UNKNOWN",
+            "evidence": "NO_FILESYSTEM_TIMESTAMPS",
+            "span_seconds": None,
+        }
+    span_seconds = round((timestamps[-1] - timestamps[0]) / 1e9, 3)
+    if len(timestamps) >= 20 and span_seconds <= 24 * 60 * 60:
+        evidence = "BATCH_TRANSFER_TIME_CLUSTER"
+    else:
+        evidence = "FILESYSTEM_TIME_IS_NOT_CAPTURE_METADATA"
+    return {
+        "rating": "UNRELIABLE",
+        "evidence": evidence,
+        "span_seconds": span_seconds,
+    }
+
+
 def source_summary(label: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     images = [record for record in records if record["media_kind"] == "image"]
     videos = [record for record in records if record["media_kind"] == "video"]
@@ -350,6 +377,7 @@ def source_summary(label: str, records: list[dict[str, Any]]) -> dict[str, Any]:
             "first": datetime.fromtimestamp(min(timestamps) / 1e9, timezone.utc).isoformat() if timestamps else None,
             "last": datetime.fromtimestamp(max(timestamps) / 1e9, timezone.utc).isoformat() if timestamps else None,
         },
+        "file_timestamp_reliability_estimate": file_timestamp_reliability(records),
         "exact_duplicate_groups": sum(count > 1 for count in exact.values()),
         "exact_duplicate_files": sum(count for count in exact.values() if count > 1),
     }
@@ -414,6 +442,37 @@ def inventory(args: argparse.Namespace) -> None:
     total_images = sum(summary["images_total"] for summary in summaries)
     total_files = sum(summary["files_total"] for summary in summaries)
     print(f"PRIVATE_QA_INVENTORY=PASS sources={len(sources)} files={total_files} images={total_images}")
+
+
+def metadata_audit(args: argparse.Namespace) -> None:
+    inventory_path = Path(args.inventory).expanduser().resolve(strict=True)
+    payload = load_json(inventory_path)
+    records = payload.get("records") if isinstance(payload, dict) else None
+    roots = payload.get("source_roots") if isinstance(payload, dict) else None
+    if payload.get("version") != VERSION or not isinstance(records, list) or not isinstance(roots, list):
+        raise PrivateQaError("inventory_schema_invalid")
+    labels: list[str] = []
+    for root in roots:
+        label = root.get("source_label") if isinstance(root, dict) else None
+        if not isinstance(label, str) or not re.fullmatch(r"Private Source [A-Z]", label) or label in labels:
+            raise PrivateQaError("inventory_schema_invalid")
+        labels.append(label)
+    summaries = [source_summary(label, [record for record in records if record.get("source_label") == label]) for label in labels]
+    report_root = inventory_path.parent.parent
+    write_json(report_root / "reports" / "real-data-metadata-audit.json", {
+        "version": VERSION,
+        "created_at": utc_now(),
+        "inventory_created_at": payload.get("created_at"),
+        "sources": summaries,
+        "method": {
+            "filesystem_times_are_capture_times": False,
+            "datetime_original_only_counts_when_exif_tag_is_present": True,
+            "filename_reliability_is_heuristic": True,
+            "timestamp_reliability_is_conservative": True,
+            "near_duplicate_method": "64-bit dHash, Hamming distance <= 5 within 16-bit prefix buckets",
+        },
+    })
+    print(f"PRIVATE_QA_METADATA_AUDIT=PASS sources={len(summaries)}")
 
 
 def sampling_reasons(record: dict[str, Any], duplicate_digests: set[str], near_digests: set[str]) -> list[str]:
@@ -720,6 +779,10 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--manifest")
     verify_parser.add_argument("--hash-mode", choices=["selected", "full"], default="selected")
     verify_parser.set_defaults(function=verify)
+
+    audit_parser = commands.add_parser("metadata-audit")
+    audit_parser.add_argument("--inventory", required=True)
+    audit_parser.set_defaults(function=metadata_audit)
     return parser
 
 

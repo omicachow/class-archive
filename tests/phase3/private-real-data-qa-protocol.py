@@ -67,6 +67,14 @@ def main() -> int:
         if "PRIVATE_QA_INVENTORY=PASS" not in inventory_result.stdout:
             raise AssertionError("private_qa_inventory_gate_missing")
         inventory = private_output / "inventory" / "real-data-inventory.json"
+        audit_result = run("metadata-audit", "--inventory", str(inventory))
+        if "PRIVATE_QA_METADATA_AUDIT=PASS" not in audit_result.stdout:
+            raise AssertionError("private_qa_metadata_audit_gate_missing")
+        audit = json.loads((private_output / "reports" / "real-data-metadata-audit.json").read_text(encoding="utf-8"))
+        if any(source.get("file_timestamp_reliability_estimate", {}).get("rating") != "UNRELIABLE" for source in audit["sources"]):
+            raise AssertionError("private_qa_timestamp_reliability_missing")
+        if audit.get("method", {}).get("filesystem_times_are_capture_times") is not False:
+            raise AssertionError("private_qa_filesystem_time_policy")
         select_result = run("select", "--inventory", str(inventory), "--output", str(private_output), "--target", "5")
         if "PRIVATE_QA_SELECTION=PASS" not in select_result.stdout:
             raise AssertionError("private_qa_selection_gate_missing")
@@ -100,7 +108,7 @@ def main() -> int:
         if "reason=output_source_overlap" not in failure.stderr or overlap.exists():
             raise AssertionError("private_qa_output_overlap_gate")
 
-    print("PRIVATE_REAL_DATA_QA_PROTOCOL=PASS assertions=13")
+    print("PRIVATE_REAL_DATA_QA_PROTOCOL=PASS assertions=16")
     return 0
 
 
