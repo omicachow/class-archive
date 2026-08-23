@@ -104,6 +104,7 @@ final class GatewayHttpController
             self::respond(400, ['error' => '请求格式无效']);
         } catch (\RuntimeException $error) {
             $code = $error->getMessage();
+            self::setTrustedCompatibilityDiagnostic($code);
             if ($code === 'class_archive_gateway_principal_unresolved') {
                 self::respond(403, ['error' => '禁止访问']);
             }
@@ -118,6 +119,7 @@ final class GatewayHttpController
             }
             self::respond(503, ['error' => '数据暂时无法安全确认']);
         } catch (\Throwable) {
+            self::setTrustedCompatibilityDiagnostic('unexpected');
             self::respond(503, ['error' => '数据暂时无法安全确认']);
         }
     }
@@ -292,6 +294,23 @@ final class GatewayHttpController
         header('Vary: Cookie', false);
         header('X-Content-Type-Options: nosniff');
         header('Referrer-Policy: no-referrer');
+    }
+
+    private static function setTrustedCompatibilityDiagnostic(string $code): void
+    {
+        // A diagnostic travels only on the private 8088 BFF-to-Gateway hop.
+        // It is never returned by the compatibility BFF and therefore cannot
+        // become a browser authorization or topology oracle. The bounded code
+        // lets the localhost-only runtime harness distinguish an unavailable
+        // model/bridge from a transient proxy failure without logging IDs,
+        // paths, request bodies, cookies, or credentials.
+        if (($_SERVER['CLASS_ARCHIVE_WEB_COMPAT_INTERNAL'] ?? '') !== '1') {
+            return;
+        }
+        if (preg_match('/\A(?:class_archive_gateway_[a-z0-9_]{1,80}|unexpected)\z/D', $code) !== 1) {
+            $code = 'unexpected';
+        }
+        header('X-Class-Archive-Gateway-Diagnostic: ' . $code);
     }
 
     private static function setMediaHeaders(): void

@@ -1191,6 +1191,23 @@ SQL);
                 'rto_seconds' => null,
             ];
         }
+        try {
+            $mlArtifacts = \ClassIdentity\MlArtifactAttestation::status();
+        } catch (Throwable) {
+            $mlArtifacts = [
+                'state' => 'MISSING',
+                'label' => '尚未验证',
+                'message' => '本地 AI 模型验证记录无法读取。',
+                'timestamp' => null,
+                'artifact_count' => 0,
+                'license_status' => 'UNKNOWN',
+                'license_label' => '需要审查',
+                'face_model' => null,
+                'face_model_revision' => null,
+                'search_model' => null,
+                'search_model_revision' => null,
+            ];
+        }
         $maintenanceTasks = is_array($maintenance['tasks'] ?? null) ? $maintenance['tasks'] : [];
         $backupFreshness = is_array($maintenanceTasks['backup_freshness'] ?? null)
             ? $maintenanceTasks['backup_freshness']
@@ -1217,6 +1234,12 @@ SQL);
         }
         if (($maintenance['state'] ?? null) !== 'VERIFIED') {
             $productionBlockers[] = 'CRON_JOBS';
+        }
+        if (($mlArtifacts['state'] ?? null) !== 'VERIFIED') {
+            $productionBlockers[] = 'LOCAL_AI_ARTIFACTS';
+        }
+        if (($mlArtifacts['license_status'] ?? null) === 'REVIEWED_RESTRICTED') {
+            $productionBlockers[] = 'LOCAL_AI_MODEL_LICENSE';
         }
         if (!$identityEnforcement) {
             $productionBlockers[] = 'IDENTITY_ENFORCEMENT';
@@ -1271,6 +1294,18 @@ SQL);
             'backup_restore_message' => (string) ($backupRestore['message'] ?? ''),
             'backup_restore_timestamp' => $backupRestore['timestamp'] ?? null,
             'backup_restore_rto_seconds' => $backupRestore['rto_seconds'] ?? null,
+            'ml_artifacts' => (string) ($mlArtifacts['state'] ?? 'MISSING'),
+            'ml_artifacts_label' => (string) ($mlArtifacts['label'] ?? '尚未验证'),
+            'ml_artifacts_message' => (string) ($mlArtifacts['message'] ?? ''),
+            'ml_artifacts_timestamp' => $mlArtifacts['timestamp'] ?? null,
+            'ml_artifacts_commit' => $mlArtifacts['commit'] ?? null,
+            'ml_artifact_count' => (int) ($mlArtifacts['artifact_count'] ?? 0),
+            'ml_artifact_license_status' => (string) ($mlArtifacts['license_status'] ?? 'UNKNOWN'),
+            'ml_artifact_license_label' => (string) ($mlArtifacts['license_label'] ?? '需要审查'),
+            'ml_face_model' => $mlArtifacts['face_model'] ?? null,
+            'ml_face_model_revision' => $mlArtifacts['face_model_revision'] ?? null,
+            'ml_search_model' => $mlArtifacts['search_model'] ?? null,
+            'ml_search_model_revision' => $mlArtifacts['search_model_revision'] ?? null,
             'identity_enforcement' => $identityEnforcement ? 'ENFORCED' : 'DISABLED',
             'identity_enforcement_label' => $identityEnforcement ? '已启用' : '已停用',
             'anonymous_presenter' => $anonymousPresenterReady ? 'READY' : 'FAIL',
@@ -1322,6 +1357,8 @@ SQL);
             'ADMIN_MFA' => '管理员多因素认证',
             'BACKUP_RESTORE_DRILL' => '备份恢复演练',
             'CRON_JOBS' => '定时任务',
+            'LOCAL_AI_ARTIFACTS' => '本地 AI 模型验证',
+            'LOCAL_AI_MODEL_LICENSE' => '本地 AI 模型许可证',
             'COMMUNITY_MODERATION' => '社区投稿治理',
             'BUSINESS_MUTATION_AUDIT' => '业务变更审计',
             default => $blocker,

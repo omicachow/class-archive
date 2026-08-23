@@ -28,7 +28,14 @@ services:
       - piwigo_uploads:/external/piwigo-upload:ro
       - piwigo_galleries:/external/piwigo-galleries:ro
       - /etc/localtime:/etc/localtime:ro
-    networks: [immich_internal]
+    networks:
+      - immich_internal
+      # The ML parser is isolated from Postgres/Redis on its own internal
+      # network. The server is the only service that spans both networks.
+      - immich_ml_internal
+      # Metadata-only bridge traffic gets a third private segment.  The
+      # bridge must never share Redis/Postgres DNS or queue/cache access.
+      - immich_bridge_internal
     restart: "no"
 
   immich-machine-learning:
@@ -36,10 +43,36 @@ services:
     # Do not replace this with a floating tag. Upgrade by changing the source
     # pin, verified platform digest, lock evidence and compatibility suite.
     image: ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05
-    env_file: ${IMMICH_SPIKE_ENV_FILE:-.env}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TZ: ${TZ:-UTC}
+      MPLCONFIGDIR: /tmp/matplotlib
+      # The ML service never gets an egress-capable network. These explicit
+      # offline flags make a cache miss fail immediately even if a future
+      # compose change accidentally connects the service to another network.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      # Cold-start preload is deliberate evidence that the verified cache is
+      # complete. The pinned source otherwise loads models only on first use.
+      MACHINE_LEARNING_PRELOAD__CLIP__TEXTUAL: "ViT-B-32__openai"
+      MACHINE_LEARNING_PRELOAD__CLIP__VISUAL: "ViT-B-32__openai"
+      MACHINE_LEARNING_PRELOAD__FACIAL_RECOGNITION__DETECTION: "buffalo_l"
+      MACHINE_LEARNING_PRELOAD__FACIAL_RECOGNITION__RECOGNITION: "buffalo_l"
+      # v3.1.0 otherwise rewrites recognition/model.onnx to add a dynamic
+      # batch axis. Keeping batch size 1 preserves the verified artifact
+      # digest and avoids a writable-model exception during offline startup.
+      MACHINE_LEARNING_MAX_BATCH_SIZE__FACIAL_RECOGNITION: "1"
     volumes:
-      - immich_model_cache:/cache
-    networks: [immich_internal]
+      # A verified model cache is an immutable runtime input. The ML service
+      # may read it but cannot replace a 0444 artifact or fetch a cache miss.
+      - immich_model_cache:/cache:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks: [immich_ml_internal]
     restart: "no"
 
   # This is deliberately not an Immich Web proxy. It is a tiny, metadata-only
@@ -72,7 +105,7 @@ services:
     tmpfs:
       - /tmp:mode=1777,size=8m
     networks:
-      immich_internal: {}
+      immich_bridge_internal: {}
       # Match the fixed authority in BridgeImmichAdapter. The alias lives only
       # on the internal Piwigo↔bridge network; it is neither a host listener
       # nor a caller-controlled destination.
@@ -176,6 +209,12 @@ services:
 
 networks:
   immich_internal:
+    driver: bridge
+    internal: true
+  immich_ml_internal:
+    driver: bridge
+    internal: true
+  immich_bridge_internal:
     driver: bridge
     internal: true
   class_archive_gateway:

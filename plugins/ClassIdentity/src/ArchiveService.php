@@ -61,7 +61,12 @@ final class ClassIdentityArchiveService
         }
         $created = create_virtual_category($name, $parentId, [
             'status' => 'private',
-            'visible' => false,
+            // Piwigo treats `visible=false` as a lock which its native ACL
+            // calculation denies even to an otherwise authorized private
+            // group. An official Class Archive child remains private through
+            // inherited group access; it must be visible inside that allowed
+            // scope so the canonical MediaGuard path can serve it.
+            'visible' => true,
             'commentable' => false,
             'inherit' => true,
             'comment' => $comment ?? '',

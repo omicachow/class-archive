@@ -62,11 +62,15 @@ final class MediaAttestation
 
         try {
             $expected = self::currentEvidence();
+            $currentCommit = BuildCommit::current();
         } catch (\Throwable) {
             return self::missing('无法重新计算媒体访问安全验证摘要。');
         }
 
         $mismatches = [];
+        if (!hash_equals($currentCommit, (string) $record['commit'])) {
+            $mismatches[] = 'commit';
+        }
         foreach (['policy_sha256', 'nginx_sha256', 'media_guard_sha256', 'schema_sha256', 'test_suite_sha256'] as $field) {
             if (!is_string($record[$field]) || !hash_equals($expected[$field], $record[$field])) {
                 $mismatches[] = $field;
@@ -76,7 +80,12 @@ final class MediaAttestation
             || (int) $record['migration_version'] !== $expected['migration_version']) {
             $mismatches[] = 'schema_or_migration_version';
         }
-        $age = max(0, time() - (int) strtotime($record['timestamp']));
+        $timestamp = (int) strtotime($record['timestamp']);
+        $age = time() - $timestamp;
+        if ($age < -300) {
+            $mismatches[] = 'future_timestamp';
+        }
+        $age = max(0, $age);
         if ($mismatches !== []) {
             return [
                 'state' => 'STALE',
@@ -125,6 +134,9 @@ final class MediaAttestation
         }
         if ($testSuiteVersion === '' || strlen($testSuiteVersion) > 64 || preg_match('/\A[A-Za-z0-9._:-]+\z/D', $testSuiteVersion) !== 1) {
             throw new \InvalidArgumentException('class_identity_media_attestation_suite_version_invalid');
+        }
+        if (!hash_equals(BuildCommit::current(), $commit)) {
+            throw new \InvalidArgumentException('class_identity_media_attestation_commit_mismatch');
         }
         $evidence = self::currentEvidence();
         return [

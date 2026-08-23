@@ -274,13 +274,16 @@ final class BridgeImmichAdapter implements ImmichAdapter
         $path = PHPWG_ROOT_PATH . self::SECRET_PATH;
         clearstatcache(true, $path);
         $stat = @lstat($path);
+        $mode = is_array($stat) ? ((int) ($stat['mode'] ?? 0) & 0777) : 0;
+        $ownerOnly = $mode === 0600
+            && (!function_exists('posix_geteuid') || (int) ($stat['uid'] ?? -1) === posix_geteuid());
+        $trustedServiceShared = self::isTrustedServiceSharedSecret($path, $stat, $mode);
         if (
             !is_array($stat)
             || is_link($path)
             || (($stat['mode'] ?? 0) & 0170000) !== 0100000
-            || (($stat['mode'] ?? 0) & 0777) !== 0600
+            || !($ownerOnly || $trustedServiceShared)
             || (int) ($stat['nlink'] ?? 0) !== 1
-            || (function_exists('posix_geteuid') && (int) ($stat['uid'] ?? -1) !== posix_geteuid())
             || (int) ($stat['size'] ?? 0) < 48
             || (int) ($stat['size'] ?? 0) > 512
         ) {
@@ -300,5 +303,53 @@ final class BridgeImmichAdapter implements ImmichAdapter
             throw new \RuntimeException('class_archive_immich_bridge_secret_unavailable');
         }
         return $token;
+    }
+
+    /**
+     * The Piwigo container deliberately normalizes durable private files to
+     * 0660 and grants the nginx worker an ACL, rather than making the whole
+     * archive world-readable. A container restart can therefore turn an
+     * otherwise valid bridge secret from 0600 into that documented service
+     * mode. Accept it only when both owner and group are the configured
+     * Piwigo durable service identity, its parent is private, and the current
+     * request account can actually read the file. Any missing identity,
+     * malformed parent, group mismatch, or inaccessible ACL fails closed.
+     *
+     * @param array<string,mixed>|false $stat
+     */
+    private static function isTrustedServiceSharedSecret(string $path, array|false $stat, int $mode): bool
+    {
+        if (!is_array($stat) || $mode !== 0660 || !is_file($path) || !is_readable($path)) {
+            return false;
+        }
+        $uid = self::configuredServiceId('PIWIGO_UID');
+        $gid = self::configuredServiceId('PIWIGO_GID');
+        if ($uid === null || $gid === null || (int) ($stat['uid'] ?? -1) !== $uid || (int) ($stat['gid'] ?? -1) !== $gid) {
+            return false;
+        }
+        $parent = dirname($path);
+        clearstatcache(true, $parent);
+        $parentStat = @lstat($parent);
+        if (
+            !is_array($parentStat)
+            || is_link($parent)
+            || (($parentStat['mode'] ?? 0) & 0170000) !== 0040000
+            || (((int) ($parentStat['mode'] ?? 0) & 0007) !== 0)
+            || (int) ($parentStat['uid'] ?? -1) !== $uid
+            || (int) ($parentStat['gid'] ?? -1) !== $gid
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    private static function configuredServiceId(string $name): ?int
+    {
+        $raw = getenv($name);
+        if (!is_string($raw) || preg_match('/\A[1-9][0-9]{0,8}\z/D', $raw) !== 1) {
+            return null;
+        }
+        $value = (int) $raw;
+        return $value > 0 ? $value : null;
     }
 }

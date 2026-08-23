@@ -66,6 +66,12 @@ services:
       - ../plugins:/workspace/plugins:ro
       - ../themes:/workspace/themes:ro
       - ../tests:/workspace/tests:ro
+      # Only the live ref metadata is exposed. No Git config, remotes,
+      # credentials, object database or reflog is mounted into Piwigo. Release
+      # attestations use this narrow view to prove their recorded commit is the
+      # commit currently checked out on the host.
+      - ../.git/HEAD:/workspace/git/HEAD:ro
+      - ../.git/refs:/workspace/git/refs:ro
     networks:
       - app
       # This internal-only network carries the narrow Class Archive ->
