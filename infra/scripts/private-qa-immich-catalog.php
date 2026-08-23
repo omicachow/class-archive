@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 use ClassIdentity\ClassArchivePhoto;
 use ClassIdentity\Gateway\BridgeImmichAdapter;
+use ClassIdentity\Gateway\PiwigoGatewayAdapter;
 
 const PRIVATE_QA_CATALOG_OUTPUT = '/tmp/class-archive-private-qa-immich-catalog.json';
 const PRIVATE_QA_BIND_INPUT = '/tmp/class-archive-private-qa-immich-bindings.json';
@@ -88,6 +89,7 @@ function privateQaImmichReadJson(string $path, int $maximumBytes): array
     $stat = @lstat($path);
     if (!is_array($stat) || is_link($path) || (($stat['mode'] ?? 0) & 0170000) !== 0100000
         || (($stat['mode'] ?? 0) & 0077) !== 0 || (int) ($stat['nlink'] ?? 0) !== 1
+        || (function_exists('posix_geteuid') && (int) ($stat['uid'] ?? -1) !== posix_geteuid())
         || (int) ($stat['size'] ?? 0) < 16 || (int) ($stat['size'] ?? 0) > $maximumBytes) {
         throw new RuntimeException('input_file_invalid');
     }
@@ -141,15 +143,26 @@ function privateQaImmichOriginal(string $reference): array
 function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requireUnbound): array
 {
     global $prefixeTable;
+    $candidates = PiwigoGatewayAdapter::fromPiwigo()->photoCandidates();
+    $eras = [];
+    foreach ($candidates as $candidate) {
+        $candidateId = $candidate->id();
+        $candidateEra = $candidate->era();
+        if (isset($eras[$candidateId]) || !in_array($candidateEra, ['HERITAGE', 'LIVING'], true)
+            || $candidate->state() !== ClassArchivePhoto::STATE_ACTIVE
+            || $candidate->mappingState() !== ClassArchivePhoto::STATE_ACTIVE) {
+            throw new RuntimeException('catalog_mapping_invalid');
+        }
+        $eras[$candidateId] = $candidateEra;
+    }
     $rows = $repository->fetchAll(
-        'SELECT p.`class_photo_id`,p.`piwigo_image_id`,p.`immich_asset_id`,p.`media_checksum`,p.`media_reference`,p.`state`,a.`era` '
+        'SELECT p.`class_photo_id`,p.`piwigo_image_id`,p.`immich_asset_id`,p.`media_checksum`,p.`media_reference`,p.`state` '
         . 'FROM `' . $repository->table('photo') . '` p '
-        . 'INNER JOIN `' . $repository->table('archive_image') . '` a ON a.`piwigo_image_id`=p.`piwigo_image_id` '
         . 'ORDER BY p.`piwigo_image_id` ASC',
     );
     $imageRow = $repository->fetchOne('SELECT COUNT(*) AS `count` FROM `' . $prefixeTable . 'images`');
     $imageCount = (int) ($imageRow['count'] ?? -1);
-    if ($imageCount < 1 || $imageCount > 500 || count($rows) !== $imageCount) {
+    if ($imageCount < 1 || $imageCount > 500 || count($rows) !== $imageCount || count($eras) !== $imageCount) {
         throw new RuntimeException('catalog_count_invalid');
     }
     $photos = [];
@@ -159,7 +172,10 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
         $binaryId = $row['class_photo_id'] ?? null;
         $binaryChecksum = $row['media_checksum'] ?? null;
         $assetId = $row['immich_asset_id'] ?? null;
-        $era = $row['era'] ?? null;
+        $classPhotoId = is_string($binaryId) && strlen($binaryId) === 16
+            ? ClassArchivePhoto::binaryToId($binaryId)
+            : '';
+        $era = $eras[$classPhotoId] ?? null;
         if (!is_string($binaryId) || strlen($binaryId) !== 16 || !is_string($binaryChecksum) || strlen($binaryChecksum) !== 32
             || ($row['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE
             || !in_array($era, ['HERITAGE', 'LIVING'], true)
@@ -167,7 +183,6 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
             || (!$requireUnbound && (!is_string($assetId) || ClassArchivePhoto::normalizeImmichAssetId($assetId) === null))) {
             throw new RuntimeException('catalog_mapping_invalid');
         }
-        $classPhotoId = ClassArchivePhoto::binaryToId($binaryId);
         $reference = ClassArchivePhoto::normalizeMediaReference((string) ($row['media_reference'] ?? ''));
         $original = privateQaImmichOriginal($reference);
         $stored = bin2hex($binaryChecksum);
@@ -287,10 +302,6 @@ try {
             throw new RuntimeException('bridge_secret_not_clean');
         }
         privateQaImmichWriteExclusive(PRIVATE_QA_BRIDGE_SECRET, ['version' => 1, 'token' => $token]);
-        if (!chmod(PRIVATE_QA_BRIDGE_SECRET, 0660)) {
-            @unlink(PRIVATE_QA_BRIDGE_SECRET);
-            throw new RuntimeException('bridge_secret_mode_invalid');
-        }
         global $prefixeTable;
         try {
             $repository->execute(
@@ -319,7 +330,7 @@ try {
         'input_file_invalid', 'input_json_invalid', 'original_untrusted', 'original_mode_invalid', 'original_hash_invalid',
         'catalog_count_invalid', 'catalog_mapping_invalid', 'catalog_integrity_invalid', 'output_not_clean', 'output_create_failed',
         'output_write_failed', 'binding_input_invalid', 'binding_asset_duplicate', 'binding_race', 'enable_input_invalid',
-        'bridge_secret_not_clean', 'bridge_secret_mode_invalid', 'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',
+        'bridge_secret_not_clean', 'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',
         'bridge_config_invalid', 'bridge_not_pristine',
         'class_archive_immich_bridge_enablement_invalid', 'class_archive_immich_bridge_response_invalid',
         'class_archive_immich_bridge_secret_unavailable', 'class_archive_immich_bridge_transport_unavailable',

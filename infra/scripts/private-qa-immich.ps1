@@ -210,7 +210,7 @@ try {
 
     try {
         $script:stage = 'catalog_export'
-        $catalogResult = Invoke-PiwigoCompose @('exec', '-T', '--user', '1000:1000', 'piwigo', 'php', $catalogScript, 'export')
+        $catalogResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'export')
         Assert-Exact ($catalogResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=export count=([0-9]+)$') 'catalog_export_failed'
         [void](Invoke-PiwigoCompose @('cp', ('piwigo:' + $catalogContainer), ('.codex-work/private-real-qa/runtime/immich/' + $run + '/catalog.json')))
         Set-ClassArchiveOwnerOnlyFileAcl -Path $catalogHost
@@ -254,8 +254,8 @@ try {
         $script:stage = 'canonical_bind'
         Write-OwnerOnlyJson $bindingHost ([ordered]@{ version = 1; scope = 'PRIVATE_REAL_DATA_QA'; catalog_digest = [string]$catalog.catalog_digest; assets = @($runtime.assets) })
         [void](Invoke-PiwigoCompose @('cp', ('.codex-work/private-real-qa/runtime/immich/' + $run + '/bindings.json'), ('piwigo:' + $bindingContainer)))
-        [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown 1000:1000 ' + $bindingContainer + ' && chmod 0600 ' + $bindingContainer)))
-        $bindResult = Invoke-PiwigoCompose @('exec', '-T', '--user', '1000:1000', 'piwigo', 'php', $catalogScript, 'bind')
+        [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $bindingContainer + ' && chmod 0600 ' + $bindingContainer)))
+        $bindResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'bind')
         Assert-Exact ($bindResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=bind count=([0-9]+)$') 'binding_failed'
 
         $script:stage = 'bridge_secret_stage'
@@ -276,12 +276,12 @@ try {
         $script:stage = 'bridge_enable'
         Write-OwnerOnlyJson $enableHost ([ordered]@{ version = 1; scope = 'PRIVATE_REAL_DATA_QA'; catalog_digest = [string]$catalog.catalog_digest; token = $bridgeToken })
         [void](Invoke-PiwigoCompose @('cp', ('.codex-work/private-real-qa/runtime/immich/' + $run + '/enable.json'), ('piwigo:' + $enableContainer)))
-        [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown 1000:1000 ' + $enableContainer + ' && chmod 0600 ' + $enableContainer)))
-        $enableResult = Invoke-PiwigoCompose @('exec', '-T', '--user', '1000:1000', 'piwigo', 'php', $catalogScript, 'enable')
+        [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $enableContainer + ' && chmod 0600 ' + $enableContainer)))
+        $enableResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'enable')
         Assert-Exact ($enableResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=enable count=([0-9]+)$') 'bridge_enable_failed'
 
         $script:stage = 'bridge_probe'
-        $probe = Invoke-PiwigoCompose @('exec', '-T', '--user', '1000:1000', 'piwigo', 'php', $catalogScript, 'probe')
+        $probe = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'probe')
         Assert-Exact ($probe -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=probe count=([0-9]+) people=([0-9]+)$') 'bridge_probe_failed'
 
         $script:stage = 'sanitized_report'
