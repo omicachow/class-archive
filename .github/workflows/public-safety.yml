@@ -19,12 +19,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' | grep -Ev '(^|/)\.env\.example$' || true)"
+          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' | grep -Ev '(^|/)\.env\.example$|^tests/fixtures/phase2-synthetic/fictional-cast-(classroom|night-cake|outdoor|playground|portraits)\.png$' || true)"
           if [[ -n "$forbidden" ]]; then
             printf '%s\n' "Tracked private artifacts are not allowed:" >&2
             printf '%s\n' "$forbidden" >&2
             exit 1
           fi
+
+      - name: Verify pinned fictional ML fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check <<'SHA256'
+          9bc950a58a09490ccdd118a3db56805ff2caa5fd953e3f83ecb79245345e99c3  tests/fixtures/phase2-synthetic/fictional-cast-classroom.png
+          ce2cd9cd2fc38caa8c3aa4cf17abe6394da420383106097d5f4bea701aca3ad0  tests/fixtures/phase2-synthetic/fictional-cast-night-cake.png
+          23b3aaf513f69c7b9ed9a208078d8e47989bac77fe458853f9c2895e03dcbd93  tests/fixtures/phase2-synthetic/fictional-cast-outdoor.png
+          d2d8d3478288affdc8d0fa89be92d063fc669e18d8152cf6952c497e1ef81987  tests/fixtures/phase2-synthetic/fictional-cast-playground.png
+          7d4f5570cd81033d609b13d0c8fee55199b47360aef9728aa8835735e6a8379f  tests/fixtures/phase2-synthetic/fictional-cast-portraits.png
+          SHA256
 
       - name: Reject high-risk credential material
         shell: bash
