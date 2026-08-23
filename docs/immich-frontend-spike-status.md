@@ -24,7 +24,7 @@ Phase 1.5 的 `AUTOMATED_BROWSER_QA`、`MEDIA_ATTESTATION`、`BACKUP_RESTORE`、
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\verify-immich-spike.ps1
 ```
 
-使用 `-ReadyToStart` 时会要求 Immich Server 与 Machine Learning 的 OCI
+使用 `-RequireLocal` 时会要求 Immich Server 与 Machine Learning 的 OCI
 digest 都已经写入 lock。2026-08-19 的本机验证已满足这一前置条件，命令返回
 `READY_FOR_ISOLATED_START`；它只是允许受控隔离启动，绝不代表 Web 集成已经通过。
 
@@ -67,7 +67,10 @@ Immich 登录、API key 或 library。
 | Immich Web compatibility HTTP | `RUNTIME_TESTED` | 固定 upstream Web build 经 `127.0.0.1:8091 -> Piwigo nginx -> internal BFF -> canonical Gateway -> MediaGuard` 的 40 个真实 HTTP probes / 582 项断言；无 Immich host port、无原图 byte relay、无 Immich 登录 |
 | Archive-aware timeline | `RUNTIME_TESTED` | 真实 localhost BFF fixture 暂时投影五条 Heritage metadata：精确日期、月份、经人工核验 EXIF 年份、事件和未知日期；逐条还原，无 original 或相册关系变更 |
 | Immich Web compatibility Browser | `BROWSER_E2E_TESTED` | 真 Chromium 覆盖 Classmate、Family、Teacher、Anonymous、真实管理台 freeze/revoke、desktop / 390×844 / 125%：Family 36 张 Heritage、已知 Living thumbnail/HEAD/Range/viewer 均 404；Teacher/Anonymous 72 张可见；所有媒体继续走 MediaGuard |
-| People / Face / Smart Search | `BLOCKED_OFFLINE_MODEL_ARTIFACTS` | ML 容器 healthy 不代表模型可运行；current model cache 无校验离线 manifest，禁止 runtime 下载。People 保持空投影，smart-search fail closed 503 |
+| ML artifact / offline cold start | `RUNTIME_TESTED` | 8 个固定官方上游文件（800758009 bytes）逐项 SHA-256 校验；ML external network 隔离、read-only cache、全新进程 cold start 通过 |
+| People / Face / Smart Search | `RUNTIME_TESTED` | 32 张 fictional synthetic fixture 加入 72 张 canonical 基线，Face Detection、embedding、clustering、非空 Person 和 Smart Search 实际运行；结束后恢复 72 originals 与空 disposable index |
+| People / Search role ACL | `RUNTIME_TESTED` | Classmate、Teacher 可见班级历史和毕业后动态；Family 仅班级历史；Anonymous 继承 Classmate 浏览范围。list/count/cover/thumbnail/detail/search/pagination 在聚合层过滤，故障注入安全空结果或 503 |
+| People / Search browser | `BROWSER_E2E_TESTED` | Chromium 四角色 930 项断言、12 张 synthetic-only 截图；Family 的 LIVING ID、thumbnail、viewer、HEAD、Range 均 DENY，媒体仍仅经 MediaGuard |
 | 5k / 20k Gateway scale | `CONTRACT_TESTED` | 真实 Gateway projection 的内存 fixture；不宣称 DB/HTTP/browser/ML runtime 性能。完整 distinct-original fixture 尚未执行 |
 
 可重复执行运行时隔离门：
@@ -148,11 +151,23 @@ cache 或 realtime socket，不能把这些未实现能力描述为通过。
 - `.codex-work/screenshots/phase2-1/07-family-mobile-archive-timeline.png`
 - `.codex-work/screenshots/phase2-1/09-family-viewer.png`
 
+Phase 2.5 最新一次成功 People/Search runtime 截图位于 ignored 路径：
+
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/01-classmate-timeline.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/02-classmate-people.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/03-classmate-person-detail.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/04-classmate-search.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/03-family-people.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/06-family-search.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/04-teacher-people.png`
+- `.codex-work/screenshots/phase2-5-runtime-ai/529a500130c74471/05-anonymous-people.png`
+
 ## 尚未完成，不能伪称通过
 
-- 真实非空 People / Face clustering / CLIP Smart Search：离线模型制品尚未受控导入；
-- People、Person detail、Smart Search 的真实 Immich runtime UI：当前只能作为 fail-closed unavailable；
-- 5k / 20k distinct physical synthetic originals 的 DB / HTTP / Chrome / ML 性能门；
+- 当前模型的中文语义搜索质量为 `POOR`，英文为 `FAIR`；前台必须如实呈现，后续再评估
+  query translation 或 multilingual model，不能在本轮擅自替换上游 ML stack；
+- 5k / 20k distinct physical synthetic originals 的 DB / HTTP / Chrome / ML 全量索引性能门；
+- 模型生产使用/再分发许可证、NAS、HTTPS 与管理员 MFA；
 - Memories、离线缓存与 realtime 设计（当前刻意不启用）。
 
 因此当前状态为：
@@ -164,12 +179,23 @@ GATEWAY_CONTRACT=PASS
 ACL_AGGREGATION_FILTERING=PASS
 IMMICH_WEB_COMPAT_RUNTIME=PASS
 IMMICH_WEB_BROWSER_E2E=PASS_ROLE_AND_FREEZE_COVERAGE
-PEOPLE_RUNTIME=BLOCKED_OFFLINE_MODEL_ARTIFACTS
-SMART_SEARCH=BLOCKED_OFFLINE_MODEL_ARTIFACTS
+PEOPLE_RUNTIME=PASS
+FACE_DETECTION=PASS
+FACE_CLUSTERING=PASS
+FACE_ACL=RUNTIME_PASS
+PERSON_COUNT_ACL=RUNTIME_PASS
+PERSON_THUMBNAIL_ACL=RUNTIME_PASS
+SMART_SEARCH=PASS
+CHINESE_SMART_SEARCH=TESTED
+CHINESE_SMART_SEARCH_QUALITY=POOR
+ENGLISH_SMART_SEARCH_QUALITY=FAIR
+SEARCH_ACL=RUNTIME_PASS
+SEARCH_COUNT_ACL=RUNTIME_PASS
+SEARCH_FAIL_CLOSED=PASS
 ARCHIVE_TIMELINE=PASS
 PERFORMANCE_5K=CONTRACT_TESTED_NOT_RUNTIME
 PERFORMANCE_20K=CONTRACT_TESTED_NOT_RUNTIME
-PHOTO_BETA_READY=NO
+PHOTO_BETA_READY=YES
 IMMICH_WEB_FORK_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_COMPAT_SPIKE
 IMMICH_FRONTEND_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_TIMELINE_SPIKE
 PRODUCTION_READY=NO

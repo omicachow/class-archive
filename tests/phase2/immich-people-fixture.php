@@ -87,11 +87,19 @@ function ciPeopleAssertPrivate(string $path): void
 {
     clearstatcache(true, $path);
     $stat = @lstat($path);
+    $mode = is_array($stat) ? ((int) ($stat['mode'] ?? 0) & 0777) : 0;
+    $groupModeIsSafe = $mode === 0660
+        && function_exists('posix_getegid')
+        && (int) ($stat['gid'] ?? -1) === posix_getegid();
     if (
         !is_array($stat)
         || is_link($path)
         || (($stat['mode'] ?? 0) & 0170000) !== 0100000
-        || (($stat['mode'] ?? 0) & 0777) !== 0600
+        // The production Piwigo lifecycle hook normalizes its private state
+        // tree to 0660 for the service account and its sole service group.
+        // Accept that exact documented policy alongside 0600, never a world
+        // readable mode or an arbitrary shared group.
+        || !($mode === 0600 || $groupModeIsSafe)
         || (int) ($stat['nlink'] ?? 0) !== 1
         || (int) ($stat['uid'] ?? -1) !== posix_geteuid()
         || (int) ($stat['size'] ?? 0) < 2
@@ -152,18 +160,20 @@ function ciPeopleReadState(string $path, string $run): array
     }
     if (
         !is_array($state)
-        || !ciPeopleExactKeys($state, ['albums', 'baseline', 'config', 'images', 'run', 'stage', 'version'])
+        || !ciPeopleExactKeys($state, ['albums', 'baseline', 'baseline_bindings', 'catalog', 'config', 'images', 'run', 'stage', 'version'])
         || $state['version'] !== 1
         || $state['run'] !== $run
         || !in_array($state['stage'], ['PREPARING', 'PREPARED', 'BOUND'], true)
         || !is_array($state['albums'])
+        || !is_array($state['baseline_bindings'])
+        || !is_array($state['catalog'])
         || !is_array($state['images'])
         || !is_array($state['baseline'])
         || !is_array($state['config'])
     ) {
         ciPeopleFail('state_shape_invalid');
     }
-    foreach (['image_count', 'original_count', 'person_count'] as $key) {
+    foreach (['image_count', 'original_count', 'person_count', 'photo_mapping_count', 'immich_binding_count'] as $key) {
         if (!is_int($state['baseline'][$key] ?? null) || $state['baseline'][$key] < 0) {
             ciPeopleFail('state_baseline_invalid');
         }
@@ -171,8 +181,32 @@ function ciPeopleReadState(string $path, string $run): array
     if (!ciPeopleExactKeys($state['config'], ['present', 'value']) || !is_bool($state['config']['present']) || ($state['config']['present'] && !is_string($state['config']['value']))) {
         ciPeopleFail('state_config_invalid');
     }
-    if (count($state['albums']) > 2 || count($state['images']) > 40) {
+    if (count($state['albums']) > 2 || count($state['images']) > 40 || count($state['catalog']) > 120 || count($state['baseline_bindings']) > 80) {
         ciPeopleFail('state_size_invalid');
+    }
+    foreach ($state['baseline_bindings'] as $binding) {
+        if (!is_array($binding) || !ciPeopleExactKeys($binding, ['class_photo_id', 'immich_asset_id']) || !is_string($binding['class_photo_id']) || $binding['immich_asset_id'] !== null) {
+            ciPeopleFail('state_baseline_binding_invalid');
+        }
+        try {
+            ClassIdentity\ClassArchivePhoto::idToBinary($binding['class_photo_id']);
+        } catch (Throwable) {
+            ciPeopleFail('state_baseline_binding_invalid');
+        }
+    }
+    foreach ($state['catalog'] as $photo) {
+        if (!is_array($photo) || !ciPeopleExactKeys($photo, ['class_photo_id', 'era', 'fixture', 'immich_asset_id', 'media_reference', 'piwigo_image_id']) || !is_string($photo['class_photo_id']) || !is_string($photo['media_reference']) || !is_bool($photo['fixture']) || !is_int($photo['piwigo_image_id']) || $photo['piwigo_image_id'] <= 0 || !in_array($photo['era'], ['HERITAGE', 'LIVING'], true) || ($photo['immich_asset_id'] !== null && !is_string($photo['immich_asset_id']))) {
+            ciPeopleFail('state_catalog_invalid');
+        }
+        try {
+            ClassIdentity\ClassArchivePhoto::idToBinary($photo['class_photo_id']);
+            ClassIdentity\ClassArchivePhoto::normalizeMediaReference($photo['media_reference']);
+            if ($photo['immich_asset_id'] !== null && ClassIdentity\ClassArchivePhoto::normalizeImmichAssetId($photo['immich_asset_id']) === null) {
+                ciPeopleFail('state_catalog_invalid');
+            }
+        } catch (Throwable) {
+            ciPeopleFail('state_catalog_invalid');
+        }
     }
     return $state;
 }
@@ -226,7 +260,10 @@ function ciPeopleAlbum(int $parentId, string $name, string $permalink): int
     if ($row !== []) {
         ciPeopleFail('fixture_album_collision');
     }
-    $created = create_virtual_category($name, $parentId, ['status' => 'private', 'visible' => false, 'commentable' => false, 'inherit' => true]);
+    // `private` is the authorization boundary. Piwigo's separate
+    // `visible=false` flag is a hard lock which would make MediaGuard deny
+    // even a role with inherited private-category access.
+    $created = create_virtual_category($name, $parentId, ['status' => 'private', 'visible' => true, 'commentable' => false, 'inherit' => true]);
     if (!is_array($created) || !ctype_digit((string) ($created['id'] ?? null))) {
         ciPeopleFail('fixture_album_create_failed');
     }
@@ -378,7 +415,11 @@ function ciPeopleWriteBridgeSecret(string $token): void
     }
     try {
         $raw = json_encode(['version' => 1, 'token' => $token], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
-        if (!chmod($path, 0600) || fwrite($handle, $raw) !== strlen($raw) || !fflush($handle)) {
+        // Match the durable Piwigo private-file lifecycle: service-owned
+        // 0660 plus the inherited nginx ACL, never world-readable. The
+        // production adapter validates the exact owner/group/parent before
+        // accepting this form and still fails closed on any mismatch.
+        if (!chmod($path, 0660) || fwrite($handle, $raw) !== strlen($raw) || !fflush($handle)) {
             ciPeopleFail('bridge_secret_write_failed');
         }
     } finally {
@@ -402,7 +443,25 @@ function ciPeoplePrepare(string $run): never
     $imageCount = (int) query2array('SELECT COUNT(*) AS `count` FROM `' . $prefixeTable . 'images`')[0]['count'];
     $originalCount = ciPeopleOriginalCount();
     $personCount = (int) $repository->fetchOne('SELECT COUNT(*) AS `count` FROM `' . $repository->table('person') . '`')['count'];
-    if ($imageCount !== 72 || $originalCount !== 72 || $personCount !== 0) {
+    $baselineRows = $repository->fetchAll(
+        'SELECT `class_photo_id`,`piwigo_image_id`,`immich_asset_id`,`state` FROM `' . $repository->table('photo') . '` ORDER BY `piwigo_image_id` ASC',
+    );
+    $baselineBindings = [];
+    foreach ($baselineRows as $row) {
+        $binaryId = $row['class_photo_id'] ?? null;
+        $piwigoImageId = (int) ($row['piwigo_image_id'] ?? 0);
+        if (!is_string($binaryId) || $piwigoImageId <= 0 || ($row['state'] ?? null) !== ClassIdentity\ClassArchivePhoto::STATE_ACTIVE || $row['immich_asset_id'] !== null) {
+            ciPeopleFail('deterministic_mapping_baseline_required');
+        }
+        $baselineBindings[] = [
+            'class_photo_id' => ClassIdentity\ClassArchivePhoto::binaryToId($binaryId),
+            // The deterministic baseline intentionally has no Immich index.
+            // Keeping this explicit makes cleanup restore the precise state
+            // rather than merely deleting the fixture images.
+            'immich_asset_id' => null,
+        ];
+    }
+    if ($imageCount !== 72 || $originalCount !== 72 || $personCount !== 0 || count($baselineRows) !== 72 || count($baselineBindings) !== 72) {
         ciPeopleFail('deterministic_baseline_required');
     }
     $heritage = ciPeopleRootId($repository, 'class-archive-heritage');
@@ -412,8 +471,16 @@ function ciPeoplePrepare(string $run): never
         'run' => $run,
         'stage' => 'PREPARING',
         'config' => $config,
-        'baseline' => ['image_count' => $imageCount, 'original_count' => $originalCount, 'person_count' => $personCount],
+        'baseline' => [
+            'image_count' => $imageCount,
+            'original_count' => $originalCount,
+            'person_count' => $personCount,
+            'photo_mapping_count' => count($baselineRows),
+            'immich_binding_count' => 0,
+        ],
+        'baseline_bindings' => $baselineBindings,
         'albums' => [],
+        'catalog' => [],
         'images' => [],
     ];
     ciPeopleWriteState($statePath, $state);
@@ -481,14 +548,78 @@ function ciPeoplePrepare(string $run): never
                 'class_photo_id' => (string) $canonical['class_photo_id'],
                 'era' => $item['era'],
                 'media_reference' => $reference,
+                'fixture_kind' => $item['kind'],
+                'fixture_subject' => $item['subject'],
                 'immich_asset_id' => null,
             ];
             ciPeopleReplaceState($statePath, $state);
         }
+        // Force the canonical projection once after every imported fixture has
+        // its archive association. This creates/validates every Class Archive
+        // UUID for the whole 72+32 library, not merely the faces under test.
+        // The resulting temporary all-library Immich binding is what makes a
+        // runtime People/Search request prove the actual Gateway path instead
+        // of accidentally testing a 32-photo partial index.
+        $candidates = ClassIdentity\Gateway\PiwigoGatewayAdapter::fromPiwigo()->photoCandidates();
+        if (count($candidates) !== $imageCount + count($state['images'])) {
+            ciPeopleFail('canonical_catalog_count_invalid');
+        }
+        $fixtureIds = [];
+        foreach ($state['images'] as $image) {
+            $fixtureIds[(string) $image['class_photo_id']] = true;
+        }
+        $catalogRows = $repository->fetchAll(
+            'SELECT `class_photo_id`,`piwigo_image_id`,`media_reference`,`immich_asset_id`,`state` FROM `' . $repository->table('photo') . '` WHERE `state` = ? AND `piwigo_image_id` IS NOT NULL',
+            [ClassIdentity\ClassArchivePhoto::STATE_ACTIVE],
+        );
+        $catalogById = [];
+        foreach ($catalogRows as $row) {
+            $binaryId = $row['class_photo_id'] ?? null;
+            $reference = $row['media_reference'] ?? null;
+            if (!is_string($binaryId) || !is_string($reference) || $row['immich_asset_id'] !== null) {
+                ciPeopleFail('canonical_catalog_mapping_invalid');
+            }
+            $classPhotoId = ClassIdentity\ClassArchivePhoto::binaryToId($binaryId);
+            if (isset($catalogById[$classPhotoId])) {
+                ciPeopleFail('canonical_catalog_mapping_invalid');
+            }
+            $catalogById[$classPhotoId] = [
+                'piwigo_image_id' => (int) ($row['piwigo_image_id'] ?? 0),
+                'media_reference' => ClassIdentity\ClassArchivePhoto::normalizeMediaReference($reference),
+            ];
+        }
+        foreach ($candidates as $candidate) {
+            $classPhotoId = $candidate->id();
+            $catalog = $catalogById[$classPhotoId] ?? null;
+            if (!is_array($catalog) || $candidate->era() === null || $candidate->piwigoImageIdForDelivery() !== $catalog['piwigo_image_id']) {
+                ciPeopleFail('canonical_catalog_projection_invalid');
+            }
+            $state['catalog'][] = [
+                'class_photo_id' => $classPhotoId,
+                'piwigo_image_id' => $catalog['piwigo_image_id'],
+                'era' => $candidate->era(),
+                'media_reference' => $catalog['media_reference'],
+                'fixture' => isset($fixtureIds[$classPhotoId]),
+                'immich_asset_id' => null,
+            ];
+        }
+        if (count($state['catalog']) !== $imageCount + count($state['images'])) {
+            ciPeopleFail('canonical_catalog_projection_invalid');
+        }
         $state['stage'] = 'PREPARED';
         ciPeopleReplaceState($statePath, $state);
         invalidate_user_cache();
-        ciPeopleJson(['ok' => true, 'run' => $run, 'photos' => array_map(static fn (array $photo): array => ['class_photo_id' => $photo['class_photo_id'], 'era' => $photo['era'], 'media_reference' => $photo['media_reference']], $state['images'])]);
+        ciPeopleJson(['ok' => true, 'run' => $run, 'photos' => array_map(static fn (array $photo): array => [
+            'class_photo_id' => $photo['class_photo_id'],
+            'era' => $photo['era'],
+            'media_reference' => $photo['media_reference'],
+            'fixture_kind' => $photo['fixture_kind'],
+            'fixture_subject' => $photo['fixture_subject'],
+        ], $state['images']), 'catalog' => array_map(static fn (array $photo): array => [
+            'class_photo_id' => $photo['class_photo_id'],
+            'era' => $photo['era'],
+            'media_reference' => $photo['media_reference'],
+        ], $state['catalog'])]);
     } finally {
         foreach ($temporary as $path) {
             if (is_file($path) && !is_link($path)) {
@@ -506,8 +637,12 @@ function ciPeopleBind(string $run): never
         ciPeopleFail('bind_state_invalid');
     }
     $input = ciPeopleReadInput();
-    if (!ciPeopleExactKeys($input, ['assets', 'version']) || $input['version'] !== 1 || !is_array($input['assets']) || count($input['assets']) !== count($state['images'])) {
+    if (!ciPeopleExactKeys($input, ['assets', 'version']) || $input['version'] !== 1 || !is_array($input['assets']) || count($input['assets']) !== count($state['catalog'])) {
         ciPeopleFail('bind_input_invalid');
+    }
+    $expected = [];
+    foreach ($state['catalog'] as $photo) {
+        $expected[(string) $photo['class_photo_id']] = true;
     }
     $bindings = [];
     foreach ($input['assets'] as $asset) {
@@ -521,14 +656,17 @@ function ciPeopleBind(string $run): never
         } catch (Throwable) {
             ciPeopleFail('bind_input_invalid');
         }
-        if ($immich === null || isset($bindings[$asset['class_photo_id']])) {
+        if ($immich === null || !isset($expected[$asset['class_photo_id']]) || isset($bindings[$asset['class_photo_id']])) {
             ciPeopleFail('bind_input_invalid');
         }
         $bindings[$asset['class_photo_id']] = $immich;
     }
+    if (count($bindings) !== count($expected)) {
+        ciPeopleFail('bind_input_invalid');
+    }
     $repository = ClassIdentity\Repository::fromPiwigo();
     $repository->transaction(function (ClassIdentity\Repository $repository) use (&$state, $bindings): void {
-        foreach ($state['images'] as &$photo) {
+        foreach ($state['catalog'] as &$photo) {
             $id = ClassIdentity\ClassArchivePhoto::idToBinary((string) $photo['class_photo_id']);
             $asset = $bindings[$photo['class_photo_id']] ?? null;
             if (!is_string($asset)) {
@@ -541,6 +679,14 @@ function ciPeopleBind(string $run): never
             );
             if ($changed !== 1) {
                 throw new RuntimeException('binding_race');
+            }
+            $photo['immich_asset_id'] = $asset;
+        }
+        unset($photo);
+        foreach ($state['images'] as &$photo) {
+            $asset = $bindings[$photo['class_photo_id']] ?? null;
+            if (!is_string($asset)) {
+                throw new RuntimeException('binding_missing');
             }
             $photo['immich_asset_id'] = $asset;
         }
@@ -566,8 +712,18 @@ function ciPeopleDescribe(string $run): never
                 'class_photo_id' => (string) $photo['class_photo_id'],
                 'era' => (string) $photo['era'],
                 'media_reference' => (string) $photo['media_reference'],
+                'fixture_kind' => (string) ($photo['fixture_kind'] ?? ''),
+                'fixture_subject' => (string) ($photo['fixture_subject'] ?? ''),
             ],
             $state['images'],
+        ),
+        'catalog' => array_map(
+            static fn (array $photo): array => [
+                'class_photo_id' => (string) $photo['class_photo_id'],
+                'era' => (string) $photo['era'],
+                'media_reference' => (string) $photo['media_reference'],
+            ],
+            $state['catalog'],
         ),
     ]);
 }
@@ -601,6 +757,253 @@ function ciPeopleEnable(string $run): never
     ciPeopleJson(['ok' => true, 'run' => $run]);
 }
 
+function ciPeopleProbe(string $run): never
+{
+    $state = ciPeopleReadState(ciPeopleStatePath($run), $run);
+    if ($state['stage'] !== 'BOUND') {
+        ciPeopleFail('probe_state_invalid');
+    }
+    $ids = array_map(static fn (array $photo): string => (string) $photo['class_photo_id'], $state['catalog']);
+    try {
+        $adapter = ClassIdentity\Gateway\BridgeImmichAdapter::configuredOrNull();
+        if ($adapter->availability() !== 'AVAILABLE') {
+            ciPeopleJson(['ok' => false, 'code' => 'adapter_unavailable']);
+        }
+        $people = $adapter->peopleForVisiblePhotos($ids);
+        ciPeopleJson(['ok' => true, 'people' => count($people), 'run' => $run]);
+    } catch (RuntimeException $error) {
+        $code = $error->getMessage();
+        $allowed = [
+            'class_archive_immich_bridge_binding_invalid' => 'binding_invalid',
+            'class_archive_immich_bridge_enablement_invalid' => 'enablement_invalid',
+            'class_archive_immich_bridge_response_invalid' => 'response_invalid',
+            'class_archive_immich_bridge_secret_unavailable' => 'secret_unavailable',
+            'class_archive_immich_bridge_transport_unavailable' => 'transport_unavailable',
+            'class_archive_immich_bridge_unavailable' => 'upstream_unavailable',
+        ];
+        ciPeopleJson(['ok' => false, 'code' => $allowed[$code] ?? 'adapter_failed']);
+    } catch (Throwable) {
+        ciPeopleJson(['ok' => false, 'code' => 'adapter_failed']);
+    }
+}
+
+function ciPeopleRequestProbe(string $run): never
+{
+    // This action intentionally runs as the nginx request account instead of
+    // the durable Piwigo owner. It proves the HTTP-equivalent service account
+    // can read a documented inherited-ACL bridge secret without exposing the
+    // secret or any upstream identifier.
+    $input = ciPeopleReadInput();
+    if (!ciPeopleExactKeys($input, ['class_photo_ids', 'version']) || $input['version'] !== 1 || !is_array($input['class_photo_ids']) || count($input['class_photo_ids']) < 1 || count($input['class_photo_ids']) > 500) {
+        ciPeopleFail('request_probe_input_invalid');
+    }
+    $ids = [];
+    foreach ($input['class_photo_ids'] as $id) {
+        if (!is_string($id) || isset($ids[$id])) {
+            ciPeopleFail('request_probe_input_invalid');
+        }
+        try {
+            ClassIdentity\ClassArchivePhoto::idToBinary($id);
+        } catch (Throwable) {
+            ciPeopleFail('request_probe_input_invalid');
+        }
+        $ids[$id] = true;
+    }
+    try {
+        $adapter = ClassIdentity\Gateway\BridgeImmichAdapter::configuredOrNull();
+        if ($adapter->availability() !== 'AVAILABLE') {
+            ciPeopleJson(['ok' => false, 'code' => 'adapter_unavailable']);
+        }
+        $people = $adapter->peopleForVisiblePhotos(array_keys($ids));
+        ciPeopleJson(['ok' => true, 'people' => count($people), 'run' => $run]);
+    } catch (RuntimeException $error) {
+        $code = $error->getMessage();
+        $allowed = [
+            'class_archive_immich_bridge_binding_invalid' => 'binding_invalid',
+            'class_archive_immich_bridge_enablement_invalid' => 'enablement_invalid',
+            'class_archive_immich_bridge_response_invalid' => 'response_invalid',
+            'class_archive_immich_bridge_secret_unavailable' => 'secret_unavailable',
+            'class_archive_immich_bridge_transport_unavailable' => 'transport_unavailable',
+            'class_archive_immich_bridge_unavailable' => 'upstream_unavailable',
+        ];
+        ciPeopleJson(['ok' => false, 'code' => $allowed[$code] ?? 'adapter_failed']);
+    } catch (Throwable) {
+        ciPeopleJson(['ok' => false, 'code' => 'adapter_failed']);
+    }
+}
+
+function ciPeopleMediaProbe(string $run): never
+{
+    // The compatibility BFF must never make a People cover a weaker media
+    // path than the rest of Class Archive.  Exercise the real MediaGuard
+    // decision with the exact imported images before a browser is allowed to
+    // request any thumbnail.  This is deliberately CLI-only and returns only
+    // aggregate synthetic assertions -- never a Piwigo id, path or decision
+    // reason that could become a public probing oracle.
+    $state = ciPeopleReadState(ciPeopleStatePath($run), $run);
+    // The policy is independent of the optional Immich binding. Allow the
+    // preflight at PREPARED so an ACL regression can be diagnosed before the
+    // expensive isolated ML import starts; the full runtime runner repeats it
+    // after BOUND to cover the complete chain.
+    if (!in_array($state['stage'], ['PREPARED', 'BOUND'], true) || !class_exists('ClassArchiveMediaGuard', false)) {
+        ciPeopleFail('media_probe_runtime_unavailable');
+    }
+
+    $images = [];
+    foreach ($state['images'] as $image) {
+        if (!is_array($image) || !in_array($image['era'] ?? null, ['HERITAGE', 'LIVING'], true)) {
+            ciPeopleFail('media_probe_state_invalid');
+        }
+        $era = (string) $image['era'];
+        if (!isset($images[$era])) {
+            $images[$era] = (int) ($image['id'] ?? 0);
+        }
+    }
+    if (($images['HERITAGE'] ?? 0) <= 0 || ($images['LIVING'] ?? 0) <= 0) {
+        ciPeopleFail('media_probe_state_invalid');
+    }
+
+    $roles = [
+        'CLASSMATE' => 'fixture-classmate',
+        'TEACHER' => 'fixture-teacher',
+        'FAMILY' => 'fixture-family',
+        'ANONYMOUS' => 'fixture-anonymous',
+    ];
+    $previousUser = $GLOBALS['user'] ?? null;
+    $checks = 0;
+    $outcome = 'ok';
+    try {
+        foreach ($roles as $role => $username) {
+            $userId = (int) get_userid($username);
+            if ($userId <= 0) {
+                $outcome = 'principal_unavailable';
+                break;
+            }
+            $candidateUser = build_user($userId, false);
+            if (!is_array($candidateUser) || (int) ($candidateUser['id'] ?? 0) !== $userId) {
+                $outcome = 'principal_unavailable';
+                break;
+            }
+            $GLOBALS['user'] = $candidateUser;
+            foreach ($images as $era => $imageId) {
+                try {
+                    $resolved = ClassArchiveMediaGuard::resolveCanonicalDelivery($imageId, 'thumbnail');
+                    $decision = ClassArchiveMediaGuard::authorize($resolved['request'], $resolved['image']);
+                } catch (Throwable) {
+                    $outcome = 'resolution_failed';
+                    break 2;
+                }
+                $expected = !($role === 'FAMILY' && $era === 'LIVING');
+                if (!is_bool($decision->allowed ?? null) || $decision->allowed !== $expected) {
+                    // Role and era are non-secret fixture assertions. Keeping
+                    // this narrow label makes a failed policy preflight
+                    // diagnosable without printing an image id, path or the
+                    // MediaGuard reason.
+                    $reason = is_string($decision->reason ?? null) && preg_match('/\A[a-z_]{1,48}\z/D', $decision->reason) === 1
+                        ? $decision->reason
+                        : 'invalid_reason';
+                    $outcome = 'policy_' . strtolower($role) . '_' . strtolower($era) . '_' . $reason;
+                    break 2;
+                }
+                ++$checks;
+            }
+        }
+    } finally {
+        if ($previousUser === null) {
+            unset($GLOBALS['user']);
+        } else {
+            $GLOBALS['user'] = $previousUser;
+        }
+    }
+
+    ciPeopleJson(['ok' => $outcome === 'ok', 'code' => $outcome, 'checks' => $checks, 'run' => $run]);
+}
+
+/**
+ * Reversible fault injection against one disposable fixture image.  The
+ * state file already owns that row and cleanup deletes it even if the outer
+ * HTTP assertion aborts, so neither mode can mutate the canonical 72-image
+ * baseline.  No identifier is returned to the terminal.
+ */
+function ciPeopleFault(string $run, string $mode, bool $restore, string $requestedClassPhotoId): never
+{
+    global $prefixeTable;
+    $state = ciPeopleReadState(ciPeopleStatePath($run), $run);
+    if ($state['stage'] !== 'BOUND') {
+        ciPeopleFail('fault_state_invalid');
+    }
+    $photo = null;
+    try {
+        ClassIdentity\ClassArchivePhoto::idToBinary($requestedClassPhotoId);
+    } catch (Throwable) {
+        ciPeopleFail('fault_target_invalid');
+    }
+    foreach ($state['catalog'] as $candidate) {
+        if (($candidate['fixture'] ?? false) === true
+            && hash_equals((string) ($candidate['class_photo_id'] ?? ''), $requestedClassPhotoId)
+            && is_string($candidate['immich_asset_id'] ?? null)) {
+            $photo = $candidate;
+            break;
+        }
+    }
+    if (!is_array($photo)) {
+        ciPeopleFail('fault_target_unavailable');
+    }
+    $repository = ClassIdentity\Repository::fromPiwigo();
+    $imageId = (int) $photo['piwigo_image_id'];
+    $classPhotoId = ClassIdentity\ClassArchivePhoto::idToBinary((string) $photo['class_photo_id']);
+    $immichAssetId = ClassIdentity\ClassArchivePhoto::normalizeImmichAssetId((string) $photo['immich_asset_id']);
+    if ($imageId <= 0 || $immichAssetId === null) {
+        ciPeopleFail('fault_target_invalid');
+    }
+
+    if ($mode === 'mapping') {
+        $changed = $restore
+            ? $repository->execute(
+                'UPDATE `' . $repository->table('photo') . '` SET `immich_asset_id` = ?, `updated_at` = UTC_TIMESTAMP(6) WHERE `class_photo_id` = ? AND `immich_asset_id` IS NULL',
+                [$immichAssetId, $classPhotoId],
+            )
+            : $repository->execute(
+                'UPDATE `' . $repository->table('photo') . '` SET `immich_asset_id` = NULL, `updated_at` = UTC_TIMESTAMP(6) WHERE `class_photo_id` = ? AND `immich_asset_id` = ?',
+                [$classPhotoId, $immichAssetId],
+            );
+        if ($changed !== 1) {
+            ciPeopleFail('fault_mapping_transition_invalid');
+        }
+    } elseif ($mode === 'era') {
+        $oppositeIndex = $photo['era'] === 'HERITAGE' ? 1 : 0;
+        $categoryId = (int) ($state['albums'][$oppositeIndex]['id'] ?? 0);
+        if ($categoryId <= 0) {
+            ciPeopleFail('fault_era_target_invalid');
+        }
+        $changed = $restore
+            ? $repository->execute(
+                'DELETE FROM `' . $prefixeTable . 'image_category` WHERE `image_id` = ? AND `category_id` = ?',
+                [$imageId, $categoryId],
+            )
+            : $repository->execute(
+                'INSERT INTO `' . $prefixeTable . 'image_category` (`image_id`,`category_id`,`rank`) VALUES (?, ?, NULL)',
+                [$imageId, $categoryId],
+            );
+        if ($changed !== 1) {
+            ciPeopleFail('fault_era_transition_invalid');
+        }
+        invalidate_user_cache();
+    } else {
+        ciPeopleFail('fault_mode_invalid');
+    }
+    ciPeopleJson(['ok' => true, 'mode' => $mode, 'restored' => $restore, 'run' => $run]);
+}
+
+function ciPeopleFaultRequest(string $run, string $mode, bool $restore): never
+{
+    $input = ciPeopleReadInput();
+    if (!ciPeopleExactKeys($input, ['class_photo_id', 'version']) || $input['version'] !== 1 || !is_string($input['class_photo_id'])) {
+        ciPeopleFail('fault_input_invalid');
+    }
+    ciPeopleFault($run, $mode, $restore, $input['class_photo_id']);
+}
+
 function ciPeopleCleanup(string $run): never
 {
     $path = ciPeopleStatePath($run);
@@ -616,16 +1019,44 @@ function ciPeopleCleanup(string $run): never
         @unlink($secret) || ciPeopleFail('bridge_secret_cleanup_failed');
     }
     $ids = array_map(static fn (array $photo): int => (int) $photo['id'], $state['images']);
-    if ($ids !== []) {
-        $placeholders = implode(',', array_fill(0, count($ids), '?'));
-        $repository->transaction(function (ClassIdentity\Repository $repository) use ($ids, $placeholders): void {
+    $repository->transaction(function (ClassIdentity\Repository $repository) use (&$state, $ids): void {
+        // A BOUND run temporarily associates every canonical 72+32 photo
+        // with a disposable Immich asset. Restore the pre-run baseline before
+        // removing only the 32 imported records. This makes cleanup prove
+        // that gateway integration did not leave a hidden external index on
+        // otherwise canonical Piwigo-first data.
+        if ($state['stage'] === 'BOUND') {
+            $catalog = [];
+            foreach ($state['catalog'] as $photo) {
+                $catalog[(string) $photo['class_photo_id']] = $photo;
+            }
+            foreach ($state['baseline_bindings'] as $binding) {
+                $classPhotoId = (string) $binding['class_photo_id'];
+                $catalogPhoto = $catalog[$classPhotoId] ?? null;
+                if (!is_array($catalogPhoto) || !is_string($catalogPhoto['immich_asset_id'] ?? null)) {
+                    throw new RuntimeException('cleanup_binding_state_invalid');
+                }
+                $changed = $repository->execute(
+                    'UPDATE `' . $repository->table('photo') . '` SET `immich_asset_id` = ?, `updated_at` = UTC_TIMESTAMP(6) '
+                    . 'WHERE `class_photo_id` = ? AND `state` = ? AND `piwigo_image_id` = ?',
+                    [$binding['immich_asset_id'], ClassIdentity\ClassArchivePhoto::idToBinary($classPhotoId), ClassIdentity\ClassArchivePhoto::STATE_ACTIVE, (int) $catalogPhoto['piwigo_image_id']],
+                );
+                if ($changed !== 1) {
+                    throw new RuntimeException('cleanup_binding_restore_failed');
+                }
+            }
+        }
+        if ($ids !== []) {
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
             $repository->execute('DELETE FROM `' . $repository->table('archive_image') . '` WHERE `piwigo_image_id` IN (' . $placeholders . ')', $ids);
             $repository->execute('DELETE FROM `' . $repository->table('photo') . '` WHERE `piwigo_image_id` IN (' . $placeholders . ')', $ids);
-            // The fixture requires an empty mapping table before setup; any
-            // ClassArchivePerson row was therefore created solely from this
-            // disposable Immich database and is safe to remove now.
-            $repository->execute('DELETE FROM `' . $repository->table('person') . '`');
-        });
+        }
+        // The fixture requires no baseline ClassArchivePerson record. Any
+        // row here was derived solely from this disposable Immich database,
+        // not from the preserved canonical mapping rows, and is safe to drop.
+        $repository->execute('DELETE FROM `' . $repository->table('person') . '`');
+    });
+    if ($ids !== []) {
         delete_elements($ids, true);
     }
     foreach (array_reverse($state['albums']) as $album) {
@@ -645,7 +1076,12 @@ function ciPeopleCleanup(string $run): never
     $imageCount = (int) query2array('SELECT COUNT(*) AS `count` FROM `' . $prefixeTable . 'images`')[0]['count'];
     $originalCount = ciPeopleOriginalCount();
     $personCount = (int) $repository->fetchOne('SELECT COUNT(*) AS `count` FROM `' . $repository->table('person') . '`')['count'];
-    if ($imageCount !== $state['baseline']['image_count'] || $originalCount !== $state['baseline']['original_count'] || $personCount !== $state['baseline']['person_count']) {
+    $mappingRow = $repository->fetchOne(
+        'SELECT COUNT(*) AS `count`, COALESCE(SUM(CASE WHEN `immich_asset_id` IS NOT NULL THEN 1 ELSE 0 END), 0) AS `bound` FROM `' . $repository->table('photo') . '`',
+    );
+    $mappingCount = (int) ($mappingRow['count'] ?? -1);
+    $bindingCount = (int) ($mappingRow['bound'] ?? -1);
+    if ($imageCount !== $state['baseline']['image_count'] || $originalCount !== $state['baseline']['original_count'] || $personCount !== $state['baseline']['person_count'] || $mappingCount !== $state['baseline']['photo_mapping_count'] || $bindingCount !== $state['baseline']['immich_binding_count']) {
         ciPeopleFail('cleanup_baseline_mismatch');
     }
     invalidate_user_cache();
@@ -661,7 +1097,7 @@ ob_end_clean();
 require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
 require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
 $user = build_user(1, false);
-if (($user['status'] ?? null) !== 'webmaster' || !class_exists(ClassIdentity\ClassArchivePhotoMappingService::class) || !class_exists(ClassIdentity\ClassArchivePersonMappingService::class) || !ClassIdentity\Access::isEnforcementEnabled()) {
+if (($user['status'] ?? null) !== 'webmaster' || !class_exists(ClassIdentity\ClassArchivePhotoMappingService::class) || !class_exists(ClassIdentity\ClassArchivePersonMappingService::class) || !class_exists(ClassIdentity\Gateway\PiwigoGatewayAdapter::class) || !ClassIdentity\Access::isEnforcementEnabled()) {
     ciPeopleFail('active_runtime_required');
 }
 
@@ -671,9 +1107,21 @@ try {
         'describe' => ciPeopleDescribe($run),
         'bind' => ciPeopleBind($run),
         'enable' => ciPeopleEnable($run),
+        'probe' => ciPeopleProbe($run),
+        'request-probe' => ciPeopleRequestProbe($run),
+        'media-probe' => ciPeopleMediaProbe($run),
+        'fault-mapping-start' => ciPeopleFaultRequest($run, 'mapping', false),
+        'fault-mapping-stop' => ciPeopleFaultRequest($run, 'mapping', true),
+        'fault-era-start' => ciPeopleFaultRequest($run, 'era', false),
+        'fault-era-stop' => ciPeopleFaultRequest($run, 'era', true),
         'cleanup' => ciPeopleCleanup($run),
         default => ciPeopleFail('action_invalid'),
     };
-} catch (Throwable) {
+} catch (Throwable $error) {
+    // This CLI fixture is explicitly gated and synthetic-only.  Keep failure
+    // diagnostics actionable without printing arbitrary exception messages,
+    // which could contain a path, a credential-bearing DSN, or input data.
+    $class = preg_replace('/[^A-Za-z0-9_\\\\]/', '_', get_class($error));
+    fwrite(STDERR, 'IMMICH_PEOPLE_FIXTURE_DIAGNOSTIC class=' . $class . ' line=' . $error->getLine() . "\n");
     ciPeopleFail('unexpected');
 }

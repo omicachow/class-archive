@@ -221,17 +221,23 @@ function Wait-ImmichReady {
 }
 
 function Reset-ImmichSpike {
-    # The compose model owns only these three named, non-external spike volumes.
-    # Prove their identities before destructive cleanup; never target Piwigo volumes.
-    # The ML profile is intentionally not started for this gate, so its cache
-    # volume may not exist. The upload and database volumes must exist because
-    # they contain every possible state created by this test.
+    # Reset the disposable Immich index state without ever deleting the
+    # separately verified ML artifact cache.  A compose-wide `down --volumes`
+    # would also remove that cache, turn a regression test into an online model
+    # fetch, and invalidate the Offline ML proof.
     $script:stage = 'cleanup_verify_owned_volumes'
     foreach ($volume in @('class_archive_immich_spike_upload', 'class_archive_immich_spike_db')) {
         [void](Invoke-UbuntuDocker @('volume', 'inspect', $volume))
     }
     $script:stage = 'cleanup_compose_down'
-    [void](Invoke-SpikeCompose @('--profile', 'immich-spike', 'down', '--volumes', '--remove-orphans'))
+    # This file is a separate compose project from Piwigo even though both
+    # attach to the controlled gateway network. Never use --remove-orphans in
+    # a spike reset, because it can manage containers outside this test scope.
+    [void](Invoke-SpikeCompose @('--profile', 'immich-spike', 'down'))
+    $script:stage = 'cleanup_remove_owned_volumes'
+    foreach ($volume in @('class_archive_immich_spike_upload', 'class_archive_immich_spike_db')) {
+        [void](Invoke-UbuntuDocker @('volume', 'rm', $volume))
+    }
     $script:stage = 'cleanup_verify_piwigo_volumes'
     foreach ($piwigoVolume in @('class_archive_piwigo_uploads', 'class_archive_piwigo_galleries')) {
         [void](Invoke-UbuntuDocker @('volume', 'inspect', $piwigoVolume))

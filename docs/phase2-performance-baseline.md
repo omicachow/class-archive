@@ -46,3 +46,30 @@ scroll、Immich ML index time、People clustering latency，或 20k physical ori
 PERFORMANCE_5K=CONTRACT_TESTED_NOT_RUNTIME
 PERFORMANCE_20K=CONTRACT_TESTED_NOT_RUNTIME
 ```
+
+## Phase 2.5 小规模真实 ML Runtime（2026-08-23）
+
+这是一轮 CPU、offline cold-cache-ready 的真实管线样本，不是 5k/20k 全量索引声明。临时
+library 为 104 张（72 canonical + 32 fictional fixture），产生 12 张检测人脸、12 个 face
+embedding、3 个 Person cluster 与 104 个 smart-search embedding：
+
+| 操作 | 耗时 |
+|---|---:|
+| Face Detection | 22,182 ms |
+| Face Recognition / clustering | 1,020 ms |
+| Smart Search indexing | 8,069 ms |
+| People query | 64 ms |
+| 8 个中英文搜索 query | 831 ms |
+| 管线总计 | 34,544 ms |
+
+本轮没有取得可信的 5k/20k full-index duration、CPU peak 或 transient vector-index size，不能
+从上述小样本线性外推。模型文件总量为 800,758,009 bytes；测试结束后 disposable DB/index
+归零，因此不存在可作为持久 index 大小的残留目录。
+
+```text
+ML_ACCELERATION=CPU
+PERFORMANCE_5K_FULL_INDEX=BLOCKED_RESOURCE_BUDGET
+PERFORMANCE_5K_QUERY=CONTRACT_TESTED
+PERFORMANCE_20K_FULL_INDEX=BLOCKED_RESOURCE_BUDGET
+PERFORMANCE_20K_QUERY=CONTRACT_TESTED
+```

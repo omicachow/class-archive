@@ -8,7 +8,7 @@
 | release tag | `v3.1.0` |
 | source commit | `8aa95c67470a02a8ddedf03c2e52963af33065ff` |
 | 许可证 | GNU AGPL-3.0-only |
-| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server、ephemeral technical-user/external-library lifecycle 和 Gateway→Immich metadata bridge runtime 已通过 |
+| 本地状态 | 官方 source archive、Server 与 ML 镜像已验证；isolated Server、ephemeral technical-user/external-library、Gateway bridge、固定离线模型闭包、cold start、非空 Face/Person/Search runtime 和角色 ACL 已通过 |
 
 精确镜像引用和摘要记录于
 [`infra/immich-spike/immich-upstream.lock.json`](../infra/immich-spike/immich-upstream.lock.json)。
@@ -45,6 +45,12 @@ dependency images 已取得；真实 Server runtime 已另由两个 runtime gate
 Class Archive 在 policy filtering 后经固定 internal-only adapter 查询真实 Immich，且同一
 memory 对 Classmate 聚合为 2 张、对 Family 聚合为 1 张；它不证明 Web integration
 或 Photo UI 已通过。
+
+Phase 2.5 又以固定 manifest 导入 8 个官方上游模型文件，在 ML 容器 external network
+隔离、read-only cache、全新进程的条件下完成 cold start。32 张 fictional synthetic fixture
+进入 104-asset 临时库，实际跑过 Face Detection、embedding、clustering、People 与 Smart
+Search；四角色 People/Search 聚合、缩略图和 Chromium 路径也由 Gateway/MediaGuard
+验证。fixture、技术用户与 disposable index 在每轮后精确清除。
 可重复运行 [`verify-supply-chain.ps1`](../infra/immich-spike/verify-supply-chain.ps1)
 以验证本机 archive SHA-256、source 版本、compose digest pin 和本地 Docker
 repo digest；该脚本不下载或启动容器。
@@ -113,6 +119,24 @@ presentation compatibility only
 6. 重新评估 AGPL 对应源码和法律通知；
 7. 只有全部通过才更新 lock。
 
+### ML 制品随上游升级
+
+Immich 的 Docker image / source upgrade 与模型制品 upgrade 是两条独立但必须汇合的
+供应链。每次修改 Immich tag、commit、ML image digest、默认 model、模型加载路径或
+预加载配置时，必须：
+
+1. 从固定 candidate source 检查实际 `snapshot_download` / local cache 加载闭包；
+2. 新建或更新 manifest，固定官方来源 revision、文件大小、SHA-256 与缓存相对路径；
+3. 逐项重新进行模型许可证与再分发审计，不能沿用 Immich 的 AGPL 结论；
+4. 受控下载后先运行 host verify，再以无网络 importer 导入新的 cache；
+5. 冷重启 ML 容器并在 internal-only network 下验证全部模型加载；
+6. 重跑 fictional People / Smart Search、Family aggregation、MediaGuard 和浏览器套件；
+7. 重新写入 digest-bound ML attestation。manifest、compose、完整 ClassIdentity PHP source、
+   BFF/nginx 配置、fixture 或纳入摘要的测试变化时，旧记录会在系统状态自动显示“需要重新验证”。
+
+模型二进制不进 Git、Docker image、GitHub Release 或 Class Archive 业务备份。详见
+[`ml-artifact-policy.md`](ml-artifact-policy.md)。
+
 ## 当前结论
 
 `IMMICH_WEB_FORK_FEASIBLE=YES_FOR_ISOLATED_READ_ONLY_COMPAT_SPIKE`。官方 source
@@ -121,5 +145,8 @@ external-library lifecycle 以及 Gateway→Immich metadata bridge 都已跑过�
 验证；Class Archive 自有同源 Gateway 已对 Piwigo + ClassIdentity 跑过真实 ACL/聚合
 HTTP 回归。官方未修改 Web build 现在由窄 BFF projection 在真实 Chromium 中显示
 Classmate synthetic Timeline 与 Viewer；它没有 Immich 登录、写 API 或直连媒体。
-People、Smart Search 的非空 Immich index 与 ML、以及生产部署仍未验证。Family 的
-compatibility 浏览器验收已单独通过；当前不暴露 Immich 端口给浏览器，也不接触真实照片或 NAS。
+People、Face clustering 与 Smart Search 已在非空 Immich index 上真实运行；Family 的
+People/Search count 与 thumbnail 经过 runtime ACL 过滤，Classmate、Family、Teacher、
+Anonymous 的 Chromium People/Search 流程均使用 synthetic-only 数据。当前上游英文导向
+模型的中文搜索质量为 `POOR`，英文为 `FAIR`，不能用中文 UI 掩盖质量限制。生产部署、
+模型生产许可证、NAS、HTTPS 与管理员 MFA 仍未验证；不暴露 Immich 端口，也不接触真实照片。
