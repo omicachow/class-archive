@@ -100,6 +100,12 @@ try {
     Invoke-TestGit $safeOutgoing @('commit', '-q', '-m', 'synthetic safe change')
     Assert-Pass (Invoke-BoundaryGate $safeOutgoing 'Outgoing' $safeOutgoingBase) 'Outgoing'
 
+    # An event base that is syntactically valid but no longer reachable (for
+    # example after a rewritten branch) must fail closed rather than silently
+    # reducing the scan to HEAD.
+    $unreachableBase = ('f' * 40)
+    Assert-Fail (Invoke-BoundaryGate $safeOutgoing 'Outgoing' $unreachableBase) 'git_command_failed' 'unreachable-base-marker'
+
     $allowlist = New-TestRepository 'synthetic-allowlist'
     $fixtureDirectory = Join-Path $allowlist 'tests\fixtures\phase2-synthetic'
     [void](New-Item -ItemType Directory -Path $fixtureDirectory -Force)
