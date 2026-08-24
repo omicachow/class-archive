@@ -2,6 +2,27 @@ import { applyDocumentTranslations, t } from './i18n.js';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const app = document.getElementById('app');
+const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my']);
+const MUTATION_PATHS = new Set([
+  '/api/class-archive/manage/people/create',
+  '/api/class-archive/manage/people/update',
+  '/api/class-archive/manage/people/merge',
+  '/api/class-archive/manage/people/visibility',
+  '/api/class-archive/manage/people/revert-merge',
+  '/api/class-archive/manage/people/move-photos',
+  '/api/class-archive/manage/archive/bulk',
+  '/api/class-archive/manage/albums/cover',
+  '/api/class-archive/manage/duplicates/consolidate',
+  '/api/class-archive/spotlight/create',
+  '/api/class-archive/spotlight/cancel',
+]);
+
+const runtime = {
+  productStatePromise: null,
+  manageOptionsPromise: null,
+  activeSelection: null,
+  dialogSequence: 0,
+};
 
 const navigation = Object.freeze([
   { key: 'photos', href: '/photos' },
@@ -59,7 +80,7 @@ function sidebar(active) {
 function mobileNavigation(active) {
   const nav = element('nav', 'mobile-nav');
   nav.setAttribute('aria-label', t('accessibility.mobileNav'));
-  append(nav, navigation.map((item) => navLink(item, active, true)));
+  append(nav, navigation.filter((item) => MOBILE_NAVIGATION.has(item.key)).map((item) => navLink(item, active, true)));
   return nav;
 }
 
@@ -108,6 +129,7 @@ function errorState() {
 }
 
 function showLoading(active, titleKey, leadKey) {
+  if (runtime.activeSelection) runtime.activeSelection.destroy();
   const page = element('div');
   append(page, pageHeader(titleKey, leadKey), loadingState());
   shell(active, page);
@@ -121,12 +143,78 @@ function businessLabel(value, fallbackKey = '') {
   const labels = new Map([
     ['HERITAGE', t('business.heritage')],
     ['LIVING', t('business.living')],
+    ['OFFICIAL', t('business.officialArchive')],
+    ['COMMUNITY', t('business.communityAlbum')],
   ]);
-  return labels.get(value) ?? safeText(value, fallbackKey ? t(fallbackKey) : '');
+  if (labels.has(value)) return labels.get(value);
+  const text = safeText(value, '');
+  if (text && !/^[A-Z][A-Z0-9_:-]*$/.test(text)) return text;
+  return fallbackKey ? t(fallbackKey) : '';
+}
+
+function precisionLabel(value) {
+  const labels = new Map([
+    ['EXACT', t('precision.exact')],
+    ['DAY', t('precision.day')],
+    ['MONTH', t('precision.month')],
+    ['TERM', t('precision.term')],
+    ['YEAR', t('precision.year')],
+    ['EVENT_ONLY', t('precision.eventOnly')],
+    ['UNKNOWN', t('precision.unknown')],
+  ]);
+  return labels.get(value) ?? t('precision.unknown');
+}
+
+function dateSourceLabel(value) {
+  const labels = new Map([
+    ['ARCHIVE_CONFIRMED', t('dateSource.confirmed')],
+    ['EVENT_INFERENCE', t('dateSource.event')],
+    ['EXIF_TRUSTED', t('dateSource.exif')],
+    ['UNKNOWN', t('dateSource.unknown')],
+  ]);
+  return labels.get(value) ?? t('dateSource.unknown');
+}
+
+function rawArchiveDate(photo) {
+  const precision = typeof photo?.date_precision === 'string' ? photo.date_precision : 'UNKNOWN';
+  const source = typeof photo?.date_source === 'string' ? photo.date_source : 'UNKNOWN';
+  const takenAt = typeof photo?.taken_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at)
+    ? photo.taken_at : null;
+  const eventLabel = safeText(photo?.eventLabel ?? photo?.event_label, '');
+  let label = t('common.unknownDate');
+  if (takenAt && ['EXACT', 'DAY'].includes(precision)) {
+    label = t('date.dayLabel', { year: takenAt.slice(0, 4), month: takenAt.slice(5, 7), day: takenAt.slice(8, 10) });
+  } else if (takenAt && precision === 'MONTH') {
+    label = t('date.monthLabel', { year: takenAt.slice(0, 4), month: takenAt.slice(5, 7) });
+  } else if (takenAt && precision === 'YEAR') {
+    label = t('date.yearLabel', { year: takenAt.slice(0, 4) });
+  } else if (eventLabel) {
+    label = eventLabel;
+  }
+  return { label, precision: precisionLabel(precision), source: dateSourceLabel(source) };
+}
+
+function roleLabel(value) {
+  const labels = new Map([
+    ['SYSTEM_ADMIN', t('business.roleAdmin')],
+    ['ARCHIVIST', t('business.roleArchivist')],
+    ['CLASSMATE', t('business.roleClassmate')],
+    ['TEACHER', t('business.roleTeacher')],
+    ['FAMILY', t('business.roleFamily')],
+    ['ANONYMOUS', t('business.roleAnonymous')],
+  ]);
+  return labels.get(value) ?? t('business.roleUnknown');
 }
 
 function validId(value) {
   return typeof value === 'string' && UUID_V4.test(value);
+}
+
+function opaqueChoiceId(value) {
+  if (validId(value)) return value.toLowerCase();
+  if (Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value)) return value;
+  return null;
 }
 
 function apiError(response) {
@@ -152,16 +240,125 @@ async function apiJson(path, options = {}) {
   return response.json();
 }
 
+function normalizeProductState(payload) {
+  const knownRoles = new Set(['SYSTEM_ADMIN', 'ARCHIVIST', 'CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS']);
+  const role = knownRoles.has(payload?.role) ? payload.role : 'UNKNOWN';
+  return {
+    role,
+    canManage: (payload?.canManage === true || payload?.can_manage === true) && ['SYSTEM_ADMIN', 'ARCHIVIST'].includes(role),
+    canSpotlight: (payload?.canSpotlight === true || payload?.can_spotlight === true) && ['CLASSMATE', 'TEACHER'].includes(role),
+    csrfToken: safeText(payload?.csrfToken ?? payload?.csrf_token, ''),
+  };
+}
+
+async function productState() {
+  if (!runtime.productStatePromise) {
+    runtime.productStatePromise = apiJson('/api/class-archive/product-state')
+      .then(normalizeProductState)
+      .catch(() => normalizeProductState(null));
+  }
+  return runtime.productStatePromise;
+}
+
+async function mutate(path, payload) {
+  if (!MUTATION_PATHS.has(path)) throw new Error('safe_mutation_path_invalid');
+  const state = await productState();
+  if (!state.csrfToken) throw new Error('safe_csrf_unavailable');
+  return apiJson(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Class-Archive-CSRF': state.csrfToken },
+    body: JSON.stringify({ ...payload, csrfToken: state.csrfToken }),
+  });
+}
+
+function toast(message, kind = 'success') {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const node = element('div', `toast toast-${kind}`, message);
+  node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  document.body.append(node);
+  requestAnimationFrame(() => node.dataset.visible = 'true');
+  setTimeout(() => {
+    node.dataset.visible = 'false';
+    setTimeout(() => node.remove(), 220);
+  }, 3200);
+}
+
+function dialogShell(titleKey, leadKey = '') {
+  runtime.dialogSequence += 1;
+  const returnFocus = document.activeElement;
+  const dialog = element('dialog', 'app-dialog');
+  const surface = element('div', 'dialog-surface');
+  const header = element('header', 'dialog-header');
+  const copy = element('div');
+  const title = element('h2', '', t(titleKey));
+  title.id = `dialog-title-${runtime.dialogSequence}`;
+  const lead = leadKey ? element('p', '', t(leadKey)) : null;
+  if (lead) lead.id = `dialog-lead-${runtime.dialogSequence}`;
+  append(copy, title, lead);
+  dialog.setAttribute('aria-labelledby', title.id);
+  if (lead) dialog.setAttribute('aria-describedby', lead.id);
+  const close = element('button', 'icon-button dialog-close', t('common.close'));
+  close.type = 'button';
+  close.setAttribute('aria-label', t('accessibility.dialogClose'));
+  close.addEventListener('click', () => dialog.close());
+  append(header, copy, close);
+  append(surface, header);
+  dialog.append(surface);
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener('close', () => {
+    dialog.remove();
+    if (returnFocus instanceof HTMLElement && returnFocus.isConnected) returnFocus.focus();
+  }, { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  return { dialog, surface };
+}
+
+function labeledControl(labelKey, control, hint = '') {
+  const label = element('label', 'field');
+  append(label, element('span', 'field-label', t(labelKey)), control, hint ? element('span', 'field-hint', hint) : null);
+  return label;
+}
+
+function labeledGroup(labelKey, content) {
+  const group = element('fieldset', 'field fieldset-reset');
+  append(group, element('legend', 'field-label', t(labelKey)), content);
+  return group;
+}
+
+function readReason(control) {
+  const value = control.value.trim();
+  control.setCustomValidity(value ? '' : t('common.reasonRequired'));
+  if (!value) {
+    control.reportValidity();
+    control.focus();
+    return null;
+  }
+  return value;
+}
+
+function option(value, label, selected = false) {
+  const node = element('option', '', label);
+  node.value = value;
+  node.selected = selected;
+  return node;
+}
+
 function normalizeArchivePhoto(photo) {
   if (!photo || !validId(photo.id)) throw new Error('safe_photo_invalid');
   const archive = photo.archive_date && typeof photo.archive_date === 'object' ? photo.archive_date : {};
+  const fallback = rawArchiveDate(photo);
   return {
     id: photo.id.toLowerCase(),
     title: businessLabel(photo.title, 'accessibility.photo'),
+    eventLabel: safeText(photo.eventLabel ?? photo.event_label, ''),
     archiveDate: {
-      label: safeText(archive.label, t('common.unknownDate')),
-      precision: safeText(archive.precision, t('common.unknownDate')),
-      source: safeText(archive.source, t('common.unknownDate')),
+      label: safeText(archive.label, fallback.label),
+      precision: safeText(archive.precision, fallback.precision),
+      source: safeText(archive.sourceLabel ?? archive.source_label ?? archive.source, fallback.source),
     },
   };
 }
@@ -241,38 +438,446 @@ function resilientImage(src, alt, eager = false) {
   return image;
 }
 
-function photoCard(photo, index = 0) {
+function normalizeManageOptions(payload) {
+  const normalizeChoices = (items, idKeys = ['id'], labelKeys = ['label', 'name']) => (Array.isArray(items) ? items : []).flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const id = idKeys.map((key) => opaqueChoiceId(item[key])).find(Boolean);
+    const label = labelKeys.map((key) => item[key]).find((value) => typeof value === 'string' && value.length > 0);
+    return id && label ? [{ id, label: safeText(label, '') }] : [];
+  });
+  return {
+    albums: normalizeChoices(payload?.albums, ['id', 'albumId'], ['name', 'label']),
+    events: normalizeChoices(payload?.events, ['id', 'eventId', 'label'], ['label', 'name']),
+    identities: normalizeChoices(payload?.identities, ['id', 'identityId'], ['displayName', 'name', 'label']),
+  };
+}
+
+async function manageOptions() {
+  if (!runtime.manageOptionsPromise) {
+    runtime.manageOptionsPromise = apiJson('/api/class-archive/manage/options').then(normalizeManageOptions);
+  }
+  return runtime.manageOptionsPromise;
+}
+
+function checkboxChoices(items, name) {
+  const group = element('div', 'choice-grid');
+  if (items.length === 0) {
+    group.append(element('span', 'field-hint', t('common.empty')));
+    return group;
+  }
+  for (const item of items) {
+    const label = element('label', 'check-choice');
+    const input = element('input');
+    input.type = 'checkbox';
+    input.name = name;
+    input.value = item.id;
+    append(label, input, element('span', '', item.label));
+    group.append(label);
+  }
+  return group;
+}
+
+async function openBulkOrganizer(controller) {
+  if (controller.selected.size === 0) return;
+  let options;
+  try {
+    options = await manageOptions();
+  } catch {
+    toast(t('common.operationFailed'), 'error');
+    return;
+  }
+  const { dialog, surface } = dialogShell('photos.bulkTitle', 'photos.bulkLead');
+  const form = element('form', 'dialog-form');
+  form.method = 'dialog';
+
+  const archiveDate = element('input', 'text-field');
+  archiveDate.type = 'text';
+  archiveDate.maxLength = 32;
+  archiveDate.placeholder = 'YYYY / YYYY-MM / YYYY-MM-DD';
+
+  const precision = element('select', 'select-field');
+  append(precision,
+    option('', t('precision.keep')),
+    option('EXACT', t('precision.exact')),
+    option('DAY', t('precision.day')),
+    option('MONTH', t('precision.month')),
+    option('TERM', t('precision.term')),
+    option('YEAR', t('precision.year')),
+    option('EVENT_ONLY', t('precision.eventOnly')),
+    option('UNKNOWN', t('precision.unknown')),
+  );
+
+  const eventSelect = element('select', 'select-field');
+  append(eventSelect, option('', t('precision.keep')), options.events.map((item) => option(item.id, item.label)));
+  const eventCustom = element('input', 'text-field');
+  eventCustom.type = 'text';
+  eventCustom.maxLength = 190;
+  eventCustom.placeholder = t('photos.bulkEventCustomPlaceholder');
+  eventSelect.addEventListener('change', () => {
+    eventCustom.disabled = eventSelect.value !== '';
+    if (eventSelect.value !== '') eventCustom.value = '';
+  });
+  eventCustom.addEventListener('input', () => {
+    eventSelect.disabled = eventCustom.value.trim() !== '';
+    if (eventCustom.value.trim() !== '') eventSelect.value = '';
+  });
+
+  const era = element('select', 'select-field');
+  append(era, option('', t('era.keep')), option('HERITAGE', t('business.heritage')), option('LIVING', t('business.living')));
+  const eraConfirmation = element('label', 'confirm-row');
+  const eraConfirmInput = element('input');
+  eraConfirmInput.type = 'checkbox';
+  append(eraConfirmation, eraConfirmInput, element('span', '', t('photos.bulkEraConfirm')));
+  eraConfirmation.hidden = true;
+  era.addEventListener('change', () => {
+    eraConfirmation.hidden = era.value === '';
+    if (era.value === '') eraConfirmInput.checked = false;
+  });
+
+  const reason = element('textarea', 'text-area');
+  reason.required = true;
+  reason.maxLength = 500;
+  reason.placeholder = t('common.reasonPlaceholder');
+
+  const addAlbums = checkboxChoices(options.albums, 'addAlbum');
+  const removeAlbums = checkboxChoices(options.albums, 'removeAlbum');
+  append(form,
+    labeledControl('photos.bulkDate', archiveDate),
+    labeledControl('photos.bulkPrecision', precision),
+    labeledControl('photos.bulkEvent', eventSelect),
+    labeledControl('photos.bulkEventCustom', eventCustom),
+    labeledGroup('photos.bulkAddAlbums', addAlbums),
+    labeledGroup('photos.bulkRemoveAlbums', removeAlbums),
+    labeledControl('photos.bulkEra', era),
+    eraConfirmation,
+    labeledControl('common.reason', reason),
+  );
+  const actions = element('div', 'dialog-actions');
+  const cancel = element('button', 'secondary-button', t('common.cancel'));
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => dialog.close());
+  const submit = element('button', 'primary-button', t('photos.bulkSubmit'));
+  submit.type = 'submit';
+  append(actions, cancel, submit);
+  form.append(actions);
+  surface.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reasonValue = readReason(reason);
+    if (!reasonValue) return;
+    if (era.value && !eraConfirmInput.checked) {
+      eraConfirmInput.focus();
+      return;
+    }
+    submit.disabled = true;
+    const checkedValues = (name) => [...form.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
+    try {
+      await mutate('/api/class-archive/manage/archive/bulk', {
+        photoIds: [...controller.selected],
+        archiveDate: archiveDate.value.trim() || null,
+        datePrecision: precision.value || null,
+        eventId: eventSelect.value || null,
+        eventLabel: eventCustom.value.trim() || null,
+        albumAddIds: checkedValues('addAlbum'),
+        albumRemoveIds: checkedValues('removeAlbum'),
+        era: era.value || null,
+        eraConfirmed: Boolean(era.value && eraConfirmInput.checked),
+        reason: reasonValue,
+      });
+      dialog.close();
+      controller.clear();
+      toast(t('common.operationSucceeded'));
+      setTimeout(() => location.reload(), 450);
+    } catch {
+      submit.disabled = false;
+      toast(t('common.operationFailed'), 'error');
+    }
+  });
+}
+
+function selectionController(photos, options = {}) {
+  if (runtime.activeSelection) runtime.activeSelection.destroy();
+  const controller = {
+    photos,
+    selected: new Set(),
+    lastIndex: null,
+    active: false,
+    cards: new Map(),
+    bar: null,
+    options,
+    enter() {
+      this.active = true;
+      this.refresh();
+    },
+    toggle(index, range = false, forceSelected = null) {
+      if (!this.active) this.enter();
+      if (range && this.lastIndex !== null) {
+        const start = Math.min(index, this.lastIndex);
+        const end = Math.max(index, this.lastIndex);
+        for (let cursor = start; cursor <= end; cursor += 1) this.selected.add(this.photos[cursor].id);
+      } else {
+        const id = this.photos[index].id;
+        const shouldSelect = forceSelected === null ? !this.selected.has(id) : forceSelected;
+        if (shouldSelect) this.selected.add(id);
+        else this.selected.delete(id);
+      }
+      this.lastIndex = index;
+      this.refresh();
+    },
+    clear() {
+      this.selected.clear();
+      this.lastIndex = null;
+      this.active = false;
+      this.refresh();
+    },
+    refresh() {
+      for (const [id, card] of this.cards) {
+        const selected = this.selected.has(id);
+        card.dataset.selecting = String(this.active);
+        card.dataset.selected = String(selected);
+        card.setAttribute('aria-selected', String(selected));
+      }
+      if (!this.bar) return;
+      this.bar.hidden = !this.active;
+      this.bar.querySelector('[data-selection-count]').textContent = t('photos.selectedCount', { count: this.selected.size });
+      for (const button of this.bar.querySelectorAll('[data-requires-selection]')) button.disabled = this.selected.size === 0;
+      const single = this.bar.querySelector('[data-requires-single]');
+      if (single) single.disabled = this.selected.size !== 1;
+    },
+    attachBar() {
+      const bar = element('aside', 'selection-bar');
+      bar.hidden = true;
+      bar.setAttribute('aria-label', t('accessibility.selection'));
+      const count = element('strong', 'selection-count');
+      count.dataset.selectionCount = '';
+      const actions = element('div', 'selection-actions');
+      const organize = element('button', 'primary-button', t('photos.organize'));
+      organize.type = 'button';
+      organize.dataset.requiresSelection = '';
+      organize.addEventListener('click', () => openBulkOrganizer(this));
+      append(actions, organize);
+      if (typeof this.options.onSetCover === 'function') {
+        const cover = element('button', 'secondary-button', t('albums.setCover'));
+        cover.type = 'button';
+        cover.dataset.requiresSingle = '';
+        cover.addEventListener('click', () => this.options.onSetCover([...this.selected][0]));
+        actions.append(cover);
+      }
+      const cancel = element('button', 'ghost-button', t('photos.exitSelection'));
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => this.clear());
+      append(actions, cancel);
+      append(bar, count, actions);
+      document.body.append(bar);
+      this.bar = bar;
+      this.refresh();
+    },
+    bind(card, index) {
+      const photo = this.photos[index];
+      this.cards.set(photo.id, card);
+      card.setAttribute('role', 'option');
+      card.setAttribute('aria-selected', 'false');
+      let longPressTimer = null;
+      let longPressed = false;
+      const cancelLongPress = () => {
+        if (longPressTimer) clearTimeout(longPressTimer);
+        longPressTimer = null;
+      };
+      card.addEventListener('pointerdown', (event) => {
+        if (event.pointerType !== 'touch' || this.active) return;
+        longPressed = false;
+        longPressTimer = setTimeout(() => {
+          longPressed = true;
+          this.toggle(index, false, true);
+        }, 520);
+      });
+      card.addEventListener('pointermove', cancelLongPress);
+      card.addEventListener('pointercancel', cancelLongPress);
+      card.addEventListener('pointerup', cancelLongPress);
+      card.addEventListener('contextmenu', (event) => {
+        if (this.active || longPressed) event.preventDefault();
+      });
+      card.addEventListener('click', (event) => {
+        const selectingGesture = this.active || event.ctrlKey || event.metaKey || event.shiftKey || longPressed;
+        if (!selectingGesture) return;
+        event.preventDefault();
+        if (!longPressed) this.toggle(index, event.shiftKey);
+        longPressed = false;
+      });
+    },
+    destroy() {
+      if (this.bar) this.bar.remove();
+      if (runtime.activeSelection === this) runtime.activeSelection = null;
+    },
+  };
+  runtime.activeSelection = controller;
+  controller.attachBar();
+  return controller;
+}
+
+function photoCard(photo, index = 0, controller = null) {
   const link = element('a', 'photo-card');
   link.href = `/photos/${photo.id}`;
   link.setAttribute('aria-label', photo.title);
+  const marker = element('span', 'selection-marker', t('accessibility.selected'));
+  marker.setAttribute('aria-hidden', 'true');
   const caption = element('span', 'photo-caption');
   append(caption, element('strong', '', photo.title), element('span', '', photo.archiveDate.label));
-  append(link, resilientImage(mediaUrl(photo.id, 'thumbnail'), '', index < 9), caption);
+  append(link, resilientImage(mediaUrl(photo.id, 'thumbnail'), '', index < 9), marker, caption);
+  if (controller) {
+    const selectionIndex = controller.photos.findIndex((item) => item.id === photo.id);
+    if (selectionIndex >= 0) controller.bind(link, selectionIndex);
+  }
   return link;
 }
 
-function photoGrid(photos, extraClass = '') {
+function photoGrid(photos, extraClass = '', controller = null) {
   const grid = element('div', `photo-grid ${extraClass}`.trim());
-  append(grid, photos.map((photo, index) => photoCard(photo, index)));
+  if (controller) grid.setAttribute('role', 'listbox');
+  if (controller) grid.setAttribute('aria-multiselectable', 'true');
+  append(grid, photos.map((photo, index) => photoCard(photo, index, controller)));
   return grid;
+}
+
+function normalizeSpotlight(payload) {
+  if (!payload || payload.active === false) return null;
+  // The Class Archive API uses { active: boolean, item: {...} }. Do not let
+  // the boolean envelope shadow the actual Spotlight record; legacy payloads
+  // that put the record under `spotlight` remain accepted.
+  const item = payload?.item ?? payload?.spotlight
+    ?? (typeof payload?.active === 'object' ? payload.active : payload);
+  if (!item || typeof item !== 'object' || item.active === false) return null;
+  const albumId = item.albumId ?? item.album_id ?? item.class_album_id ?? item.targetId;
+  const id = opaqueChoiceId(item.id ?? item.spotlightId ?? item.spotlight_id);
+  const coverPhotoId = item.coverPhotoId ?? item.cover_photo_id;
+  if (!validId(albumId) || !id || !validId(coverPhotoId)) return null;
+  return {
+    id,
+    albumId: albumId.toLowerCase(),
+    albumName: safeText(item.albumName ?? item.album_name ?? item.title, t('albums.title')),
+    coverPhotoId: coverPhotoId.toLowerCase(),
+    description: safeText(item.description, ''),
+    expiresAt: formatLocalDateTime(item.expiresAt ?? item.expires_at),
+  };
+}
+
+function formatLocalDateTime(value) {
+  const text = safeText(value, '');
+  if (!text) return '';
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text;
+  const date = new Date(normalized);
+  if (!Number.isFinite(date.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+}
+
+async function openReasonMutation(titleKey, leadKey, path, payload, onSuccess) {
+  const { dialog, surface } = dialogShell(titleKey, leadKey);
+  const form = element('form', 'dialog-form');
+  const reason = element('textarea', 'text-area');
+  reason.required = true;
+  reason.maxLength = 500;
+  reason.placeholder = t('common.reasonPlaceholder');
+  form.append(labeledControl('common.reason', reason));
+  const actions = element('div', 'dialog-actions');
+  const cancel = element('button', 'secondary-button', t('common.cancel'));
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => dialog.close());
+  const submit = element('button', 'primary-button', t('common.confirm'));
+  submit.type = 'submit';
+  append(actions, cancel, submit);
+  form.append(actions);
+  surface.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reasonValue = readReason(reason);
+    if (!reasonValue) return;
+    submit.disabled = true;
+    try {
+      const result = await mutate(path, { ...payload, reason: reasonValue });
+      dialog.close();
+      toast(t('common.operationSucceeded'));
+      if (onSuccess) await onSuccess(result);
+    } catch {
+      submit.disabled = false;
+      toast(t('common.operationFailed'), 'error');
+    }
+  });
+}
+
+function spotlightHero(spotlight, state) {
+  const hero = element('section', 'spotlight-hero');
+  const cover = resilientImage(mediaUrl(spotlight.coverPhotoId, 'thumbnail'), '', true);
+  const shade = element('div', 'spotlight-shade');
+  const copy = element('div', 'spotlight-copy');
+  append(copy,
+    element('p', 'spotlight-eyebrow', t('spotlight.eyebrow')),
+    element('h2', '', spotlight.albumName),
+    spotlight.description ? element('p', 'spotlight-description', spotlight.description) : null,
+    spotlight.expiresAt ? element('p', 'spotlight-expiry', t('spotlight.expires', { time: spotlight.expiresAt })) : null,
+  );
+  const actions = element('div', 'spotlight-actions');
+  const open = element('a', 'light-button', t('spotlight.open'));
+  open.href = `/albums/${spotlight.albumId}`;
+  actions.append(open);
+  if (state.canManage) {
+    const cancel = element('button', 'light-ghost-button', t('spotlight.cancel'));
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => openReasonMutation(
+      'spotlight.cancel',
+      '',
+      '/api/class-archive/spotlight/cancel',
+      { spotlightId: spotlight.id },
+      () => location.reload(),
+    ));
+    actions.append(cancel);
+  }
+  append(shade, copy, actions);
+  append(hero, cover, shade);
+  return hero;
 }
 
 async function renderPhotos() {
   showLoading('photos', 'photos.title', 'photos.lead');
   try {
-    const timeline = normalizeTimeline(await apiJson('/api/class-archive/timeline'));
+    const [timelinePayload, state, spotlightPayload] = await Promise.all([
+      apiJson('/api/class-archive/timeline'),
+      productState(),
+      apiJson('/api/class-archive/spotlight').catch(() => null),
+    ]);
+    const timeline = normalizeTimeline(timelinePayload);
+    const spotlight = normalizeSpotlight(spotlightPayload);
     const page = element('div');
     append(page, pageHeader('photos.title', 'photos.lead', t('common.photosCount', { count: timeline.total })));
+    if (spotlight) page.append(spotlightHero(spotlight, state));
+    const utility = element('div', 'photo-utilities');
+    const memories = element('a', 'secondary-button', t('photos.memoriesEntry'));
+    memories.href = '/memories';
+    utility.append(memories);
+    let manageButton = null;
+    if (state.canManage && timeline.total > 0) {
+      manageButton = element('button', 'secondary-button', t('photos.organize'));
+      manageButton.type = 'button';
+      utility.append(manageButton);
+    }
+    page.append(utility);
     if (timeline.total === 0) {
       page.append(emptyState('photos.emptyTitle', 'photos.emptyBody'));
     } else {
+      const allPhotos = timeline.groups.flatMap((group) => group.items);
+      const controller = state.canManage ? selectionController(allPhotos) : null;
+      if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
       for (const group of timeline.groups) {
         const section = element('section', 'timeline-section');
         const heading = element('div', 'section-heading');
         append(heading, element('h2', '', group.label), element('span', '', t('common.photosCount', { count: group.total })));
-        append(section, heading, photoGrid(group.items));
+        append(section, heading, photoGrid(group.items, '', controller));
         page.append(section);
       }
+      if (controller) page.append(element('p', 'selection-hint', t('photos.selectionHint')));
     }
     shell('photos', page);
   } catch {
@@ -317,6 +922,7 @@ async function renderViewer(id) {
 
     const page = element('main', 'viewer-page');
     page.id = 'main-content';
+    page.dataset.infoOpen = 'false';
     const stage = element('section', 'viewer-stage');
     const wrap = element('div', 'viewer-image-wrap');
     const image = resilientImage(mediaUrl(id, 'preview'), title, true);
@@ -419,6 +1025,7 @@ async function renderViewer(id) {
     infoToggle.addEventListener('click', () => {
       const open = info.dataset.open !== 'true';
       info.dataset.open = String(open);
+      page.dataset.infoOpen = String(open);
       infoToggle.setAttribute('aria-expanded', String(open));
     });
     document.addEventListener('keydown', (event) => {
@@ -498,9 +1105,20 @@ function personCard(person) {
 async function renderPeople() {
   showLoading('people', 'people.title', 'people.lead');
   try {
-    const people = normalizePeople(await apiJson('/api/people?size=500&withHidden=false'));
+    const [peoplePayload, state] = await Promise.all([
+      apiJson('/api/people?size=500&withHidden=false'),
+      productState(),
+    ]);
+    const people = normalizePeople(peoplePayload);
     const page = element('div');
     append(page, pageHeader('people.title', 'people.lead', t('common.peopleCount', { count: people.length })));
+    if (state.canManage) {
+      const actions = element('div', 'page-actions');
+      const manage = element('a', 'secondary-button', t('people.manage'));
+      manage.href = '/people/manage';
+      actions.append(manage);
+      page.append(actions);
+    }
     if (people.length === 0) page.append(emptyState('people.emptyTitle', 'people.emptyBody'));
     else {
       const grid = element('div', 'people-grid');
@@ -511,6 +1129,534 @@ async function renderPeople() {
   } catch {
     const page = element('div');
     append(page, pageHeader('people.title', 'people.lead'), errorState());
+    shell('people', page);
+  }
+}
+
+function normalizeManagePeople(payload) {
+  const items = payload?.items ?? payload?.people;
+  if (!Array.isArray(items)) throw new Error('safe_manage_people_invalid');
+  return items.map((person) => {
+    const id = person?.id ?? person?.classPersonId ?? person?.class_person_id;
+    const coverPhotoId = person?.coverPhotoId ?? person?.cover_photo_id ?? null;
+    const photosPayload = person?.photos ?? person?.items ?? [];
+    if (!validId(id) || (coverPhotoId !== null && !validId(coverPhotoId)) || !Array.isArray(photosPayload)) {
+      throw new Error('safe_manage_person_invalid');
+    }
+    const photos = photosPayload.map(normalizeArchivePhoto);
+    return {
+      id: id.toLowerCase(),
+      name: safeText(person.displayName ?? person.display_name ?? person.name ?? person.label, t('people.unnamed')),
+      coverPhotoId: coverPhotoId ? coverPhotoId.toLowerCase() : photos[0]?.id ?? null,
+      linkedIdentityId: opaqueChoiceId(person.classmateIdentityId ?? person.classmate_identity_id),
+      linkedIdentityName: safeText(person.classmateIdentityName ?? person.classmate_identity_name ?? person.identityName, ''),
+      hidden: person.hidden === true || person.is_hidden === true,
+      count: Number.isInteger(person.photoCount ?? person.photo_count)
+        ? (person.photoCount ?? person.photo_count)
+        : photos.length,
+      photos,
+    };
+  });
+}
+
+function normalizeManageMerges(payload) {
+  const items = payload?.merges ?? [];
+  if (!Array.isArray(items)) throw new Error('safe_manage_merges_invalid');
+  return items.map((merge) => {
+    const id = merge?.id ?? merge?.mergeId ?? merge?.merge_id;
+    const sourcePersonId = merge?.sourcePersonId ?? merge?.source_person_id;
+    const targetPersonId = merge?.targetPersonId ?? merge?.target_person_id;
+    if (!validId(id) || !validId(sourcePersonId) || !validId(targetPersonId)) {
+      throw new Error('safe_manage_merge_invalid');
+    }
+    return {
+      id: id.toLowerCase(),
+      sourceName: safeText(merge.sourceName ?? merge.source_name, t('people.unnamed')),
+      targetName: safeText(merge.targetName ?? merge.target_name, t('people.unnamed')),
+    };
+  });
+}
+
+function managePersonRow(person, allPeople, selected, refreshSelection) {
+  const row = element('article', 'manage-person-row');
+  const choose = element('input');
+  choose.type = 'checkbox';
+  choose.setAttribute('aria-label', person.name);
+  choose.addEventListener('change', () => {
+    if (choose.checked) selected.add(person.id);
+    else selected.delete(person.id);
+    refreshSelection();
+  });
+  const portrait = element('span', 'manage-person-portrait');
+  if (person.coverPhotoId) portrait.append(resilientImage(mediaUrl(person.coverPhotoId, 'thumbnail'), '', false));
+  const copy = element('div', 'manage-person-copy');
+  append(copy,
+    element('strong', '', person.name),
+    element('span', '', t('common.photosCount', { count: person.count })),
+    element('span', '', person.linkedIdentityName || t('people.unlinked')),
+  );
+  const status = element('span', `status-pill ${person.hidden ? 'status-muted' : ''}`, person.hidden ? t('people.hiddenStatus') : t('people.visibleStatus'));
+  const edit = element('button', 'secondary-button compact-button', t('common.edit'));
+  edit.type = 'button';
+  edit.addEventListener('click', () => openPersonEditor(person, allPeople));
+  append(row, choose, portrait, copy, status, edit);
+  return row;
+}
+
+async function openPersonMoveDialog(person, photoIds, allPeople) {
+  if (photoIds.length === 0) return;
+  const { dialog, surface } = dialogShell('people.correctTitle');
+  const form = element('form', 'dialog-form');
+  const target = element('select', 'select-field');
+  append(target, option('', t('people.removeFromPerson')));
+  for (const item of allPeople.filter((candidate) => candidate.id !== person.id)) {
+    target.append(option(item.id, item.name));
+  }
+  target.append(option('__new__', t('people.moveToNew')));
+  const newName = element('input', 'text-field');
+  newName.type = 'text';
+  newName.maxLength = 190;
+  newName.placeholder = t('people.newPersonNamePlaceholder');
+  newName.hidden = true;
+  target.addEventListener('change', () => {
+    newName.hidden = target.value !== '__new__';
+    newName.required = target.value === '__new__';
+    if (!newName.required) newName.value = '';
+  });
+  const reason = element('textarea', 'text-area');
+  reason.required = true;
+  reason.maxLength = 500;
+  reason.placeholder = t('common.reasonPlaceholder');
+  append(form,
+    labeledControl('people.moveTo', target),
+    labeledControl('people.newPersonName', newName),
+    labeledControl('common.reason', reason),
+  );
+  const actions = element('div', 'dialog-actions');
+  const cancel = element('button', 'secondary-button', t('common.cancel'));
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => dialog.close());
+  const submit = element('button', 'primary-button', t('common.confirm'));
+  submit.type = 'submit';
+  append(actions, cancel, submit);
+  form.append(actions);
+  surface.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reasonValue = readReason(reason);
+    if (!reasonValue) return;
+    submit.disabled = true;
+    try {
+      let targetPersonId = target.value || null;
+      if (targetPersonId === '__new__') {
+        const created = await mutate('/api/class-archive/manage/people/create', {
+          displayName: newName.value.trim(),
+          classmateIdentityId: null,
+          reason: reasonValue,
+        });
+        if (!validId(created?.id)) throw new Error('safe_person_create_result_invalid');
+        targetPersonId = created.id.toLowerCase();
+      }
+      await mutate('/api/class-archive/manage/people/move-photos', {
+        sourcePersonId: person.id,
+        targetPersonId,
+        photoIds,
+        reason: reasonValue,
+      });
+      dialog.close();
+      toast(t('common.operationSucceeded'));
+      setTimeout(() => location.reload(), 450);
+    } catch {
+      submit.disabled = false;
+      toast(t('common.operationFailed'), 'error');
+    }
+  });
+}
+
+async function openPersonEditor(person, allPeople) {
+  let options;
+  try {
+    options = await manageOptions();
+  } catch {
+    toast(t('common.operationFailed'), 'error');
+    return;
+  }
+  const { dialog, surface } = dialogShell('people.editTitle');
+  const form = element('form', 'dialog-form');
+  const name = element('input', 'text-field');
+  name.type = 'text';
+  name.required = true;
+  name.maxLength = 190;
+  name.value = person.name === t('people.unnamed') ? '' : person.name;
+  const identity = element('select', 'select-field');
+  append(identity, option('', t('people.noIdentityLink')));
+  for (const item of options.identities) identity.append(option(item.id, item.label, item.id === person.linkedIdentityId));
+  const hiddenLabel = element('label', 'confirm-row');
+  const hidden = element('input');
+  hidden.type = 'checkbox';
+  hidden.checked = person.hidden;
+  append(hiddenLabel, hidden, element('span', '', t('people.hidden')));
+  append(form, labeledControl('people.displayName', name), labeledControl('people.identityLink', identity), hiddenLabel);
+
+  let coverId = person.coverPhotoId;
+  const correctionIds = new Set();
+  if (person.photos.length > 0) {
+    const label = element('span', 'field-label', t('people.photos'));
+    const photoChoices = element('div', 'manage-photo-grid');
+    for (const photo of person.photos) {
+      const card = element('div', 'manage-photo-choice');
+      card.append(resilientImage(mediaUrl(photo.id, 'thumbnail'), '', false));
+      const controls = element('div', 'manage-photo-controls');
+      const cover = element('label', 'mini-choice');
+      const coverInput = element('input');
+      coverInput.type = 'radio';
+      coverInput.name = 'personCover';
+      coverInput.checked = photo.id === coverId;
+      coverInput.addEventListener('change', () => { if (coverInput.checked) coverId = photo.id; });
+      append(cover, coverInput, element('span', '', t('people.setCover')));
+      const correct = element('label', 'mini-choice');
+      const correctInput = element('input');
+      correctInput.type = 'checkbox';
+      correctInput.addEventListener('change', () => {
+        if (correctInput.checked) correctionIds.add(photo.id);
+        else correctionIds.delete(photo.id);
+        const correctionButton = form.querySelector('[data-correction-action]');
+        if (correctionButton) correctionButton.disabled = correctionIds.size === 0;
+      });
+      append(correct, correctInput, element('span', '', t('common.select')));
+      append(controls, cover, correct);
+      append(card, controls);
+      photoChoices.append(card);
+    }
+    const field = element('div', 'field');
+    append(field, label, photoChoices);
+    form.append(field);
+  }
+
+  const reason = element('textarea', 'text-area');
+  reason.required = true;
+  reason.maxLength = 500;
+  reason.placeholder = t('common.reasonPlaceholder');
+  form.append(labeledControl('common.reason', reason));
+  const actions = element('div', 'dialog-actions dialog-actions-split');
+  const correct = element('button', 'secondary-button', t('people.correctTitle'));
+  correct.type = 'button';
+  correct.dataset.correctionAction = '';
+  correct.disabled = true;
+  correct.addEventListener('click', () => {
+    if (correctionIds.size === 0) return;
+    const photoIds = [...correctionIds];
+    dialog.close();
+    void openPersonMoveDialog(person, photoIds, allPeople);
+  });
+  const cancel = element('button', 'ghost-button', t('common.cancel'));
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => dialog.close());
+  const submit = element('button', 'primary-button', t('common.save'));
+  submit.type = 'submit';
+  append(actions, correct, cancel, submit);
+  form.append(actions);
+  surface.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reasonValue = readReason(reason);
+    if (!reasonValue) return;
+    submit.disabled = true;
+    try {
+      await mutate('/api/class-archive/manage/people/update', {
+        classPersonId: person.id,
+        displayName: name.value.trim(),
+        classmateIdentityId: identity.value || null,
+        hidden: hidden.checked,
+        coverPhotoId: coverId,
+        reason: reasonValue,
+      });
+      dialog.close();
+      toast(t('common.operationSucceeded'));
+      setTimeout(() => location.reload(), 450);
+    } catch {
+      submit.disabled = false;
+      toast(t('common.operationFailed'), 'error');
+    }
+  });
+}
+
+function normalizeDuplicateGroups(payload) {
+  const items = payload?.items ?? [];
+  if (!Array.isArray(items)) throw new Error('safe_duplicate_groups_invalid');
+  return items.flatMap((group) => {
+    const groupId = opaqueChoiceId(group?.id ?? group?.groupId);
+    const rawPhotos = group?.photos ?? group?.items;
+    if (!groupId || !Array.isArray(rawPhotos)) return [];
+    const photos = rawPhotos.flatMap((photo) => {
+      const id = photo?.id ?? photo?.photoId;
+      if (!validId(id)) return [];
+      const sourceCount = Number(photo?.sourceCount ?? photo?.source_count ?? 0);
+      if (!Number.isInteger(sourceCount) || sourceCount < 0) return [];
+      return [{
+        id: id.toLowerCase(),
+        sourceLabel: safeText(photo.sourceLabel ?? photo.source, t('duplicates.source')),
+        sourceCount,
+      }];
+    });
+    return photos.length > 1 ? [{
+      id: groupId,
+      exact: group.exact === true || group.type === 'EXACT',
+      photos,
+    }] : [];
+  });
+}
+
+function duplicateGroupCard(group) {
+  const card = element('article', 'duplicate-card');
+  append(card, element('h3', '', group.exact ? t('duplicates.exact') : t('duplicates.near')));
+  const form = element('form', 'duplicate-form');
+  const choices = element('div', 'duplicate-choice-grid');
+  for (const [index, photo] of group.photos.entries()) {
+    const label = element('label', 'duplicate-choice');
+    const input = element('input');
+    input.type = 'radio';
+    input.name = `canonical-${group.id}`;
+    input.value = photo.id;
+    input.required = true;
+    input.checked = index === 0;
+    const image = resilientImage(mediaUrl(photo.id, 'thumbnail'), '', false);
+    append(label, input, image, element('span', '', photo.sourceCount > 0
+      ? t('duplicates.sourcesCount', { count: photo.sourceCount })
+      : photo.sourceLabel));
+    choices.append(label);
+  }
+  const reason = element('input', 'text-field');
+  let submit = null;
+  if (group.exact) {
+    reason.required = true;
+    reason.maxLength = 500;
+    reason.placeholder = t('common.reasonPlaceholder');
+    submit = element('button', 'secondary-button', t('duplicates.consolidate'));
+    submit.type = 'submit';
+    append(form, choices, labeledControl('common.reason', reason), submit);
+  } else {
+    for (const radio of choices.querySelectorAll('input[type="radio"]')) radio.disabled = true;
+    append(form, choices, element('p', 'field-hint', t('duplicates.nearNote')));
+  }
+  card.append(form);
+  if (!group.exact) return card;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reasonValue = readReason(reason);
+    if (!reasonValue) return;
+    submit.disabled = true;
+    const canonical = form.querySelector('input[type="radio"]:checked');
+    try {
+      await mutate('/api/class-archive/manage/duplicates/consolidate', {
+        duplicateGroupId: group.id,
+        canonicalPhotoId: canonical?.value,
+        reason: reasonValue,
+      });
+      card.remove();
+      toast(t('common.operationSucceeded'));
+    } catch {
+      submit.disabled = false;
+      toast(t('common.operationFailed'), 'error');
+    }
+  });
+  return card;
+}
+
+async function renderPeopleManage() {
+  showLoading('people', 'people.manageTitle', 'people.manageLead');
+  try {
+    const state = await productState();
+    if (!state.canManage) throw new Error('safe_manage_forbidden');
+    const [peoplePayload, duplicatePayload] = await Promise.all([
+      apiJson('/api/class-archive/manage/people'),
+      apiJson('/api/class-archive/manage/duplicates').catch(() => ({ items: [] })),
+    ]);
+    const people = normalizeManagePeople(peoplePayload);
+    const activeMerges = normalizeManageMerges(peoplePayload);
+    const duplicateGroups = normalizeDuplicateGroups(duplicatePayload);
+    const page = element('div');
+    const back = element('a', 'back-link', t('people.manageBack'));
+    back.href = '/people';
+    append(page, back, pageHeader('people.manageTitle', 'people.manageLead', t('common.peopleCount', { count: people.length })));
+    const selected = new Set();
+    const manageActions = element('div', 'manage-toolbar');
+    const selectionCount = element('strong', '', t('people.manageSelected', { count: 0 }));
+    const merge = element('button', 'secondary-button', t('people.merge'));
+    merge.type = 'button';
+    merge.disabled = true;
+    const hideSelected = element('button', 'secondary-button', t('people.hideSelected'));
+    hideSelected.type = 'button';
+    hideSelected.disabled = true;
+    const showSelected = element('button', 'secondary-button', t('people.showSelected'));
+    showSelected.type = 'button';
+    showSelected.disabled = true;
+    const refreshSelection = () => {
+      selectionCount.textContent = t('people.manageSelected', { count: selected.size });
+      merge.disabled = selected.size < 2;
+      hideSelected.disabled = selected.size === 0;
+      showSelected.disabled = selected.size === 0;
+    };
+    const bulkVisibility = (hidden) => openReasonMutation(
+      hidden ? 'people.hideSelected' : 'people.showSelected',
+      hidden ? 'people.hideSelectedLead' : 'people.showSelectedLead',
+      '/api/class-archive/manage/people/visibility',
+      { classPersonIds: [...selected], hidden },
+      () => location.reload(),
+    );
+    hideSelected.addEventListener('click', () => bulkVisibility(true));
+    showSelected.addEventListener('click', () => bulkVisibility(false));
+    merge.addEventListener('click', () => {
+      const selectedPeople = people.filter((person) => selected.has(person.id));
+      const { dialog, surface } = dialogShell('people.mergeTitle', 'people.mergeWarning');
+      const form = element('form', 'dialog-form');
+      const target = element('select', 'select-field');
+      append(target, selectedPeople.map((person) => option(person.id, person.name)));
+      const cover = element('select', 'select-field');
+      const refreshCovers = () => {
+        cover.replaceChildren();
+        for (const person of selectedPeople) {
+          if (person.coverPhotoId) cover.append(option(person.coverPhotoId, person.name, person.id === target.value));
+        }
+      };
+      target.addEventListener('change', refreshCovers);
+      refreshCovers();
+      const reason = element('textarea', 'text-area');
+      reason.required = true;
+      reason.maxLength = 500;
+      reason.placeholder = t('common.reasonPlaceholder');
+      append(form,
+        labeledControl('people.mergeTarget', target),
+        labeledControl('people.mergeCover', cover),
+        labeledControl('common.reason', reason),
+      );
+      const actions = element('div', 'dialog-actions');
+      const cancel = element('button', 'secondary-button', t('common.cancel'));
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => dialog.close());
+      const submit = element('button', 'primary-button', t('people.merge'));
+      submit.type = 'submit';
+      append(actions, cancel, submit);
+      form.append(actions);
+      surface.append(form);
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const reasonValue = readReason(reason);
+        if (!reasonValue) return;
+        submit.disabled = true;
+        try {
+          await mutate('/api/class-archive/manage/people/merge', {
+            sourcePersonIds: [...selected].filter((id) => id !== target.value),
+            targetPersonId: target.value,
+            coverPhotoId: cover.value || null,
+            reason: reasonValue,
+          });
+          dialog.close();
+          toast(t('common.operationSucceeded'));
+          setTimeout(() => location.reload(), 450);
+        } catch {
+          submit.disabled = false;
+          toast(t('common.operationFailed'), 'error');
+        }
+      });
+    });
+    const create = element('button', 'primary-button', t('people.create'));
+    create.type = 'button';
+    create.addEventListener('click', async () => {
+      let options;
+      try {
+        options = await manageOptions();
+      } catch {
+        toast(t('common.operationFailed'), 'error');
+        return;
+      }
+      const { dialog, surface } = dialogShell('people.createTitle', 'people.createLead');
+      const form = element('form', 'dialog-form');
+      const name = element('input', 'text-field');
+      name.type = 'text';
+      name.required = true;
+      name.maxLength = 190;
+      const identity = element('select', 'select-field');
+      append(identity, option('', t('people.noIdentityLink')));
+      for (const item of options.identities) identity.append(option(item.id, item.label));
+      const reason = element('textarea', 'text-area');
+      reason.required = true;
+      reason.maxLength = 500;
+      reason.placeholder = t('common.reasonPlaceholder');
+      append(form,
+        labeledControl('people.displayName', name),
+        labeledControl('people.identityLink', identity),
+        labeledControl('common.reason', reason),
+      );
+      const actions = element('div', 'dialog-actions');
+      const cancel = element('button', 'secondary-button', t('common.cancel'));
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => dialog.close());
+      const submit = element('button', 'primary-button', t('people.create'));
+      submit.type = 'submit';
+      append(actions, cancel, submit);
+      form.append(actions);
+      surface.append(form);
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const reasonValue = readReason(reason);
+        if (!reasonValue || !name.value.trim()) return;
+        submit.disabled = true;
+        try {
+          await mutate('/api/class-archive/manage/people/create', {
+            displayName: name.value.trim(),
+            classmateIdentityId: identity.value || null,
+            reason: reasonValue,
+          });
+          dialog.close();
+          toast(t('common.operationSucceeded'));
+          setTimeout(() => location.reload(), 450);
+        } catch {
+          submit.disabled = false;
+          toast(t('common.operationFailed'), 'error');
+        }
+      });
+      name.focus();
+    });
+    append(manageActions, selectionCount, merge, hideSelected, showSelected, create);
+    page.append(manageActions);
+    const list = element('section', 'manage-people-list');
+    if (people.length === 0) list.append(element('p', 'manage-empty', t('people.noManageItems')));
+    else append(list, people.map((person) => managePersonRow(person, people, selected, refreshSelection)));
+    page.append(list);
+    if (activeMerges.length > 0) {
+      const mergeHistory = element('section', 'merge-history');
+      const heading = element('div', 'section-heading');
+      append(heading, element('h2', '', t('people.mergeHistory')), element('span', '', String(activeMerges.length)));
+      mergeHistory.append(heading);
+      for (const item of activeMerges) {
+        const row = element('div', 'merge-history-row');
+        const description = element('span', '', t('people.mergeSummary', { source: item.sourceName, target: item.targetName }));
+        const revert = element('button', 'secondary-button compact-button', t('people.revertMerge'));
+        revert.type = 'button';
+        revert.addEventListener('click', () => openReasonMutation(
+          'people.revertMergeTitle',
+          'people.revertMergeLead',
+          '/api/class-archive/manage/people/revert-merge',
+          { mergeId: item.id },
+          () => location.reload(),
+        ));
+        append(row, description, revert);
+        mergeHistory.append(row);
+      }
+      page.append(mergeHistory);
+    }
+    const duplicateSection = element('section', 'duplicate-section');
+    const duplicateHeading = element('div', 'section-heading');
+    append(duplicateHeading, element('h2', '', t('duplicates.title')), element('span', '', String(duplicateGroups.length)));
+    duplicateSection.append(duplicateHeading);
+    if (duplicateGroups.length === 0) duplicateSection.append(element('p', 'manage-empty', t('duplicates.none')));
+    else append(duplicateSection, duplicateGroups.map(duplicateGroupCard));
+    page.append(duplicateSection);
+    shell('people', page);
+  } catch {
+    const page = element('div');
+    append(page, pageHeader('people.manageTitle', 'people.manageLead'), errorState());
     shell('people', page);
   }
 }
@@ -553,7 +1699,7 @@ async function renderPerson(id) {
   }
 }
 
-function normalizeSearch(payload) {
+function normalizeLegacySearch(payload) {
   const items = payload?.assets?.items;
   if (!Array.isArray(items)) throw new Error('safe_search_invalid');
   return items.map((asset) => {
@@ -566,7 +1712,7 @@ function normalizeSearch(payload) {
   });
 }
 
-async function search(query) {
+async function legacySearch(query) {
   const options = (body) => ({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -580,14 +1726,155 @@ async function search(query) {
   if (fulfilled.length === 0) throw new Error('safe_search_unavailable');
   const combined = new Map();
   for (const result of fulfilled) {
-    for (const photo of normalizeSearch(result.value)) {
+    for (const photo of normalizeLegacySearch(result.value)) {
       if (!combined.has(photo.id)) combined.set(photo.id, photo);
     }
   }
-  return { photos: [...combined.values()], partial: fulfilled.length !== settled.length };
+  return {
+    structured: [],
+    structuredPhotos: [],
+    smartPhotos: [...combined.values()],
+    partial: fulfilled.length !== settled.length,
+    normalized: false,
+  };
+}
+
+function normalizeSearchPhoto(photo) {
+  if (!photo || !validId(photo.id ?? photo.photoId ?? photo.classPhotoId)) throw new Error('safe_hybrid_photo_invalid');
+  const id = photo.id ?? photo.photoId ?? photo.classPhotoId;
+  if (photo.archive_date || photo.archiveDate) {
+    return normalizeArchivePhoto({
+      ...photo,
+      id,
+      archive_date: photo.archive_date ?? photo.archiveDate,
+    });
+  }
+  return {
+    id: id.toLowerCase(),
+    title: safeText(photo.title ?? photo.label ?? photo.originalFileName, t('accessibility.photo')),
+    archiveDate: {
+      label: safeText(photo.dateLabel, t('common.unknownDate')),
+      precision: precisionLabel(photo.datePrecision ?? 'UNKNOWN'),
+      source: t('common.unknownDate'),
+    },
+  };
+}
+
+function resultItems(value) {
+  if (Array.isArray(value)) return value;
+  return Array.isArray(value?.items) ? value.items : [];
+}
+
+function normalizeStructuredResult(type, item) {
+  if (!item || typeof item !== 'object') return null;
+  const label = safeText(item.label ?? item.name ?? item.title, '');
+  if (!label) return null;
+  const count = Number.isInteger(item.total ?? item.count ?? item.photoCount) ? (item.total ?? item.count ?? item.photoCount) : null;
+  const rawId = item.id ?? item.classPersonId ?? item.albumId;
+  let href = null;
+  if (type === 'people' && validId(rawId)) href = `/people/${rawId.toLowerCase()}`;
+  if (type === 'albums' && validId(rawId)) href = `/albums/${rawId.toLowerCase()}`;
+  return { type, label, count, href };
+}
+
+function normalizeHybridSearch(payload) {
+  if (!payload || typeof payload !== 'object') throw new Error('safe_hybrid_search_invalid');
+  const structuredSource = payload.structured ?? payload.exact ?? payload.sections ?? {};
+  const structured = [];
+  const typeNames = ['people', 'albums', 'events', 'dates', 'tags', 'descriptions'];
+  if (Array.isArray(structuredSource)) {
+    for (const section of structuredSource) {
+      const type = typeNames.includes(section?.type) ? section.type : null;
+      if (!type) continue;
+      const items = resultItems(section);
+      structured.push({ type, items: items.map((item) => normalizeStructuredResult(type, item)).filter(Boolean) });
+    }
+  } else {
+    for (const type of typeNames) {
+      const items = resultItems(structuredSource[type]);
+      if (items.length > 0) structured.push({ type, items: items.map((item) => normalizeStructuredResult(type, item)).filter(Boolean) });
+    }
+  }
+  const structuredPhotos = resultItems(
+    structuredSource.photos ?? payload.photos ?? payload.exactPhotos ?? payload.exact_photos,
+  ).map(normalizeSearchPhoto);
+  const smartPhotos = resultItems(payload.smart ?? payload.smartMatches ?? payload.semantic).map(normalizeSearchPhoto);
+  const seen = new Set(structuredPhotos.map((photo) => photo.id));
+  const uniqueSmart = smartPhotos.filter((photo) => {
+    if (seen.has(photo.id)) return false;
+    seen.add(photo.id);
+    return true;
+  });
+  return {
+    structured,
+    structuredPhotos,
+    smartPhotos: uniqueSmart,
+    partial: payload.partial === true,
+    normalized: payload.normalized === true || Boolean(payload.normalizedQuery ?? payload.normalized_query),
+  };
+}
+
+async function hybridSearch(query) {
+  try {
+    const params = new URLSearchParams({ q: query });
+    return normalizeHybridSearch(await apiJson(`/api/class-archive/search/hybrid?${params}`));
+  } catch (error) {
+    if (error?.status && error.status !== 404) throw error;
+    return legacySearch(query);
+  }
+}
+
+function structuredSection(section, onQuery) {
+  const key = `search.${section.type}Section`;
+  const group = element('section', 'search-structured-group');
+  append(group, element('h3', '', t(key)));
+  const list = element('div', 'search-result-chips');
+  for (const item of section.items) {
+    const node = item.href ? element('a', 'search-result-chip') : element('button', 'search-result-chip');
+    if (item.href) node.href = item.href;
+    else {
+      node.type = 'button';
+      node.addEventListener('click', () => onQuery(item.label));
+    }
+    append(node, element('strong', '', item.label), item.count === null ? null : element('span', '', t('common.photosCount', { count: item.count })));
+    list.append(node);
+  }
+  group.append(list);
+  return group;
+}
+
+function renderHybridResults(response, onQuery) {
+  const root = element('div', 'hybrid-results');
+  const exactCount = response.structuredPhotos.length + response.structured.reduce((total, section) => total + section.items.length, 0);
+  if (exactCount > 0) {
+    const section = element('section', 'search-section');
+    const heading = element('div', 'search-section-heading');
+    append(heading, element('div', '', undefined), element('span', 'result-kind', t('search.structured')));
+    const headingCopy = heading.firstElementChild;
+    append(headingCopy, element('h2', '', t('search.structured')), element('p', '', t('search.structuredLead')));
+    section.append(heading);
+    for (const group of response.structured) section.append(structuredSection(group, onQuery));
+    if (response.structuredPhotos.length > 0) {
+      const photosHeading = element('h3', 'search-subheading', t('search.photosSection'));
+      append(section, photosHeading, photoGrid(response.structuredPhotos, 'search-photo-grid'));
+    }
+    root.append(section);
+  }
+  if (response.smartPhotos.length > 0) {
+    const section = element('section', 'search-section smart-section');
+    const heading = element('div', 'search-section-heading');
+    const copy = element('div');
+    append(copy, element('h2', '', t('search.smart')), element('p', '', t('search.smartLead')));
+    append(heading, copy, element('span', 'beta-badge', t('search.smartBeta')));
+    append(section, heading, photoGrid(response.smartPhotos, 'search-photo-grid'));
+    root.append(section);
+  }
+  if (exactCount === 0 && response.smartPhotos.length === 0) root.append(emptyState('search.noResultsTitle', 'search.noResultsBody'));
+  return root;
 }
 
 async function renderSearch() {
+  if (runtime.activeSelection) runtime.activeSelection.destroy();
   const page = element('div');
   append(page, pageHeader('search.title', 'search.lead'));
   const form = element('form', 'search-form');
@@ -620,12 +1907,16 @@ async function renderSearch() {
     status.textContent = t('search.searching');
     results.replaceChildren(loadingState());
     try {
-      const response = await search(query);
+      const response = await hybridSearch(query);
+      const total = response.structuredPhotos.length + response.smartPhotos.length;
       status.textContent = response.partial
         ? t('search.partial')
-        : t('search.results', { count: response.photos.length });
-      if (response.photos.length === 0) results.replaceChildren(emptyState('search.noResultsTitle', 'search.noResultsBody'));
-      else results.replaceChildren(photoGrid(response.photos, 'search-photo-grid'));
+        : `${t('search.results', { count: total })}${response.normalized ? ` · ${t('search.normalized')}` : ''}`;
+      const runQuery = (value) => {
+        input.value = value;
+        form.requestSubmit();
+      };
+      results.replaceChildren(renderHybridResults(response, runQuery));
     } catch {
       status.textContent = '';
       results.replaceChildren(errorState());
@@ -636,38 +1927,160 @@ async function renderSearch() {
 }
 
 function normalizeAlbums(payload) {
-  if (!Array.isArray(payload)) throw new Error('safe_albums_invalid');
-  return payload.map((album) => {
-    if (!album || !Number.isInteger(album.assetCount) || album.assetCount < 0 || !validId(album.albumThumbnailAssetId)) {
+  const items = Array.isArray(payload) ? payload : payload?.items;
+  if (!Array.isArray(items)) throw new Error('safe_albums_invalid');
+  return items.map((album) => {
+    const id = album?.id ?? album?.albumId ?? album?.class_album_id;
+    const total = album?.total ?? album?.assetCount ?? album?.photoCount ?? album?.photo_count;
+    const coverPhotoId = album?.coverPhotoId ?? album?.cover_photo_id ?? album?.albumThumbnailAssetId ?? null;
+    if (!album || !validId(id) || !Number.isInteger(total) || total < 0 || (coverPhotoId !== null && !validId(coverPhotoId))) {
       throw new Error('safe_album_invalid');
     }
     return {
-      name: businessLabel(album.albumName, 'albums.title'),
-      count: album.assetCount,
-      coverPhotoId: album.albumThumbnailAssetId.toLowerCase(),
+      id: id.toLowerCase(),
+      name: safeText(album.name ?? album.albumName ?? album.album_name, t('albums.title')),
+      type: (album.type ?? album.album_type) === 'COMMUNITY' ? 'COMMUNITY' : 'OFFICIAL',
+      description: safeText(album.description, ''),
+      eventLabel: safeText(album.eventLabel ?? album.event_label, ''),
+      dateLabel: safeText(album.dateLabel ?? album.date_label, ''),
+      count: total,
+      coverPhotoId: coverPhotoId ? coverPhotoId.toLowerCase() : null,
+      owned: album.owned === true || album.owned_by_current === true,
+      canSpotlight: album.canSpotlight === true || album.can_spotlight === true,
     };
   });
+}
+
+function albumCard(album) {
+  const card = element('a', 'album-card');
+  card.href = `/albums/${album.id}`;
+  const cover = element('div', 'album-cover');
+  if (album.coverPhotoId) cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', false));
+  const copy = element('div', 'album-copy');
+  append(copy,
+    element('h3', 'album-title', album.name),
+    album.eventLabel || album.dateLabel ? element('p', 'album-meta', [album.eventLabel, album.dateLabel].filter(Boolean).join(' · ')) : null,
+    element('p', 'album-count', t('common.photosCount', { count: album.count })),
+  );
+  append(card, cover, copy);
+  return card;
+}
+
+function albumSection(titleKey, leadKey, albums) {
+  const section = element('section', 'album-section');
+  const heading = element('div', 'collection-heading');
+  const copy = element('div');
+  append(copy, element('h2', '', t(titleKey)), element('p', '', t(leadKey)));
+  heading.append(copy);
+  section.append(heading);
+  const grid = element('div', 'album-grid');
+  append(grid, albums.map(albumCard));
+  section.append(grid);
+  return section;
+}
+
+async function loadAlbums() {
+  try {
+    return await apiJson('/api/class-archive/albums');
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+    return apiJson('/api/albums');
+  }
 }
 
 async function renderAlbums() {
   showLoading('albums', 'albums.title', 'albums.lead');
   try {
-    const albums = normalizeAlbums(await apiJson('/api/albums'));
+    const albums = normalizeAlbums(await loadAlbums());
     const page = element('div');
     append(page, pageHeader('albums.title', 'albums.lead'));
     if (albums.length === 0) page.append(emptyState('albums.emptyTitle', 'albums.emptyBody'));
     else {
-      const grid = element('div', 'album-grid');
-      for (const album of albums) {
-        const card = element('article', 'album-card');
-        const cover = element('div', 'album-cover');
-        cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', false));
-        const copy = element('div', 'album-copy');
-        append(copy, element('h2', 'album-title', album.name), element('p', 'album-count', t('common.photosCount', { count: album.count })));
-        append(card, cover, copy);
-        grid.append(card);
+      const official = albums.filter((album) => album.type === 'OFFICIAL');
+      const community = albums.filter((album) => album.type === 'COMMUNITY');
+      if (official.length > 0) page.append(albumSection('albums.official', 'albums.officialLead', official));
+      if (community.length > 0) page.append(albumSection('albums.community', 'albums.communityLead', community));
+    }
+    shell('albums', page);
+  } catch {
+    const page = element('div');
+    append(page, pageHeader('albums.title', 'albums.lead'), errorState());
+    shell('albums', page);
+  }
+}
+
+function normalizeAlbumDetail(payload) {
+  const source = payload?.album ? { ...payload.album, items: payload.items ?? payload.album.items } : payload;
+  const [album] = normalizeAlbums({ items: [source] });
+  const rawItems = source?.items ?? source?.photos;
+  if (!Array.isArray(rawItems)) throw new Error('safe_album_detail_invalid');
+  const photos = rawItems.map(normalizeArchivePhoto);
+  if (album.count !== photos.length) throw new Error('safe_album_detail_count_invalid');
+  return { ...album, photos };
+}
+
+async function renderAlbum(id) {
+  showLoading('albums', 'albums.title', 'albums.lead');
+  try {
+    const [albumPayload, state, spotlightPayload] = await Promise.all([
+      apiJson(`/api/class-archive/albums/${id}`),
+      productState(),
+      apiJson('/api/class-archive/spotlight').catch(() => null),
+    ]);
+    const album = normalizeAlbumDetail(albumPayload);
+    const spotlight = normalizeSpotlight(spotlightPayload);
+    const page = element('div');
+    const back = element('a', 'back-link', t('albums.back'));
+    back.href = '/albums';
+    page.append(back);
+    const hero = element('section', 'album-detail-hero');
+    if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', true));
+    const shade = element('div', 'album-detail-shade');
+    append(shade,
+      element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
+      element('h1', '', album.name),
+      album.description ? element('p', 'album-description', album.description) : null,
+      element('p', 'album-detail-meta', [album.eventLabel, album.dateLabel, t('common.photosCount', { count: album.count })].filter(Boolean).join(' · ')),
+    );
+    const heroActions = element('div', 'album-hero-actions');
+    if (state.canSpotlight && album.owned && album.canSpotlight && spotlight?.albumId !== album.id) {
+      const create = element('button', 'light-button', t('spotlight.create'));
+      create.type = 'button';
+      create.addEventListener('click', () => openReasonMutation(
+        'spotlight.createTitle',
+        'spotlight.createLead',
+        '/api/class-archive/spotlight/create',
+        { albumId: album.id, durationHours: 24 },
+        () => location.reload(),
+      ));
+      heroActions.append(create);
+    }
+    if (spotlight?.albumId === album.id) heroActions.append(element('span', 'light-status', t('spotlight.active')));
+    shade.append(heroActions);
+    hero.append(shade);
+    page.append(hero);
+    if (album.photos.length === 0) {
+      page.append(element('p', 'manage-empty', t('albums.noPhotos')));
+    } else {
+      let manageButton = null;
+      if (state.canManage) {
+        const actions = element('div', 'page-actions');
+        manageButton = element('button', 'secondary-button', t('photos.organize'));
+        manageButton.type = 'button';
+        actions.append(manageButton);
+        page.append(actions);
       }
-      page.append(grid);
+      const controller = state.canManage ? selectionController(album.photos, {
+        onSetCover: (photoId) => openReasonMutation(
+          'albums.setCover',
+          '',
+          '/api/class-archive/manage/albums/cover',
+          { albumId: album.id, photoId },
+          () => location.reload(),
+        ),
+      }) : null;
+      if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
+      page.append(photoGrid(album.photos, 'album-photo-grid', controller));
     }
     shell('albums', page);
   } catch {
@@ -693,6 +2106,9 @@ async function renderMemories() {
         label: businessLabel(memory.label, 'memories.title'),
         count: memory.photo_count,
         coverPhotoId: memory.cover_photo_id.toLowerCase(),
+        href: validId(memory.album_id ?? memory.albumId)
+          ? `/albums/${(memory.album_id ?? memory.albumId).toLowerCase()}`
+          : `/photos/${memory.cover_photo_id.toLowerCase()}`,
       };
     });
     const page = element('div');
@@ -700,9 +2116,12 @@ async function renderMemories() {
     if (memories.length === 0) {
       page.append(emptyState('memories.emptyTitle', 'memories.emptyBody'));
     } else {
+      page.append(element('p', 'memory-archive-note', t('memories.archiveNote')));
       const grid = element('div', 'memory-grid');
       for (const memory of memories) {
-        const card = element('article', 'memory-card');
+        const card = element('a', 'memory-card');
+        card.href = memory.href;
+        card.setAttribute('aria-label', `${t('memories.open')}: ${memory.label}`);
         const cover = resilientImage(mediaUrl(memory.coverPhotoId, 'thumbnail'), '', false);
         const shade = element('div', 'memory-shade');
         append(shade, element('h2', 'memory-title', memory.label), element('p', 'memory-count', t('common.photosCount', { count: memory.count })));
@@ -722,18 +2141,34 @@ async function renderMemories() {
 async function renderMy() {
   showLoading('my', 'my.title', 'my.lead');
   try {
-    const user = await apiJson('/api/users/me');
-    const role = safeText(user?.name, t('my.currentRole'));
+    const [user, state] = await Promise.all([apiJson('/api/users/me'), productState()]);
+    const role = roleLabel(state.role);
     const page = element('div');
     append(page, pageHeader('my.title', 'my.lead'));
     const card = element('section', 'profile-card');
-    append(card, element('p', '', t('my.currentRole')), element('span', 'role-badge', role), element('p', '', t('my.scopeNote')));
+    const displayName = safeText(user?.displayName ?? user?.name, '');
+    append(card,
+      displayName ? element('h2', 'profile-name', displayName) : null,
+      element('p', '', t('my.currentRole')),
+      element('span', 'role-badge', role),
+      element('p', '', t('my.scopeNote')),
+    );
     const links = element('div', 'profile-links');
-    const linkItems = [
-      ['/class-archive-core/identity', 'my.identity'],
-      ['/class-archive-core/home', 'my.gallery'],
-      ['/class-archive-about', 'my.about'],
-    ];
+    const linkItems = [];
+    if (['CLASSMATE', 'TEACHER', 'FAMILY'].includes(state.role)) {
+      linkItems.push(['/class-archive-core/identity', 'my.identity']);
+    }
+    if (state.role === 'CLASSMATE') {
+      linkItems.push(['/class-archive-core/identity', 'my.familyInvite']);
+      linkItems.push(['/class-archive-core/identity', 'my.anonymousSeat']);
+    }
+    if (state.role === 'FAMILY') linkItems.push(['/class-archive-core/identity', 'my.submissions']);
+    if (state.canManage) {
+      linkItems.push(['/class-archive-core/admin', 'my.adminConsole']);
+      linkItems.push(['/people/manage', 'my.peopleManage']);
+    }
+    linkItems.push(['/class-archive-core/home', 'my.gallery']);
+    linkItems.push(['/class-archive-about', 'my.about']);
     for (const [href, key] of linkItems) {
       const link = element('a', 'profile-link');
       link.href = href;
@@ -756,25 +2191,32 @@ function route() {
   const photo = /^\/photos\/([0-9a-f-]{36})$/i.exec(path);
   if (photo && validId(photo[1])) return { name: 'viewer', id: photo[1].toLowerCase() };
   if (path === '/people') return { name: 'people' };
+  if (path === '/people/manage') return { name: 'peopleManage' };
   const person = /^\/people\/([0-9a-f-]{36})$/i.exec(path);
   if (person && validId(person[1])) return { name: 'person', id: person[1].toLowerCase() };
   if (path === '/search') return { name: 'search' };
   if (path === '/albums') return { name: 'albums' };
+  const album = /^\/albums\/([0-9a-f-]{36})$/i.exec(path);
+  if (album && validId(album[1])) return { name: 'album', id: album[1].toLowerCase() };
   if (path === '/memories') return { name: 'memories' };
   if (path === '/my') return { name: 'my' };
   return { name: 'photos' };
 }
 
 async function start() {
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  window.scrollTo(0, 0);
   applyDocumentTranslations();
   const current = route();
   const handlers = {
     photos: () => renderPhotos(),
     viewer: () => renderViewer(current.id),
     people: () => renderPeople(),
+    peopleManage: () => renderPeopleManage(),
     person: () => renderPerson(current.id),
     search: () => renderSearch(),
     albums: () => renderAlbums(),
+    album: () => renderAlbum(current.id),
     memories: () => renderMemories(),
     my: () => renderMy(),
   };
