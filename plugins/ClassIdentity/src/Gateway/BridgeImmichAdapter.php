@@ -73,6 +73,8 @@ final class BridgeImmichAdapter implements ImmichAdapter
                 (string) $mapped['class_person_id'],
                 $mapped['display_name'] ?? null,
                 $item['class_photo_ids'],
+                $item['cover_class_photo_id'] ?? null,
+                $item['portrait_focus'] ?? null,
             );
         }
         return $result;
@@ -120,7 +122,7 @@ final class BridgeImmichAdapter implements ImmichAdapter
 
     /**
      * @param list<string> $visibleClassPhotoIds
-     * @return list<array{label?:string,immich_person_id?:string,class_photo_ids:list<string>}>
+     * @return list<array{label?:string,immich_person_id?:string,class_photo_ids:list<string>,cover_class_photo_id?:string,portrait_focus?:array{x:float,y:float,zoom:float}|null}>
      */
     private function requestCandidates(string $endpoint, array $visibleClassPhotoIds): array
     {
@@ -152,12 +154,33 @@ final class BridgeImmichAdapter implements ImmichAdapter
                 $normalized = $this->normalizeCandidateIds($ids, $allowed);
                 if ($endpoint === '/people') {
                     $immichPersonId = $item['immich_person_id'] ?? null;
-                    if (!is_string($immichPersonId)) {
+                    $coverPhotoId = $item['cover_class_photo_id'] ?? null;
+                    $portraitFocus = $item['portrait_focus'] ?? null;
+                    if (!is_string($immichPersonId) || !is_string($coverPhotoId) || !isset($allowed[$coverPhotoId])
+                        || !in_array($coverPhotoId, $normalized, true)) {
                         throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                    }
+                    ClassArchivePhoto::idToBinary($coverPhotoId);
+                    if ($portraitFocus !== null) {
+                        if (!is_array($portraitFocus)) {
+                            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                        }
+                        $focusKeys = array_keys($portraitFocus);
+                        sort($focusKeys, SORT_STRING);
+                        if ($focusKeys !== ['x', 'y', 'zoom']) {
+                            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                        }
+                        foreach (['x', 'y', 'zoom'] as $focusKey) {
+                            if (!is_int($portraitFocus[$focusKey]) && !is_float($portraitFocus[$focusKey])) {
+                                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                            }
+                        }
                     }
                     $result[] = [
                         'immich_person_id' => ClassArchivePerson::normalizeImmichPersonId($immichPersonId),
                         'class_photo_ids' => $normalized,
+                        'cover_class_photo_id' => $coverPhotoId,
+                        'portrait_focus' => $portraitFocus,
                     ];
                     continue;
                 }

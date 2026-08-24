@@ -214,12 +214,30 @@ function prefetchAdjacentPreviews(photos, index) {
 
 function resilientImage(src, alt, eager = false) {
   const image = element('img');
-  image.src = src;
   image.alt = alt;
   image.loading = eager ? 'eager' : 'lazy';
   image.decoding = 'async';
   image.referrerPolicy = 'no-referrer';
-  image.addEventListener('error', () => image.remove(), { once: true });
+  let failures = 0;
+  image.addEventListener('load', () => {
+    failures = 0;
+    delete image.dataset.loadState;
+  });
+  image.addEventListener('error', () => {
+    failures += 1;
+    if (failures <= 2) {
+      image.dataset.loadState = 'retrying';
+      image.removeAttribute('src');
+      setTimeout(() => { image.src = src; }, failures * 900);
+      return;
+    }
+    // Keep a translated error state in the authorized card. Removing the
+    // element left a silent grey tile and made a transient cold derivative
+    // timeout look like a missing photo.
+    image.dataset.loadState = 'error';
+    image.alt = alt || t('common.imageUnavailable');
+  });
+  image.src = src;
   return image;
 }
 
@@ -233,8 +251,8 @@ function photoCard(photo, index = 0) {
   return link;
 }
 
-function photoGrid(photos) {
-  const grid = element('div', 'photo-grid');
+function photoGrid(photos, extraClass = '') {
+  const grid = element('div', `photo-grid ${extraClass}`.trim());
   append(grid, photos.map((photo, index) => photoCard(photo, index)));
   return grid;
 }
@@ -331,7 +349,11 @@ async function renderViewer(id) {
     };
     previous.addEventListener('click', () => goTo(-1));
     next.addEventListener('click', () => goTo(1));
-    prefetchAdjacentPreviews(photos, index);
+    // Large archival originals make cold derivative generation expensive.
+    // Let the requested preview finish before adjacent prefetch begins.
+    image.addEventListener('load', () => {
+      setTimeout(() => prefetchAdjacentPreviews(photos, index), 700);
+    }, { once: true });
 
     const info = element('aside', 'viewer-info');
     info.dataset.open = 'false';
@@ -428,20 +450,42 @@ function normalizePeople(payload) {
     throw new Error('safe_people_invalid');
   }
   return payload.people.map((person) => {
-    if (!person || !validId(person.id)) throw new Error('safe_person_invalid');
+    if (!person || !validId(person.id) || !validId(person.coverPhotoId)) throw new Error('safe_person_invalid');
     return {
       id: person.id.toLowerCase(),
+      coverPhotoId: person.coverPhotoId.toLowerCase(),
+      portraitFocus: normalizePortraitFocus(person.portraitFocus),
       name: safeText(person.name, t('people.unnamed')),
       count: Number.isInteger(person.photoCount) && person.photoCount > 0 ? person.photoCount : null,
     };
   });
 }
 
+function normalizePortraitFocus(value) {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || !Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.zoom)
+      || value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1 || value.zoom < 1 || value.zoom > 6) {
+    throw new Error('safe_person_focus_invalid');
+  }
+  return { x: value.x, y: value.y, zoom: value.zoom };
+}
+
+function portraitImage(person, eager = false) {
+  const image = resilientImage(mediaUrl(person.coverPhotoId, 'thumbnail'), '', eager);
+  if (person.portraitFocus) {
+    image.style.setProperty('--portrait-x', `${person.portraitFocus.x * 100}%`);
+    image.style.setProperty('--portrait-y', `${person.portraitFocus.y * 100}%`);
+    image.style.setProperty('--portrait-zoom', String(person.portraitFocus.zoom));
+  }
+  return image;
+}
+
 function personCard(person) {
   const link = element('a', 'person-card');
   link.href = `/people/${person.id}`;
   const portrait = element('span', 'person-photo');
-  portrait.append(resilientImage(`/api/people/${person.id}/thumbnail`, '', false));
+  portrait.append(portraitImage(person));
   append(
     link,
     portrait,
@@ -472,12 +516,15 @@ async function renderPeople() {
 }
 
 function normalizePerson(payload) {
-  if (!payload || !validId(payload.id) || !Number.isInteger(payload.photo_count) || !Array.isArray(payload.items)
+  if (!payload || !validId(payload.id) || !validId(payload.cover_photo_id)
+      || !Number.isInteger(payload.photo_count) || !Array.isArray(payload.items)
       || payload.photo_count !== payload.items.length) {
     throw new Error('safe_person_detail_invalid');
   }
   return {
     id: payload.id.toLowerCase(),
+    coverPhotoId: payload.cover_photo_id.toLowerCase(),
+    portraitFocus: normalizePortraitFocus(payload.portrait_focus),
     name: safeText(payload.label, t('people.unnamed')),
     count: payload.photo_count,
     photos: payload.items.map(normalizeArchivePhoto),
@@ -493,7 +540,7 @@ async function renderPerson(id) {
     back.href = '/people';
     const hero = element('section', 'person-hero');
     const portrait = element('span', 'person-photo');
-    portrait.append(resilientImage(`/api/people/${id}/thumbnail`, '', true));
+    portrait.append(portraitImage(person, true));
     const copy = element('div');
     append(copy, element('h1', 'page-title', person.name), element('p', 'page-lead', t('common.photosCount', { count: person.count })));
     append(hero, portrait, copy);
@@ -578,7 +625,7 @@ async function renderSearch() {
         ? t('search.partial')
         : t('search.results', { count: response.photos.length });
       if (response.photos.length === 0) results.replaceChildren(emptyState('search.noResultsTitle', 'search.noResultsBody'));
-      else results.replaceChildren(photoGrid(response.photos));
+      else results.replaceChildren(photoGrid(response.photos, 'search-photo-grid'));
     } catch {
       status.textContent = '';
       results.replaceChildren(errorState());
@@ -591,8 +638,14 @@ async function renderSearch() {
 function normalizeAlbums(payload) {
   if (!Array.isArray(payload)) throw new Error('safe_albums_invalid');
   return payload.map((album) => {
-    if (!album || !Number.isInteger(album.assetCount) || album.assetCount < 0) throw new Error('safe_album_invalid');
-    return { name: businessLabel(album.albumName, 'albums.title'), count: album.assetCount };
+    if (!album || !Number.isInteger(album.assetCount) || album.assetCount < 0 || !validId(album.albumThumbnailAssetId)) {
+      throw new Error('safe_album_invalid');
+    }
+    return {
+      name: businessLabel(album.albumName, 'albums.title'),
+      count: album.assetCount,
+      coverPhotoId: album.albumThumbnailAssetId.toLowerCase(),
+    };
   });
 }
 
@@ -607,7 +660,11 @@ async function renderAlbums() {
       const grid = element('div', 'album-grid');
       for (const album of albums) {
         const card = element('article', 'album-card');
-        append(card, element('h2', 'album-title', album.name), element('p', 'album-count', t('common.photosCount', { count: album.count })));
+        const cover = element('div', 'album-cover');
+        cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', false));
+        const copy = element('div', 'album-copy');
+        append(copy, element('h2', 'album-title', album.name), element('p', 'album-count', t('common.photosCount', { count: album.count })));
+        append(card, cover, copy);
         grid.append(card);
       }
       page.append(grid);
@@ -623,10 +680,37 @@ async function renderAlbums() {
 async function renderMemories() {
   showLoading('memories', 'memories.title', 'memories.lead');
   try {
-    const memories = await apiJson('/api/memories');
-    if (!Array.isArray(memories)) throw new Error('safe_memories_invalid');
+    const payload = await apiJson('/api/class-archive/memories');
+    if (!payload || !Number.isInteger(payload.total) || !Array.isArray(payload.items) || payload.total !== payload.items.length) {
+      throw new Error('safe_memories_invalid');
+    }
+    const memories = payload.items.map((memory) => {
+      if (!memory || typeof memory.label !== 'string' || !Number.isInteger(memory.photo_count)
+          || memory.photo_count < 1 || !validId(memory.cover_photo_id)) {
+        throw new Error('safe_memory_invalid');
+      }
+      return {
+        label: businessLabel(memory.label, 'memories.title'),
+        count: memory.photo_count,
+        coverPhotoId: memory.cover_photo_id.toLowerCase(),
+      };
+    });
     const page = element('div');
-    append(page, pageHeader('memories.title', 'memories.lead'), emptyState('memories.emptyTitle', 'memories.emptyBody'));
+    append(page, pageHeader('memories.title', 'memories.lead'));
+    if (memories.length === 0) {
+      page.append(emptyState('memories.emptyTitle', 'memories.emptyBody'));
+    } else {
+      const grid = element('div', 'memory-grid');
+      for (const memory of memories) {
+        const card = element('article', 'memory-card');
+        const cover = resilientImage(mediaUrl(memory.coverPhotoId, 'thumbnail'), '', false);
+        const shade = element('div', 'memory-shade');
+        append(shade, element('h2', 'memory-title', memory.label), element('p', 'memory-count', t('common.photosCount', { count: memory.count })));
+        append(card, cover, shade);
+        grid.append(card);
+      }
+      page.append(grid);
+    }
     shell('memories', page);
   } catch {
     const page = element('div');

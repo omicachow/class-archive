@@ -110,6 +110,7 @@ final class GatewayService
             foreach ($photo->albumLabels() as $label) {
                 $albums[$label]['name'] = $label;
                 $albums[$label]['photo_ids'][] = $photo->id();
+                $albums[$label]['cover_photo_id'] ??= $photo->id();
             }
         }
         ksort($albums, SORT_NATURAL | SORT_FLAG_CASE);
@@ -202,23 +203,71 @@ final class GatewayService
     public function memories(): array
     {
         $visible = $this->visiblePhotos();
-        if ($this->immich->availability() !== 'AVAILABLE') {
+        $allowed = self::allowedIdSet($visible);
+        $byId = [];
+        $items = [];
+        foreach ($visible as $photo) {
+            $byId[$photo->id()] = $photo;
+            $bucket = $photo->timelineBucket();
+            if (($bucket['kind'] ?? 'UNKNOWN') === 'UNKNOWN') {
+                continue;
+            }
+            $key = 'archive:' . (string) ($bucket['key'] ?? '');
+            if (!isset($items[$key])) {
+                $items[$key] = [
+                    'label' => (string) ($bucket['label'] ?? '班级回忆'),
+                    'kind' => (string) ($bucket['kind'] ?? 'EVENT'),
+                    'photo_count' => 0,
+                    'cover_photo_id' => $photo->id(),
+                ];
+            }
+            ++$items[$key]['photo_count'];
+        }
+        $immichAvailable = $this->immich->availability() === 'AVAILABLE';
+        // Class Archive chronology is the business truth. When it can form a
+        // reliable event/month/year memory, do not duplicate it with an
+        // opaque Immich collection over the same photos.
+        if ($items !== []) {
+            return ['available' => true, 'total' => count($items), 'items' => array_values($items)];
+        }
+        if (!$immichAvailable) {
             return ['available' => false, 'total' => 0, 'items' => []];
         }
-        $allowed = self::allowedIdSet($visible);
         $items = [];
+        $ordinal = 0;
         foreach ($this->immich->memoriesForVisiblePhotos(array_keys($allowed)) as $candidate) {
             if (!$candidate instanceof GatewayMemoryCandidate) {
                 throw new \RuntimeException('class_archive_gateway_memory_candidate_invalid');
             }
-            $count = self::intersectionCount($candidate->classPhotoIds(), $allowed);
-            if ($count === 0) {
+            $members = [];
+            foreach ($candidate->classPhotoIds() as $classPhotoId) {
+                if (isset($allowed[$classPhotoId]) && isset($byId[$classPhotoId])) {
+                    $members[$classPhotoId] = true;
+                }
+            }
+            if ($members === []) {
                 continue;
             }
-            $items[] = ['label' => $candidate->label(), 'photo_count' => $count];
+            $coverPhotoId = null;
+            foreach ($visible as $photo) {
+                if (isset($members[$photo->id()])) {
+                    $coverPhotoId = $photo->id();
+                    break;
+                }
+            }
+            if ($coverPhotoId === null) {
+                throw new \RuntimeException('class_archive_gateway_memory_cover_invalid');
+            }
+            ++$ordinal;
+            $items['immich:' . $ordinal] = [
+                'label' => $candidate->label(),
+                'kind' => 'COLLECTION',
+                'photo_count' => count($members),
+                'cover_photo_id' => $coverPhotoId,
+            ];
         }
 
-        return ['available' => true, 'total' => count($items), 'items' => $items];
+        return ['available' => true, 'total' => count($items), 'items' => array_values($items)];
     }
 
     /** @return list<GatewayPhotoCandidate> */
@@ -294,13 +343,24 @@ final class GatewayService
             if ($label === '人物') {
                 $label = '人物 ' . $ordinal;
             }
-            $items[] = [
+            $coverPhotoId = $person['candidate']->coverPhotoId();
+            if ($coverPhotoId === null || !isset($memberIds[$coverPhotoId]) || !isset($photosById[$coverPhotoId])) {
+                $coverPhotoId = (string) $photos[0]['id'];
+            }
+            $portraitFocus = hash_equals($coverPhotoId, (string) ($person['candidate']->coverPhotoId() ?? ''))
+                ? $person['candidate']->portraitFocus()
+                : null;
+            $item = [
                 'id' => $id,
                 'label' => $label,
                 'photo_count' => count($photos),
-                'cover_photo_id' => (string) $photos[0]['id'],
+                'cover_photo_id' => $coverPhotoId,
                 'items' => $photos,
             ];
+            if ($portraitFocus !== null) {
+                $item['portrait_focus'] = $portraitFocus;
+            }
+            $items[] = $item;
         }
 
         return ['available' => true, 'items' => $items];

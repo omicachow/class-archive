@@ -937,9 +937,33 @@ function archiveTimelineProjection(payload) {
   return { total, groups: output };
 }
 
+function archiveMemoryProjection(payload) {
+  if (!payload || typeof payload !== 'object' || payload.available !== true
+    || !Number.isInteger(payload.total) || !Array.isArray(payload.items) || payload.total !== payload.items.length) {
+    throw new GatewayResponseError(503);
+  }
+  const ids = new Set();
+  const items = payload.items.map((memory) => {
+    if (!memory || typeof memory !== 'object' || typeof memory.label !== 'string'
+      || memory.label.length < 1 || memory.label.length > 190
+      || !Number.isInteger(memory.photo_count) || memory.photo_count < 1
+      || typeof memory.cover_photo_id !== 'string' || !UUID_V4.test(memory.cover_photo_id)
+      || typeof memory.kind !== 'string' || !['EVENT', 'MONTH', 'YEAR', 'TERM', 'COLLECTION'].includes(memory.kind)) {
+      throw new GatewayResponseError(503);
+    }
+    const coverPhotoId = memory.cover_photo_id.toLowerCase();
+    const key = `${memory.kind}:${memory.label}:${coverPhotoId}`;
+    if (ids.has(key)) throw new GatewayResponseError(503);
+    ids.add(key);
+    return { label: memory.label, kind: memory.kind, photo_count: memory.photo_count, cover_photo_id: coverPhotoId };
+  });
+  return { total: items.length, items };
+}
+
 function archivePersonProjection(person) {
   if (!person || typeof person !== 'object' || typeof person.id !== 'string' || !UUID_V4.test(person.id)
     || typeof person.label !== 'string' || person.label.length < 1 || person.label.length > 190
+    || typeof person.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)
     || !Number.isInteger(person.photo_count) || person.photo_count < 1 || !Array.isArray(person.items)
     || person.items.length !== person.photo_count) {
     throw new GatewayResponseError(503);
@@ -954,7 +978,26 @@ function archivePersonProjection(person) {
     const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
     return { id, title, archive_date: archiveDateProjection(photo) };
   });
-  return { id: person.id.toLowerCase(), label: person.label, photo_count: person.photo_count, items };
+  const coverPhotoId = person.cover_photo_id.toLowerCase();
+  if (!ids.has(coverPhotoId)) {
+    throw new GatewayResponseError(503);
+  }
+  const portraitFocus = normalizePortraitFocus(person.portrait_focus);
+  return {
+    id: person.id.toLowerCase(), label: person.label, photo_count: person.photo_count,
+    cover_photo_id: coverPhotoId, portrait_focus: portraitFocus, items,
+  };
+}
+
+function normalizePortraitFocus(value) {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'x,y,zoom'
+    || !Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.zoom)
+    || value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1 || value.zoom < 1 || value.zoom > 6) {
+    throw new GatewayResponseError(503);
+  }
+  return { x: value.x, y: value.y, zoom: value.zoom };
 }
 
 function compatibleAssetOwner(role) {
@@ -1132,9 +1175,10 @@ function opaqueId(namespace, label) {
 function compatibleAlbums(payload, role) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   return items
-    .filter((entry) => typeof entry?.name === 'string' && Number.isInteger(entry?.total))
+    .filter((entry) => typeof entry?.name === 'string' && Number.isInteger(entry?.total)
+      && typeof entry?.cover_photo_id === 'string' && UUID_V4.test(entry.cover_photo_id))
     .map((entry) => ({
-      id: opaqueId('album', entry.name), albumName: entry.name, description: '', albumThumbnailAssetId: null,
+      id: opaqueId('album', entry.name), albumName: entry.name, description: '', albumThumbnailAssetId: entry.cover_photo_id.toLowerCase(),
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
       albumUsers: [{ user: compatibleAssetOwner(role), role: 'owner' }], shared: false, hasSharedLink: false,
       startDate: null, endDate: null, lastModifiedAssetTimestamp: null, assetCount: entry.total, order: 'desc',
@@ -1177,6 +1221,12 @@ function compatiblePerson(person, role) {
     id: person.id,
     name: person.label,
     photoCount: person.photo_count,
+    // Public ClassArchivePhoto UUID selected from this already role-filtered
+    // projection. The owned Photo UI can request it through the ordinary
+    // canonical asset route, avoiding a second full People projection for
+    // every portrait while MediaGuard still authorizes the bytes.
+    coverPhotoId: person.cover_photo_id,
+    portraitFocus: normalizePortraitFocus(person.portrait_focus),
     birthDate: null,
     thumbnailPath: `/api/people/${person.id}/thumbnail`,
     isHidden: false,
@@ -1458,6 +1508,12 @@ async function handleApi(request, response, url, clientAddress) {
       exactQuery(url, new Set());
       const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
       respondJson(response, request.method, 200, archiveTimelineProjection(timeline));
+      return;
+    }
+    if (url.pathname === '/api/class-archive/memories') {
+      exactQuery(url, new Set());
+      const memories = await gatewayJson(request, '/api/memories', clientAddress);
+      respondJson(response, request.method, 200, archiveMemoryProjection(memories));
       return;
     }
     if (url.pathname === '/api/albums') {

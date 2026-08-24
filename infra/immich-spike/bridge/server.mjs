@@ -7,6 +7,8 @@ const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_IMMICH_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ASSETS = 500;
 const MAX_MEMBERS = 1000;
+const SEARCH_CANDIDATE_WINDOW = 500;
+const MAX_SEARCH_RESULTS = 50;
 const IMMICH_API = 'http://immich-server:2283/api';
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BRIDGE_TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
@@ -214,28 +216,75 @@ async function people(allowed) {
   const people = response?.people;
   if (!Array.isArray(people) || people.length > 500) fail('immich_people_invalid');
   const result = [];
-  for (const person of people) {
-    const id = person?.id;
-    if (typeof id !== 'string' || !UUID_V4.test(id)) fail('immich_person_id_invalid');
-    const assets = assetIdsFromResponse(await immich('/search/metadata', 'POST', { personIds: [id], page: 1, size: 1000 }));
-    const classPhotoIds = canonicalIds(assets, allowed);
-    if (classPhotoIds.length > 0) {
+  // Immich exposes face coordinates per asset. Resolve a bounded number of
+  // local metadata requests concurrently so a cold People page cannot exceed
+  // the Gateway timeout merely because a real class photo contains many
+  // clusters. No media bytes or upstream ids leave this bridge.
+  for (let offset = 0; offset < people.length; offset += 12) {
+    const batch = await Promise.all(people.slice(offset, offset + 12).map(async (person) => {
+      const id = person?.id;
+      if (typeof id !== 'string' || !UUID_V4.test(id)) fail('immich_person_id_invalid');
+      const assets = assetIdsFromResponse(await immich('/search/metadata', 'POST', { personIds: [id], page: 1, size: 1000 }));
+      const classPhotoIds = canonicalIds(assets, allowed);
+      if (classPhotoIds.length === 0) return null;
+      let portrait = null;
+      for (const assetId of assets) {
+        const classPhotoId = allowed.get(assetId);
+        if (classPhotoId === undefined) continue;
+        const faces = await immich(`/faces?id=${encodeURIComponent(assetId)}`);
+        if (!Array.isArray(faces) || faces.length > 1000) fail('immich_asset_faces_invalid');
+        const face = faces.find((candidate) => candidate?.person?.id === id);
+        if (!face) continue;
+        const values = [
+          face.boundingBoxX1, face.boundingBoxY1, face.boundingBoxX2, face.boundingBoxY2,
+          face.imageWidth, face.imageHeight,
+        ];
+        // A malformed/legacy crop is presentation metadata, not authority.
+        // Ignore that crop and retain the already-authorized canonical cover;
+        // never let it broaden membership or select another asset.
+        if (!values.every((value) => Number.isFinite(value))) continue;
+        const [x1, y1, x2, y2, width, height] = values;
+        if (width <= 0 || height <= 0 || x1 < 0 || y1 < 0 || x2 <= x1 || y2 <= y1 || x2 > width || y2 > height) {
+          continue;
+        }
+        const faceRatio = Math.max((x2 - x1) / width, (y2 - y1) / height);
+        const rounded = (value) => Math.round(value * 10_000) / 10_000;
+        portrait = {
+          cover_class_photo_id: classPhotoId,
+          portrait_focus: {
+            x: rounded(((x1 + x2) / 2) / width),
+            y: rounded(((y1 + y2) / 2) / height),
+            zoom: rounded(Math.min(5, Math.max(1.15, 0.55 / faceRatio))),
+          },
+        };
+        break;
+      }
       // This upstream UUID travels only over the private bridge to the
       // ClassArchivePerson mapper. It is never sent to the browser; the
       // public gateway replaces it with a fresh opaque Class Archive UUID.
-      result.push({ immich_person_id: id, class_photo_ids: classPhotoIds });
-    }
+      return {
+        immich_person_id: id,
+        class_photo_ids: classPhotoIds,
+        cover_class_photo_id: portrait?.cover_class_photo_id ?? classPhotoIds[0],
+        portrait_focus: portrait?.portrait_focus ?? null,
+      };
+    }));
+    result.push(...batch.filter((item) => item !== null));
   }
   return result;
 }
 
 async function smartSearch(allowed, query) {
-  const response = await immich('/search/smart', 'POST', { query, page: 1, size: MAX_ASSETS });
+  // Fetch a bounded ranking window, apply the caller's canonical policy
+  // membership, and only then take the product Top-K.  Capping the upstream
+  // result before ACL would make a Family search depend on how many denied
+  // LIVING assets happened to rank above its visible HERITAGE assets.
+  const response = await immich('/search/smart', 'POST', { query, page: 1, size: SEARCH_CANDIDATE_WINDOW });
   const assetIds = assetIdsFromResponse(response);
   // Only mapped, policy-approved canonical ids leave this private boundary.
   // The public Gateway recomputes its visible count and pagination over this
   // already bounded membership list; Immich's total/cursor never cross.
-  return canonicalIds(assetIds, allowed);
+  return canonicalIds(assetIds, allowed).slice(0, MAX_SEARCH_RESULTS);
 }
 
 function respond(response, status, value) {
@@ -252,6 +301,10 @@ function respond(response, status, value) {
 const server = createServer(async (request, response) => {
   try {
     const route = request.url ?? '';
+    if (request.method === 'GET' && route === '/healthz') {
+      respond(response, 200, { status: 'ok' });
+      return;
+    }
     if (request.method !== 'POST' || !['/v1/people', '/v1/memories', '/v1/search'].includes(route)) {
       fail('route_not_found', 404);
     }
@@ -266,7 +319,10 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     const status = error instanceof BridgeError ? error.status : 503;
     // Never log a request body, authorization value, Immich payload, asset id
-    // or filesystem path. A generic response prevents an adapter oracle.
+    // or filesystem path. A generic response prevents an adapter oracle; the
+    // fixed internal code remains useful for local health diagnosis.
+    const code = error instanceof BridgeError ? error.code : 'unexpected';
+    console.error(`CLASS_ARCHIVE_IMMICH_GATEWAY_DIAGNOSTIC status=${status} code=${code}`);
     respond(response, status, { error: status === 403 ? 'forbidden' : status === 404 ? 'not_found' : 'unavailable' });
   }
 });

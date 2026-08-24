@@ -266,11 +266,16 @@ final class GatewayPhotoCandidate
 /** Candidate membership only; the gateway recomputes the visible count. */
 final class GatewayPersonCandidate
 {
-    /** @param list<string> $classPhotoIds */
+    /**
+     * @param list<string> $classPhotoIds
+     * @param array{x:float,y:float,zoom:float}|null $portraitFocus
+     */
     public function __construct(
         private readonly string $classPersonId,
         private readonly ?string $label,
         private readonly array $classPhotoIds,
+        private readonly ?string $coverPhotoId = null,
+        private readonly ?array $portraitFocus = null,
     ) {
         ClassArchivePerson::idToBinary($classPersonId);
         if ($label !== null && ($label === '' || strlen($label) > 190 || str_contains($label, "\0"))) {
@@ -281,6 +286,31 @@ final class GatewayPersonCandidate
                 throw new \InvalidArgumentException('class_archive_gateway_person_photo_invalid');
             }
             ClassArchivePhoto::idToBinary($id);
+        }
+        if ($coverPhotoId !== null) {
+            ClassArchivePhoto::idToBinary($coverPhotoId);
+            if (!in_array($coverPhotoId, $classPhotoIds, true)) {
+                throw new \InvalidArgumentException('class_archive_gateway_person_cover_invalid');
+            }
+        }
+        if ($portraitFocus !== null) {
+            $keys = array_keys($portraitFocus);
+            sort($keys, SORT_STRING);
+            if ($coverPhotoId === null || $keys !== ['x', 'y', 'zoom']) {
+                throw new \InvalidArgumentException('class_archive_gateway_person_focus_invalid');
+            }
+            foreach (['x', 'y', 'zoom'] as $key) {
+                if (!is_int($portraitFocus[$key]) && !is_float($portraitFocus[$key])) {
+                    throw new \InvalidArgumentException('class_archive_gateway_person_focus_invalid');
+                }
+            }
+            $x = (float) $portraitFocus['x'];
+            $y = (float) $portraitFocus['y'];
+            $zoom = (float) $portraitFocus['zoom'];
+            if (!is_finite($x) || !is_finite($y) || !is_finite($zoom)
+                || $x < 0.0 || $x > 1.0 || $y < 0.0 || $y > 1.0 || $zoom < 1.0 || $zoom > 6.0) {
+                throw new \InvalidArgumentException('class_archive_gateway_person_focus_invalid');
+            }
         }
     }
 
@@ -298,6 +328,24 @@ final class GatewayPersonCandidate
     public function classPhotoIds(): array
     {
         return $this->classPhotoIds;
+    }
+
+    public function coverPhotoId(): ?string
+    {
+        return $this->coverPhotoId;
+    }
+
+    /** @return array{x:float,y:float,zoom:float}|null */
+    public function portraitFocus(): ?array
+    {
+        if ($this->portraitFocus === null) {
+            return null;
+        }
+        return [
+            'x' => (float) $this->portraitFocus['x'],
+            'y' => (float) $this->portraitFocus['y'],
+            'zoom' => (float) $this->portraitFocus['zoom'],
+        ];
     }
 }
 
