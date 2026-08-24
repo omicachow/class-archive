@@ -537,6 +537,21 @@ function ciPeoplePrepare(string $run): never
                 ciPeopleFail('imported_checksum_failed');
             }
             $canonical = $mapping->ensurePiwigoMapping($imageId, $checksum, $reference);
+            if (!class_exists('ClassArchiveDerivativeWarmupQueue', false)
+                || !class_exists('ClassArchiveDerivativeCacheWarmer', false)
+            ) {
+                ciPeopleFail('derivative_warmup_runtime_missing');
+            }
+            $classPhotoId = (string) ($canonical['class_photo_id'] ?? '');
+            // Import is an explicit synthetic write workflow. Publish the
+            // same persisted Piwigo profiles used by approved submissions and
+            // private QA imports before any browser read; request-time media
+            // delivery stays cache-only and fail-closed.
+            if (!\ClassArchiveDerivativeWarmupQueue::enqueueBestEffort($classPhotoId, $imageId)
+                || !\ClassArchiveDerivativeCacheWarmer::warmBestEffort($classPhotoId, $imageId)
+            ) {
+                ciPeopleFail('derivative_warmup_failed');
+            }
             $repository->execute(
                 'INSERT INTO `' . $repository->table('archive_image') . '` '
                 . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`created_at`,`updated_at`) '
@@ -545,7 +560,7 @@ function ciPeoplePrepare(string $run): never
             );
             $state['images'][] = [
                 'id' => $imageId,
-                'class_photo_id' => (string) $canonical['class_photo_id'],
+                'class_photo_id' => $classPhotoId,
                 'era' => $item['era'],
                 'media_reference' => $reference,
                 'fixture_kind' => $item['kind'],
@@ -1074,10 +1089,11 @@ function ciPeopleCleanup(string $run): never
         }
         delete_categories([(int) $album['id']], 'no_delete');
     }
-    // Fixture cleanup is also a write workflow. Restore the durable
-    // 72-photo projection now, rather than leaving the next GET to rebuild or
-    // consume a stale all-library payload.
-    ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+    // Projection publication runs after this business cleanup returns, in a
+    // fresh PHP process. This process loaded the bridge flag before restoring
+    // config and deleting the secret; rebuilding here would reuse that stale
+    // in-memory config and incorrectly contact the disabled bridge. The outer
+    // runner keeps reads fail-closed until its idempotent publish succeeds.
     if (!unlink($path) || file_exists($path) || is_link($path)) {
         ciPeopleFail('state_cleanup_failed');
     }

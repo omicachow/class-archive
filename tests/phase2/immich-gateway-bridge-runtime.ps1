@@ -658,13 +658,24 @@ function Invoke-PiwigoFixture([string]$Action, [string]$Run, $RequestPayload = $
 }
 
 function Invoke-PiwigoReadProjectionRebuild {
-    $text = Invoke-PiwigoCompose @(
-        'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
-        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all'
-    )
-    if ($text -notmatch '(?m)^READ_PROJECTION_REBUILD=PASS\b') {
-        throw 'piwigo_projection_cleanup_rebuild_failed'
+    # The just-finished fixture removed many native image rows and can leave a
+    # brief Docker/PHP health transition. Retry only the deterministic publish,
+    # never the business cleanup, and keep the bound short and fail-closed.
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            $text = Invoke-PiwigoCompose @(
+                'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+                '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all'
+            )
+            if ($text -match '(?m)^READ_PROJECTION_REBUILD=PASS\b') {
+                return
+            }
+        } catch {
+            if ($attempt -eq 5) { break }
+        }
+        if ($attempt -lt 5) { Start-Sleep -Seconds 2 }
     }
+    throw 'piwigo_projection_cleanup_rebuild_failed'
 }
 
 function Provision-PiwigoFixtureAccounts([string]$Password) {
@@ -704,10 +715,21 @@ function Rebuild-BridgeBackedReadProjections {
         '--scope=aggregates', '--kinds=PEOPLE,MEMORIES', '--json'
     )
     try { $result = $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'bridge_projection_rebuild_response_invalid' }
+    $changedKinds = @($result.aggregates.changed_kinds)
+    $unexpectedChangedKinds = @($changedKinds | Where-Object { $_ -notin @('PEOPLE', 'MEMORIES') })
+    $states = @{}
+    foreach ($projection in @($result.projections)) {
+        if ($null -ne $projection.kind) { $states[[string]$projection.kind] = [string]$projection.state }
+    }
+    # changed_kinds is a delta, not the requested set. Archive-derived
+    # Memories may already be byte-identical when the bridge becomes
+    # available, while People must change from unavailable to populated.
     Assert-Exact ([string]$result.result -eq 'PASS' `
-        -and @($result.aggregates.changed_kinds).Count -eq 2 `
-        -and @($result.aggregates.changed_kinds) -contains 'PEOPLE' `
-        -and @($result.aggregates.changed_kinds) -contains 'MEMORIES') 'bridge_projection_rebuild_invalid'
+        -and $result.aggregates.dry_run -eq $false `
+        -and $changedKinds -contains 'PEOPLE' `
+        -and $unexpectedChangedKinds.Count -eq 0 `
+        -and $states['PEOPLE'] -eq 'ACTIVE' `
+        -and $states['MEMORIES'] -eq 'ACTIVE') 'bridge_projection_rebuild_invalid'
 }
 
 function Invoke-WS([Uri]$Uri, [Microsoft.PowerShell.Commands.WebRequestSession]$Session, [hashtable]$Body) {
@@ -1174,22 +1196,23 @@ try {
             $fault = Invoke-PiwigoFixture 'fault-era-start' $run $faultPayload
             Assert-Exact ([bool]$fault.ok -and -not [bool]$fault.restored) 'era_fault_start_failed'
             $eraFaultStarted = $true
-            $ambiguous = Read-GatewayJson (Invoke-Gateway $faultSearchUri $sessions['CLASSMATE']) 'ambiguous_era_search'
-            $ambiguousIds = @($ambiguous.items | ForEach-Object { [string]$_.id })
-            # Search is a policy-filtered Top-K. If the baseline already fills
-            # K, removing one ambiguous candidate may safely promote the next
-            # authorized ranked candidate, so the public count need not fall
-            # by exactly one. Prove the ambiguous id is absent, the returned
-            # aggregate is self-consistent and bounded, and direct metadata
-            # lookup is equally opaque.
-            Assert-Exact ([int]$ambiguous.total -eq @($ambiguous.items).Count -and [int]$ambiguous.total -le [int]$baselineFaultSearch.total -and $ambiguousIds -notcontains [string]$faultTarget[0].id) 'ambiguous_era_not_filtered'
+            # The opposite-root association is a native Piwigo mutation. Its
+            # durable trigger rotates the source epoch and makes the complete
+            # catalog unavailable immediately; serving a filtered 200 from an
+            # older generation would be a stale-policy bypass. A generic 503
+            # is therefore the required fail-closed result until rebuild.
+            Assert-SearchUnavailable $faultSearchUri $sessions['CLASSMATE'] 'ambiguous_era_search'
             $ambiguousPhotoUri = [Uri]::new($baseUri, ('api/photos/' + [string]$faultTarget[0].id))
-            $ambiguousPhoto = Read-GatewayJson (Invoke-Gateway $ambiguousPhotoUri $sessions['CLASSMATE']) 'ambiguous_era_photo' 404
-            Assert-Exact ($ambiguousPhoto.error -is [string] -and $ambiguousPhoto.error.Length -gt 0) 'ambiguous_era_photo_not_filtered'
+            $ambiguousPhoto = Read-GatewayJson (Invoke-Gateway $ambiguousPhotoUri $sessions['CLASSMATE']) 'ambiguous_era_photo' 503
+            Assert-Exact ($ambiguousPhoto.error -is [string] -and $ambiguousPhoto.error.Length -gt 0) 'ambiguous_era_photo_not_unavailable'
         } finally {
             if ($eraFaultStarted) {
                 $restored = Invoke-PiwigoFixture 'fault-era-stop' $run $faultPayload
                 Assert-Exact ([bool]$restored.ok -and [bool]$restored.restored) 'era_fault_restore_failed'
+                # The second native mutation restores business truth but also
+                # advances the source epoch. Publish a verified generation in
+                # a separate write-side process before testing later faults.
+                Invoke-PiwigoReadProjectionRebuild
             }
         }
 
@@ -1270,34 +1293,17 @@ try {
         try { Invoke-Logout $wsUri $session } catch { if ($null -eq $failure) { $failure = $_; $failureStage = 'logout' } }
     }
     if ($fixturePrepared) {
-        # Piwigo's application and PHP workers can transiently restart after a
-        # disposable local bridge/browser run. The fixture's own cleanup is
-        # state-file driven and proves the exact 72-image baseline, so retry
-        # only an uncompleted invocation once. Never ignore a failure: a
-        # leftover synthetic image/index is a test-safety failure even when a
-        # primary browser assertion has already failed.
-        $cleanupComplete = $false
-        $lastCleanupFailure = $null
-        for ($cleanupAttempt = 1; $cleanupAttempt -le 2; $cleanupAttempt++) {
-            try {
-                $script:stage = 'cleanup_piwigo_fixture'
-                $cleanup = Invoke-PiwigoFixture 'cleanup' $run
-                Assert-Exact ([bool]$cleanup.ok) 'piwigo_fixture_cleanup_invalid'
-                # Binding and cleanup deliberately change canonical mapping
-                # source generations. Once the bridge is disabled and its
-                # temporary mappings are gone, publish a baseline projection
-                # again so the next reader does not inherit an AI-available
-                # payload from the disposable run.
-                Invoke-PiwigoReadProjectionRebuild
-                $cleanupComplete = $true
-                break
-            } catch {
-                $lastCleanupFailure = $_
-                if ($cleanupAttempt -lt 2) { Start-Sleep -Seconds 2 }
-            }
-        }
-        if (-not $cleanupComplete) {
-            $fixtureCleanupFailure = $lastCleanupFailure
+        # Business cleanup mutates MyISAM and InnoDB state and therefore runs
+        # exactly once. Projection publication is a separate idempotent phase
+        # in a fresh PHP process, so it observes the restored bridge config and
+        # only that safe publish step receives a bounded retry.
+        try {
+            $script:stage = 'cleanup_piwigo_fixture'
+            $cleanup = Invoke-PiwigoFixture 'cleanup' $run
+            Assert-Exact ([bool]$cleanup.ok) 'piwigo_fixture_cleanup_invalid'
+            Invoke-PiwigoReadProjectionRebuild
+        } catch {
+            $fixtureCleanupFailure = $_
             if ($null -eq $failure) {
                 $failure = $fixtureCleanupFailure
                 $failureStage = 'cleanup_piwigo_fixture'
@@ -1367,7 +1373,7 @@ Write-Output "IMMICH_GATEWAY_BRIDGE=PASS evidence=RUNTIME_TESTED assertions=$scr
 if ($useRuntimePeopleSearch) {
     Write-Output 'IMMICH_RUNTIME_AI_ACL=PASS evidence=RUNTIME_TESTED people_count_filter=PASS person_thumbnail_filter=PASS smart_search_count_filter=PASS roles=CLASSMATE_FAMILY_TEACHER_ANONYMOUS'
     if (-not $searchFailClosedPassed) { throw 'search_fail_closed_completion_missing' }
-    Write-Output 'IMMICH_RUNTIME_SEARCH_FAIL_CLOSED=PASS evidence=RUNTIME_TESTED ml_unavailable=503 immich_unavailable=503 mapping_missing=503 ambiguous_era=FILTERED gateway_db=503'
+    Write-Output 'IMMICH_RUNTIME_SEARCH_FAIL_CLOSED=PASS evidence=RUNTIME_TESTED ml_unavailable=503 immich_unavailable=503 mapping_missing=503 ambiguous_era=503 gateway_db=503'
     if ($BrowserE2E.IsPresent) {
         if (-not $browserPassed) { throw 'browser_e2e_completion_missing' }
         Write-Output $browserResult
