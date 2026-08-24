@@ -32,8 +32,8 @@ const app = await readFile(files.app, 'utf8');
 const i18n = await readFile(files.i18n, 'utf8');
 const server = await readFile(files.server, 'utf8');
 
-check(html.includes('type="module" src="/photo-ui/app.js"'), 'document must load the owned module');
-check(html.includes('href="/photo-ui/app.css"'), 'document must load the owned stylesheet');
+check(html.includes('type="module" src="/photo-ui/app.js?v=__PHOTO_UI_ASSET_REV__"'), 'document must load the versioned owned module');
+check(html.includes('href="/photo-ui/app.css?v=__PHOTO_UI_ASSET_REV__"'), 'document must load the versioned owned stylesheet');
 check(!/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), 'document must not use inline scripts');
 
 for (const [route, label] of [
@@ -60,7 +60,8 @@ const rootRouteStart = server.indexOf("if (url.pathname === '/')");
 const rootPrincipal = server.indexOf('await principal(request, clientAddress)', rootRouteStart);
 const rootPhotoRedirect = server.indexOf("response.setHeader('Location', '/photos')", rootRouteStart);
 check(rootRouteStart >= 0 && rootPrincipal > rootRouteStart && rootPhotoRedirect > rootPrincipal, 'root route must authenticate before redirecting to the photo product');
-check((server.match(/url\.searchParams\.size !== 0/g) ?? []).length >= 3, 'root, owned routes, and owned static files must fail closed on unknown query parameters');
+check((server.match(/url\.searchParams\.size !== 0/g) ?? []).length >= 2, 'root and owned routes must fail closed on unknown query parameters');
+check(server.includes("url.searchParams.get('v') !== revision"), 'owned static assets must accept only their current content revision');
 const detailPhotoPrecheck = server.indexOf('gatewayJson(request, `/api/photos/${photoId}`', uiRouteStart);
 const detailPersonPrecheck = server.indexOf('gatewayJson(request, `/api/people/${personId}`', uiRouteStart);
 check(detailPhotoPrecheck > uiPrincipal && detailPhotoPrecheck < uiDocument, 'photo detail document must be prechecked by the canonical Gateway');
@@ -80,15 +81,16 @@ check(server.includes("url.pathname === '/class-archive-timeline'"), 'legacy cla
 check(server.includes('/class-archive-person/'), 'legacy class-archive person route must remain available');
 check(server.includes('/class-archive-photo/'), 'legacy class-archive photo route must remain available');
 
-check(app.includes("apiJson('/api/class-archive/timeline')"), 'timeline must use the archive-aware projection');
-check(app.includes("apiJson('/api/people?size=500&withHidden=false')"), 'people must use the policy-filtered BFF endpoint');
+check(app.includes("presentationJson('/api/class-archive/timeline')"), 'timeline must use the cached archive-aware projection');
+check(app.includes("presentationJson('/api/people?size=500&withHidden=false')"), 'people must use the policy-filtered presentation cache');
 check(app.includes("apiJson('/api/search/metadata'"), 'hybrid search must use metadata search');
 check(app.includes("apiJson('/api/search/smart'"), 'hybrid search must use safe smart search');
 check(app.includes("apiJson(`/api/class-archive/search/hybrid?${params}`)"), 'search must prefer the structured Class Archive hybrid projection');
-check(app.includes("apiJson('/api/albums')"), 'albums must use the BFF contract');
-check(app.includes("apiJson('/api/class-archive/memories')"), 'memories must use the archive-aware BFF contract');
+check(app.includes("presentationJson('/api/class-archive/albums')"), 'albums must use the cached BFF contract');
+check(app.includes("presentationJson('/api/class-archive/memories')"), 'memories must use the cached archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
-check(app.includes("['thumbnail', 'preview'].includes(size)"), 'owned media helper must allow only thumbnail and preview');
+check(app.includes("['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)"), 'owned media helper must use only canonical responsive derivatives');
+check(app.includes("if (revision) params.set('v', revision)"), 'owned media URLs must carry the opaque content revision when available');
 check(!app.includes('/original'), 'owned UI must not request an original endpoint');
 check(!app.includes(':2283') && !app.includes('immich-server') && !app.includes('immich_asset_id'), 'owned UI must not expose the internal Immich media boundary');
 check(!app.includes('ownerId') && !app.includes('assetId') && !app.includes('personId'), 'owned UI must not render or depend on technical identifier fields');
@@ -99,16 +101,41 @@ check(app.includes("event.key === 'ArrowLeft'"), 'viewer must support previous-p
 check(app.includes("event.key === 'ArrowRight'"), 'viewer must support next-photo keyboard navigation');
 check(app.includes("event.key === 'Escape'"), 'viewer must support Escape');
 check(app.includes('updateZoom'), 'viewer must expose bounded zoom controls');
-check(app.includes("mediaUrl(id, 'preview')"), 'viewer must use a MediaGuard-backed preview');
+check(app.includes("responsivePhotoImage(photo, 'viewer'"), 'viewer must use a responsive MediaGuard-backed preview');
 check(app.includes("addEventListener('touchstart'"), 'viewer must start mobile touch gesture tracking');
 check(app.includes("addEventListener('touchmove'"), 'viewer must handle two-finger pinch movement');
 check(app.includes("addEventListener('touchend'"), 'viewer must complete horizontal swipe navigation');
 check(app.includes("gesture = { type: 'pinch'"), 'viewer must distinguish pinch from swipe gestures');
 check(app.includes('Math.abs(deltaX) >= 56'), 'viewer swipe must use a deliberate horizontal threshold');
 check(app.includes('prefetchAdjacentPreviews(photos, index)'), 'viewer must prefetch only adjacent authorized previews');
-check(app.includes("preview.src = mediaUrl(adjacent.id, 'preview')"), 'adjacent prefetch must remain on the BFF MediaGuard preview route');
+check(app.includes("preview.src = mediaUrl(adjacent.id, 'preview', adjacent.mediaRevision ?? '')"), 'adjacent prefetch must remain on the versioned BFF MediaGuard preview route');
+check(app.includes('new IntersectionObserver') && app.includes("rootMargin: '700px 0px'"), 'grid media must use bounded viewport overscan');
+check(app.includes("index < 6"), 'only the first-screen grid cards may load eagerly');
+check(app.includes('image.srcset = image.dataset.srcset') && app.includes('image.sizes = options.sizes'), 'grid must expose responsive srcset and sizes');
+check(app.includes('sessionStorage.setItem') && app.includes('sessionStorage.removeItem'), 'presentation SWR must remain session-scoped and purgeable');
+check(app.includes("window.addEventListener('pagehide'")
+  && app.includes("window.addEventListener('pageshow'")
+  && app.includes('event.persisted')
+  && app.includes("document.visibilityState !== 'visible'")
+  && app.includes('concealPrivatePresentation();'),
+  'back-forward and background-tab transitions must conceal private pixels before revalidating the session');
+check(app.includes('runtime.cacheScope !== verifiedScope')
+  && app.includes('runtime.presentationFailureActive || runtime.cacheScope !== verifiedScope')
+  && app.includes('failClosedPresentation(error);')
+  && !app.includes('if (cached !== null) return cached;'),
+  'presentation SWR failures must remove stale data instead of treating it as a successful refresh');
+check(app.includes('function assertPresentationActive()')
+  && app.includes("throw new Error('safe_presentation_fail_closed')"),
+  'parallel presentation reads must not repaint after a sibling read has failed closed');
+check(app.includes('function reloadProjectionBackedRoute()')
+  && (app.match(/reloadProjectionBackedRoute,/g) ?? []).length === 2,
+  'Spotlight mutations must reload through the epoch-aware presentation invalidation path');
 
 check(css.includes('--sidebar: 220px'), 'desktop sidebar must be 220px');
+check(css.includes('html[data-session-revalidating="true"] #app')
+  && css.includes('visibility: hidden')
+  && css.includes('pointer-events: none'),
+  'the session barrier must hide and disable the old private interface');
 check(app.includes("const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my'])"), 'mobile navigation must use the five product tabs');
 check(css.includes('grid-template-columns: repeat(5, minmax(0, 1fr))'), 'mobile navigation must have five equal tabs');
 check(css.includes('env(safe-area-inset-bottom)'), 'mobile navigation must respect the safe area');
@@ -123,7 +150,17 @@ check(css.includes('.viewer-page[data-info-open="true"] .viewer-nav'), 'mobile V
 check(app.includes("history.scrollRestoration = 'manual'") && app.includes('window.scrollTo(0, 0)'), 'full-page product navigation must start at a stable top position');
 check(app.includes("new Intl.DateTimeFormat('zh-CN'"), 'Spotlight expiry must use a natural localized date instead of a raw database timestamp');
 check(!app.includes('createElementNS') && !app.includes('iconPaths'), 'owned UI must not hand-draw substitute icon assets');
-check(app.includes("mediaUrl(album.coverPhotoId, 'thumbnail')") && css.includes('.album-cover'), 'album cards must use authorized canonical cover artwork');
-check(app.includes("mediaUrl(memory.coverPhotoId, 'thumbnail')") && css.includes('.memory-card'), 'memory cards must use authorized archive cover artwork');
+check(app.includes("mediaUrl(album.coverPhotoId, 'medium')") && css.includes('.album-cover'), 'album cards must use an authorized medium cover derivative');
+check(app.includes("mediaUrl(memory.coverPhotoId, 'large')") && css.includes('.memory-card'), 'memory cards must use an authorized large cover derivative');
+
+check(server.includes("'public, max-age=31536000, immutable'"), 'versioned app shell assets must use native immutable HTTP caching');
+check(server.includes("'private, no-cache, max-age=0, must-revalidate, no-transform'"), 'private media and metadata must revalidate rather than use public caching');
+check(server.includes("url.pathname === '/service-worker.js'") && server.includes("'Not found.'"), 'private media must not be retained by a service worker');
+check(server.includes('photoUiCacheScope(request, role, presentationEpoch, clientAddress)')
+  && server.includes('.update(presentationEpoch)')
+  && server.includes('payload.role !== role'),
+  'presentation cache scope must bind to a consistent fresh role and scoped projection epoch');
+check(server.includes("'/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app'"), 'login must return through Piwigo\'s canonical authenticated photo-first bridge');
+check(server.includes("fetchSite === 'same-site'") && server.includes("url.pathname === '/photos'") && server.includes("request.headers['sec-fetch-mode'] === 'navigate'") && server.includes("request.headers['sec-fetch-dest'] === 'document'"), 'cross-port login return must be limited to the exact top-level photos document');
 
 process.stdout.write(`${JSON.stringify({ suite: 'phase3-photo-ui-static', assertions, result: 'PASS' })}\n`);

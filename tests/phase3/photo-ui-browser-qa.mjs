@@ -363,7 +363,7 @@ async function viewer(page, role, mobile) {
   await waitForDecoded(page, '.viewer-image[src^="/api/assets/"]', 1, `${role}_viewer_decoded`);
   assert(await page.locator('.viewer-image[data-load-state="error"]').count() === 0, `${role}_viewer_image_error`);
   const src = await page.locator('.viewer-image').getAttribute('src');
-  assert(/^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=preview$/i.test(src ?? ''), `${role}_viewer_media_path`);
+  assert(/^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=preview&v=[a-f0-9]{32}$/i.test(src ?? ''), `${role}_viewer_media_path`);
   const info = page.getByRole('button', { name: '照片信息', exact: true });
   assert(await info.count() === 1, `${role}_viewer_info_button`);
   await info.click();
@@ -521,8 +521,23 @@ async function submitOpenDialog(page, reasonText) {
   if (await reason.count()) await reason.fill(reasonText);
   const submit = dialog.locator('button.primary-button').last();
   assert(await submit.count() === 1, 'product_dialog_submit_missing');
+  const mutationResponse = page.waitForResponse((response) => {
+    const request = response.request();
+    return request.method() === 'POST' && response.url().startsWith(photoOrigin.origin)
+      && new URL(response.url()).pathname.startsWith('/api/class-archive/');
+  }, { timeout: 30_000 });
+  const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
   await submit.click();
-  await page.waitForTimeout(850);
+  const response = await mutationResponse.catch(() => null);
+  assert(response !== null && response.status() >= 200 && response.status() < 300, 'product_dialog_mutation_failed');
+  // Every successful product mutation used by this E2E deliberately reloads
+  // the route. Wait for that concrete navigation instead of a timer measured
+  // from the click: the server mutation itself can take longer than the toast
+  // delay, which previously let the next locator race the old document.
+  assert(await navigation, 'product_dialog_navigation_missing');
+  await page.waitForFunction(() => document.readyState === 'complete', null, { timeout: 15_000 }).catch(() => null);
 }
 
 async function createManagedPerson(page, label) {
@@ -810,6 +825,26 @@ async function spotlightJourney() {
     assert(await create.count() === 1, 'classmate_spotlight_create_missing');
     await create.click();
     await submitOpenDialog(memberPage, '本地浏览器精选验收');
+    if (process.env.CLASS_ARCHIVE_BROWSER_DEBUG === '1') {
+      const postCreateState = await memberPage.evaluate(async () => {
+        const [stateResponse, spotlightResponse] = await Promise.all([
+          fetch('/api/class-archive/product-state', { credentials: 'same-origin', cache: 'no-store' }),
+          fetch('/api/class-archive/spotlight', { credentials: 'same-origin', cache: 'no-store' }),
+        ]);
+        const spotlight = await spotlightResponse.json().catch(() => ({}));
+        return {
+          productStatus: stateResponse.status,
+          spotlightStatus: spotlightResponse.status,
+          spotlightActive: spotlight?.active === true,
+          hasItem: spotlight?.item != null,
+          activeLabels: [...document.querySelectorAll('.light-status')]
+            .filter((node) => node.textContent?.trim() === '当前正在精选展示').length,
+          createButtons: [...document.querySelectorAll('button')]
+            .filter((node) => node.textContent?.trim() === '设为 24 小时精选').length,
+        };
+      });
+      process.stderr.write(`SPOTLIGHT_POST_CREATE ${JSON.stringify(postCreateState)}\n`);
+    }
     const activeStatus = memberPage.getByText('当前正在精选展示', { exact: true });
     await activeStatus.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
     assert(await activeStatus.count() === 1, 'classmate_spotlight_active');

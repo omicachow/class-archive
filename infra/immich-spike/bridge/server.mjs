@@ -9,6 +9,10 @@ const MAX_ASSETS = 500;
 const MAX_MEMBERS = 1000;
 const SEARCH_CANDIDATE_WINDOW = 500;
 const MAX_SEARCH_RESULTS = 50;
+const PEOPLE_ASSET_PAGE_SIZE = 500;
+const MAX_PEOPLE_ASSET_PAGES = 40;
+const FACE_LOOKUP_CONCURRENCY = 24;
+const MAX_PORTRAIT_FOCUS_LOOKUPS = 48;
 const IMMICH_API = 'http://immich-server:2283/api';
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BRIDGE_TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
@@ -215,61 +219,121 @@ async function people(allowed) {
   const response = await immich('/people?size=500&withHidden=false');
   const people = response?.people;
   if (!Array.isArray(people) || people.length > 500) fail('immich_people_invalid');
-  const result = [];
-  // Immich exposes face coordinates per asset. Resolve a bounded number of
-  // local metadata requests concurrently so a cold People page cannot exceed
-  // the Gateway timeout merely because a real class photo contains many
-  // clusters. No media bytes or upstream ids leave this bridge.
-  for (let offset = 0; offset < people.length; offset += 12) {
-    const batch = await Promise.all(people.slice(offset, offset + 12).map(async (person) => {
-      const id = person?.id;
-      if (typeof id !== 'string' || !UUID_V4.test(id)) fail('immich_person_id_invalid');
-      const assets = assetIdsFromResponse(await immich('/search/metadata', 'POST', { personIds: [id], page: 1, size: 1000 }));
-      const classPhotoIds = canonicalIds(assets, allowed);
-      if (classPhotoIds.length === 0) return null;
-      let portrait = null;
-      for (const assetId of assets) {
-        const classPhotoId = allowed.get(assetId);
-        if (classPhotoId === undefined) continue;
-        const faces = await immich(`/faces?id=${encodeURIComponent(assetId)}`);
-        if (!Array.isArray(faces) || faces.length > 1000) fail('immich_asset_faces_invalid');
-        const face = faces.find((candidate) => candidate?.person?.id === id);
-        if (!face) continue;
-        const values = [
-          face.boundingBoxX1, face.boundingBoxY1, face.boundingBoxX2, face.boundingBoxY2,
-          face.imageWidth, face.imageHeight,
-        ];
-        // A malformed/legacy crop is presentation metadata, not authority.
-        // Ignore that crop and retain the already-authorized canonical cover;
-        // never let it broaden membership or select another asset.
-        if (!values.every((value) => Number.isFinite(value))) continue;
-        const [x1, y1, x2, y2, width, height] = values;
-        if (width <= 0 || height <= 0 || x1 < 0 || y1 < 0 || x2 <= x1 || y2 <= y1 || x2 > width || y2 > height) {
-          continue;
+  const records = new Map();
+  for (const person of people) {
+    const id = person?.id;
+    if (typeof id !== 'string' || !UUID_V4.test(id) || records.has(id)) fail('immich_person_id_invalid');
+    records.set(id, {
+      id,
+      classPhotoIds: [],
+      classPhotoSet: new Set(),
+      coverAssetId: null,
+      coverClassPhotoId: null,
+      portraitFocus: null,
+    });
+  }
+  if (records.size === 0) return [];
+
+  // One paginated metadata scan returns the person memberships already
+  // attached to each asset. This replaces the previous N-person query fanout
+  // (and its N x face-query tail latency) while retaining the exact same ACL
+  // boundary: only asset ids present in `allowed` contribute membership,
+  // count or cover selection. Upstream totals and denied ids never leave the
+  // bridge.
+  const seenAssets = new Set();
+  let page = 1;
+  for (let pageCount = 0; pageCount < MAX_PEOPLE_ASSET_PAGES; pageCount += 1) {
+    const metadata = await immich('/search/metadata', 'POST', {
+      withPeople: true,
+      page,
+      size: PEOPLE_ASSET_PAGE_SIZE,
+    });
+    const assets = metadata?.assets?.items;
+    const nextPage = metadata?.assets?.nextPage;
+    if (!Array.isArray(assets) || assets.length > PEOPLE_ASSET_PAGE_SIZE
+      || !(nextPage === null || (typeof nextPage === 'string' && /^\d+$/.test(nextPage)))) {
+      fail('immich_assets_invalid');
+    }
+    for (const asset of assets) {
+      const assetId = asset?.id;
+      if (typeof assetId !== 'string' || !UUID_V4.test(assetId) || seenAssets.has(assetId)) {
+        fail('immich_asset_id_invalid');
+      }
+      seenAssets.add(assetId);
+      const classPhotoId = allowed.get(assetId);
+      if (classPhotoId === undefined) continue;
+      const memberships = asset?.people;
+      if (!Array.isArray(memberships) || memberships.length > 500) fail('immich_people_invalid');
+      for (const membership of memberships) {
+        const personId = membership?.id;
+        if (typeof personId !== 'string' || !UUID_V4.test(personId)) fail('immich_person_id_invalid');
+        const record = records.get(personId);
+        if (record === undefined || record.classPhotoSet.has(classPhotoId)) continue;
+        record.classPhotoSet.add(classPhotoId);
+        record.classPhotoIds.push(classPhotoId);
+        if (record.coverAssetId === null) {
+          record.coverAssetId = assetId;
+          record.coverClassPhotoId = classPhotoId;
         }
-        const faceRatio = Math.max((x2 - x1) / width, (y2 - y1) / height);
-        const rounded = (value) => Math.round(value * 10_000) / 10_000;
-        portrait = {
-          cover_class_photo_id: classPhotoId,
-          portrait_focus: {
+      }
+    }
+    if (nextPage === null) break;
+    const candidatePage = Number(nextPage);
+    if (!Number.isSafeInteger(candidatePage) || candidatePage <= page) fail('immich_assets_invalid');
+    page = candidatePage;
+    if (pageCount === MAX_PEOPLE_ASSET_PAGES - 1) fail('immich_assets_invalid');
+  }
+
+  // Face coordinates are optional presentation metadata. Resolve a bounded
+  // leading set of unique authorized covers once (group photos often cover
+  // many people); all remaining cards safely use the full-photo crop. This
+  // keeps a cold People projection within the bridge deadline without making
+  // crop availability part of membership or cover authorization.
+  const coverAssets = [...new Set(
+    [...records.values()].map((record) => record.coverAssetId).filter((id) => typeof id === 'string'),
+  )].slice(0, MAX_PORTRAIT_FOCUS_LOOKUPS);
+  const facesByAsset = new Map();
+  for (let offset = 0; offset < coverAssets.length; offset += FACE_LOOKUP_CONCURRENCY) {
+    const ids = coverAssets.slice(offset, offset + FACE_LOOKUP_CONCURRENCY);
+    const settled = await Promise.allSettled(ids.map((assetId) => immich(`/faces?id=${encodeURIComponent(assetId)}`)));
+    settled.forEach((item, index) => {
+      if (item.status === 'fulfilled' && Array.isArray(item.value) && item.value.length <= 1000) {
+        facesByAsset.set(ids[index], item.value);
+      }
+    });
+  }
+
+  const rounded = (value) => Math.round(value * 10_000) / 10_000;
+  const result = [];
+  for (const record of records.values()) {
+    if (record.classPhotoIds.length === 0 || record.coverAssetId === null || record.coverClassPhotoId === null) continue;
+    const faces = facesByAsset.get(record.coverAssetId) ?? [];
+    const face = faces.find((candidate) => candidate?.person?.id === record.id);
+    if (face) {
+      const values = [
+        face.boundingBoxX1, face.boundingBoxY1, face.boundingBoxX2, face.boundingBoxY2,
+        face.imageWidth, face.imageHeight,
+      ];
+      if (values.every((value) => Number.isFinite(value))) {
+        const [x1, y1, x2, y2, width, height] = values;
+        if (width > 0 && height > 0 && x1 >= 0 && y1 >= 0 && x2 > x1 && y2 > y1 && x2 <= width && y2 <= height) {
+          const faceRatio = Math.max((x2 - x1) / width, (y2 - y1) / height);
+          record.portraitFocus = {
             x: rounded(((x1 + x2) / 2) / width),
             y: rounded(((y1 + y2) / 2) / height),
             zoom: rounded(Math.min(5, Math.max(1.15, 0.55 / faceRatio))),
-          },
-        };
-        break;
+          };
+        }
       }
-      // This upstream UUID travels only over the private bridge to the
-      // ClassArchivePerson mapper. It is never sent to the browser; the
-      // public gateway replaces it with a fresh opaque Class Archive UUID.
-      return {
-        immich_person_id: id,
-        class_photo_ids: classPhotoIds,
-        cover_class_photo_id: portrait?.cover_class_photo_id ?? classPhotoIds[0],
-        portrait_focus: portrait?.portrait_focus ?? null,
-      };
-    }));
-    result.push(...batch.filter((item) => item !== null));
+    }
+    // This upstream UUID travels only over the private bridge to the
+    // ClassArchivePerson mapper. It is never sent to the browser.
+    result.push({
+      immich_person_id: record.id,
+      class_photo_ids: record.classPhotoIds,
+      cover_class_photo_id: record.coverClassPhotoId,
+      portrait_focus: record.portraitFocus,
+    });
   }
   return result;
 }

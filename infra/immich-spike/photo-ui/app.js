@@ -1,4 +1,4 @@
-import { applyDocumentTranslations, t } from './i18n.js';
+import { applyDocumentTranslations, t } from './i18n.js?v=__PHOTO_UI_ASSET_REV__';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const app = document.getElementById('app');
@@ -16,12 +16,26 @@ const MUTATION_PATHS = new Set([
   '/api/class-archive/spotlight/create',
   '/api/class-archive/spotlight/cancel',
 ]);
+const PRESENTATION_CACHE_PREFIX = 'class-archive-photo-ui-v2:';
+const PRESENTATION_CACHE_SCOPE_KEY = `${PRESENTATION_CACHE_PREFIX}active-scope`;
+const PRESENTATION_CACHE_PATHS = new Set([
+  '/api/class-archive/timeline',
+  '/api/class-archive/spotlight',
+  '/api/class-archive/albums',
+  '/api/class-archive/memories',
+  '/api/people?size=500&withHidden=false',
+]);
+const PRESENTATION_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 const runtime = {
   productStatePromise: null,
+  productStateFailure: null,
   manageOptionsPromise: null,
   activeSelection: null,
   dialogSequence: 0,
+  cacheScope: null,
+  sessionValidationGeneration: 0,
+  presentationFailureActive: false,
 };
 
 const navigation = Object.freeze([
@@ -113,9 +127,18 @@ function emptyState(titleKey, bodyKey) {
 }
 
 function loadingState() {
-  const state = element('section', 'empty-state');
+  const state = element('section', 'photo-loading');
   state.setAttribute('aria-live', 'polite');
-  state.append(element('p', '', t('common.loading')));
+  state.append(element('span', 'sr-only', t('common.loading')));
+  const heading = element('div', 'loading-heading');
+  append(heading, element('span', 'skeleton-line skeleton-line-title'), element('span', 'skeleton-line skeleton-line-meta'));
+  const grid = element('div', 'loading-photo-grid');
+  for (let index = 0; index < 12; index += 1) {
+    const tile = element('span', 'loading-photo-tile');
+    tile.style.setProperty('--skeleton-ratio', index % 4 === 0 ? '1.36' : index % 3 === 0 ? '.78' : '1.05');
+    grid.append(tile);
+  }
+  append(state, heading, grid);
   return state;
 }
 
@@ -126,6 +149,30 @@ function errorState() {
   button.addEventListener('click', () => location.reload());
   append(state, element('h2', '', t('common.safeErrorTitle')), element('p', '', t('common.safeErrorBody')), button);
   return state;
+}
+
+function concealPrivatePresentation() {
+  document.documentElement.dataset.sessionRevalidating = 'true';
+  app.setAttribute('aria-busy', 'true');
+}
+
+function revealPrivatePresentation() {
+  delete document.documentElement.dataset.sessionRevalidating;
+  app.removeAttribute('aria-busy');
+}
+
+function failClosedPresentation(error) {
+  clearPresentationCache();
+  concealPrivatePresentation();
+  runtime.presentationFailureActive = true;
+  if (error?.status === 401 || error?.status === 403) return;
+  if (runtime.activeSelection) runtime.activeSelection.destroy();
+  app.replaceChildren(errorState());
+  if (document.visibilityState === 'visible') revealPrivatePresentation();
+}
+
+function assertPresentationActive() {
+  if (runtime.presentationFailureActive) throw new Error('safe_presentation_fail_closed');
 }
 
 function showLoading(active, titleKey, leadKey) {
@@ -223,14 +270,81 @@ function apiError(response) {
   return error;
 }
 
+function clearPresentationCache() {
+  runtime.cacheScope = null;
+  try {
+    for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(PRESENTATION_CACHE_PREFIX)) sessionStorage.removeItem(key);
+    }
+  } catch {
+    // A disabled/full browser storage area is a performance miss, never an
+    // authorization fallback. The next request still goes to the server.
+  }
+}
+
+function reloadProjectionBackedRoute() {
+  // A successful mutation can rotate the server presentation epoch before a
+  // same-tab reload observes the new product state. Session storage survives
+  // that reload, so an old projection could otherwise paint once and remain
+  // visible on pages that do not repaint their SWR refresh (album detail in
+  // particular). Remove the old epoch-bound payload before navigation and
+  // conceal the private DOM while the fresh document is loading.
+  runtime.productStatePromise = null;
+  runtime.productStateFailure = null;
+  runtime.presentationFailureActive = false;
+  clearPresentationCache();
+  concealPrivatePresentation();
+  location.reload();
+}
+
+function presentationCacheKey(path) {
+  if (!runtime.cacheScope || !PRESENTATION_CACHE_PATHS.has(path)) return null;
+  return `${PRESENTATION_CACHE_PREFIX}${runtime.cacheScope}:${path}`;
+}
+
+function readPresentationCache(path) {
+  const key = presentationCacheKey(path);
+  if (!key) return null;
+  try {
+    const record = JSON.parse(sessionStorage.getItem(key) ?? 'null');
+    if (!record || record.scope !== runtime.cacheScope || record.path !== path
+      || !Number.isFinite(record.storedAt) || Date.now() - record.storedAt > PRESENTATION_CACHE_MAX_AGE_MS
+      || !Object.hasOwn(record, 'payload')) {
+      sessionStorage.removeItem(key);
+      return null;
+    }
+    return record.payload;
+  } catch {
+    try { sessionStorage.removeItem(key); } catch { }
+    return null;
+  }
+}
+
+function writePresentationCache(path, payload) {
+  const key = presentationCacheKey(path);
+  if (!key) return;
+  try {
+    sessionStorage.setItem(key, JSON.stringify({
+      scope: runtime.cacheScope,
+      path,
+      storedAt: Date.now(),
+      payload,
+    }));
+  } catch {
+    // Quota/storage denial must not alter the fresh server result.
+  }
+}
+
 async function apiJson(path, options = {}) {
   const response = await fetch(path, {
     credentials: 'same-origin',
-    cache: 'no-store',
+    cache: options.cache ?? 'no-cache',
     ...options,
     headers: { Accept: 'application/json', ...(options.headers ?? {}) },
   });
-  if (response.status === 401) {
+  if (response.status === 401 || response.status === 403) {
+    clearPresentationCache();
     location.assign('/auth/login');
     throw apiError(response);
   }
@@ -240,22 +354,79 @@ async function apiJson(path, options = {}) {
   return response.json();
 }
 
+async function presentationJson(path) {
+  if (!PRESENTATION_CACHE_PATHS.has(path)) throw new Error('safe_presentation_cache_path_invalid');
+  assertPresentationActive();
+  const state = await productState();
+  if (state.role === 'UNKNOWN' || !state.cacheScope) {
+    const error = runtime.productStateFailure ?? new Error('safe_product_state_unavailable');
+    failClosedPresentation(error);
+    throw error;
+  }
+  const verifiedScope = state.cacheScope;
+  const cached = readPresentationCache(path);
+  const refresh = apiJson(path, { cache: 'no-cache' }).then((payload) => {
+    if (runtime.presentationFailureActive || runtime.cacheScope !== verifiedScope
+      || document.visibilityState !== 'visible') {
+      throw new Error('safe_presentation_session_changed');
+    }
+    writePresentationCache(path, payload);
+    return payload;
+  }).catch((error) => {
+    failClosedPresentation(error);
+    throw error;
+  });
+  // Some pages intentionally paint an already verified session-scoped value
+  // before the refresh completes. Register a rejection observer even when the
+  // page does not need the fresh value for repainting; failClosedPresentation
+  // has already removed the stale DOM before this observer settles.
+  refresh.catch(() => undefined);
+  if (cached !== null) return { value: cached, refresh, cacheHit: true };
+  return { value: await refresh, refresh: null, cacheHit: false };
+}
+
 function normalizeProductState(payload) {
   const knownRoles = new Set(['SYSTEM_ADMIN', 'ARCHIVIST', 'CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS']);
   const role = knownRoles.has(payload?.role) ? payload.role : 'UNKNOWN';
+  const presentationEpoch = typeof payload?.presentationEpoch === 'string'
+    && /^[a-f0-9]{64}$/.test(payload.presentationEpoch) ? payload.presentationEpoch : null;
+  const cacheScope = presentationEpoch !== null && typeof payload?.cacheScope === 'string'
+    && /^[a-f0-9]{32}$/.test(payload.cacheScope) ? payload.cacheScope : null;
   return {
     role,
     canManage: (payload?.canManage === true || payload?.can_manage === true) && ['SYSTEM_ADMIN', 'ARCHIVIST'].includes(role),
     canSpotlight: (payload?.canSpotlight === true || payload?.can_spotlight === true) && ['CLASSMATE', 'TEACHER'].includes(role),
     csrfToken: safeText(payload?.csrfToken ?? payload?.csrf_token, ''),
+    presentationEpoch,
+    cacheScope,
   };
 }
 
 async function productState() {
   if (!runtime.productStatePromise) {
     runtime.productStatePromise = apiJson('/api/class-archive/product-state')
-      .then(normalizeProductState)
-      .catch(() => normalizeProductState(null));
+      .then((payload) => {
+        runtime.productStateFailure = null;
+        const state = normalizeProductState(payload);
+        if (!state.cacheScope || state.role === 'UNKNOWN') {
+          clearPresentationCache();
+          return state;
+        }
+        let storedScope = null;
+        try { storedScope = sessionStorage.getItem(PRESENTATION_CACHE_SCOPE_KEY); } catch { }
+        if ((runtime.cacheScope !== null && runtime.cacheScope !== state.cacheScope)
+          || (storedScope !== null && storedScope !== state.cacheScope)) {
+          clearPresentationCache();
+        }
+        runtime.cacheScope = state.cacheScope;
+        try { sessionStorage.setItem(PRESENTATION_CACHE_SCOPE_KEY, state.cacheScope); } catch { }
+        return state;
+      })
+      .catch((error) => {
+        runtime.productStateFailure = error;
+        clearPresentationCache();
+        return normalizeProductState(null);
+      });
   }
   return runtime.productStatePromise;
 }
@@ -351,10 +522,17 @@ function normalizeArchivePhoto(photo) {
   if (!photo || !validId(photo.id)) throw new Error('safe_photo_invalid');
   const archive = photo.archive_date && typeof photo.archive_date === 'object' ? photo.archive_date : {};
   const fallback = rawArchiveDate(photo);
+  const width = Number.isSafeInteger(photo.width) && photo.width > 0 && photo.width <= 200000 ? photo.width : null;
+  const height = Number.isSafeInteger(photo.height) && photo.height > 0 && photo.height <= 200000 ? photo.height : null;
+  const mediaRevision = typeof photo.media_revision === 'string' && /^[a-f0-9]{32}$/.test(photo.media_revision)
+    ? photo.media_revision : '';
   return {
     id: photo.id.toLowerCase(),
     title: businessLabel(photo.title, 'accessibility.photo'),
     eventLabel: safeText(photo.eventLabel ?? photo.event_label, ''),
+    width,
+    height,
+    mediaRevision,
     archiveDate: {
       label: safeText(archive.label, fallback.label),
       precision: safeText(archive.precision, fallback.precision),
@@ -387,9 +565,78 @@ function normalizeTimeline(payload) {
   return { total: payload.total, groups };
 }
 
-function mediaUrl(id, size) {
-  if (!validId(id) || !['thumbnail', 'preview'].includes(size)) throw new Error('safe_media_path_invalid');
-  return `/api/assets/${id.toLowerCase()}/thumbnail?size=${size}`;
+function mediaUrl(id, size, revision = '') {
+  if (!validId(id) || !['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)) {
+    throw new Error('safe_media_path_invalid');
+  }
+  if (revision !== '' && !/^[a-f0-9]{32}$/.test(revision)) throw new Error('safe_media_revision_invalid');
+  const params = new URLSearchParams({ size });
+  if (revision) params.set('v', revision);
+  return `/api/assets/${id.toLowerCase()}/thumbnail?${params}`;
+}
+
+const lazyImageObserver = typeof IntersectionObserver === 'function'
+  ? new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        activateImage(entry.target);
+        observer.unobserve(entry.target);
+      }
+    }, { rootMargin: '700px 0px', threshold: 0.01 })
+  : null;
+
+function activateImage(image) {
+  if (!(image instanceof HTMLImageElement) || image.dataset.activated === 'true') return;
+  image.dataset.activated = 'true';
+  if (image.dataset.srcset) image.srcset = image.dataset.srcset;
+  if (image.dataset.src) image.src = image.dataset.src;
+}
+
+function responsivePhotoSource(photo, purpose = 'grid') {
+  const revision = photo?.mediaRevision ?? '';
+  const variants = [
+    ['xsmall', 432, 324],
+    ['small', 576, 432],
+    ['medium', 792, 594],
+    ['large', 1008, 756],
+    ['preview', 1224, 918],
+  ];
+  const policies = {
+    // The desktop shell reserves navigation and gutters, so each of the five
+    // masonry columns is about 15vw rather than 20vw. A truthful sizes hint
+    // keeps Chrome from choosing the next, unnecessarily heavy derivative.
+    grid: { initial: 'xsmall', sizes: '(max-width: 680px) 33vw, (max-width: 1100px) 25vw, 15vw' },
+    search: { initial: 'small', sizes: '(max-width: 680px) 33vw, (max-width: 1100px) 50vw, 25vw' },
+    portrait: { initial: 'small', sizes: '(max-width: 680px) 28vw, 190px' },
+    cover: { initial: 'medium', sizes: '(max-width: 680px) 100vw, (max-width: 1100px) 50vw, 34vw' },
+    hero: { initial: 'large', sizes: '100vw' },
+    viewer: { initial: 'preview', sizes: '100vw' },
+  };
+  const policy = policies[purpose] ?? policies.grid;
+  const sourceWidth = Number(photo?.width);
+  const sourceHeight = Number(photo?.height);
+  const hasDimensions = Number.isFinite(sourceWidth) && sourceWidth > 0
+    && Number.isFinite(sourceHeight) && sourceHeight > 0;
+  const responsiveVariants = [];
+  let previousWidth = 0;
+  for (const [variant, maxWidth, maxHeight] of variants) {
+    const outputWidth = hasDimensions
+      ? Math.max(1, Math.floor(sourceWidth * Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight)))
+      : Math.min(maxWidth, maxHeight);
+    if (outputWidth <= previousWidth) continue;
+    responsiveVariants.push(`${mediaUrl(photo.id, variant, revision)} ${outputWidth}w`);
+    previousWidth = outputWidth;
+  }
+  return {
+    src: mediaUrl(photo.id, policy.initial, revision),
+    // Piwigo profiles are bounding boxes, not guaranteed output widths. Using
+    // the box width as a srcset descriptor makes portrait photos look blurry
+    // because the browser overestimates the pixels it will receive. Describe
+    // the projected, aspect-ratio-preserving output width instead.
+    srcset: responsiveVariants.join(', '),
+    sizes: policy.sizes,
+    aspectRatio: photo.width && photo.height ? `${photo.width} / ${photo.height}` : '',
+  };
 }
 
 const adjacentPreviewCache = new Map();
@@ -401,7 +648,7 @@ function prefetchAdjacentPreviews(photos, index) {
     const preview = new Image();
     preview.decoding = 'async';
     preview.referrerPolicy = 'no-referrer';
-    preview.src = mediaUrl(adjacent.id, 'preview');
+    preview.src = mediaUrl(adjacent.id, 'preview', adjacent.mediaRevision ?? '');
     adjacentPreviewCache.set(adjacent.id, preview);
   }
   while (adjacentPreviewCache.size > 4) {
@@ -409,12 +656,17 @@ function prefetchAdjacentPreviews(photos, index) {
   }
 }
 
-function resilientImage(src, alt, eager = false) {
+function resilientImage(src, alt, eager = false, options = {}) {
   const image = element('img');
   image.alt = alt;
   image.loading = eager ? 'eager' : 'lazy';
   image.decoding = 'async';
   image.referrerPolicy = 'no-referrer';
+  if (typeof options.sizes === 'string' && options.sizes) image.sizes = options.sizes;
+  if (typeof options.srcset === 'string' && options.srcset) image.dataset.srcset = options.srcset;
+  if (typeof options.aspectRatio === 'string' && options.aspectRatio) image.style.aspectRatio = options.aspectRatio;
+  if (eager) image.fetchPriority = 'high';
+  image.dataset.src = src;
   let failures = 0;
   image.addEventListener('load', () => {
     failures = 0;
@@ -424,8 +676,10 @@ function resilientImage(src, alt, eager = false) {
     failures += 1;
     if (failures <= 2) {
       image.dataset.loadState = 'retrying';
+      image.dataset.activated = 'false';
       image.removeAttribute('src');
-      setTimeout(() => { image.src = src; }, failures * 900);
+      image.removeAttribute('srcset');
+      setTimeout(() => activateImage(image), failures * 900);
       return;
     }
     // Keep a translated error state in the authorized card. Removing the
@@ -434,8 +688,14 @@ function resilientImage(src, alt, eager = false) {
     image.dataset.loadState = 'error';
     image.alt = alt || t('common.imageUnavailable');
   });
-  image.src = src;
+  if (eager || lazyImageObserver === null) activateImage(image);
+  else lazyImageObserver.observe(image);
   return image;
+}
+
+function responsivePhotoImage(photo, purpose = 'grid', alt = '', eager = false) {
+  const source = responsivePhotoSource(photo, purpose);
+  return resilientImage(source.src, alt, eager, source);
 }
 
 function normalizeManageOptions(payload) {
@@ -723,7 +983,7 @@ function photoCard(photo, index = 0, controller = null) {
   marker.setAttribute('aria-hidden', 'true');
   const caption = element('span', 'photo-caption');
   append(caption, element('strong', '', photo.title), element('span', '', photo.archiveDate.label));
-  append(link, resilientImage(mediaUrl(photo.id, 'thumbnail'), '', index < 9), marker, caption);
+  append(link, responsivePhotoImage(photo, 'grid', '', index < 6), marker, caption);
   if (controller) {
     const selectionIndex = controller.photos.findIndex((item) => item.id === photo.id);
     if (selectionIndex >= 0) controller.bind(link, selectionIndex);
@@ -810,7 +1070,7 @@ async function openReasonMutation(titleKey, leadKey, path, payload, onSuccess) {
 
 function spotlightHero(spotlight, state) {
   const hero = element('section', 'spotlight-hero');
-  const cover = resilientImage(mediaUrl(spotlight.coverPhotoId, 'thumbnail'), '', true);
+  const cover = resilientImage(mediaUrl(spotlight.coverPhotoId, 'preview'), '', true, { sizes: '100vw' });
   const shade = element('div', 'spotlight-shade');
   const copy = element('div', 'spotlight-copy');
   append(copy,
@@ -831,7 +1091,7 @@ function spotlightHero(spotlight, state) {
       '',
       '/api/class-archive/spotlight/cancel',
       { spotlightId: spotlight.id },
-      () => location.reload(),
+      reloadProjectionBackedRoute,
     ));
     actions.append(cancel);
   }
@@ -840,46 +1100,66 @@ function spotlightHero(spotlight, state) {
   return hero;
 }
 
+function paintPhotos(timelinePayload, state, spotlightPayload) {
+  assertPresentationActive();
+  if (runtime.activeSelection) runtime.activeSelection.destroy();
+  const timeline = normalizeTimeline(timelinePayload);
+  const spotlight = normalizeSpotlight(spotlightPayload);
+  const page = element('div');
+  append(page, pageHeader('photos.title', 'photos.lead', t('common.photosCount', { count: timeline.total })));
+  if (spotlight) page.append(spotlightHero(spotlight, state));
+  const utility = element('div', 'photo-utilities');
+  const memories = element('a', 'secondary-button', t('photos.memoriesEntry'));
+  memories.href = '/memories';
+  utility.append(memories);
+  let manageButton = null;
+  if (state.canManage && timeline.total > 0) {
+    manageButton = element('button', 'secondary-button', t('photos.organize'));
+    manageButton.type = 'button';
+    utility.append(manageButton);
+  }
+  page.append(utility);
+  if (timeline.total === 0) {
+    page.append(emptyState('photos.emptyTitle', 'photos.emptyBody'));
+  } else {
+    const allPhotos = timeline.groups.flatMap((group) => group.items);
+    const controller = state.canManage ? selectionController(allPhotos) : null;
+    if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
+    for (const group of timeline.groups) {
+      const section = element('section', 'timeline-section');
+      const heading = element('div', 'section-heading');
+      append(heading, element('h2', '', group.label), element('span', '', t('common.photosCount', { count: group.total })));
+      append(section, heading, photoGrid(group.items, '', controller));
+      page.append(section);
+    }
+    if (controller) page.append(element('p', 'selection-hint', t('photos.selectionHint')));
+  }
+  shell('photos', page);
+}
+
 async function renderPhotos() {
   showLoading('photos', 'photos.title', 'photos.lead');
   try {
-    const [timelinePayload, state, spotlightPayload] = await Promise.all([
-      apiJson('/api/class-archive/timeline'),
-      productState(),
-      apiJson('/api/class-archive/spotlight').catch(() => null),
+    const state = await productState();
+    if (state.role === 'UNKNOWN' || !state.cacheScope) throw new Error('safe_product_state_unavailable');
+    const [timelineRead, spotlightRead] = await Promise.all([
+      presentationJson('/api/class-archive/timeline'),
+      presentationJson('/api/class-archive/spotlight'),
     ]);
-    const timeline = normalizeTimeline(timelinePayload);
-    const spotlight = normalizeSpotlight(spotlightPayload);
-    const page = element('div');
-    append(page, pageHeader('photos.title', 'photos.lead', t('common.photosCount', { count: timeline.total })));
-    if (spotlight) page.append(spotlightHero(spotlight, state));
-    const utility = element('div', 'photo-utilities');
-    const memories = element('a', 'secondary-button', t('photos.memoriesEntry'));
-    memories.href = '/memories';
-    utility.append(memories);
-    let manageButton = null;
-    if (state.canManage && timeline.total > 0) {
-      manageButton = element('button', 'secondary-button', t('photos.organize'));
-      manageButton.type = 'button';
-      utility.append(manageButton);
+    assertPresentationActive();
+    paintPhotos(timelineRead.value, state, spotlightRead.value);
+    if (timelineRead.refresh || spotlightRead.refresh) {
+      Promise.all([
+        timelineRead.refresh ?? Promise.resolve(timelineRead.value),
+        spotlightRead.refresh ?? Promise.resolve(spotlightRead.value),
+      ]).then(([freshTimeline, freshSpotlight]) => {
+        assertPresentationActive();
+        if (location.pathname !== '/photos') return;
+        if (JSON.stringify(freshTimeline) === JSON.stringify(timelineRead.value)
+          && JSON.stringify(freshSpotlight) === JSON.stringify(spotlightRead.value)) return;
+        paintPhotos(freshTimeline, state, freshSpotlight);
+      }).catch((error) => failClosedPresentation(error));
     }
-    page.append(utility);
-    if (timeline.total === 0) {
-      page.append(emptyState('photos.emptyTitle', 'photos.emptyBody'));
-    } else {
-      const allPhotos = timeline.groups.flatMap((group) => group.items);
-      const controller = state.canManage ? selectionController(allPhotos) : null;
-      if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
-      for (const group of timeline.groups) {
-        const section = element('section', 'timeline-section');
-        const heading = element('div', 'section-heading');
-        append(heading, element('h2', '', group.label), element('span', '', t('common.photosCount', { count: group.total })));
-        append(section, heading, photoGrid(group.items, '', controller));
-        page.append(section);
-      }
-      if (controller) page.append(element('p', 'selection-hint', t('photos.selectionHint')));
-    }
-    shell('photos', page);
   } catch {
     const page = element('div');
     append(page, pageHeader('photos.title', 'photos.lead'), errorState());
@@ -909,11 +1189,12 @@ function infoRow(labelKey, value) {
 async function renderViewer(id) {
   app.replaceChildren(loadingState());
   try {
-    const [asset, timelinePayload] = await Promise.all([
+    const [asset, timelineRead] = await Promise.all([
       apiJson(`/api/assets/${id}`),
-      apiJson('/api/class-archive/timeline'),
+      presentationJson('/api/class-archive/timeline'),
     ]);
-    const timeline = normalizeTimeline(timelinePayload);
+    assertPresentationActive();
+    const timeline = normalizeTimeline(timelineRead.value);
     const photos = timeline.groups.flatMap((group) => group.items);
     const index = photos.findIndex((photo) => photo.id === id);
     if (index < 0) throw new Error('safe_viewer_membership_invalid');
@@ -925,7 +1206,7 @@ async function renderViewer(id) {
     page.dataset.infoOpen = 'false';
     const stage = element('section', 'viewer-stage');
     const wrap = element('div', 'viewer-image-wrap');
-    const image = resilientImage(mediaUrl(id, 'preview'), title, true);
+    const image = responsivePhotoImage(photo, 'viewer', title, true);
     image.className = 'viewer-image';
     wrap.append(image);
 
@@ -1079,7 +1360,7 @@ function normalizePortraitFocus(value) {
 }
 
 function portraitImage(person, eager = false) {
-  const image = resilientImage(mediaUrl(person.coverPhotoId, 'thumbnail'), '', eager);
+  const image = resilientImage(mediaUrl(person.coverPhotoId, 'small'), '', eager, { sizes: '(max-width: 680px) 28vw, 190px' });
   if (person.portraitFocus) {
     image.style.setProperty('--portrait-x', `${person.portraitFocus.x * 100}%`);
     image.style.setProperty('--portrait-y', `${person.portraitFocus.y * 100}%`);
@@ -1105,11 +1386,10 @@ function personCard(person) {
 async function renderPeople() {
   showLoading('people', 'people.title', 'people.lead');
   try {
-    const [peoplePayload, state] = await Promise.all([
-      apiJson('/api/people?size=500&withHidden=false'),
-      productState(),
-    ]);
-    const people = normalizePeople(peoplePayload);
+    const state = await productState();
+    const peopleRead = await presentationJson('/api/people?size=500&withHidden=false');
+    assertPresentationActive();
+    const people = normalizePeople(peopleRead.value);
     const page = element('div');
     append(page, pageHeader('people.title', 'people.lead', t('common.peopleCount', { count: people.length })));
     if (state.canManage) {
@@ -1188,7 +1468,7 @@ function managePersonRow(person, allPeople, selected, refreshSelection) {
     refreshSelection();
   });
   const portrait = element('span', 'manage-person-portrait');
-  if (person.coverPhotoId) portrait.append(resilientImage(mediaUrl(person.coverPhotoId, 'thumbnail'), '', false));
+  if (person.coverPhotoId) portrait.append(resilientImage(mediaUrl(person.coverPhotoId, 'xsmall'), '', false));
   const copy = element('div', 'manage-person-copy');
   append(copy,
     element('strong', '', person.name),
@@ -1305,7 +1585,7 @@ async function openPersonEditor(person, allPeople) {
     const photoChoices = element('div', 'manage-photo-grid');
     for (const photo of person.photos) {
       const card = element('div', 'manage-photo-choice');
-      card.append(resilientImage(mediaUrl(photo.id, 'thumbnail'), '', false));
+      card.append(resilientImage(mediaUrl(photo.id, 'xsmall'), '', false));
       const controls = element('div', 'manage-photo-controls');
       const cover = element('label', 'mini-choice');
       const coverInput = element('input');
@@ -1420,7 +1700,7 @@ function duplicateGroupCard(group) {
     input.value = photo.id;
     input.required = true;
     input.checked = index === 0;
-    const image = resilientImage(mediaUrl(photo.id, 'thumbnail'), '', false);
+    const image = resilientImage(mediaUrl(photo.id, 'xsmall'), '', false);
     append(label, input, image, element('span', '', photo.sourceCount > 0
       ? t('duplicates.sourcesCount', { count: photo.sourceCount })
       : photo.sourceLabel));
@@ -1955,7 +2235,7 @@ function albumCard(album) {
   const card = element('a', 'album-card');
   card.href = `/albums/${album.id}`;
   const cover = element('div', 'album-cover');
-  if (album.coverPhotoId) cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', false));
+  if (album.coverPhotoId) cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'medium'), '', false, { sizes: '(max-width: 680px) 100vw, 34vw' }));
   const copy = element('div', 'album-copy');
   append(copy,
     element('h3', 'album-title', album.name),
@@ -1980,18 +2260,14 @@ function albumSection(titleKey, leadKey, albums) {
 }
 
 async function loadAlbums() {
-  try {
-    return await apiJson('/api/class-archive/albums');
-  } catch (error) {
-    if (error?.status !== 404) throw error;
-    return apiJson('/api/albums');
-  }
+  return (await presentationJson('/api/class-archive/albums')).value;
 }
 
 async function renderAlbums() {
   showLoading('albums', 'albums.title', 'albums.lead');
   try {
     const albums = normalizeAlbums(await loadAlbums());
+    assertPresentationActive();
     const page = element('div');
     append(page, pageHeader('albums.title', 'albums.lead'));
     if (albums.length === 0) page.append(emptyState('albums.emptyTitle', 'albums.emptyBody'));
@@ -2022,19 +2298,20 @@ function normalizeAlbumDetail(payload) {
 async function renderAlbum(id) {
   showLoading('albums', 'albums.title', 'albums.lead');
   try {
-    const [albumPayload, state, spotlightPayload] = await Promise.all([
+    const [albumPayload, state, spotlightRead] = await Promise.all([
       apiJson(`/api/class-archive/albums/${id}`),
       productState(),
-      apiJson('/api/class-archive/spotlight').catch(() => null),
+      presentationJson('/api/class-archive/spotlight'),
     ]);
+    assertPresentationActive();
     const album = normalizeAlbumDetail(albumPayload);
-    const spotlight = normalizeSpotlight(spotlightPayload);
+    const spotlight = normalizeSpotlight(spotlightRead.value);
     const page = element('div');
     const back = element('a', 'back-link', t('albums.back'));
     back.href = '/albums';
     page.append(back);
     const hero = element('section', 'album-detail-hero');
-    if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'thumbnail'), '', true));
+    if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'preview'), '', true, { sizes: '100vw' }));
     const shade = element('div', 'album-detail-shade');
     append(shade,
       element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
@@ -2051,7 +2328,7 @@ async function renderAlbum(id) {
         'spotlight.createLead',
         '/api/class-archive/spotlight/create',
         { albumId: album.id, durationHours: 24 },
-        () => location.reload(),
+        reloadProjectionBackedRoute,
       ));
       heroActions.append(create);
     }
@@ -2093,7 +2370,8 @@ async function renderAlbum(id) {
 async function renderMemories() {
   showLoading('memories', 'memories.title', 'memories.lead');
   try {
-    const payload = await apiJson('/api/class-archive/memories');
+    const payload = (await presentationJson('/api/class-archive/memories')).value;
+    assertPresentationActive();
     if (!payload || !Number.isInteger(payload.total) || !Array.isArray(payload.items) || payload.total !== payload.items.length) {
       throw new Error('safe_memories_invalid');
     }
@@ -2122,7 +2400,7 @@ async function renderMemories() {
         const card = element('a', 'memory-card');
         card.href = memory.href;
         card.setAttribute('aria-label', `${t('memories.open')}: ${memory.label}`);
-        const cover = resilientImage(mediaUrl(memory.coverPhotoId, 'thumbnail'), '', false);
+        const cover = resilientImage(mediaUrl(memory.coverPhotoId, 'large'), '', false, { sizes: '(max-width: 680px) 100vw, 42vw' });
         const shade = element('div', 'memory-shade');
         append(shade, element('h2', 'memory-title', memory.label), element('p', 'memory-count', t('common.photosCount', { count: memory.count })));
         append(card, cover, shade);
@@ -2222,5 +2500,43 @@ async function start() {
   };
   await handlers[current.name]();
 }
+
+async function revalidateVisibleSession() {
+  concealPrivatePresentation();
+  const validationGeneration = ++runtime.sessionValidationGeneration;
+  const previousScope = runtime.cacheScope;
+  runtime.productStatePromise = null;
+  const state = await productState();
+  if (validationGeneration !== runtime.sessionValidationGeneration) return;
+  if (!state.cacheScope || state.role === 'UNKNOWN') {
+    clearPresentationCache();
+    location.replace('/auth/login');
+    return;
+  }
+  if (previousScope !== null && previousScope !== state.cacheScope) {
+    clearPresentationCache();
+    location.reload();
+    return;
+  }
+  if (document.visibilityState !== 'visible') return;
+  runtime.presentationFailureActive = false;
+  revealPrivatePresentation();
+}
+
+window.addEventListener('pagehide', () => {
+  ++runtime.sessionValidationGeneration;
+  concealPrivatePresentation();
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) void revalidateVisibleSession();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') {
+    ++runtime.sessionValidationGeneration;
+    concealPrivatePresentation();
+    return;
+  }
+  void revalidateVisibleSession();
+});
 
 void start();

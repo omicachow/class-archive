@@ -257,8 +257,20 @@ function Assert-PrivateResponse {
     param($Response, [Parameter(Mandatory = $true)][int]$Status, [Parameter(Mandatory = $true)][string]$Label)
 
     Assert-True ($Response.Status -eq $Status) "$Label returned HTTP $($Response.Status)"
-    Assert-True ($Response.CacheControl -like '*no-store*') "$Label response was cacheable"
+    $cacheControl = [string]$Response.CacheControl
+    $noStore = $cacheControl -like '*no-store*'
+    $privateRevalidation = $cacheControl -like '*private*' `
+        -and $cacheControl -like '*no-cache*' `
+        -and $cacheControl -like '*must-revalidate*' `
+        -and $cacheControl -notlike '*public*'
+    Assert-True ($noStore -or $privateRevalidation) "$Label response used an unsafe cache policy"
     Assert-True (-not $Response.Headers.ContainsKey('Access-Control-Allow-Origin')) "$Label enabled CORS"
+}
+
+function Assert-NoStore {
+    param($Response, [Parameter(Mandatory = $true)][string]$Label)
+
+    Assert-True ([string]$Response.CacheControl -like '*no-store*') "$Label did not remain no-store"
 }
 
 function Assert-Json {
@@ -380,16 +392,22 @@ try {
     Assert-True ($guestLoginTarget.AbsoluteUri -eq [Uri]::new($compatUri, 'class-archive-core/login').AbsoluteUri) 'guest_web_login_redirect_invalid'
     $guestLoginHandoff = Invoke-Http -Uri $guestLoginTarget -Session $sessions['GUEST']
     Assert-PrivateResponse -Response $guestLoginHandoff -Status 303 -Label 'guest core login handoff'
-    Assert-True ($guestLoginHandoff.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'guest_core_login_handoff_invalid'
+    # Piwigo only accepts same-origin redirect targets. The exact encoded
+    # plugin route performs the second bounded hop back to the photo product
+    # after authentication; no caller-controlled return URL is accepted.
+    $expectedGuestLogin = "http://127.0.0.1:$httpPort/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app"
+    Assert-True ($guestLoginHandoff.Location -eq $expectedGuestLogin) 'guest_core_login_handoff_invalid'
     $guestIndex = Invoke-Http -Uri ([Uri]::new($compatUri, 'index.html')) -Session $sessions['GUEST']
     Assert-PrivateResponse -Response $guestIndex -Status 303 -Label 'guest explicit index'
     $guestMe = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Session $sessions['GUEST']
     Assert-Json -Response $guestMe -Status 401 -Label 'guest compatibility user' | Out-Null
+    Assert-NoStore -Response $guestMe -Label 'guest compatibility user'
     Assert-NoBackendLeak -Text $guestMe.Text -Label 'guest compatibility user'
 
     foreach ($role in @('CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS', 'SYSTEM_ADMIN')) {
         $response = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Session $sessions[$role]
         $user = Assert-Json -Response $response -Status 200 -Label "$role compatibility user"
+        Assert-NoStore -Response $response -Label "$role compatibility user"
         Assert-NoBackendLeak -Text $response.Text -Label "$role compatibility user"
         Assert-True ([string]$user.id -match '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') "$role compatibility user id was not opaque UUID"
         Assert-True ($user.isAdmin -eq $false) "$role compatibility user became Immich admin"
@@ -424,6 +442,30 @@ try {
     Assert-PrivateResponse -Response $foreignOrigin -Status 403 -Label 'compat foreign origin'
     $foreignFetch = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Headers @{ 'Sec-Fetch-Site' = 'cross-site' }
     Assert-PrivateResponse -Response $foreignFetch -Status 403 -Label 'compat foreign fetch'
+    $sameSiteLoginReturnHeaders = @{
+        'Sec-Fetch-Site' = 'same-site'
+        'Sec-Fetch-Mode' = 'navigate'
+        'Sec-Fetch-Dest' = 'document'
+    }
+    $sameSiteLoginReturn = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos')) -Session $sessions['CLASSMATE'] -Headers $sameSiteLoginReturnHeaders
+    Assert-PrivateResponse -Response $sameSiteLoginReturn -Status 200 -Label 'compat exact same-site login return'
+    $sameSiteQuery = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos?unexpected=1')) -Session $sessions['CLASSMATE'] -Headers $sameSiteLoginReturnHeaders
+    Assert-PrivateResponse -Response $sameSiteQuery -Status 403 -Label 'compat same-site query denied'
+    $sameSiteApi = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Session $sessions['CLASSMATE'] -Headers $sameSiteLoginReturnHeaders
+    Assert-PrivateResponse -Response $sameSiteApi -Status 403 -Label 'compat same-site api denied'
+    $sameSiteSubresource = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos')) -Session $sessions['CLASSMATE'] -Headers @{
+        'Sec-Fetch-Site' = 'same-site'
+        'Sec-Fetch-Mode' = 'no-cors'
+        'Sec-Fetch-Dest' = 'image'
+    }
+    Assert-PrivateResponse -Response $sameSiteSubresource -Status 403 -Label 'compat same-site subresource denied'
+    $sameSiteOrigin = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos')) -Session $sessions['CLASSMATE'] -Headers @{
+        Origin = $baseUri.GetLeftPart([UriPartial]::Authority)
+        'Sec-Fetch-Site' = 'same-site'
+        'Sec-Fetch-Mode' = 'navigate'
+        'Sec-Fetch-Dest' = 'document'
+    }
+    Assert-PrivateResponse -Response $sameSiteOrigin -Status 403 -Label 'compat same-site origin denied'
     $gatewayClassmate = Invoke-Http -Uri ([Uri]::new($baseUri, 'api/photos')) -Session $sessions['CLASSMATE']
     $gatewayFamily = Invoke-Http -Uri ([Uri]::new($baseUri, 'api/photos')) -Session $sessions['FAMILY']
     $classmatePayload = Assert-Json -Response $gatewayClassmate -Status 200 -Label 'gateway classmate source'

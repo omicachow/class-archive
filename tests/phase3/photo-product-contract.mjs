@@ -23,8 +23,11 @@ function check(condition, message) {
   assertions += 1;
 }
 
-check(schema.includes('public const CURRENT_VERSION = 8;'), 'ClassIdentity schema must advance to v8');
+check(schema.includes('public const CURRENT_VERSION = 12;'), 'ClassIdentity schema must include the v12 durable native source epoch while preserving v8 productization');
 check(schema.includes("'name' => '0008_photo_productization_domain'"), 'v8 migration must have a stable ledger name');
+check(schema.includes("'name' => '0012_durable_native_source_epoch'"), 'v12 migration must have a stable ledger name');
+check(schema.includes("CREATE TABLE IF NOT EXISTS {$epoch}") && schema.includes(') ENGINE=MyISAM'), 'v12 source epoch sentinel must remain durable in the native MyISAM domain');
+check(schema.includes("'source_key', 'generation', 'updated_at'"), 'v12 source epoch sentinel schema must remain fingerprinted');
 for (const table of [
   'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source',
   'photo_duplicate', 'batch_operation', 'batch_operation_item',
@@ -84,11 +87,13 @@ check(!server.includes("url.pathname.replace('/api/class-archive'"), 'BFF must n
 
 const candidateIndex = controller.indexOf('$candidate = $gateway->mediaCandidate($classPhotoId)');
 const resolveIndex = controller.indexOf('ClassArchiveMediaGuard::resolveCanonicalDelivery', candidateIndex);
-const targetIndex = controller.indexOf('ClassArchiveMediaGuard::assertDeliveryTarget', resolveIndex);
-const authorizeIndex = controller.indexOf('ClassArchiveMediaGuard::authorize', targetIndex);
-const accelIndex = controller.indexOf("header('X-Accel-Redirect: '", authorizeIndex);
-check(candidateIndex >= 0 && resolveIndex > candidateIndex && targetIndex > resolveIndex && authorizeIndex > targetIndex && accelIndex > authorizeIndex,
-  'canonical media must resolve a visible UUID, re-enter MediaGuard, then hand off via X-Accel');
+const authorizeIndex = controller.indexOf('ClassArchiveMediaGuard::authorize', resolveIndex);
+const targetIndex = controller.indexOf('ClassArchiveMediaGuard::assertDeliveryTarget', authorizeIndex);
+const accelIndex = controller.indexOf("header('X-Accel-Redirect: '", targetIndex);
+check(candidateIndex >= 0 && resolveIndex > candidateIndex && authorizeIndex > resolveIndex && targetIndex > authorizeIndex && accelIndex > targetIndex,
+  'canonical media must resolve a visible UUID, authorize before cache probing, require a ready target, then hand off via X-Accel');
+check(controller.includes('catch (\\ClassArchiveMediaUnavailable)') && controller.includes('self::respondMediaDeny(503)'),
+  'authorized canonical cache misses must fail closed without entering a generator');
 check(!controller.includes('readfile(') && !controller.includes('fpassthru('), 'Gateway must not stream archive bytes in PHP');
 check(server.includes('if (upstreamResponse.status === 200 || upstreamResponse.status === 206)')
   && server.includes('Do not silently fall back to user-space media relay'), 'BFF must reject successful media without a validated X-Accel target');

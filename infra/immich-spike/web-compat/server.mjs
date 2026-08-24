@@ -90,7 +90,14 @@ const photoUiGatewayMutationRoutes = new Map([
   ['/api/class-archive/spotlight/cancel', '/api/spotlight/cancel'],
 ]);
 const coreRedirectTargets = new Map([
-  ['/class-archive-core/login', '/identification.php'],
+  // Piwigo permits only same-origin post-login targets.  The double-encoded
+  // value survives its form round trip as the exact authenticated bridge
+  // route, which then performs the bounded loopback redirect to this UI.
+  // The Piwigo nginx origin does not rewrite arbitrary pretty paths into
+  // index.php.  Keep the bridge on Piwigo's canonical query route so the
+  // ClassIdentity hook actually runs after login instead of landing on an
+  // nginx-level 404 at /class-archive-photo-app.
+  ['/class-archive-core/login', '/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app'],
   ['/class-archive-core/home', '/'],
   ['/class-archive-core/identity', '/index.php?/class-identity/my'],
   ['/class-archive-core/admin', '/admin.php?page=plugin-ClassIdentity'],
@@ -444,10 +451,25 @@ function parsePort(value) {
 }
 
 function setSecurityHeaders(response, options = {}) {
-  const { html = false, media = false } = options;
-  response.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
-  response.setHeader('Pragma', 'no-cache');
-  response.setHeader('Expires', '0');
+  const { html = false, media = false, metadata = false, immutable = false, deferCache = false } = options;
+  if (!deferCache) {
+    if (immutable) {
+      // These files are presentation-only and contain no account data. Their
+      // URL carries a content digest, so a shared browser cache is safe.
+      response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (media || metadata) {
+      // Every reuse must revalidate against the current authenticated session.
+      // This preserves logout/freeze/account-switch semantics while allowing
+      // an unchanged private derivative to complete as 304 with zero bytes.
+      response.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate, no-transform');
+      response.setHeader('Pragma', 'no-cache');
+      response.setHeader('Expires', '0');
+    } else {
+      response.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+      response.setHeader('Pragma', 'no-cache');
+      response.setHeader('Expires', '0');
+    }
+  }
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('X-Frame-Options', 'DENY');
@@ -461,7 +483,7 @@ function setSecurityHeaders(response, options = {}) {
         "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
     );
   }
-  if (media) {
+  if (media || metadata) {
     response.setHeader('Vary', 'Cookie', false);
   }
 }
@@ -497,14 +519,14 @@ function respond(response, method, status, contentType, body = '', options = {})
   }
 }
 
-function respondJson(response, method, status, payload) {
+function respondJson(response, method, status, payload, options = {}) {
   let body = '{"error":"请求暂时无法安全确认"}';
   try {
     body = JSON.stringify(payload);
   } catch {
     status = 503;
   }
-  respond(response, method, status, 'application/json; charset=utf-8', body);
+  respond(response, method, status, 'application/json; charset=utf-8', body, options);
 }
 
 function rejectHost(request, response) {
@@ -516,7 +538,7 @@ function rejectHost(request, response) {
   return false;
 }
 
-function rejectForeignRequest(request, response) {
+function rejectForeignRequest(request, response, url) {
   // Browsers normally omit Origin for same-origin GET/HEAD, but send it for
   // the read-only search POST. Do not let a caller on another origin use a
   // loopback cookie as a cross-origin read oracle.
@@ -526,7 +548,19 @@ function rejectForeignRequest(request, response) {
     return true;
   }
   const fetchSite = request.headers['sec-fetch-site'];
-  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+  // Piwigo and the Photo UI deliberately use adjacent loopback ports, so the
+  // successful login return is `same-site`, not `same-origin`. Permit only
+  // the exact read-only top-level document landing. API, media,
+  // iframe/subresource, query-bearing and Origin-bearing requests remain
+  // same-origin-only and cannot use this transition.
+  const isPiwigoLoginReturn = fetchSite === 'same-site'
+    && (request.method === 'GET' || request.method === 'HEAD')
+    && url.pathname === '/photos'
+    && url.search === ''
+    && request.headers.origin === undefined
+    && request.headers['sec-fetch-mode'] === 'navigate'
+    && request.headers['sec-fetch-dest'] === 'document';
+  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none' && !isPiwigoLoginReturn) {
     respond(response, request.method, 403, 'text/plain; charset=utf-8', 'Request source denied.');
     return true;
   }
@@ -645,6 +679,79 @@ async function readPhotoUiFile(fileName) {
   } catch {
     return null;
   }
+}
+
+async function photoUiAssetRevision() {
+  const names = ['app.css', 'app.js', 'i18n.js'];
+  const assets = await Promise.all(names.map((name) => readPhotoUiFile(name)));
+  if (assets.some((asset) => asset === null)) {
+    return null;
+  }
+  const digest = createHash('sha256');
+  for (let index = 0; index < names.length; index += 1) {
+    digest.update(names[index]);
+    digest.update('\0');
+    digest.update(assets[index].body);
+    digest.update('\0');
+  }
+  return digest.digest('hex').slice(0, 32);
+}
+
+function versionPhotoUiBody(asset, revision) {
+  if (!asset || !/^[a-f0-9]{32}$/.test(revision)) return null;
+  return Buffer.from(
+    asset.body.toString('utf8').replaceAll('__PHOTO_UI_ASSET_REV__', revision),
+    'utf8',
+  );
+}
+
+function requestEtagMatches(request, etag) {
+  const value = request.headers['if-none-match'];
+  if (typeof value !== 'string' || value.length > 512) return false;
+  return value.split(',').map((part) => part.trim()).includes(etag);
+}
+
+function respondImmutablePhotoUiAsset(request, response, asset, revision) {
+  const body = versionPhotoUiBody(asset, revision);
+  if (body === null) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+    return;
+  }
+  const bodyRevision = createHash('sha256').update(body).digest('hex').slice(0, 16);
+  const etag = `"class-archive-photo-ui-${revision}-${bodyRevision}"`;
+  setSecurityHeaders(response, { immutable: true });
+  response.setHeader('ETag', etag);
+  response.setHeader('Content-Type', asset.type);
+  if (requestEtagMatches(request, etag)) {
+    response.statusCode = 304;
+    response.end();
+    return;
+  }
+  response.statusCode = 200;
+  response.setHeader('Content-Length', String(body.length));
+  if (noBody(request.method)) {
+    response.end();
+    return;
+  }
+  response.end(body);
+}
+
+function photoUiCacheScope(request, role, presentationEpoch, clientAddress) {
+  if (!knownRoles.has(role) || typeof presentationEpoch !== 'string' || !/^[a-f0-9]{64}$/.test(presentationEpoch)
+    || typeof clientAddress !== 'string' || isIP(clientAddress) === 0) {
+    throw new GatewayResponseError(503, 'photo_ui_cache_scope_invalid');
+  }
+  return createHash('sha256')
+    .update('class-archive-photo-ui-session-scope-v2\0')
+    .update(role)
+    .update('\0')
+    .update(presentationEpoch)
+    .update('\0')
+    .update(clientAddress)
+    .update('\0')
+    .update(sessionCookie(request))
+    .digest('hex')
+    .slice(0, 32);
 }
 
 function isPhotoUiRoute(pathname) {
@@ -899,7 +1006,14 @@ async function relayPublicGatewayApi(request, response, path, clientAddress, opt
   // Deliberately relay the bounded JSON body verbatim. It may contain
   // validation/conflict details which the owned UI needs, but is never logged
   // here (including on mutation failures).
-  respond(response, request.method, result.status, 'application/json; charset=utf-8', result.body);
+  respond(
+    response,
+    request.method,
+    result.status,
+    'application/json; charset=utf-8',
+    result.body,
+    options.responseOptions ?? { metadata: request.method === 'GET' || request.method === 'HEAD' },
+  );
 }
 
 async function principal(request, clientAddress) {
@@ -1046,7 +1160,12 @@ function archiveTimelineProjection(payload) {
       }
       photoIds.add(id);
       const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
-      return { id, title, archive_date: archiveDateProjection(photo) };
+      const mediaRevision = typeof photo?.media_revision === 'string' && /^[a-f0-9]{32}$/.test(photo.media_revision)
+        ? photo.media_revision : null;
+      const width = Number.isInteger(photo?.width) && photo.width > 0 && photo.width <= 200000 ? photo.width : null;
+      const height = Number.isInteger(photo?.height) && photo.height > 0 && photo.height <= 200000 ? photo.height : null;
+      if ((width === null) !== (height === null)) throw new GatewayResponseError(503);
+      return { id, title, archive_date: archiveDateProjection(photo), media_revision: mediaRevision, width, height };
     });
     if (items.length !== group.total) {
       throw new GatewayResponseError(503);
@@ -1469,7 +1588,7 @@ function redirectToPiwigoCore(request, response, target) {
   response.end();
 }
 
-async function proxyCanonicalMedia(request, response, photoId, variant, clientAddress) {
+async function proxyCanonicalMedia(request, response, photoId, variant, clientAddress, mediaRevision = null) {
   const headers = {
     ...(sessionCookie(request) ? { Cookie: sessionCookie(request) } : {}),
     ...(typeof request.headers.range === 'string' && request.headers.range.length <= 128 ? { Range: request.headers.range } : {}),
@@ -1479,6 +1598,9 @@ async function proxyCanonicalMedia(request, response, photoId, variant, clientAd
     'X-Class-Archive-Web-Compat-Internal': '1',
   };
   const upstream = new URL(`/api/photos/${photoId}/media/${variant}`, gatewayOrigin);
+  if (mediaRevision !== null) {
+    upstream.searchParams.set('v', mediaRevision);
+  }
   let upstreamResponse;
   try {
     upstreamResponse = await fetch(upstream, { method: request.method, headers, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
@@ -1502,7 +1624,9 @@ async function proxyCanonicalMedia(request, response, photoId, variant, clientAd
       respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
       return;
     }
-    setSecurityHeaders(response, { media: true });
+    // The final internal nginx location owns the one canonical private cache
+    // header and validators. Avoid adding a second conflicting field here.
+    setSecurityHeaders(response, { media: true, deferCache: true });
     response.statusCode = 200;
     const contentType = upstreamResponse.headers.get('content-type');
     if (contentType !== null && contentType.toLowerCase().startsWith('image/')) {
@@ -1516,6 +1640,16 @@ async function proxyCanonicalMedia(request, response, photoId, variant, clientAd
     // A successful canonical media authorization must have an internal nginx
     // target. Do not silently fall back to user-space media relay.
     respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
+    return;
+  }
+  if (upstreamResponse.status === 304) {
+    setSecurityHeaders(response, { media: true });
+    for (const header of ['etag', 'last-modified']) {
+      const value = upstreamResponse.headers.get(header);
+      if (value !== null) response.setHeader(header, value);
+    }
+    response.statusCode = 304;
+    response.end();
     return;
   }
   // Authorization failures are status-only evidence. Never buffer or relay a
@@ -1563,7 +1697,31 @@ async function handleApi(request, response, url, clientAddress) {
     const readPath = photoUiGatewayReadRoutes.get(url.pathname);
     if (readPath) {
       exactQuery(url, new Set());
-      await relayPublicGatewayApi(request, response, readPath, clientAddress);
+      if (url.pathname === '/api/class-archive/product-state') {
+        const result = await publicGatewayApi(request, readPath, clientAddress);
+        if (result.status !== 200) {
+          respond(response, request.method, result.status, 'application/json; charset=utf-8', result.body);
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(result.body.toString('utf8'));
+        } catch {
+          throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
+        }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || payload.role !== role
+          || typeof payload.presentationEpoch !== 'string'
+          || !/^[a-f0-9]{64}$/.test(payload.presentationEpoch)) {
+          throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
+        }
+        payload.cacheScope = photoUiCacheScope(request, role, payload.presentationEpoch, clientAddress);
+        // Product state includes the mutation CSRF value, so it remains
+        // no-store even though ordinary presentation documents can revalidate.
+        respondJson(response, request.method, 200, payload);
+        return;
+      }
+      await relayPublicGatewayApi(request, response, readPath, clientAddress, { responseOptions: { metadata: true } });
       return;
     }
     const albumMatch = /^\/api\/class-archive\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
@@ -1838,12 +1996,16 @@ async function handleApi(request, response, url, clientAddress) {
     }
     const thumbnailMatch = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(url.pathname);
     if (thumbnailMatch) {
-      const query = exactQuery(url, new Set(['size', 'c', 'edited']));
+      const query = exactQuery(url, new Set(['size', 'c', 'edited', 'v']));
       const size = query.get('size');
-      if (size !== 'thumbnail' && size !== 'preview') {
+      if (!['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)) {
         throw new TypeError('class_archive_web_compat_thumbnail_size_invalid');
       }
-      await proxyCanonicalMedia(request, response, assertUuid(thumbnailMatch[1]), size, clientAddress);
+      const mediaRevision = query.get('v');
+      if (mediaRevision !== undefined && !/^[a-f0-9]{32}$/.test(mediaRevision)) {
+        throw new TypeError('class_archive_web_compat_media_revision_invalid');
+      }
+      await proxyCanonicalMedia(request, response, assertUuid(thumbnailMatch[1]), size, clientAddress, mediaRevision ?? null);
       return;
     }
     const originalMatch = /^\/api\/assets\/([0-9a-f-]{36})\/original$/.exec(url.pathname);
@@ -1852,14 +2014,18 @@ async function handleApi(request, response, url, clientAddress) {
       // and original URLs. It is not a delivery credential, so accept only
       // the bounded form expected from the verified v3.1.0 bundle. The
       // canonical gateway and MediaGuard still authorize every request.
-      const query = exactQuery(url, new Set(['c', 'edited']));
+      const query = exactQuery(url, new Set(['c', 'edited', 'v']));
       if (query.has('edited') && query.get('edited') !== 'true' && query.get('edited') !== 'false') {
         throw new TypeError('class_archive_web_compat_original_edited_invalid');
       }
       if (query.has('c') && !/^[A-Za-z0-9_-]{1,128}$/.test(query.get('c'))) {
         throw new TypeError('class_archive_web_compat_original_cache_key_invalid');
       }
-      await proxyCanonicalMedia(request, response, assertUuid(originalMatch[1]), 'original', clientAddress);
+      const mediaRevision = query.get('v');
+      if (mediaRevision !== undefined && !/^[a-f0-9]{32}$/.test(mediaRevision)) {
+        throw new TypeError('class_archive_web_compat_media_revision_invalid');
+      }
+      await proxyCanonicalMedia(request, response, assertUuid(originalMatch[1]), 'original', clientAddress, mediaRevision ?? null);
       return;
     }
   } catch (error) {
@@ -1893,7 +2059,7 @@ async function serveApplication(request, response, url) {
     respond(response, request.method, 200, 'text/plain; charset=utf-8', 'ok');
     return;
   }
-  if (rejectHost(request, response) || rejectForeignRequest(request, response) || rejectUnsafePath(request, response)) {
+  if (rejectHost(request, response) || rejectForeignRequest(request, response, url) || rejectUnsafePath(request, response)) {
     return;
   }
   const clientAddress = trustedClientAddress(request, response);
@@ -1920,7 +2086,11 @@ async function serveApplication(request, response, url) {
   }
   const photoUiStaticFile = photoUiStaticPaths.get(url.pathname);
   if (photoUiStaticFile) {
-    if (url.searchParams.size !== 0) {
+    const revision = await photoUiAssetRevision();
+    if (revision === null
+      || url.searchParams.size !== 1
+      || url.searchParams.get('v') !== revision
+    ) {
       respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
       return;
     }
@@ -1929,7 +2099,7 @@ async function serveApplication(request, response, url) {
       respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
       return;
     }
-    respond(response, request.method, 200, asset.type, asset.body);
+    respondImmutablePhotoUiAsset(request, response, asset, revision);
     return;
   }
   const coreRedirectTarget = coreRedirectTargets.get(url.pathname);
@@ -2007,11 +2177,13 @@ async function serveApplication(request, response, url) {
       return;
     }
     const document = await readPhotoUiFile('index.html');
-    if (!document) {
+    const revision = await photoUiAssetRevision();
+    const documentBody = revision === null ? null : versionPhotoUiBody(document, revision);
+    if (!document || documentBody === null) {
       respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
       return;
     }
-    respond(response, request.method, 200, 'text/html; charset=utf-8', document.body, { html: true });
+    respond(response, request.method, 200, 'text/html; charset=utf-8', documentBody, { html: true });
     return;
   }
   if (url.pathname === '/class-archive-timeline') {

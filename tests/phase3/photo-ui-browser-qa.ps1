@@ -128,6 +128,12 @@ try {
     finally {
         $ErrorActionPreference = $previousErrorAction
     }
+    if ($env:CLASS_ARCHIVE_BROWSER_DEBUG -eq '1') {
+        # Raw browser diagnostics may include private-QA object identifiers, so
+        # retain them only beside the ignored local screenshot evidence.
+        $debugPath = Join-Path $screenshotDirectory 'browser-debug.log'
+        [IO.File]::WriteAllLines($debugPath, [string[]]$output, [Text.UTF8Encoding]::new($false))
+    }
     $safeLines = @($output | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^PHOTO_UI_BROWSER_QA=(?:PASS|FAIL)\b' -or $_ -match '^PHOTO_UI_BROWSER_STAGE=[a-z0-9_-]+$'
     })
