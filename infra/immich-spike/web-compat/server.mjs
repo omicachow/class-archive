@@ -65,10 +65,35 @@ const photoUiStaticPaths = new Map([
   ['/photo-ui/i18n.js', 'i18n.js'],
 ]);
 const photoUiRootRoutes = new Set(['/photos', '/people', '/search', '/albums', '/memories', '/my']);
+// This is an explicit public API boundary for the owned Photo UI.  Keep the
+// mapping here, rather than accepting a caller-provided upstream path: the
+// Web compatibility process must not become a general Piwigo/Gateway proxy.
+const photoUiGatewayReadRoutes = new Map([
+  ['/api/class-archive/product-state', '/api/product-state'],
+  ['/api/class-archive/albums', '/api/albums'],
+  ['/api/class-archive/spotlight', '/api/spotlight'],
+  ['/api/class-archive/manage/people', '/api/manage/people'],
+  ['/api/class-archive/manage/options', '/api/manage/options'],
+  ['/api/class-archive/manage/duplicates', '/api/manage/duplicates'],
+]);
+const photoUiGatewayMutationRoutes = new Map([
+  ['/api/class-archive/manage/people/create', '/api/manage/people/create'],
+  ['/api/class-archive/manage/people/update', '/api/manage/people/update'],
+  ['/api/class-archive/manage/people/merge', '/api/manage/people/merge'],
+  ['/api/class-archive/manage/people/visibility', '/api/manage/people/visibility'],
+  ['/api/class-archive/manage/people/revert-merge', '/api/manage/people/revert-merge'],
+  ['/api/class-archive/manage/people/move-photos', '/api/manage/people/move-photos'],
+  ['/api/class-archive/manage/archive/bulk', '/api/manage/archive/bulk'],
+  ['/api/class-archive/manage/albums/cover', '/api/manage/albums/cover'],
+  ['/api/class-archive/manage/duplicates/consolidate', '/api/manage/duplicates/consolidate'],
+  ['/api/class-archive/spotlight/create', '/api/spotlight/create'],
+  ['/api/class-archive/spotlight/cancel', '/api/spotlight/cancel'],
+]);
 const coreRedirectTargets = new Map([
   ['/class-archive-core/login', '/identification.php'],
   ['/class-archive-core/home', '/'],
   ['/class-archive-core/identity', '/index.php?/class-identity/my'],
+  ['/class-archive-core/admin', '/admin.php?page=plugin-ClassIdentity'],
 ]);
 
 const compatiblePreferences = Object.freeze({
@@ -623,16 +648,35 @@ async function readPhotoUiFile(fileName) {
 }
 
 function isPhotoUiRoute(pathname) {
+  if (pathname === '/people/manage') {
+    return true;
+  }
   if (photoUiRootRoutes.has(pathname)) {
     return true;
   }
-  const detail = /^\/(?:photos|people)\/([0-9a-f-]{36})$/i.exec(pathname);
+  const detail = /^\/(?:photos|people|albums)\/([0-9a-f-]{36})$/i.exec(pathname);
   return detail !== null && UUID_V4.test(detail[1]);
 }
 
 function sessionCookie(request) {
   const cookie = request.headers.cookie;
   return typeof cookie === 'string' && cookie.length <= 8192 ? cookie : '';
+}
+
+function gatewayRequestHeaders(request, clientAddress, contentType = null) {
+  const csrf = request.headers['x-class-archive-csrf'];
+  if (csrf !== undefined && (typeof csrf !== 'string' || csrf.length === 0 || csrf.length > 4096 || csrf.includes('\0'))) {
+    throw new TypeError('class_archive_web_compat_csrf_invalid');
+  }
+  const cookie = sessionCookie(request);
+  return {
+    Accept: 'application/json',
+    ...(cookie ? { Cookie: cookie } : {}),
+    ...(csrf ? { 'X-Class-Archive-CSRF': csrf } : {}),
+    ...(contentType ? { 'Content-Type': contentType } : {}),
+    'X-Forwarded-For': clientAddress,
+    'X-Class-Archive-Web-Compat-Internal': '1',
+  };
 }
 
 function isSafeInternalDelivery(value) {
@@ -740,17 +784,12 @@ async function queueGatewaySessionRequest(request, clientAddress, task) {
 
 async function fetchGatewayJson(request, path, clientAddress) {
   const upstream = new URL(path, gatewayOrigin);
-  const cookie = sessionCookie(request);
+  const headers = gatewayRequestHeaders(request, clientAddress);
   let result;
   try {
     result = await fetch(upstream, {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        ...(cookie ? { Cookie: cookie } : {}),
-        'X-Forwarded-For': clientAddress,
-        'X-Class-Archive-Web-Compat-Internal': '1',
-      },
+      headers,
       redirect: 'manual',
       signal: AbortSignal.timeout(10_000),
     });
@@ -763,11 +802,14 @@ async function fetchGatewayJson(request, path, clientAddress) {
   }
   const contentType = result.headers.get('content-type') ?? '';
   if (!contentType.toLowerCase().startsWith('application/json')) {
+    try { await result.body?.cancel(); } catch { }
     throw new GatewayResponseError(503, 'gateway_content_type');
   }
   try {
-    return await result.json();
-  } catch {
+    const body = await boundedGatewayBody(result);
+    return JSON.parse(body.toString('utf8'));
+  } catch (error) {
+    if (error instanceof GatewayResponseError) throw error;
     throw new GatewayResponseError(503, 'gateway_json');
   }
 }
@@ -777,6 +819,87 @@ async function gatewayJson(request, path, clientAddress) {
     throw new GatewayResponseError(503, 'gateway_client_address');
   }
   return queueGatewaySessionRequest(request, clientAddress, () => fetchGatewayJson(request, path, clientAddress));
+}
+
+function mappedPublicGatewayStatus(status) {
+  if (status >= 200 && status < 300) return status;
+  return new Set([400, 403, 404, 409, 503]).has(status) ? status : 503;
+}
+
+async function boundedGatewayBody(result) {
+  if (!result.body) return Buffer.alloc(0);
+  const chunks = [];
+  let length = 0;
+  try {
+    for await (const chunk of result.body) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      length += bytes.length;
+      // Public API responses are small control-plane JSON documents. A
+      // bounded relay prevents a faulty internal endpoint from turning this
+      // compatibility process into an unbounded response buffer.
+      if (length > 1024 * 1024) {
+        throw new GatewayResponseError(503, 'gateway_body_too_large');
+      }
+      chunks.push(bytes);
+    }
+  } catch (error) {
+    try { await result.body.cancel(); } catch { }
+    if (error instanceof GatewayResponseError) throw error;
+    throw new GatewayResponseError(503, 'gateway_body_read');
+  }
+  return Buffer.concat(chunks, length);
+}
+
+async function fetchPublicGatewayApi(request, path, clientAddress, options = {}) {
+  const method = options.method ?? 'GET';
+  const body = options.body ?? null;
+  const headers = gatewayRequestHeaders(request, clientAddress, body === null ? null : 'application/json');
+  let result;
+  try {
+    result = await fetch(new URL(path, gatewayOrigin), {
+      method,
+      headers,
+      ...(body === null ? {} : { body }),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new GatewayResponseError(503, 'gateway_transport');
+  }
+  const contentType = result.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().startsWith('application/json')) {
+    try { await result.body?.cancel(); } catch { }
+    throw new GatewayResponseError(503, 'gateway_content_type');
+  }
+  if (result.status < 200 || result.status >= 300) {
+    const diagnostic = result.headers.get('x-class-archive-gateway-diagnostic');
+    if (diagnostic) {
+      emitGatewayDiagnostic(method === 'POST' ? 'mutation' : 'api', new GatewayResponseError(result.status, diagnostic));
+    }
+  }
+  return {
+    body: await boundedGatewayBody(result),
+    status: mappedPublicGatewayStatus(result.status),
+  };
+}
+
+async function publicGatewayApi(request, path, clientAddress, options = {}) {
+  if (typeof clientAddress !== 'string' || isIP(clientAddress) === 0) {
+    throw new GatewayResponseError(503, 'gateway_client_address');
+  }
+  return queueGatewaySessionRequest(
+    request,
+    clientAddress,
+    () => fetchPublicGatewayApi(request, path, clientAddress, options),
+  );
+}
+
+async function relayPublicGatewayApi(request, response, path, clientAddress, options = {}) {
+  const result = await publicGatewayApi(request, path, clientAddress, options);
+  // Deliberately relay the bounded JSON body verbatim. It may contain
+  // validation/conflict details which the owned UI needs, but is never logged
+  // here (including on mutation failures).
+  respond(response, request.method, result.status, 'application/json; charset=utf-8', result.body);
 }
 
 async function principal(request, clientAddress) {
@@ -1270,6 +1393,41 @@ async function parseJsonBody(request) {
   return parsed;
 }
 
+async function parsePhotoUiMutationBody(request) {
+  const contentType = request.headers['content-type'];
+  if (typeof contentType !== 'string' || contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    throw new TypeError('class_archive_web_compat_mutation_content_type');
+  }
+  const contentLength = request.headers['content-length'];
+  if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > 64 * 1024)) {
+    throw new TypeError('class_archive_web_compat_mutation_body_too_large');
+  }
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += bytes.length;
+    if (length > 64 * 1024) {
+      throw new TypeError('class_archive_web_compat_mutation_body_too_large');
+    }
+    chunks.push(bytes);
+  }
+  const raw = Buffer.concat(chunks, length);
+  if (raw.length === 0) {
+    throw new TypeError('class_archive_web_compat_mutation_body_empty');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new SyntaxError('class_archive_web_compat_mutation_json_invalid');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('class_archive_web_compat_mutation_body_invalid');
+  }
+  return raw;
+}
+
 function searchTermFromBody(payload) {
   for (const key of ['originalFileName', 'description', 'ocr', 'originalPath', 'query']) {
     const value = payload[key];
@@ -1374,9 +1532,20 @@ async function proxyCanonicalMedia(request, response, photoId, variant, clientAd
 
 async function handleApi(request, response, url, clientAddress) {
   const isSearch = url.pathname === '/api/search/metadata' || url.pathname === '/api/search/smart';
-  if (request.method !== 'GET' && request.method !== 'HEAD' && !(isSearch && request.method === 'POST')) {
-    response.setHeader('Allow', isSearch ? 'POST' : 'GET, HEAD');
+  const isPhotoUiMutation = photoUiGatewayMutationRoutes.has(url.pathname);
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !(isSearch && request.method === 'POST') && !(isPhotoUiMutation && request.method === 'POST')) {
+    response.setHeader('Allow', isSearch || isPhotoUiMutation ? 'POST' : 'GET, HEAD');
     respond(response, request.method, 405, 'application/json; charset=utf-8', '{"error":"只读接口"}');
+    return;
+  }
+  // Check the relay-only request headers before the principal call so a
+  // malformed CSRF value remains a caller error (400), never an apparent
+  // session-expiry response. The actual headers are rebuilt per Gateway call.
+  try {
+    gatewayRequestHeaders(request, clientAddress);
+  } catch (error) {
+    emitGatewayDiagnostic('api', error);
+    respondJson(response, request.method, 400, { error: '请求格式无效' });
     return;
   }
   let role;
@@ -1391,6 +1560,39 @@ async function handleApi(request, response, url, clientAddress) {
   }
 
   try {
+    const readPath = photoUiGatewayReadRoutes.get(url.pathname);
+    if (readPath) {
+      exactQuery(url, new Set());
+      await relayPublicGatewayApi(request, response, readPath, clientAddress);
+      return;
+    }
+    const albumMatch = /^\/api\/class-archive\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (albumMatch) {
+      exactQuery(url, new Set());
+      await relayPublicGatewayApi(request, response, `/api/albums/${assertUuid(albumMatch[1])}`, clientAddress);
+      return;
+    }
+    if (url.pathname === '/api/class-archive/search/hybrid') {
+      const query = exactQuery(url, new Set(['q']));
+      const value = query.get('q');
+      if (value === undefined) {
+        throw new TypeError('class_archive_web_compat_hybrid_search_query_missing');
+      }
+      await relayPublicGatewayApi(request, response, `/api/search/hybrid?q=${encodeURIComponent(value)}`, clientAddress);
+      return;
+    }
+    const mutationPath = photoUiGatewayMutationRoutes.get(url.pathname);
+    if (mutationPath) {
+      if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST');
+        respondJson(response, request.method, 405, { error: '仅支持 POST' });
+        return;
+      }
+      exactQuery(url, new Set());
+      const body = await parsePhotoUiMutationBody(request);
+      await relayPublicGatewayApi(request, response, mutationPath, clientAddress, { method: 'POST', body });
+      return;
+    }
     if (url.pathname === '/api/users/me') {
       exactQuery(url, new Set());
       respondJson(response, request.method, 200, compatibleUser(role));
@@ -1663,8 +1865,15 @@ async function handleApi(request, response, url, clientAddress) {
   } catch (error) {
     if (error instanceof GatewayResponseError) {
       emitGatewayDiagnostic('api', error);
-      const status = error.status === 404 ? 404 : 503;
-      respondJson(response, request.method, status, { error: status === 404 ? '资源不存在' : '数据暂时无法安全确认' });
+      const status = mappedPublicGatewayStatus(error.status);
+      const errors = {
+        400: '请求格式无效',
+        403: '请求被拒绝',
+        404: '资源不存在',
+        409: '请求冲突',
+        503: '数据暂时无法安全确认',
+      };
+      respondJson(response, request.method, status, { error: errors[status] });
       return;
     }
     if (error instanceof TypeError || error instanceof SyntaxError) {
@@ -1759,10 +1968,15 @@ async function serveApplication(request, response, url) {
     // The document is not an authorization result. Require the current
     // ClassIdentity principal before returning it, then let every metadata and
     // media request independently re-enter the Gateway and MediaGuard.
+    let documentRole;
     try {
-      await principal(request, clientAddress);
+      documentRole = await principal(request, clientAddress);
     } catch {
       redirectToPiwigoLogin(request, response);
+      return;
+    }
+    if (url.pathname === '/people/manage' && documentRole !== 'SYSTEM_ADMIN') {
+      respond(response, request.method, 403, 'text/plain; charset=utf-8', '禁止访问', { html: true });
       return;
     }
     if (url.searchParams.size !== 0) {
@@ -1771,6 +1985,7 @@ async function serveApplication(request, response, url) {
     }
     const photoDetail = /^\/photos\/([0-9a-f-]{36})$/i.exec(url.pathname);
     const personDetail = /^\/people\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    const albumDetail = /^\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
     try {
       if (photoDetail) {
         const photoId = assertUuid(photoDetail[1]);
@@ -1780,6 +1995,11 @@ async function serveApplication(request, response, url) {
       if (personDetail) {
         const personId = assertUuid(personDetail[1]);
         archivePersonProjection(await gatewayJson(request, `/api/people/${personId}`, clientAddress));
+      }
+      if (albumDetail) {
+        const albumId = assertUuid(albumDetail[1]);
+        const album = await gatewayJson(request, `/api/albums/${albumId}`, clientAddress);
+        if (assertUuid(album?.id) !== albumId) throw new GatewayResponseError(503);
       }
     } catch (error) {
       const status = error instanceof GatewayResponseError && error.status === 404 ? 404 : 503;

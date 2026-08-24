@@ -67,6 +67,18 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
             . 'ORDER BY ai.`archive_date` IS NULL ASC, ai.`archive_date` DESC, i.`id` DESC',
             [$heritage, $heritage, $living, $living],
         );
+        $categoryIdsByImage = [];
+        foreach ($this->repository->fetchAll(
+            'SELECT ic.`image_id`,ic.`category_id` FROM `' . $p . 'image_category` ic '
+                . 'JOIN `' . $p . 'categories` c ON c.`id`=ic.`category_id` ORDER BY ic.`image_id`,ic.`category_id`',
+        ) as $association) {
+            $imageId = (int) ($association['image_id'] ?? 0);
+            $categoryId = (int) ($association['category_id'] ?? 0);
+            if ($imageId <= 0 || $categoryId <= 0) {
+                throw new \RuntimeException('class_archive_gateway_album_association_invalid');
+            }
+            $categoryIdsByImage[$imageId][] = $categoryId;
+        }
         $result = [];
         foreach ($rows as $row) {
             $isHeritage = (int) ($row['is_heritage'] ?? 0) === 1;
@@ -112,6 +124,7 @@ final class PiwigoGatewayAdapter implements PiwigoAdapter
                 $precision,
                 $source,
                 self::nullableText($row['event_label'] ?? null, 190),
+                array_values(array_unique($categoryIdsByImage[$imageId] ?? [])),
             );
         }
 

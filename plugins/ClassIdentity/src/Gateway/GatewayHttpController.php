@@ -74,19 +74,24 @@ final class GatewayHttpController
         }
 
         self::setSecurityHeaders();
-        if (!in_array(strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')), ['GET', 'HEAD'], true)) {
-            header('Allow: GET, HEAD');
-            self::respond(405, ['error' => '仅支持读取请求']);
+        $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+        if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
+            header('Allow: GET, HEAD, POST');
+            self::respond(405, ['error' => '请求方法不被允许']);
         }
         self::requireSameOriginWhenPresent();
 
         try {
+            $gateway = self::gateway();
+            if ($method === 'POST') {
+                $response = self::handleMutation($segments);
+                self::respond(200, $response);
+            }
+            $product = self::handleProductRead($segments, $gateway);
+            if ($product !== null) {
+                self::respond(200, $product);
+            }
             [$route, $photoId, $searchQuery, $mediaVariant] = self::parseRoute($segments);
-            $gateway = new GatewayService(
-                new ClassIdentityAdapter(),
-                PiwigoGatewayAdapter::fromPiwigo(),
-                BridgeImmichAdapter::configuredOrNull(),
-            );
             $response = match ($route) {
                 'photos' => $photoId === null ? $gateway->photos() : self::knownPhoto($gateway, $photoId),
                 'media' => self::deliverMedia($gateway, (string) $photoId, (string) $mediaVariant),
@@ -100,15 +105,25 @@ final class GatewayHttpController
                 default => throw new \InvalidArgumentException('class_archive_gateway_route_invalid'),
             };
             self::respond(200, $response);
-        } catch (\InvalidArgumentException) {
+        } catch (\InvalidArgumentException $error) {
+            // Validation diagnostics are exposed only on the trusted BFF hop.
+            // The browser continues to receive the fixed Chinese 400 body, so
+            // field-level failures cannot become an authorization oracle.
+            self::setTrustedCompatibilityDiagnostic($error->getMessage());
             self::respond(400, ['error' => '请求格式无效']);
         } catch (\RuntimeException $error) {
             $code = $error->getMessage();
             self::setTrustedCompatibilityDiagnostic($code);
-            if ($code === 'class_archive_gateway_principal_unresolved') {
+            if ($code === 'class_archive_gateway_principal_unresolved'
+                || str_contains($code, '_system_admin_required')
+                || str_contains($code, '_member_role_required')
+            ) {
                 self::respond(403, ['error' => '禁止访问']);
             }
-            if ($code === 'class_archive_gateway_photo_not_found') {
+            if ($code === 'class_archive_gateway_photo_not_found'
+                || $code === 'class_archive_gateway_album_not_found'
+                || str_ends_with($code, '_not_found')
+            ) {
                 self::respond(404, ['error' => '资源不存在']);
             }
             if ($code === 'class_archive_gateway_person_not_found') {
@@ -117,11 +132,641 @@ final class GatewayHttpController
             if ($code === 'class_archive_gateway_route_not_found') {
                 self::respond(404, ['error' => '资源不存在']);
             }
+            if (str_contains($code, '_already_') || str_contains($code, '_drift') || str_contains($code, '_race')
+                || str_contains($code, '_not_active') || str_contains($code, '_candidate_required')
+                || str_contains($code, '_confirmation_required')
+                || str_contains($code, '_old_era_album_removal_required')
+                || str_contains($code, '_era_membership_ambiguous')
+            ) {
+                self::respond(409, ['error' => '状态已发生变化，请刷新后重试']);
+            }
             self::respond(503, ['error' => '数据暂时无法安全确认']);
         } catch (\Throwable) {
             self::setTrustedCompatibilityDiagnostic('unexpected');
             self::respond(503, ['error' => '数据暂时无法安全确认']);
         }
+    }
+
+    private static function gateway(): GatewayService
+    {
+        return new GatewayService(
+            new ClassIdentityAdapter(),
+            PiwigoGatewayAdapter::fromPiwigo(),
+            BridgeImmichAdapter::configuredOrNull(),
+            new GatewayPolicy(),
+            \ClassIdentity\AlbumService::fromPiwigo(),
+            \ClassIdentity\PersonCurationService::fromPiwigo(),
+            \ClassIdentity\SpotlightService::fromPiwigo(),
+            \ClassIdentity\CanonicalPhotoService::fromPiwigo(),
+        );
+    }
+
+    /** @return array<string,mixed>|null */
+    private static function handleProductRead(array $segments, GatewayService $gateway): ?array
+    {
+        if (($segments[0] ?? null) === 'manage') {
+            // Reject every management read before target parsing, Piwigo/ML
+            // lookup, or payload validation. A non-admin therefore receives a
+            // uniform 403 and cannot use 400/404 differences as an oracle.
+            \ClassIdentity\DomainSupport::requireSystemAdmin(self::currentUserId());
+        }
+        if ($segments === ['product-state']) {
+            self::requireExactQuery([]);
+            $role = (string) ($gateway->me()['role'] ?? '');
+            return [
+                'role' => $role,
+                'canManage' => $role === \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
+                'canSpotlight' => in_array($role, [\ClassIdentity\Access::ROLE_CLASSMATE, \ClassIdentity\Access::ROLE_TEACHER], true),
+                'csrfToken' => in_array($role, [
+                    \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
+                    \ClassIdentity\Access::ROLE_CLASSMATE,
+                    \ClassIdentity\Access::ROLE_TEACHER,
+                ], true) ? (string) get_pwg_token() : '',
+            ];
+        }
+        if (count($segments) === 2 && ($segments[0] ?? null) === 'albums' && is_string($segments[1])) {
+            \ClassIdentity\DomainSupport::idToBinary($segments[1]);
+            self::requireExactQuery([]);
+            $album = $gateway->album(strtolower($segments[1]));
+            if ($album === null) {
+                throw new \RuntimeException('class_archive_gateway_album_not_found');
+            }
+            return $album;
+        }
+        if ($segments === ['spotlight']) {
+            self::requireExactQuery([]);
+            return $gateway->spotlight();
+        }
+        if ($segments === ['search', 'hybrid']) {
+            $query = self::requireExactQuery(['q'])['q'] ?? null;
+            if (!is_string($query)) {
+                throw new \InvalidArgumentException('class_archive_gateway_search_missing');
+            }
+            return $gateway->hybridSearch($query);
+        }
+        if ($segments === ['manage', 'people']) {
+            self::requireExactQuery([]);
+            return $gateway->managedPeople();
+        }
+        if ($segments === ['manage', 'options']) {
+            self::requireExactQuery([]);
+            return $gateway->managementOptions();
+        }
+        if ($segments === ['manage', 'duplicates']) {
+            self::requireExactQuery([]);
+            return $gateway->managedDuplicates();
+        }
+        return null;
+    }
+
+    /** @return array<string,mixed> */
+    private static function handleMutation(array $segments): array
+    {
+        $route = implode('/', $segments);
+        $contracts = [
+            'manage/people/create' => [
+                ['csrfToken', 'displayName', 'classmateIdentityId', 'reason'],
+                ['csrfToken', 'displayName', 'classmateIdentityId', 'reason'],
+            ],
+            'manage/people/update' => [
+                ['csrfToken', 'classPersonId', 'displayName', 'classmateIdentityId', 'hidden', 'coverPhotoId', 'reason'],
+                // A full replacement contract prevents an omitted optional
+                // field from silently clearing the person's current name,
+                // identity link, or cover.
+                ['csrfToken', 'classPersonId', 'displayName', 'classmateIdentityId', 'hidden', 'coverPhotoId', 'reason'],
+            ],
+            'manage/people/merge' => [
+                ['csrfToken', 'sourcePersonIds', 'targetPersonId', 'coverPhotoId', 'reason'],
+                ['csrfToken', 'sourcePersonIds', 'targetPersonId', 'reason'],
+            ],
+            'manage/people/visibility' => [
+                ['csrfToken', 'classPersonIds', 'hidden', 'reason'],
+                ['csrfToken', 'classPersonIds', 'hidden', 'reason'],
+            ],
+            'manage/people/revert-merge' => [
+                ['csrfToken', 'mergeId', 'reason'],
+                ['csrfToken', 'mergeId', 'reason'],
+            ],
+            'manage/people/move-photos' => [
+                ['csrfToken', 'sourcePersonId', 'targetPersonId', 'photoIds', 'reason'],
+                ['csrfToken', 'sourcePersonId', 'targetPersonId', 'photoIds', 'reason'],
+            ],
+            'manage/archive/bulk' => [
+                ['csrfToken', 'photoIds', 'archiveDate', 'datePrecision', 'eventId', 'eventLabel', 'albumAddIds', 'albumRemoveIds', 'era', 'eraConfirmed', 'reason'],
+                ['csrfToken', 'photoIds', 'albumAddIds', 'albumRemoveIds', 'reason'],
+            ],
+            'manage/albums/cover' => [
+                ['csrfToken', 'albumId', 'photoId', 'reason'],
+                ['csrfToken', 'albumId', 'photoId', 'reason'],
+            ],
+            'manage/duplicates/consolidate' => [
+                ['csrfToken', 'duplicateGroupId', 'canonicalPhotoId', 'reason'],
+                ['csrfToken', 'duplicateGroupId', 'canonicalPhotoId', 'reason'],
+            ],
+            'spotlight/create' => [
+                ['csrfToken', 'albumId', 'durationHours', 'reason'],
+                ['csrfToken', 'albumId', 'durationHours', 'reason'],
+            ],
+            'spotlight/cancel' => [
+                ['csrfToken', 'spotlightId', 'reason'],
+                ['csrfToken', 'spotlightId', 'reason'],
+            ],
+        ];
+        if (!isset($contracts[$route])) {
+            header('Allow: GET, HEAD');
+            self::respond(405, ['error' => '该接口不接受修改请求']);
+        }
+        // Distinguish a genuinely read-only route from an attempt to bypass
+        // the internal compatibility BFF.  The former keeps its stable 405
+        // contract; a known mutation route still fails closed with 403 before
+        // any body, CSRF or domain state is inspected.
+        if (($_SERVER['CLASS_ARCHIVE_WEB_COMPAT_INTERNAL'] ?? '') !== '1') {
+            throw new \RuntimeException('class_archive_gateway_system_admin_required');
+        }
+        self::requireExactQuery([]);
+        $userId = self::currentUserId();
+        if (($segments[0] ?? null) === 'manage' || $route === 'spotlight/cancel') {
+            \ClassIdentity\DomainSupport::requireSystemAdmin($userId);
+        }
+        [$allowed, $required] = $contracts[$route];
+        $body = self::jsonMutationBody($allowed, $required);
+        self::requireMutationToken($body);
+
+        return match ($route) {
+            'manage/people/create' => self::mutatePersonCreate($userId, $body),
+            'manage/people/update' => self::mutatePersonUpdate($userId, $body),
+            'manage/people/merge' => self::mutatePersonMerge($userId, $body),
+            'manage/people/visibility' => self::mutatePersonVisibility($userId, $body),
+            'manage/people/revert-merge' => self::mutatePersonMergeRevert($userId, $body),
+            'manage/people/move-photos' => self::mutatePersonPhotos($userId, $body),
+            'manage/archive/bulk' => self::mutateArchiveBulk($userId, $body),
+            'manage/albums/cover' => self::mutateAlbumCover($userId, $body),
+            'manage/duplicates/consolidate' => self::mutateDuplicate($userId, $body),
+            'spotlight/create' => self::mutateSpotlightCreate($userId, $body),
+            'spotlight/cancel' => self::mutateSpotlightCancel($userId, $body),
+            default => throw new \RuntimeException('class_archive_gateway_route_not_found'),
+        };
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonCreate(int $userId, array $body): array
+    {
+        $displayName = self::nullableText($body['displayName'] ?? null, 190);
+        if ($displayName === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_person_name_required');
+        }
+        $result = \ClassIdentity\PersonCurationService::fromPiwigo()->createManualPerson(
+            $userId,
+            $displayName,
+            self::nullablePositiveInt($body['classmateIdentityId'] ?? null),
+            self::reason($body),
+        );
+        return ['created' => true, 'id' => (string) $result['class_person_id']];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonUpdate(int $userId, array $body): array
+    {
+        $id = self::uuid($body['classPersonId'] ?? null);
+        $displayName = self::nullableText($body['displayName'] ?? null, 190);
+        $identityId = self::nullablePositiveInt($body['classmateIdentityId'] ?? null);
+        $hidden = $body['hidden'] ?? null;
+        if (!is_bool($hidden)) {
+            throw new \InvalidArgumentException('class_archive_gateway_hidden_invalid');
+        }
+        $cover = self::nullableUuid($body['coverPhotoId'] ?? null);
+        $result = \ClassIdentity\PersonCurationService::fromPiwigo()->updatePerson(
+            $userId,
+            $id,
+            $displayName,
+            $identityId,
+            $hidden ? 'HIDDEN' : 'VISIBLE',
+            $cover,
+            self::reason($body),
+        );
+        return ['updated' => true, 'id' => (string) $result['class_person_id']];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonMerge(int $userId, array $body): array
+    {
+        $target = self::uuid($body['targetPersonId'] ?? null);
+        $sources = self::uuidList($body['sourcePersonIds'] ?? null, 1, 100);
+        $reason = self::reason($body);
+        $service = \ClassIdentity\PersonCurationService::fromPiwigo();
+        foreach ($sources as $source) {
+            if (hash_equals($source, $target)) {
+                throw new \InvalidArgumentException('class_archive_gateway_person_merge_target_invalid');
+            }
+        }
+        $mergeIds = $service->mergeMany(
+            $userId,
+            $sources,
+            $target,
+            self::nullableUuid($body['coverPhotoId'] ?? null),
+            $reason,
+        );
+        return ['merged' => count($mergeIds), 'targetPersonId' => $target, 'mergeIds' => $mergeIds];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonVisibility(int $userId, array $body): array
+    {
+        $hidden = $body['hidden'] ?? null;
+        if (!is_bool($hidden)) {
+            throw new \InvalidArgumentException('class_archive_gateway_hidden_invalid');
+        }
+        $count = \ClassIdentity\PersonCurationService::fromPiwigo()->setVisibilityBulk(
+            $userId,
+            self::uuidList($body['classPersonIds'] ?? null, 1, 500),
+            $hidden ? 'HIDDEN' : 'VISIBLE',
+            self::reason($body),
+        );
+        return ['updated' => $count, 'hidden' => $hidden];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonMergeRevert(int $userId, array $body): array
+    {
+        $mergeId = self::uuid($body['mergeId'] ?? null);
+        \ClassIdentity\PersonCurationService::fromPiwigo()->revertMerge($userId, $mergeId, self::reason($body));
+        return ['reverted' => true, 'id' => $mergeId];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutatePersonPhotos(int $userId, array $body): array
+    {
+        $source = self::uuid($body['sourcePersonId'] ?? null);
+        $target = self::nullableUuid($body['targetPersonId'] ?? null);
+        $photos = self::uuidList($body['photoIds'] ?? null, 1, 500);
+        $reason = self::reason($body);
+        $updated = \ClassIdentity\PersonCurationService::fromPiwigo()->movePhotos(
+            $userId,
+            $source,
+            $target,
+            $photos,
+            $reason,
+        );
+        return ['updated' => $updated];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateArchiveBulk(int $userId, array $body): array
+    {
+        $photos = self::uuidList($body['photoIds'] ?? null, 1, 500);
+        $add = self::uuidList($body['albumAddIds'] ?? null, 0, 500);
+        $remove = self::uuidList($body['albumRemoveIds'] ?? null, 0, 500);
+        if (array_intersect($add, $remove) !== []) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_change_ambiguous');
+        }
+        $era = self::nullableEnum($body['era'] ?? null, ['HERITAGE', 'LIVING']);
+        $confirmed = ($body['eraConfirmed'] ?? false) === true;
+        if ($era !== null && !$confirmed) {
+            throw new \RuntimeException('class_archive_bulk_era_confirmation_required');
+        }
+        $eventLabel = self::nullableText($body['eventLabel'] ?? null, 190);
+        $eventId = self::nullableText($body['eventId'] ?? null, 64);
+        if ($eventId !== null && $eventLabel !== null) {
+            throw new \InvalidArgumentException('class_archive_gateway_event_ambiguous');
+        }
+        if ($eventId !== null) {
+            foreach ((self::gateway()->managementOptions()['events'] ?? []) as $event) {
+                if (is_array($event) && hash_equals((string) ($event['id'] ?? ''), $eventId)) {
+                    $eventLabel = (string) $event['name'];
+                    break;
+                }
+            }
+            if ($eventLabel === null) {
+                throw new \InvalidArgumentException('class_archive_gateway_event_invalid');
+            }
+        }
+        $changes = [];
+        $archiveDate = self::nullableArchiveDate($body['archiveDate'] ?? null);
+        $precision = self::nullableEnum($body['datePrecision'] ?? null, ['EXACT', 'DAY', 'MONTH', 'TERM', 'YEAR', 'EVENT_ONLY', 'UNKNOWN']);
+        if ($archiveDate !== null && $precision === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_archive_precision_required');
+        }
+        if ($precision !== null) {
+            $changes['archive_date'] = self::archiveDateForPrecision($archiveDate, $precision);
+            $changes['date_precision'] = $precision;
+            if (in_array($precision, ['TERM', 'EVENT_ONLY'], true)) {
+                $changes['date_source'] = 'EVENT_INFERENCE';
+                $changes['date_confidence'] = 'MEDIUM';
+            } elseif ($precision === 'UNKNOWN') {
+                $changes['date_source'] = 'UNKNOWN';
+                $changes['date_confidence'] = 'UNKNOWN';
+                $changes['event_label'] = null;
+            } else {
+                $changes['date_source'] = 'ARCHIVE_CONFIRMED';
+                $changes['date_confidence'] = 'HIGH';
+            }
+        }
+        if ($eventLabel !== null) {
+            $changes['event_label'] = $eventLabel;
+        }
+        if (in_array($precision, ['TERM', 'EVENT_ONLY'], true) && $eventLabel === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_event_required');
+        }
+        if ($add !== []) {
+            $changes['add_album_ids'] = $add;
+        }
+        if ($remove !== []) {
+            $changes['remove_album_ids'] = $remove;
+        }
+        if ($era !== null) {
+            $changes['era'] = $era;
+        }
+        if (count(array_filter($changes, static fn(mixed $value): bool => $value !== null && $value !== [])) === 0) {
+            throw new \InvalidArgumentException('class_archive_gateway_bulk_empty');
+        }
+        return \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
+            $userId,
+            $photos,
+            $changes,
+            self::reason($body),
+            $confirmed,
+        );
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateAlbumCover(int $userId, array $body): array
+    {
+        $albumId = self::uuid($body['albumId'] ?? null);
+        $photoId = self::uuid($body['photoId'] ?? null);
+        $service = \ClassIdentity\AlbumService::fromPiwigo();
+        $current = $service->findByClassAlbumId($albumId);
+        if ($current === null) {
+            throw new \RuntimeException('class_archive_album_not_found');
+        }
+        $visibleAlbum = self::gateway()->album($albumId);
+        $visibleMembers = is_array($visibleAlbum['items'] ?? null) ? $visibleAlbum['items'] : [];
+        $belongs = false;
+        foreach ($visibleMembers as $member) {
+            if (is_array($member) && is_string($member['id'] ?? null) && hash_equals($photoId, strtolower($member['id']))) {
+                $belongs = true;
+                break;
+            }
+        }
+        if (!$belongs) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_cover_membership_invalid');
+        }
+        $result = $service->updateMapping(
+            $userId,
+            $albumId,
+            (string) $current['album_type'],
+            (string) $current['era'],
+            isset($current['owner_principal_id']) ? (int) $current['owner_principal_id'] : null,
+            is_string($current['description'] ?? null) ? $current['description'] : null,
+            is_string($current['event_label'] ?? null) ? $current['event_label'] : null,
+            $photoId,
+            (string) $current['state'],
+            self::reason($body),
+        );
+        return ['updated' => true, 'albumId' => (string) $result['class_album_id'], 'coverPhotoId' => $photoId];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateDuplicate(int $userId, array $body): array
+    {
+        $duplicateId = self::uuid($body['duplicateGroupId'] ?? null);
+        $canonical = self::uuid($body['canonicalPhotoId'] ?? null);
+        \ClassIdentity\CanonicalPhotoService::fromPiwigo()->consolidateExact($userId, $duplicateId, $canonical, self::reason($body));
+        return ['consolidated' => true, 'id' => $duplicateId, 'canonicalPhotoId' => $canonical];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateSpotlightCreate(int $userId, array $body): array
+    {
+        if (($body['durationHours'] ?? null) !== 24) {
+            throw new \InvalidArgumentException('class_archive_spotlight_duration_invalid');
+        }
+        $result = \ClassIdentity\SpotlightService::fromPiwigo()->create(
+            $userId,
+            self::uuid($body['albumId'] ?? null),
+            self::reason($body),
+        );
+        return [
+            'created' => true,
+            'id' => (string) $result['spotlight_id'],
+            'albumId' => (string) $result['class_album_id'],
+            'expiresAt' => (string) $result['expires_at'],
+        ];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateSpotlightCancel(int $userId, array $body): array
+    {
+        $id = self::uuid($body['spotlightId'] ?? null);
+        \ClassIdentity\SpotlightService::fromPiwigo()->cancel($userId, $id, self::reason($body));
+        return ['cancelled' => true, 'id' => $id];
+    }
+
+    /** @param list<string> $allowed @param list<string> $required @return array<string,mixed> */
+    private static function jsonMutationBody(array $allowed, array $required): array
+    {
+        $contentType = strtolower(trim(explode(';', (string) ($_SERVER['CONTENT_TYPE'] ?? ''), 2)[0]));
+        if ($contentType !== 'application/json') {
+            throw new \InvalidArgumentException('class_archive_gateway_mutation_content_type_invalid');
+        }
+        $declared = $_SERVER['CONTENT_LENGTH'] ?? null;
+        if ($declared !== null) {
+            $declared = is_int($declared) ? (string) $declared : $declared;
+        }
+        if ($declared !== null && (!is_string($declared) || preg_match('/\A[0-9]{1,8}\z/D', $declared) !== 1 || (int) $declared > 65536)) {
+            throw new \InvalidArgumentException('class_archive_gateway_mutation_size_invalid');
+        }
+        $raw = file_get_contents('php://input', false, null, 0, 65537);
+        if (!is_string($raw) || $raw === '' || strlen($raw) > 65536 || str_contains($raw, "\0")) {
+            throw new \InvalidArgumentException('class_archive_gateway_mutation_body_invalid');
+        }
+        try {
+            $body = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+        } catch (\Throwable $error) {
+            throw new \InvalidArgumentException('class_archive_gateway_mutation_json_invalid', 0, $error);
+        }
+        if (!is_array($body) || array_is_list($body)) {
+            throw new \InvalidArgumentException('class_archive_gateway_mutation_body_invalid');
+        }
+        foreach (array_keys($body) as $key) {
+            if (!is_string($key) || !in_array($key, $allowed, true)) {
+                throw new \InvalidArgumentException('class_archive_gateway_mutation_field_invalid');
+            }
+        }
+        foreach ($required as $key) {
+            if (!array_key_exists($key, $body)) {
+                throw new \InvalidArgumentException('class_archive_gateway_mutation_field_missing');
+            }
+        }
+        return $body;
+    }
+
+    /** @param array<string,mixed> $body */
+    private static function requireMutationToken(array $body): void
+    {
+        $submitted = $body['csrfToken'] ?? null;
+        $header = $_SERVER['HTTP_X_CLASS_ARCHIVE_CSRF'] ?? null;
+        if (!is_string($submitted) || $submitted === '' || strlen($submitted) > 4096 || str_contains($submitted, "\0")) {
+            throw new \RuntimeException('class_archive_gateway_system_admin_required');
+        }
+        if (is_string($header) && ($header === '' || !hash_equals($submitted, $header))) {
+            throw new \RuntimeException('class_archive_gateway_system_admin_required');
+        }
+        $expected = (string) get_pwg_token();
+        if ($expected === '' || !hash_equals($expected, $submitted)) {
+            throw new \RuntimeException('class_archive_gateway_system_admin_required');
+        }
+    }
+
+    private static function currentUserId(): int
+    {
+        global $user;
+        $id = is_array($user ?? null) ? (int) ($user['id'] ?? 0) : 0;
+        if ($id <= 0 || \ClassIdentity\Access::resolveAuthorizationContext($id) === null) {
+            throw new \RuntimeException('class_archive_gateway_principal_unresolved');
+        }
+        return $id;
+    }
+
+    private static function uuid(mixed $value): string
+    {
+        if (!is_string($value)) {
+            throw new \InvalidArgumentException('class_archive_gateway_uuid_invalid');
+        }
+        \ClassIdentity\DomainSupport::idToBinary($value);
+        return strtolower($value);
+    }
+
+    private static function nullableUuid(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        return self::uuid($value);
+    }
+
+    /** @return list<string> */
+    private static function uuidList(mixed $value, int $minimum, int $maximum): array
+    {
+        if (!is_array($value) || !array_is_list($value) || count($value) < $minimum || count($value) > $maximum) {
+            throw new \InvalidArgumentException('class_archive_gateway_uuid_list_invalid');
+        }
+        $ids = [];
+        foreach ($value as $id) {
+            $normalized = self::uuid($id);
+            if (isset($ids[$normalized])) {
+                throw new \InvalidArgumentException('class_archive_gateway_uuid_list_duplicate');
+            }
+            $ids[$normalized] = true;
+        }
+        return array_keys($ids);
+    }
+
+    private static function nullablePositiveInt(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (is_int($value)) {
+            $result = $value;
+        } elseif (is_string($value) && preg_match('/\A[1-9][0-9]{0,18}\z/D', $value) === 1) {
+            $result = (int) $value;
+        } else {
+            throw new \InvalidArgumentException('class_archive_gateway_integer_invalid');
+        }
+        if ($result <= 0) {
+            throw new \InvalidArgumentException('class_archive_gateway_integer_invalid');
+        }
+        return $result;
+    }
+
+    private static function nullableText(mixed $value, int $maximum): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (!is_string($value) || preg_match('//u', $value) !== 1 || str_contains($value, "\0")) {
+            throw new \InvalidArgumentException('class_archive_gateway_text_invalid');
+        }
+        $value = trim($value);
+        $length = function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+        if ($value === '' || $length > $maximum || preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value) === 1) {
+            throw new \InvalidArgumentException('class_archive_gateway_text_invalid');
+        }
+        return $value;
+    }
+
+    private static function nullableEnum(mixed $value, array $allowed): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (!is_string($value)) {
+            throw new \InvalidArgumentException('class_archive_gateway_enum_invalid');
+        }
+        $value = strtoupper(trim($value));
+        if (!in_array($value, $allowed, true)) {
+            throw new \InvalidArgumentException('class_archive_gateway_enum_invalid');
+        }
+        return $value;
+    }
+
+    private static function nullableArchiveDate(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (!is_string($value) || preg_match('/\A\d{4}(?:-\d{2}(?:-\d{2})?)?\z/D', $value) !== 1) {
+            throw new \InvalidArgumentException('class_archive_gateway_archive_date_invalid');
+        }
+        return $value;
+    }
+
+    private static function archiveDateForPrecision(?string $archiveDate, string $precision): ?string
+    {
+        if (in_array($precision, ['EVENT_ONLY', 'UNKNOWN'], true)) {
+            if ($archiveDate !== null) {
+                throw new \InvalidArgumentException('class_archive_gateway_archive_date_conflict');
+            }
+            return null;
+        }
+        if ($precision === 'TERM') {
+            if ($archiveDate !== null) {
+                throw new \InvalidArgumentException('class_archive_gateway_archive_date_conflict');
+            }
+            return null;
+        }
+        if ($archiveDate === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_archive_date_required');
+        }
+        $normalized = match ($precision) {
+            'EXACT', 'DAY' => preg_match('/\A\d{4}-\d{2}-\d{2}\z/D', $archiveDate) === 1
+                ? $archiveDate : null,
+            'MONTH' => preg_match('/\A\d{4}-\d{2}\z/D', $archiveDate) === 1
+                ? $archiveDate . '-01'
+                : (preg_match('/\A\d{4}-\d{2}-\d{2}\z/D', $archiveDate) === 1 ? substr($archiveDate, 0, 7) . '-01' : null),
+            'YEAR' => preg_match('/\A\d{4}\z/D', $archiveDate) === 1
+                ? $archiveDate . '-01-01'
+                : (preg_match('/\A\d{4}(?:-\d{2}(?:-\d{2})?)?\z/D', $archiveDate) === 1 ? substr($archiveDate, 0, 4) . '-01-01' : null),
+            default => null,
+        };
+        if ($normalized === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_archive_date_invalid');
+        }
+        $parsed = \DateTimeImmutable::createFromFormat('!Y-m-d', $normalized, new \DateTimeZone('UTC'));
+        if (!$parsed || $parsed->format('Y-m-d') !== $normalized) {
+            throw new \InvalidArgumentException('class_archive_gateway_archive_date_invalid');
+        }
+        return $normalized;
+    }
+
+    /** @param array<string,mixed> $body */
+    private static function reason(array $body): string
+    {
+        $reason = self::nullableText($body['reason'] ?? null, 500);
+        if ($reason === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_reason_required');
+        }
+        return $reason;
     }
 
     /** @return array{0:string,1:?string,2:?string,3:?string} */
@@ -348,6 +993,9 @@ final class GatewayHttpController
     private static function respond(int $status, array $payload): never
     {
         http_response_code($status);
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'HEAD') {
+            exit;
+        }
         try {
             echo json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         } catch (\Throwable) {

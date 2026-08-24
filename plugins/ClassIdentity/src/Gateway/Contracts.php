@@ -108,6 +108,9 @@ final class GatewayPhotoCandidate
     /** @var list<string> */
     private array $albumLabels;
 
+    /** @var list<int> */
+    private array $albumCategoryIds;
+
     public function __construct(
         private readonly string $classPhotoId,
         private readonly ?string $era,
@@ -121,6 +124,7 @@ final class GatewayPhotoCandidate
         private readonly string $datePrecision = 'UNKNOWN',
         private readonly string $dateSource = 'UNKNOWN',
         private readonly ?string $eventLabel = null,
+        array $albumCategoryIds = [],
     ) {
         ClassArchivePhoto::idToBinary($classPhotoId);
         if ($era !== null && !in_array($era, ['HERITAGE', 'LIVING'], true)) {
@@ -156,6 +160,16 @@ final class GatewayPhotoCandidate
         }
         $this->albumLabels = array_keys($normalizedAlbums);
         sort($this->albumLabels, SORT_STRING);
+
+        $normalizedCategories = [];
+        foreach ($albumCategoryIds as $categoryId) {
+            if (!is_int($categoryId) || $categoryId <= 0) {
+                throw new \InvalidArgumentException('class_archive_gateway_album_category_invalid');
+            }
+            $normalizedCategories[$categoryId] = true;
+        }
+        $this->albumCategoryIds = array_map('intval', array_keys($normalizedCategories));
+        sort($this->albumCategoryIds, SORT_NUMERIC);
     }
 
     public function id(): string
@@ -194,6 +208,17 @@ final class GatewayPhotoCandidate
     public function albumLabels(): array
     {
         return $this->albumLabels;
+    }
+
+    /**
+     * Private Piwigo association input for the stable ClassArchiveAlbum
+     * projection. Category ids never appear in publicProjection().
+     *
+     * @return list<int>
+     */
+    public function albumCategoryIds(): array
+    {
+        return $this->albumCategoryIds;
     }
 
     public function matches(string $query): bool
