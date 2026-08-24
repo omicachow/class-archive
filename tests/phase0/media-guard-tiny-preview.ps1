@@ -158,6 +158,13 @@ function Assert-Deny($Response, [string]$Label, [int[]]$Expected = @(403)) {
     Assert-PrivateMedia $Response $Label
 }
 
+function Assert-Unavailable($Response, [string]$Label) {
+    Assert-True ($Response.Status -eq 503) "$Label expected HTTP 503, got $($Response.Status)."
+    Assert-True ($Response.ContentType -notlike 'image/*') "$Label returned image bytes while the derivative was missing."
+    Assert-NoCoreRedirectHeaders $Response $Label
+    Assert-PrivateMedia $Response $Label
+}
+
 function Get-Sha256([byte[]]$Bytes) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try {
@@ -218,12 +225,22 @@ try {
     $actionDownloadUri = [Uri]::new($baseUri, "action.php?id=$imageId&part=e&download")
     $actionTamperedDownloadUri = [Uri]::new($baseUri, "action.php?id=$imageId&part=e&download=0")
 
-    # First miss: the explicit derivative enters Core i.php, receives its exact
-    # No-change redirect internally, is re-authorized, re-encoded and returned
-    # as HTTP 200 without exposing the source Location.
+    # Force a true cache miss. Authorized member GET/HEAD/Range must all return
+    # an explicit unavailable response without creating a file or entering
+    # Piwigo i.php. Only the separate maintenance warmup may publish it.
+    $null = Invoke-Fixture -ComposeBase $composeBase -Mode 'purge' -RunId $runId -ImageId $imageId
     $firstMiss = Invoke-Probe $derivativeUri $sessions.Family
-    Assert-AllowImage $firstMiss 'family/explicit-derivative/cache-miss'
-    $firstHash = Get-Sha256 $firstMiss.Body
+    Assert-Unavailable $firstMiss 'family/explicit-derivative/cache-miss'
+    Assert-Unavailable (Invoke-Probe $derivativeUri $sessions.Family 'HEAD') 'family/explicit-derivative/cache-miss/HEAD'
+    Assert-Unavailable (Invoke-Probe $derivativeUri $sessions.Family 'RANGE') 'family/explicit-derivative/cache-miss/RANGE'
+    $missingStatus = Invoke-Fixture -ComposeBase $composeBase -Mode 'status' -RunId $runId -ImageId $imageId
+    Assert-True (-not [bool]$missingStatus.derivative_exists -and [int]$missingStatus.derivative_size -eq 0) 'Member cache-miss probes created a derivative file.'
+
+    $warm = Invoke-Fixture -ComposeBase $composeBase -Mode 'warm' -RunId $runId -ImageId $imageId
+    Assert-True ([bool]$warm.warmed -and [string]$warm.mode -eq '660') 'Explicit maintenance warmup did not publish mode 0660.'
+    $firstHit = Invoke-Probe $derivativeUri $sessions.Family
+    Assert-AllowImage $firstHit 'family/explicit-derivative/cache-hit-after-warmup'
+    $firstHash = Get-Sha256 $firstHit.Body
     Assert-True ($firstHash -ne [string]$fixture.source_sha256) 'Safe preview bytes are identical to the archived original.'
     $inspection = Invoke-Fixture -ComposeBase $composeBase -Mode 'inspect' -RunId $runId -ImageId $imageId
     Assert-True ([string]$inspection.mode -eq '660') "Safe preview mode is $($inspection.mode), expected 660."
@@ -231,13 +248,30 @@ try {
     Assert-True ([int]$inspection.derivative_height -eq [int]$inspection.source_height) 'Safe preview height changed unexpectedly.'
     Assert-True ([string]$inspection.derivative_sha256 -eq $firstHash) 'HTTP bytes differ from the atomically published derivative.'
 
-    # Force a second cache miss to prove Core's normal no-download action URL
-    # has SAFE_PREVIEW semantics and does not inherit original permission.
+    # A second hard link is not a trusted cache file even when its path, bytes,
+    # owner and mode otherwise look valid. MediaGuard must fail closed for all
+    # request methods, then recover once the synthetic extra link is removed.
+    $hardlinked = Invoke-Fixture -ComposeBase $composeBase -Mode 'hardlink-create' -RunId $runId -ImageId $imageId
+    Assert-True ([bool]$hardlinked.hardlinked -and [int]$hardlinked.nlink -eq 2) 'Synthetic hardlink fixture was not established.'
+    Assert-Unavailable (Invoke-Probe $derivativeUri $sessions.Family) 'family/explicit-derivative/hardlink'
+    Assert-Unavailable (Invoke-Probe $derivativeUri $sessions.Family 'HEAD') 'family/explicit-derivative/hardlink/HEAD'
+    Assert-Unavailable (Invoke-Probe $derivativeUri $sessions.Family 'RANGE') 'family/explicit-derivative/hardlink/RANGE'
+    $unlinked = Invoke-Fixture -ComposeBase $composeBase -Mode 'hardlink-remove' -RunId $runId -ImageId $imageId
+    Assert-True ([bool]$unlinked.hardlink_removed -and [int]$unlinked.nlink -eq 1) 'Synthetic hardlink fixture was not safely removed.'
+    Assert-AllowImage (Invoke-Probe $derivativeUri $sessions.Family) 'family/explicit-derivative/after-hardlink-removal'
+
+    # Core's normal no-download action URL uses the same cache-only preview
+    # contract. It is unavailable on a miss, then works after maintenance.
     $null = Invoke-Fixture -ComposeBase $composeBase -Mode 'purge' -RunId $runId -ImageId $imageId
     $actionMiss = Invoke-Probe $actionPreviewUri $sessions.Family
-    Assert-AllowImage $actionMiss 'family/action-safe-preview/cache-miss'
-    Assert-True ((Get-Sha256 $actionMiss.Body) -ne [string]$fixture.source_sha256) 'Action preview returned archived original bytes.'
-    Assert-True (-not $actionMiss.Headers.ContainsKey('content-disposition')) 'Action preview was marked as an original download.'
+    Assert-Unavailable $actionMiss 'family/action-safe-preview/cache-miss'
+    $actionMissingStatus = Invoke-Fixture -ComposeBase $composeBase -Mode 'status' -RunId $runId -ImageId $imageId
+    Assert-True (-not [bool]$actionMissingStatus.derivative_exists) 'Action cache miss created a derivative file.'
+    $null = Invoke-Fixture -ComposeBase $composeBase -Mode 'warm' -RunId $runId -ImageId $imageId
+    $actionHit = Invoke-Probe $actionPreviewUri $sessions.Family
+    Assert-AllowImage $actionHit 'family/action-safe-preview/cache-hit-after-warmup'
+    Assert-True ((Get-Sha256 $actionHit.Body) -ne [string]$fixture.source_sha256) 'Action preview returned archived original bytes.'
+    Assert-True (-not $actionHit.Headers.ContainsKey('content-disposition')) 'Action preview was marked as an original download.'
 
     $anonymousPreview = Invoke-Probe $actionPreviewUri $sessions.Anonymous
     Assert-AllowImage $anonymousPreview 'anonymous/action-safe-preview/cache-hit'
@@ -331,7 +365,9 @@ Write-Output 'TINY_PREVIEW_HTTP=PASS'
 Write-Output "HTTP_PROBES=$probeCount"
 Write-Output 'ACTION_NO_DOWNLOAD=SAFE_PREVIEW'
 Write-Output 'ACTION_WITH_DOWNLOAD=ORIGINAL'
-Write-Output 'CORE_NO_CHANGE_REDIRECT=INTERNAL_REENCODE'
+Write-Output 'MEMBER_CACHE_MISS=HTTP_503_NO_GENERATION'
+Write-Output 'TINY_SOURCE_WARMUP=MAINTENANCE_ONLY'
+Write-Output 'HARDLINK_DERIVATIVE=HTTP_503_FAIL_CLOSED'
 Write-Output 'ORIGINAL_BYTES_TO_FAMILY_ANONYMOUS=DENY'
 Write-Output 'SYNTHETIC_FIXTURE_CLEANUP=PASS'
 Write-Output 'SYNTHETIC_ORIGINAL_PHYSICALLY_REMOVED=PASS'

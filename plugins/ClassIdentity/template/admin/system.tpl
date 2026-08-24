@@ -10,7 +10,20 @@
 <tr><th>匿名脱敏呈现</th><td>{if $CA_SYSTEM.anonymous_presenter == 'READY'}已就绪{else}未通过{/if}</td></tr>
 <tr><th>身份权限强制</th><td>{if $CA_SYSTEM.identity_enforcement == 'ENFORCED'}已启用{else}已停用{/if}</td></tr><tr><th>独立系统管理员</th><td>{$CA_SYSTEM.system_admins|escape:'html'} 个</td></tr><tr><th>业务角色映射</th><td>{$CA_SYSTEM.role_group_mappings|escape:'html'}</td></tr><tr><th>密钥配置</th><td>{if $CA_SYSTEM.secret_configuration == 'Configured'}已配置{else}异常{/if}</td></tr>
 <tr><th>数据库</th><td>{if $CA_SYSTEM.database == 'Healthy'}正常{else}异常{/if}</td></tr><tr><th>迁移</th><td>{$CA_SYSTEM.migration_label|escape:'html'}</td></tr><tr><th>数据结构校验</th><td>{if $CA_SYSTEM.schema_verification == 'PASS'}通过{else}未通过{/if}</td></tr><tr><th>缺失表</th><td>{if $CA_SYSTEM.missing_tables}{$CA_SYSTEM.missing_tables|escape:'html'}{else}无{/if}</td></tr>
-<tr><th>存储空间</th><td>可用 {$CA_SYSTEM.storage_free|escape:'html'} / 总计 {$CA_SYSTEM.storage_total|escape:'html'}</td></tr><tr><th>衍生图缓存</th><td>{$CA_SYSTEM.derivative_cache|escape:'html'}</td></tr>
+<tr><th>存储空间</th><td>可用 {$CA_SYSTEM.storage_free|escape:'html'} / 总计 {$CA_SYSTEM.storage_total|escape:'html'}</td></tr>
+<tr><th>派生图预生成</th><td>
+{if $CA_SYSTEM.derivative_cache == 'Writable'}<span class="ca-admin__badge ca-admin__badge--ok">{$CA_SYSTEM.derivative_cache_label|escape:'html'}</span>{else}<span class="ca-admin__badge ca-admin__badge--danger">{$CA_SYSTEM.derivative_cache_label|escape:'html'}</span>{/if}
+{if $CA_SYSTEM.derivative_warmup}
+{foreach from=$CA_SYSTEM.derivative_warmup item=warmup}<div><strong>{$warmup.label|escape:'html'}（{$warmup.selected_images|escape:'html'} 张）</strong>：预生成覆盖率 {$warmup.coverage_label|escape:'html'}（{$warmup.checked|escape:'html'} 个目标尺寸）；已有派生图复用率 {$warmup.cache_reuse_label|escape:'html'}（{$warmup.cached|escape:'html'} 个）；本次新生成 {$warmup.generated|escape:'html'} 个；原尺寸复用率 {$warmup.source_reuse_label|escape:'html'}。</div>{/foreach}
+<span class="ca-admin__muted">原尺寸复用与缓存、新生成结果可能重叠。{if $CA_SYSTEM.derivative_warmup_timestamp} 统计时间：{$CA_SYSTEM.derivative_warmup_timestamp|escape:'html'}。{/if}</span>
+{else}<br><span class="ca-admin__muted">预生成覆盖与复用统计：尚未采集。请先运行后台维护。</span>{/if}
+<br><span class="ca-admin__muted">运行时缓存命中 / 未命中：{$CA_SYSTEM.derivative_runtime_metrics_label|escape:'html'}（当前没有持久运行时计数，不能用维护结果代替）。</span>
+</td></tr>
+<tr><th>照片读取投影</th><td>
+{if $CA_SYSTEM.photo_projection}
+{foreach from=$CA_SYSTEM.photo_projection item=projection}<div>{if $projection.state == 'ACTIVE'}<span class="ca-admin__badge ca-admin__badge--ok">{$projection.label|escape:'html'}：{$projection.state_label|escape:'html'}</span>{elseif $projection.state == 'BUILDING'}<span class="ca-admin__badge">{$projection.label|escape:'html'}：{$projection.state_label|escape:'html'}</span>{else}<span class="ca-admin__badge ca-admin__badge--danger">{$projection.label|escape:'html'}：{$projection.state_label|escape:'html'}</span>{/if} <span class="ca-admin__muted">{$projection.count_label|escape:'html'}；{$projection.last_build_label|escape:'html'}</span></div>{/foreach}
+{else}<span class="ca-admin__badge ca-admin__badge--danger">状态暂时不可用</span><br><span class="ca-admin__muted">无法确认读取投影状态时不会显示为正常。</span>{/if}
+</td></tr>
 <tr><th>最近成功备份</th><td>{$CA_SYSTEM.backup_last_success|escape:'html'}</td></tr><tr><th>最近失败备份</th><td>{$CA_SYSTEM.backup_last_failure|escape:'html'}</td></tr><tr><th>备份恢复演练</th><td>{if $CA_SYSTEM.backup_restore_drill == 'VERIFIED'}<span class="ca-admin__badge ca-admin__badge--ok">{$CA_SYSTEM.backup_restore_label|escape:'html'}</span>{else}<span class="ca-admin__badge ca-admin__badge--danger">{$CA_SYSTEM.backup_restore_label|escape:'html'}</span>{/if}<br><span class="ca-admin__muted">{$CA_SYSTEM.backup_restore_message|escape:'html'}{if $CA_SYSTEM.backup_restore_timestamp} 演练时间：{$CA_SYSTEM.backup_restore_timestamp|escape:'html'}。{/if}</span></td></tr><tr><th>后台维护</th><td>{$CA_SYSTEM.cron_jobs|escape:'html'}{if $CA_SYSTEM.maintenance_timestamp}<br><span class="ca-admin__muted">{$CA_SYSTEM.maintenance_message|escape:'html'} 执行时间：{$CA_SYSTEM.maintenance_timestamp|escape:'html'}。</span>{/if}</td></tr>
 <tr><th>管理员多因素认证</th><td>尚未配置</td></tr><tr><th>生产阻断项</th><td>{$CA_SYSTEM.production_blockers_label|escape:'html'}</td></tr>
 <tr><th>人工处理失败</th><td>{$CA_SYSTEM.failed_manual_operations|escape:'html'}</td></tr>

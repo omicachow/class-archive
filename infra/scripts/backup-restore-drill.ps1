@@ -186,6 +186,44 @@ function Get-RestoreFixture {
     }
 }
 
+function Invoke-ReadProjectionRebuild {
+    $output = @(& "$env:SystemRoot\System32\wsl.exe" @($composeBase + @(
+        'exec', '-T', '--user', 'nginx', 'piwigo',
+        'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+    )) 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw 'Could not rebuild read projections after restore.'
+    }
+    $jsonLine = @($output | Where-Object { ([string]$_).TrimStart().StartsWith('{') }) | Select-Object -Last 1
+    if ($null -eq $jsonLine) {
+        throw 'Read projection rebuild did not emit JSON.'
+    }
+    try {
+        $record = ([string]$jsonLine | ConvertFrom-Json)
+    }
+    catch {
+        throw 'Read projection rebuild JSON was invalid.'
+    }
+    $catalog = @($record.projections | Where-Object { $_.kind -eq 'PHOTO_CATALOG' })
+    $aggregateKinds = @('TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT')
+    $activeAggregates = @($record.projections | Where-Object {
+        $_.kind -in $aggregateKinds -and $_.state -eq 'ACTIVE'
+    })
+    if (
+        $record.result -ne 'PASS' -or
+        [int]$record.count -ne 72 -or
+        $catalog.Count -ne 1 -or
+        $catalog[0].state -ne 'ACTIVE' -or
+        [int]$catalog[0].count -ne 72 -or
+        $activeAggregates.Count -ne 5
+    ) {
+        throw 'Read projections were not rebuilt to PHOTO_CATALOG ACTIVE/72 plus five ACTIVE aggregates.'
+    }
+    $record | Add-Member -NotePropertyName active_aggregate_count -NotePropertyValue $activeAggregates.Count
+    return $record
+}
+
 function Save-JsonArtifact {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)]$Value)
     $path = Join-Path $workRoot $Name
@@ -195,10 +233,10 @@ function Save-JsonArtifact {
 
 function Assert-CanonicalFixture {
     param([Parameter(Mandatory = $true)]$Fixture)
-    if ([int]$Fixture.fixture_version -ne 2 -or [int]$Fixture.class_identity_schema_version -ne 8) {
-        throw 'Refusing destructive drill: restore fixture does not attest the ClassIdentity v8 product schema.'
+    if ([int]$Fixture.fixture_version -ne 4 -or [int]$Fixture.class_identity_schema_version -ne 11) {
+        throw 'Refusing destructive drill: restore fixture does not attest the ClassIdentity v11 product schema.'
     }
-    $v8State = @(
+    $v11BusinessState = @(
         'person',
         'person_merge',
         'person_photo_rule',
@@ -210,11 +248,19 @@ function Assert-CanonicalFixture {
         'batch_operation_item',
         'migration'
     )
-    foreach ($name in $v8State) {
+    foreach ($name in $v11BusinessState) {
         $property = $Fixture.summary.PSObject.Properties[$name]
         if ($null -eq $property -or $null -eq $property.Value.count -or [string]$property.Value.sha256 -notmatch '^[0-9a-f]{64}$') {
-            throw "Refusing destructive drill: restore fixture is missing deterministic v8 state: $name"
+            throw "Refusing destructive drill: restore fixture is missing deterministic v11 business state: $name"
         }
+    }
+    if (
+        $Fixture.projection_recovery.policy -ne 'REBUILD_FROM_BUSINESS_TRUTH' -or
+        $Fixture.projection_recovery.projection -ne 'ALL' -or
+        [int]$Fixture.projection_recovery.expected_count -ne 72 -or
+        (@($Fixture.projection_recovery.required_active) -join ',') -ne 'PHOTO_CATALOG,TIMELINE,ALBUMS,PEOPLE,MEMORIES,SPOTLIGHT'
+    ) {
+        throw 'Refusing destructive drill: fixture projection recovery contract is invalid.'
     }
     if (
         [int]$Fixture.summary.images.count -ne 72 -or
@@ -343,6 +389,12 @@ try {
     }
     if (-not $piwigoHealthy) { throw 'Piwigo did not become healthy after restore.' }
 
+    # The SQL snapshot deliberately contains projection DDL but no cache rows.
+    # Rebuild deterministically from restored Piwigo/Class Archive truth before
+    # any Gateway/browser regression consumes the catalog or aggregates.
+    $projectionRebuild = Invoke-ReadProjectionRebuild
+    [void](Save-JsonArtifact -Name 'read-projection-rebuild.json' -Value $projectionRebuild)
+
     Restore-ImmichOriginalMounts -State $immichMountState
 
     Invoke-Dev 'baseline-verify'
@@ -358,7 +410,9 @@ try {
         'php', '/workspace/infra/scripts/write-backup-restore-evidence.php',
         "--bundle=$bundle",
         "--fixture-sha256=$($after.fixture_sha256)",
-        "--rto-seconds=$rtoSeconds"
+        "--rto-seconds=$rtoSeconds",
+        "--projection-count=$([int]$projectionRebuild.count)",
+        "--aggregate-count=$([int]$projectionRebuild.active_aggregate_count)"
     )
     Invoke-DevWithEvidence -Action 'test-phase0' -ArtifactName 'phase0-after-restore.log'
     Invoke-DevWithEvidence -Action 'test-phase1' -ArtifactName 'phase1-after-restore.log'
@@ -368,6 +422,8 @@ try {
         fixture_sha256 = $after.fixture_sha256
         rto_seconds = $rtoSeconds
         baseline = '72/72/8'
+        photo_catalog_projection = 'ACTIVE/72'
+        aggregate_projections = 'TIMELINE,ALBUMS,PEOPLE,MEMORIES,SPOTLIGHT=ACTIVE'
         phase0 = 'PASS'
         phase1 = 'PASS'
     }

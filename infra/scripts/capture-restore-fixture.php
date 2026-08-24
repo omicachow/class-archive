@@ -122,6 +122,7 @@ $tables = [
     'photo_duplicate' => 'SELECT HEX(`duplicate_id`) AS `duplicate_id`,HEX(`left_class_photo_id`) AS `left_class_photo_id`,HEX(`right_class_photo_id`) AS `right_class_photo_id`,`relation_kind`,`similarity`,`state`,HEX(`canonical_class_photo_id`) AS `canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reviewed_at` FROM `' . $ci . 'photo_duplicate` ORDER BY `created_at`,`duplicate_id` ASC',
     'batch_operation' => 'SELECT HEX(`batch_id`) AS `batch_id`,`actor_principal_id`,`operation_type`,`state`,HEX(`payload_digest`) AS `payload_digest`,`item_count`,`applied_count`,`failed_count`,`high_risk_confirmed`,`error_code`,`created_at`,`updated_at`,`completed_at` FROM `' . $ci . 'batch_operation` ORDER BY `created_at`,`batch_id` ASC',
     'batch_operation_item' => 'SELECT `id`,HEX(`batch_id`) AS `batch_id`,HEX(`class_photo_id`) AS `class_photo_id`,`state`,SHA2(CAST(`before_value` AS CHAR),256) AS `before_sha256`,SHA2(CAST(`after_value` AS CHAR),256) AS `after_sha256`,`error_code`,`created_at`,`updated_at` FROM `' . $ci . 'batch_operation_item` ORDER BY `id` ASC',
+    'native_source_epoch' => 'SELECT `source_key`,HEX(`generation`) AS `generation`,`updated_at` FROM `' . $ci . 'native_source_epoch` ORDER BY `source_key` ASC',
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
     'migration' => 'SELECT `version`,`migration_name`,HEX(`checksum`) AS `checksum`,`plugin_version`,`applied_at` FROM `' . $ci . 'migration` ORDER BY `version` ASC',
 ];
@@ -136,6 +137,16 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
     fixtureFail('multi_album_query_failed');
 }
 $summary['multi_album_images'] = (int) $row['count'];
-$payload = ['fixture_version' => 2, 'class_identity_schema_version' => 8, 'summary' => $summary];
+$payload = [
+    'fixture_version' => 4,
+    'class_identity_schema_version' => 12,
+    'projection_recovery' => [
+        'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
+        'projection' => 'ALL',
+        'expected_count' => (int) $summary['photo']['count'],
+        'required_active' => ['PHOTO_CATALOG', 'TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT'],
+    ],
+    'summary' => $summary,
+];
 $payload['fixture_sha256'] = hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
 fwrite(STDOUT, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");

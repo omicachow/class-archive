@@ -148,7 +148,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 if (isset($_POST['album_id']) && is_scalar($_POST['album_id']) && ctype_digit((string) $_POST['album_id'])) {
                     $albumId = (int) $_POST['album_id'];
                 }
-                $submissionService->review(
+                $approved = $submissionService->review(
                     ClassIdentityHttp::postPositiveInt('submission_id'),
                     $actorUserId,
                     true,
@@ -157,6 +157,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     isset($_POST['archive_date']) && is_string($_POST['archive_date']) ? trim($_POST['archive_date']) : null,
                     isset($_POST['date_precision']) && is_string($_POST['date_precision']) ? $_POST['date_precision'] : 'UNKNOWN',
                     isset($_POST['event_label']) && is_string($_POST['event_label']) ? $_POST['event_label'] : '',
+                );
+                if ($approved === null) {
+                    throw new RuntimeException('submission_approval_projection_missing');
+                }
+                // Approval already invalidates the exact promoted photo and
+                // every dependent aggregate through promotePendingMapping().
+                // Publish only that committed photo instead of making one
+                // administrator review rebuild the whole gallery.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
+                    [(string) $approved['class_photo_id']],
+                    \ClassIdentity\ProjectionMutationBoundary::allAggregateKinds(),
                 );
                 ClassIdentityHttp::flash('success', '投稿已通过并收录到班级历史。');
                 ClassIdentityHttp::redirectTo('submissions');
@@ -176,7 +187,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 if (isset($_POST['album_id']) && is_scalar($_POST['album_id']) && ctype_digit((string) $_POST['album_id'])) {
                     $albumId = (int) $_POST['album_id'];
                 }
-                $archiveService->saveMetadata(
+                $projection = $archiveService->saveMetadata(
                     $actorUserId,
                     ClassIdentityHttp::postPositiveInt('image_id'),
                     ClassIdentityHttp::postString('era', 16, true),
@@ -189,6 +200,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     $albumId,
                     ClassIdentityHttp::requireReason(),
                 );
+                if (($projection['projection_rebuild_mode'] ?? null) === 'FULL_NATIVE_SOURCE') {
+                    \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+                } elseif (($projection['projection_rebuild_mode'] ?? null) === 'BOUNDED') {
+                    \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
+                        [(string) $projection['class_photo_id']],
+                        (array) $projection['projection_kinds'],
+                    );
+                } else {
+                    throw new RuntimeException('archive_projection_rebuild_mode_invalid');
+                }
                 ClassIdentityHttp::flash('success', '档案信息已保存，原图仍保持单份。');
                 ClassIdentityHttp::redirectTo('archive');
 
@@ -200,6 +221,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     isset($_POST['album_comment']) && is_string($_POST['album_comment']) ? $_POST['album_comment'] : null,
                     ClassIdentityHttp::requireReason(),
                 );
+                // Piwigo category INSERT is protected by the v11 native guard,
+                // which rotates the catalog generation before the MyISAM row
+                // exists. Publish a fresh catalog and its aggregates together.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
                 ClassIdentityHttp::flash('success', '正式档案相册已建立。');
                 ClassIdentityHttp::redirectTo('archive');
 

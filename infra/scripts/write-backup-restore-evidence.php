@@ -4,21 +4,28 @@ declare(strict_types=1);
 
 const CLASS_ARCHIVE_RESTORE_EVIDENCE_ROOT = '/var/www/html/piwigo';
 
-/** @return array{bundle:string,fixture:string,rto:int} */
+/** @return array{bundle:string,fixture:string,rto:int,projection_count:int,aggregate_count:int} */
 function restoreEvidenceArguments(array $argv): array
 {
     $values = [];
     foreach (array_slice($argv, 1) as $argument) {
-        if (preg_match('/\A--(bundle|fixture-sha256|rto-seconds)=(.+)\z/D', $argument, $matches) !== 1 || isset($values[$matches[1]])) {
+        if (preg_match('/\A--(bundle|fixture-sha256|rto-seconds|projection-count|aggregate-count)=(.+)\z/D', $argument, $matches) !== 1 || isset($values[$matches[1]])) {
             throw new InvalidArgumentException('backup_restore_evidence_argument_invalid');
         }
         $values[$matches[1]] = $matches[2];
     }
-    if (!isset($values['bundle'], $values['fixture-sha256'], $values['rto-seconds'])
-        || !ctype_digit($values['rto-seconds'])) {
+    if (!isset($values['bundle'], $values['fixture-sha256'], $values['rto-seconds'], $values['projection-count'], $values['aggregate-count'])
+        || !ctype_digit($values['rto-seconds']) || !ctype_digit($values['projection-count'])
+        || !ctype_digit($values['aggregate-count'])) {
         throw new InvalidArgumentException('backup_restore_evidence_argument_invalid');
     }
-    return ['bundle' => $values['bundle'], 'fixture' => $values['fixture-sha256'], 'rto' => (int) $values['rto-seconds']];
+    return [
+        'bundle' => $values['bundle'],
+        'fixture' => $values['fixture-sha256'],
+        'rto' => (int) $values['rto-seconds'],
+        'projection_count' => (int) $values['projection-count'],
+        'aggregate_count' => (int) $values['aggregate-count'],
+    ];
 }
 
 try {
@@ -40,7 +47,13 @@ try {
     require PHPWG_ROOT_PATH . 'include/common.inc.php';
     ob_end_clean();
     require_once PHPWG_ROOT_PATH . 'plugins/ClassIdentity/main.inc.php';
-    $record = \ClassIdentity\BackupRestoreEvidence::create($arguments['bundle'], $arguments['fixture'], $arguments['rto']);
+    $record = \ClassIdentity\BackupRestoreEvidence::create(
+        $arguments['bundle'],
+        $arguments['fixture'],
+        $arguments['rto'],
+        $arguments['projection_count'],
+        $arguments['aggregate_count'],
+    );
     \ClassIdentity\BackupRestoreEvidence::persist($record);
     fwrite(STDOUT, "BACKUP_RESTORE_EVIDENCE=PASS\n");
 } catch (Throwable $error) {

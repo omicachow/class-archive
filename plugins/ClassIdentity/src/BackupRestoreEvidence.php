@@ -12,21 +12,29 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class BackupRestoreEvidence
 {
-    public const VERSION = 2;
-    public const FIXTURE_VERSION = 2;
-    public const CLASS_IDENTITY_SCHEMA_VERSION = 8;
-    public const BACKUP_MANIFEST_FORMAT = 4;
+    public const VERSION = 4;
+    public const FIXTURE_VERSION = 4;
+    public const CLASS_IDENTITY_SCHEMA_VERSION = 12;
+    public const BACKUP_MANIFEST_FORMAT = 6;
     public const FRESHNESS_SECONDS = 90 * 86400;
 
     private const DATA_DIRECTORY = '_data/class-archive';
     private const FILE_NAME = 'backup-restore-drill.json';
 
     /** @return array<string, mixed> */
-    public static function create(string $bundle, string $fixtureSha256, int $rtoSeconds): array
+    public static function create(
+        string $bundle,
+        string $fixtureSha256,
+        int $rtoSeconds,
+        int $photoCatalogCount,
+        int $materializedAggregateCount,
+    ): array
     {
         if (preg_match('/\Aclass-archive-[0-9]{8}T[0-9]{6}Z\z/D', $bundle) !== 1
             || preg_match('/\A[0-9a-f]{64}\z/D', $fixtureSha256) !== 1
-            || $rtoSeconds < 0 || $rtoSeconds > 86400) {
+            || $rtoSeconds < 0 || $rtoSeconds > 86400
+            || $photoCatalogCount < 0 || $photoCatalogCount > 10_000_000
+            || $materializedAggregateCount !== 5) {
             throw new \InvalidArgumentException('class_identity_backup_restore_evidence_input_invalid');
         }
         return [
@@ -39,6 +47,11 @@ final class BackupRestoreEvidence
             'class_identity_schema_version' => self::CLASS_IDENTITY_SCHEMA_VERSION,
             'backup_manifest_format' => self::BACKUP_MANIFEST_FORMAT,
             'rto_seconds' => $rtoSeconds,
+            'photo_catalog_projection_state' => 'ACTIVE',
+            'photo_catalog_projection_count' => $photoCatalogCount,
+            'materialized_aggregate_projection_state' => 'ACTIVE',
+            'materialized_aggregate_projection_count' => $materializedAggregateCount,
+            'projection_rebuild_scope' => 'ALL',
             'result' => 'PASS',
         ];
     }
@@ -108,6 +121,12 @@ final class BackupRestoreEvidence
             || (int) ($record['fixture_version'] ?? 0) !== self::FIXTURE_VERSION
             || (int) ($record['class_identity_schema_version'] ?? 0) !== self::CLASS_IDENTITY_SCHEMA_VERSION
             || (int) ($record['backup_manifest_format'] ?? 0) !== self::BACKUP_MANIFEST_FORMAT
+            || ($record['photo_catalog_projection_state'] ?? null) !== 'ACTIVE'
+            || !is_int($record['photo_catalog_projection_count'] ?? null)
+            || (int) $record['photo_catalog_projection_count'] < 0
+            || ($record['materialized_aggregate_projection_state'] ?? null) !== 'ACTIVE'
+            || ($record['materialized_aggregate_projection_count'] ?? null) !== 5
+            || ($record['projection_rebuild_scope'] ?? null) !== 'ALL'
             || ($record['result'] ?? null) !== 'PASS') {
             return self::missing('备份恢复演练记录需要重新执行。');
         }
@@ -148,6 +167,7 @@ final class BackupRestoreEvidence
             '/workspace/infra/scripts/audit-backup.sh',
             '/workspace/infra/scripts/restore-backup.sh',
             '/workspace/infra/scripts/backup-restore-drill.ps1',
+            '/workspace/infra/scripts/rebuild-photo-read-projection.php',
         ];
         $context = hash_init('sha256');
         foreach ($paths as $path) {

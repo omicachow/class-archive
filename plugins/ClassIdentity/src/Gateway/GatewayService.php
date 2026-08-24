@@ -8,6 +8,8 @@ use ClassIdentity\Access;
 use ClassIdentity\AlbumService;
 use ClassIdentity\CanonicalPhotoService;
 use ClassIdentity\ClassArchivePerson;
+use ClassIdentity\ClassArchivePhoto;
+use ClassIdentity\DomainSupport;
 use ClassIdentity\PersonCurationService;
 use ClassIdentity\Repository;
 use ClassIdentity\SpotlightService;
@@ -43,6 +45,7 @@ final class GatewayService
         private readonly ?PersonCurationService $personCuration = null,
         private readonly ?SpotlightService $spotlightDomain = null,
         private readonly ?CanonicalPhotoService $canonicalDomain = null,
+        private readonly ?ReadProjectionStore $readProjection = null,
     ) {
     }
 
@@ -50,6 +53,19 @@ final class GatewayService
     public function me(): array
     {
         return ['role' => $this->principal()->role()];
+    }
+
+    /** @return array{role:string,presentation_epoch:string} */
+    public function productState(): array
+    {
+        if ($this->readProjection === null) {
+            throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
+        }
+        $principal = $this->principal();
+        return [
+            'role' => $principal->role(),
+            'presentation_epoch' => $this->readProjection->presentationEpoch($this->projectionScope($principal)),
+        ];
     }
 
     /** @return array{total:int,items:list<array<string,mixed>>} */
@@ -66,6 +82,10 @@ final class GatewayService
     /** @return array<string, mixed>|null */
     public function photo(string $classPhotoId): ?array
     {
+        if ($this->piwigo instanceof PointPiwigoAdapter) {
+            $photo = $this->pointVisiblePhoto($classPhotoId);
+            return $photo?->publicProjection();
+        }
         foreach ($this->visiblePhotos() as $photo) {
             if (hash_equals($photo->id(), $classPhotoId)) {
                 return $photo->publicProjection();
@@ -83,6 +103,9 @@ final class GatewayService
      */
     public function mediaCandidate(string $classPhotoId): ?GatewayPhotoCandidate
     {
+        if ($this->piwigo instanceof PointPiwigoAdapter) {
+            return $this->pointVisiblePhoto($classPhotoId);
+        }
         foreach ($this->visiblePhotos() as $photo) {
             if (hash_equals($photo->id(), $classPhotoId)) {
                 return $photo;
@@ -92,8 +115,50 @@ final class GatewayService
         return null;
     }
 
+    /**
+     * Point lookup shortens only the source read. Current-principal policy and
+     * canonical alias checks remain mandatory and are never read from cache.
+     */
+    private function pointVisiblePhoto(string $classPhotoId): ?GatewayPhotoCandidate
+    {
+        ClassArchivePhoto::idToBinary($classPhotoId);
+        try {
+            $candidate = $this->piwigo instanceof PointPiwigoAdapter
+                ? $this->piwigo->photoCandidate($classPhotoId)
+                : null;
+            if (!$candidate instanceof GatewayPhotoCandidate) {
+                return null;
+            }
+            $visible = $this->policy->filterVisible($this->principal(), [$candidate]);
+            if (count($visible) !== 1 || !$visible[0] instanceof GatewayPhotoCandidate) {
+                return null;
+            }
+            if ($this->canonicalDomain !== null) {
+                $map = $this->canonicalDomain->canonicalMapFor([$classPhotoId]);
+                if (!isset($map[$classPhotoId]) || !hash_equals($classPhotoId, (string) $map[$classPhotoId])) {
+                    // A consolidated alias is never a browser identity.
+                    return null;
+                }
+            }
+            return $visible[0];
+        } catch (\RuntimeException $error) {
+            throw $error;
+        } catch (\Throwable $error) {
+            throw new \RuntimeException('class_archive_gateway_source_unavailable', 0, $error);
+        }
+    }
+
     /** @return array{total:int,groups:list<array<string,mixed>>} */
     public function timeline(): array
+    {
+        if ($this->readProjection !== null) {
+            return $this->readProjection->aggregate(ReadProjectionStore::TIMELINE, $this->projectionScope());
+        }
+        return $this->computeTimeline();
+    }
+
+    /** @return array{total:int,groups:list<array<string,mixed>>} */
+    private function computeTimeline(): array
     {
         $visible = $this->visiblePhotos();
         $groups = [];
@@ -125,6 +190,19 @@ final class GatewayService
     /** @return array{total:int,items:list<array<string,mixed>>} */
     public function albums(): array
     {
+        if ($this->readProjection !== null) {
+            $projection = $this->readProjection->aggregate(ReadProjectionStore::ALBUMS, $this->projectionScope());
+            $items = is_array($projection['items'] ?? null) ? $projection['items'] : null;
+            if ($items === null) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            $items = $this->applyAlbumCapabilities($items);
+            foreach ($items as &$item) {
+                unset($item['items'], $item['photo_ids']);
+            }
+            unset($item);
+            return ['total' => count($items), 'items' => $items];
+        }
         if ($this->albumDomain !== null) {
             $items = $this->visibleAlbumItems();
             return ['total' => count($items), 'items' => $items];
@@ -151,6 +229,19 @@ final class GatewayService
     public function album(string $classAlbumId): ?array
     {
         \ClassIdentity\DomainSupport::idToBinary($classAlbumId);
+        if ($this->readProjection !== null) {
+            $projection = $this->readProjection->aggregate(ReadProjectionStore::ALBUMS, $this->projectionScope());
+            $items = is_array($projection['items'] ?? null) ? $this->applyAlbumCapabilities($projection['items']) : [];
+            foreach ($items as $album) {
+                if (is_array($album) && is_string($album['id'] ?? null) && hash_equals($album['id'], strtolower($classAlbumId))) {
+                    $photoIds = $this->projectionPhotoIds($album);
+                    $album['items'] = $this->hydrateProjectionPhotos($photoIds);
+                    unset($album['photo_ids']);
+                    return $album;
+                }
+            }
+            return null;
+        }
         foreach ($this->visibleAlbumItems(true) as $album) {
             if (isset($album['id']) && is_string($album['id']) && hash_equals($album['id'], strtolower($classAlbumId))) {
                 return $album;
@@ -241,25 +332,41 @@ final class GatewayService
         ];
     }
 
-    /** @return array{active:bool,item:?array<string,mixed>} */
+    /** @return array{active:bool,total:int,item:?array<string,mixed>} */
     public function spotlight(): array
     {
-        if ($this->spotlightDomain === null || $this->albumDomain === null) {
-            return ['active' => false, 'item' => null];
+        if ($this->readProjection !== null) {
+            return $this->validatedSpotlightProjection(
+                $this->readProjection->aggregate(ReadProjectionStore::SPOTLIGHT, $this->projectionScope()),
+            );
         }
-        $albums = $this->visibleAlbumItems();
+        return $this->computeSpotlight(true);
+    }
+
+    /** @return array{active:bool,total:int,item:?array<string,mixed>} */
+    private function computeSpotlight(bool $requireCurrentUser): array
+    {
+        if ($this->spotlightDomain === null || $this->albumDomain === null) {
+            return ['active' => false, 'total' => 0, 'item' => null];
+        }
+        // Album membership and cover selection are already role-scoped. User
+        // ownership capabilities are deliberately excluded from the shared
+        // FULL/HERITAGE payload.
+        $albums = $this->visibleAlbumItems(false, false);
         $byId = [];
         foreach ($albums as $album) {
             $byId[(string) $album['id']] = $album;
         }
-        $records = $this->spotlightDomain->activeForUser($this->currentUserId(), array_keys($byId));
+        $records = $requireCurrentUser
+            ? $this->spotlightDomain->activeForUser($this->currentUserId(), array_keys($byId))
+            : $this->spotlightDomain->activeForProjection(array_keys($byId));
         foreach ($records as $record) {
             $albumId = (string) ($record['class_album_id'] ?? '');
             if (!isset($byId[$albumId])) {
                 continue;
             }
             $album = $byId[$albumId];
-            return ['active' => true, 'item' => [
+            return ['active' => true, 'total' => 1, 'item' => [
                 'id' => (string) $record['spotlight_id'],
                 'albumId' => $albumId,
                 'albumName' => (string) $album['name'],
@@ -269,7 +376,69 @@ final class GatewayService
                 'expiresAt' => (string) $record['expires_at'],
             ]];
         }
-        return ['active' => false, 'item' => null];
+        return ['active' => false, 'total' => 0, 'item' => null];
+    }
+
+    /**
+     * Validate the persisted public shape and suppress a cached card at its
+     * server deadline even if the maintenance expiry job has not run yet.
+     * Expiry can only remove visibility; it never falls back to live source.
+     *
+     * @param array<string,mixed> $projection
+     * @return array{active:bool,total:int,item:?array<string,mixed>}
+     */
+    private function validatedSpotlightProjection(array $projection): array
+    {
+        $active = $projection['active'] ?? null;
+        $total = $projection['total'] ?? null;
+        $item = $projection['item'] ?? null;
+        if (!is_bool($active) || !is_int($total) || $total < 0 || $total > 1
+            || ($active && ($total !== 1 || !is_array($item)))
+            || (!$active && ($total !== 0 || $item !== null))
+        ) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        if (!$active) {
+            return ['active' => false, 'total' => 0, 'item' => null];
+        }
+        foreach (['id', 'albumId', 'albumName', 'publisherLabel', 'expiresAt'] as $field) {
+            if (!is_string($item[$field] ?? null)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+        }
+        DomainSupport::idToBinary((string) $item['id']);
+        DomainSupport::idToBinary((string) $item['albumId']);
+        if (!is_string($item['coverPhotoId'] ?? null)) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        ClassArchivePhoto::idToBinary((string) $item['coverPhotoId']);
+        if (($item['description'] ?? null) !== null && !is_string($item['description'])) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        $expires = self::spotlightUtcTimestamp((string) $item['expiresAt']);
+        if ($expires <= new \DateTimeImmutable('now', new \DateTimeZone('UTC'))) {
+            return ['active' => false, 'total' => 0, 'item' => null];
+        }
+        return ['active' => true, 'total' => 1, 'item' => $item];
+    }
+
+    private static function spotlightUtcTimestamp(string $value): \DateTimeImmutable
+    {
+        $zone = new \DateTimeZone('UTC');
+        foreach ([
+            ['!Y-m-d H:i:s.u', 'Y-m-d H:i:s.u'],
+            ['!Y-m-d H:i:s', 'Y-m-d H:i:s'],
+        ] as [$format, $canonicalFormat]) {
+            $parsed = \DateTimeImmutable::createFromFormat($format, $value, $zone);
+            $errors = \DateTimeImmutable::getLastErrors();
+            if ($parsed instanceof \DateTimeImmutable
+                && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))
+                && hash_equals($value, $parsed->format($canonicalFormat))
+            ) {
+                return $parsed;
+            }
+        }
+        throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
     }
 
     /** @return array{total:int,items:list<array<string,mixed>>} */
@@ -460,11 +629,11 @@ final class GatewayService
     /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
     public function people(): array
     {
-        $projection = $this->visiblePeople();
+        $projection = $this->peopleProjection();
         $items = [];
         foreach ($projection['items'] as $item) {
             if (is_array($item)) {
-                unset($item['items']);
+                unset($item['items'], $item['photo_ids']);
                 $items[] = $item;
             }
         }
@@ -475,9 +644,14 @@ final class GatewayService
     public function person(string $classPersonId): ?array
     {
         ClassArchivePerson::idToBinary($classPersonId);
-        $projection = $this->visiblePeople();
+        $projection = $this->peopleProjection();
         foreach ($projection['items'] as $item) {
             if (is_array($item) && isset($item['id']) && is_string($item['id']) && hash_equals($item['id'], $classPersonId)) {
+                if ($this->readProjection !== null) {
+                    $photoIds = $this->projectionPhotoIds($item);
+                    $item['items'] = $this->hydrateProjectionPhotos($photoIds);
+                    unset($item['photo_ids']);
+                }
                 return $item;
             }
         }
@@ -523,6 +697,15 @@ final class GatewayService
 
     /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
     public function memories(): array
+    {
+        if ($this->readProjection !== null) {
+            return $this->readProjection->aggregate(ReadProjectionStore::MEMORIES, $this->projectionScope());
+        }
+        return $this->computeMemories();
+    }
+
+    /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
+    private function computeMemories(): array
     {
         $resolution = $this->visiblePhotoResolution();
         $visible = $resolution['photos'];
@@ -593,6 +776,64 @@ final class GatewayService
         }
 
         return ['available' => true, 'total' => count($items), 'items' => array_values($items)];
+    }
+
+    /**
+     * Build-only entry point used by ReadProjectionBuilder. It intentionally
+     * bypasses the read store so maintenance cannot recursively consume the
+     * stale payload it is trying to replace.
+     *
+     * @return array<string,mixed>
+     */
+    public function projectionPayload(string $kind): array
+    {
+        return match ($kind) {
+            ReadProjectionStore::TIMELINE => $this->computeTimeline(),
+            ReadProjectionStore::ALBUMS => (function (): array {
+                $items = $this->visibleAlbumItems(true, false);
+                foreach ($items as &$item) {
+                    $photos = is_array($item['items'] ?? null) ? $item['items'] : null;
+                    if ($photos === null) {
+                        throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+                    }
+                    $item['photo_ids'] = array_map(static function (array $photo): string {
+                        if (!is_string($photo['id'] ?? null)) {
+                            throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+                        }
+                        return (string) $photo['id'];
+                    }, $photos);
+                    unset($item['items']);
+                }
+                unset($item);
+                return ['total' => count($items), 'items' => $items];
+            })(),
+            ReadProjectionStore::PEOPLE => (function (): array {
+                $projection = $this->visiblePeople();
+                $items = is_array($projection['items'] ?? null) ? $projection['items'] : [];
+                foreach ($items as &$item) {
+                    $photos = is_array($item['items'] ?? null) ? $item['items'] : null;
+                    if ($photos === null) {
+                        throw new \RuntimeException('class_archive_gateway_people_projection_invalid');
+                    }
+                    $item['photo_ids'] = array_map(static function (array $photo): string {
+                        if (!is_string($photo['id'] ?? null)) {
+                            throw new \RuntimeException('class_archive_gateway_people_projection_invalid');
+                        }
+                        return (string) $photo['id'];
+                    }, $photos);
+                    unset($item['items']);
+                }
+                unset($item);
+                return [
+                    'available' => (bool) ($projection['available'] ?? false),
+                    'total' => count($items),
+                    'items' => $items,
+                ];
+            })(),
+            ReadProjectionStore::MEMORIES => $this->computeMemories(),
+            ReadProjectionStore::SPOTLIGHT => $this->computeSpotlight(false),
+            default => throw new \InvalidArgumentException('class_archive_read_aggregate_kind_invalid'),
+        };
     }
 
     /** @return list<GatewayPhotoCandidate> */
@@ -758,6 +999,9 @@ final class GatewayService
             $dateSource,
             $eventLabel,
             array_map('intval', array_keys($categoryIds)),
+            $canonical->mediaRevision(),
+            $canonical->sourceDimensions()['width'] ?? null,
+            $canonical->sourceDimensions()['height'] ?? null,
         );
     }
 
@@ -918,10 +1162,29 @@ final class GatewayService
         return ['available' => true, 'items' => $items];
     }
 
+    /** @return array{available:bool,total?:int,items:list<array<string,mixed>>} */
+    private function peopleProjection(): array
+    {
+        if ($this->readProjection !== null) {
+            $projection = $this->readProjection->aggregate(ReadProjectionStore::PEOPLE, $this->projectionScope());
+            if (!is_bool($projection['available'] ?? null)
+                || !is_int($projection['total'] ?? null)
+                || !is_array($projection['items'] ?? null)
+                || $projection['total'] !== count($projection['items'])
+            ) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            return $projection;
+        }
+        $projection = $this->visiblePeople();
+        $projection['total'] = count($projection['items']);
+        return $projection;
+    }
+
     /**
      * @return list<array<string,mixed>>
      */
-    private function visibleAlbumItems(bool $includePhotos = false): array
+    private function visibleAlbumItems(bool $includePhotos = false, bool $includeCapabilities = true): array
     {
         if ($this->albumDomain === null) {
             return [];
@@ -939,9 +1202,13 @@ final class GatewayService
             return [];
         }
         $mappings = $this->albumDomain->projectVisible(array_map('intval', array_keys($categoryIds)), $photoIds);
-        $context = $this->authorizationContext();
-        $principalId = (int) ($context['principal_id'] ?? 0);
-        $role = (string) ($context['role'] ?? '');
+        $principalId = 0;
+        $role = '';
+        if ($includeCapabilities) {
+            $context = $this->authorizationContext();
+            $principalId = (int) ($context['principal_id'] ?? 0);
+            $role = (string) ($context['role'] ?? '');
+        }
         $items = [];
         foreach ($mappings as $mapping) {
             $categoryId = (int) ($mapping['piwigo_category_id'] ?? 0);
@@ -970,7 +1237,8 @@ final class GatewayService
             if ($domain === null) {
                 throw new \RuntimeException('class_archive_gateway_album_mapping_unavailable');
             }
-            $owned = $principalId > 0 && (int) ($domain['owner_principal_id'] ?? 0) === $principalId;
+            $owned = $includeCapabilities && $principalId > 0
+                && (int) ($domain['owner_principal_id'] ?? 0) === $principalId;
             $canSpotlight = $owned && ($mapping['album_type'] ?? null) === 'COMMUNITY'
                 && in_array($role, [Access::ROLE_CLASSMATE, Access::ROLE_TEACHER], true);
             $era = (string) ($mapping['era'] ?? 'MIXED');
@@ -1003,6 +1271,103 @@ final class GatewayService
             return $type !== 0 ? $type : strnatcasecmp((string) $left['name'], (string) $right['name']);
         });
         return $items;
+    }
+
+    /**
+     * Ownership is the only album-list field that is account-specific. Keep
+     * it out of the shared role-scope payload and overlay it from fresh domain
+     * state after current-principal authorization succeeds.
+     *
+     * @param list<array<string,mixed>> $items
+     * @return list<array<string,mixed>>
+     */
+    private function applyAlbumCapabilities(array $items): array
+    {
+        if ($this->albumDomain === null) {
+            throw new \RuntimeException('class_archive_album_service_unavailable');
+        }
+        $context = $this->authorizationContext();
+        $principalId = (int) ($context['principal_id'] ?? 0);
+        $role = (string) ($context['role'] ?? '');
+        foreach ($items as &$item) {
+            if (!is_array($item) || !is_string($item['id'] ?? null)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            $domain = $this->albumDomain->findByClassAlbumId((string) $item['id']);
+            if ($domain === null) {
+                throw new \RuntimeException('class_archive_gateway_album_mapping_unavailable');
+            }
+            $owned = $principalId > 0 && (int) ($domain['owner_principal_id'] ?? 0) === $principalId;
+            $item['owned'] = $owned;
+            $item['canSpotlight'] = $owned && ($item['type'] ?? null) === 'COMMUNITY'
+                && in_array($role, [Access::ROLE_CLASSMATE, Access::ROLE_TEACHER], true);
+        }
+        unset($item);
+        return $items;
+    }
+
+    /** @param array<string,mixed> $item @return list<string> */
+    private function projectionPhotoIds(array $item): array
+    {
+        $ids = is_array($item['photo_ids'] ?? null) ? $item['photo_ids'] : null;
+        if ($ids === null || count($ids) > 10000) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        $seen = [];
+        $result = [];
+        foreach ($ids as $id) {
+            if (!is_string($id)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            ClassArchivePhoto::idToBinary($id);
+            $id = strtolower($id);
+            if (isset($seen[$id])) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            $seen[$id] = true;
+            $result[] = $id;
+        }
+        $declared = is_int($item['photo_count'] ?? null)
+            ? (int) $item['photo_count']
+            : (is_int($item['total'] ?? null) ? (int) $item['total'] : null);
+        if ($declared !== null && $declared !== count($result)) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        return $result;
+    }
+
+    /**
+     * Hydrate membership ids from the current durable catalog. This is a
+     * bounded indexed join, not a live Piwigo/Immich aggregation. Policy is
+     * deliberately re-applied so a stale membership can never widen access.
+     *
+     * @param list<string> $photoIds
+     * @return list<array<string,mixed>>
+     */
+    private function hydrateProjectionPhotos(array $photoIds): array
+    {
+        if ($this->readProjection === null) {
+            throw new \RuntimeException('class_archive_read_projection_unavailable');
+        }
+        $candidates = $this->readProjection->photosByIds($photoIds);
+        if (count($candidates) !== count($photoIds)) {
+            throw new \RuntimeException('class_archive_read_aggregate_dependency_missing');
+        }
+        $visible = $this->policy->filterVisible($this->principal(), $candidates);
+        if (count($visible) !== count($photoIds)) {
+            // A restrictive Era/state mutation must rebuild the role-scoped
+            // membership before detail reads resume; never silently expose or
+            // miscount a stale member.
+            throw new \RuntimeException('class_archive_read_aggregate_dependency_stale');
+        }
+        $result = [];
+        foreach ($visible as $index => $photo) {
+            if (!$photo instanceof GatewayPhotoCandidate || !hash_equals($photoIds[$index], $photo->id())) {
+                throw new \RuntimeException('class_archive_read_aggregate_dependency_order_invalid');
+            }
+            $result[] = $photo->publicProjection();
+        }
+        return $result;
     }
 
     /** @return list<array<string,mixed>> */
@@ -1154,6 +1519,19 @@ final class GatewayService
         return $principal;
     }
 
+    private function projectionScope(?GatewayPrincipal $principal = null): string
+    {
+        $principal ??= $this->principal();
+        return match ($principal->role()) {
+            Access::ROLE_FAMILY => ReadProjectionStore::SCOPE_HERITAGE,
+            Access::ROLE_CLASSMATE,
+            Access::ROLE_TEACHER,
+            Access::ROLE_ANONYMOUS,
+            Access::ROLE_SYSTEM_ADMIN => ReadProjectionStore::SCOPE_FULL,
+            default => throw new \RuntimeException('class_archive_gateway_principal_unresolved'),
+        };
+    }
+
     private function normalizeQuery(string $query): string
     {
         $query = trim($query);
@@ -1206,7 +1584,7 @@ final class GatewayRouteContract
             '/api/search' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/search/smart' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/photos/{id}' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
-            '/api/photos/{id}/media/{thumbnail|preview|original}' => ['method' => 'GET, HEAD', 'evidence' => 'CONTRACT_TESTED'],
+            '/api/photos/{id}/media/{thumbnail|xsmall|small|medium|large|preview|original}' => ['method' => 'GET, HEAD', 'evidence' => 'CONTRACT_TESTED'],
             '/api/me' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/memories' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],
             '/api/product-state' => ['method' => 'GET', 'evidence' => 'CONTRACT_TESTED'],

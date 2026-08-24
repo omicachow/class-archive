@@ -560,6 +560,10 @@ function ciPeoplePrepare(string $run): never
         // The resulting temporary all-library Immich binding is what makes a
         // runtime People/Search request prove the actual Gateway path instead
         // of accidentally testing a 32-photo partial index.
+        // Phase 3.3A makes the member read path projection-only. This fixture
+        // is an explicit synthetic write workflow, so publish the new catalog
+        // before asking the read adapter for the resulting canonical view.
+        ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
         $candidates = ClassIdentity\Gateway\PiwigoGatewayAdapter::fromPiwigo()->photoCandidates();
         if (count($candidates) !== $imageCount + count($state['images'])) {
             ciPeopleFail('canonical_catalog_count_invalid');
@@ -1070,6 +1074,10 @@ function ciPeopleCleanup(string $run): never
         }
         delete_categories([(int) $album['id']], 'no_delete');
     }
+    // Fixture cleanup is also a write workflow. Restore the durable
+    // 72-photo projection now, rather than leaving the next GET to rebuild or
+    // consume a stale all-library payload.
+    ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
     if (!unlink($path) || file_exists($path) || is_link($path)) {
         ciPeopleFail('state_cleanup_failed');
     }
@@ -1097,7 +1105,7 @@ ob_end_clean();
 require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
 require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
 $user = build_user(1, false);
-if (($user['status'] ?? null) !== 'webmaster' || !class_exists(ClassIdentity\ClassArchivePhotoMappingService::class) || !class_exists(ClassIdentity\ClassArchivePersonMappingService::class) || !class_exists(ClassIdentity\Gateway\PiwigoGatewayAdapter::class) || !ClassIdentity\Access::isEnforcementEnabled()) {
+if (($user['status'] ?? null) !== 'webmaster' || !class_exists(ClassIdentity\ClassArchivePhotoMappingService::class) || !class_exists(ClassIdentity\ClassArchivePersonMappingService::class) || !class_exists(ClassIdentity\Gateway\PiwigoGatewayAdapter::class) || !class_exists(ClassIdentity\Gateway\ReadProjectionBuilder::class) || !ClassIdentity\Access::isEnforcementEnabled()) {
     ciPeopleFail('active_runtime_required');
 }
 

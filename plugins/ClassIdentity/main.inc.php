@@ -27,6 +27,7 @@ require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
 require_once CLASS_IDENTITY_PATH . 'src/DomainSupport.php';
+require_once CLASS_IDENTITY_PATH . 'src/ProjectionMutationBoundary.php';
 require_once CLASS_IDENTITY_PATH . 'src/PersonCurationService.php';
 require_once CLASS_IDENTITY_PATH . 'src/AlbumService.php';
 require_once CLASS_IDENTITY_PATH . 'src/SpotlightService.php';
@@ -47,10 +48,13 @@ require_once CLASS_IDENTITY_PATH . 'src/BackupRestoreEvidence.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/Contracts.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayPolicy.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayService.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/ReadProjectionStore.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/PiwigoGatewayAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/BridgeImmichAdapter.php';
+require_once CLASS_IDENTITY_PATH . 'src/Gateway/ReadProjectionBuilder.php';
 require_once CLASS_IDENTITY_PATH . 'src/Gateway/GatewayHttpController.php';
 require_once CLASS_IDENTITY_PATH . 'public.php';
+require_once CLASS_IDENTITY_PATH . 'src/PhotoAppRedirect.php';
 
 if (!class_exists('ClassIdentityAccess', false)) {
     class_alias(\ClassIdentity\Access::class, 'ClassIdentityAccess');
@@ -76,6 +80,8 @@ add_event_handler('loc_begin_admin', [\ClassIdentity\Access::class, 'guardClassI
 add_event_handler('loc_begin_password', [\ClassIdentity\Access::class, 'guardCorePasswordRoute'], 5);
 add_event_handler('loc_begin_profile', [\ClassIdentity\Access::class, 'guardCoreProfileMutation'], 5);
 add_event_handler('get_admin_plugin_menu_links', [\ClassIdentity\Access::class, 'addAdminMenuLink'], 5);
+add_event_handler('loc_end_section_init', [\ClassIdentity\PhotoAppRedirect::class, 'onSectionInit'], 3);
+add_event_handler('loc_begin_index', [\ClassIdentity\PhotoAppRedirect::class, 'onBeginIndex'], 3);
 add_event_handler('loc_end_section_init', [ClassIdentityPublicController::class, 'onSectionInit'], 5);
 add_event_handler('loc_begin_index', [ClassIdentityPublicController::class, 'onBeginIndex'], 5);
 add_event_handler('loc_end_index', [ClassIdentityPublicController::class, 'onEndIndex'], 5);

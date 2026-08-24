@@ -160,6 +160,17 @@ final class BulkArchiveService
 
         try {
             $this->repository->transaction(function (Repository $repository) use ($batchId, $admin, $items, $changes, $reason, $eraConfirmed): void {
+                // The PREPARED journal invalidation protects the compensated
+                // MyISAM saga, but a concurrent builder may legitimately
+                // recover that early STALE state before this final InnoDB
+                // source commit begins. Rotate the dependency epochs again in
+                // the same transaction as archive_image so the real source
+                // mutation can never commit behind an ACTIVE older snapshot.
+                ProjectionMutationBoundary::invalidatePhotos(
+                    $repository,
+                    ProjectionMutationBoundary::archiveKinds($changes),
+                    'ARCHIVE_BULK_FINALIZE',
+                );
                 foreach ($items as $item) {
                     $this->updateArchiveRow($repository, (int) $item['piwigo_image_id'], $changes);
                     $repository->execute(
@@ -212,7 +223,13 @@ final class BulkArchiveService
         if ($mutations !== [] && function_exists('invalidate_user_cache')) {
             invalidate_user_cache();
         }
-        return $this->journalStatus($adminUserId, $batchId);
+        $status = $this->journalStatus($adminUserId, $batchId);
+        // v11 native Piwigo guards rotate the PHOTO_CATALOG generation before
+        // every image_category row write. A bounded point refresh is valid for
+        // ClassIdentity-only metadata, but any attempted MyISAM association
+        // mutation requires a fresh catalog generation after commit.
+        $status['projection_rebuild_mode'] = $mutations === [] ? 'BOUNDED' : 'FULL_NATIVE_SOURCE';
+        return $status;
     }
 
     /** @return array<string,mixed> */
@@ -663,6 +680,15 @@ final class BulkArchiveService
     private function prepareJournal(string $batchId, array $admin, array $items, array $changes, string $payloadDigest, bool $confirmed, string $reason): void
     {
         $this->repository->transaction(function (Repository $repository) use ($batchId, $admin, $items, $changes, $payloadDigest, $confirmed, $reason): void {
+            // The projection becomes unavailable in the same durable commit
+            // that authorizes the following compensated MyISAM mutations.
+            // If the association saga later fails, STALE is intentionally
+            // retained until a verified rebuild; old metadata is never served.
+            ProjectionMutationBoundary::invalidatePhotos(
+                $repository,
+                ProjectionMutationBoundary::archiveKinds($changes),
+                'ARCHIVE_BULK',
+            );
             $binary = DomainSupport::idToBinary($batchId);
             $repository->execute(
                 'INSERT INTO `' . DomainSupport::table($repository, 'batch_operation') . '` '

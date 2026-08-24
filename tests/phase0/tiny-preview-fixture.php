@@ -187,6 +187,28 @@ try {
     $sourceFile = CLASS_ARCHIVE_TINY_PIWIGO_ROOT . '/' . $source;
     $derivative = tinyDerivativePath($source);
     $derivativeFile = CLASS_ARCHIVE_TINY_PIWIGO_ROOT . '/_data/i/' . $derivative;
+    $hardlinkFile = dirname($derivativeFile) . '/.class-archive-hardlink-' . $runId . '.test';
+
+    if ($mode === 'status') {
+        tinyJson([
+            'derivative_exists' => is_file($derivativeFile) && !is_link($derivativeFile),
+            'derivative_size' => is_file($derivativeFile) && !is_link($derivativeFile) ? (int) filesize($derivativeFile) : 0,
+        ]);
+        exit;
+    }
+
+    if ($mode === 'warm') {
+        require_once '/workspace/infra/scripts/warm-photo-cache.php';
+        if (is_file($derivativeFile) || is_link($derivativeFile)) {
+            tinyFail('Fixture derivative must be missing before warmup.');
+        }
+        classArchivePhotoCacheGenerateIdentity($derivative, $sourceFile);
+        if (!is_file($derivativeFile) || is_link($derivativeFile)) {
+            tinyFail('Explicit maintenance warmup did not publish the fixture derivative.');
+        }
+        tinyJson(['warmed' => true, 'mode' => substr(sprintf('%o', fileperms($derivativeFile)), -3)]);
+        exit;
+    }
 
     if ($mode === 'inspect') {
         if (!is_file($derivativeFile) || is_link($derivativeFile)) {
@@ -208,6 +230,38 @@ try {
         exit;
     }
 
+    if ($mode === 'hardlink-create') {
+        if (!is_file($derivativeFile) || is_link($derivativeFile) || file_exists($hardlinkFile) || is_link($hardlinkFile)
+            || !link($derivativeFile, $hardlinkFile)) {
+            tinyFail('Cannot create the synthetic hardlink fixture.');
+        }
+        clearstatcache(true, $derivativeFile);
+        clearstatcache(true, $hardlinkFile);
+        $stat = lstat($derivativeFile);
+        if (!is_array($stat) || (int) ($stat['nlink'] ?? 0) !== 2) {
+            tinyFail('Synthetic hardlink fixture did not produce two links.');
+        }
+        tinyJson(['hardlinked' => true, 'nlink' => 2]);
+        exit;
+    }
+
+    if ($mode === 'hardlink-remove') {
+        clearstatcache(true, $derivativeFile);
+        clearstatcache(true, $hardlinkFile);
+        $stat = @lstat($derivativeFile);
+        if (!is_file($hardlinkFile) || is_link($hardlinkFile) || !is_array($stat)
+            || (int) ($stat['nlink'] ?? 0) !== 2 || !unlink($hardlinkFile)) {
+            tinyFail('Cannot safely remove the synthetic hardlink fixture.');
+        }
+        clearstatcache(true, $derivativeFile);
+        $stat = @lstat($derivativeFile);
+        if (!is_array($stat) || (int) ($stat['nlink'] ?? 0) !== 1) {
+            tinyFail('Derivative link count did not recover after fixture cleanup.');
+        }
+        tinyJson(['hardlink_removed' => true, 'nlink' => 1]);
+        exit;
+    }
+
     if ($mode === 'purge') {
         if (file_exists($derivativeFile) || is_link($derivativeFile)) {
             if (!is_file($derivativeFile) || is_link($derivativeFile) || !unlink($derivativeFile)) {
@@ -219,6 +273,11 @@ try {
     }
 
     if ($mode === 'delete') {
+        if (file_exists($hardlinkFile) || is_link($hardlinkFile)) {
+            if (!is_file($hardlinkFile) || is_link($hardlinkFile) || !unlink($hardlinkFile)) {
+                tinyFail('Cannot remove the synthetic hardlink during cleanup.');
+            }
+        }
         $deleted = delete_elements([$imageId], true);
         if ($deleted !== 1 || query2array('SELECT id FROM ' . IMAGES_TABLE . ' WHERE id = ' . $imageId) !== []) {
             tinyFail('Fixture image cleanup failed.');

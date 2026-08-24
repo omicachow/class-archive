@@ -26,7 +26,11 @@ function classArchiveMediaDeny(int $status = 403): never
     classArchiveMediaResponseHeaders();
     http_response_code($status);
     header('Content-Type: text/plain; charset=utf-8');
-    echo $status === 404 ? 'Media not found.' : 'Media access denied.';
+    echo match ($status) {
+        404 => 'Media not found.',
+        503 => 'Media temporarily unavailable.',
+        default => 'Media access denied.',
+    };
     exit;
 }
 
@@ -54,11 +58,11 @@ try {
         (string) ($_SERVER['CLASS_ARCHIVE_MEDIA_KIND'] ?? '')
     );
     $request = $resolved['request'];
-    ClassArchiveMediaGuard::assertDeliveryTarget($request);
     $decision = ClassArchiveMediaGuard::authorize($request, $resolved['image']);
     if (!$decision->allowed) {
         classArchiveMediaDeny();
     }
+    ClassArchiveMediaGuard::assertDeliveryTarget($request);
 
     classArchiveMediaResponseHeaders();
     header('Content-Type: ' . classArchiveMediaContentType($request->internalUri));
@@ -74,6 +78,8 @@ try {
         );
     }
     exit;
+} catch (ClassArchiveMediaUnavailable) {
+    classArchiveMediaDeny(503);
 } catch (DomainException) {
     classArchiveMediaDeny(404);
 } catch (Throwable $exception) {

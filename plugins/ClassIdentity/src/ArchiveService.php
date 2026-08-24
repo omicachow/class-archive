@@ -146,7 +146,8 @@ final class ClassIdentityArchiveService
         return $rows;
     }
 
-    public function saveMetadata(int $adminUserId, int $imageId, string $era, ?string $archiveDate, string $precision, string $confidence, ?string $dateSource, ?string $eventLabel, bool $official, ?int $albumId, string $reason): void
+    /** @return array{class_photo_id:string,projection_kinds:list<string>,projection_rebuild_mode:string} */
+    public function saveMetadata(int $adminUserId, int $imageId, string $era, ?string $archiveDate, string $precision, string $confidence, ?string $dateSource, ?string $eventLabel, bool $official, ?int $albumId, string $reason): array
     {
         $admin = $this->requireAdmin($adminUserId);
         $era = strtoupper(trim($era));
@@ -204,22 +205,29 @@ final class ClassIdentityArchiveService
             throw new RuntimeException('archive_album_mapping_conflict');
         }
 
-        \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
+        $changes = [
+            'archive_date' => $archiveDate,
+            'date_precision' => $precision,
+            'date_confidence' => $confidence,
+            'date_source' => $dateSource,
+            'event_label' => $eventLabel,
+            'official' => $official,
+            'add_album_ids' => [(string) $mapping['class_album_id']],
+            'remove_album_ids' => [],
+        ];
+        $classPhotoId = \ClassIdentity\DomainSupport::binaryToId((string) $photo['class_photo_id']);
+        $bulkResult = \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
             $adminUserId,
-            [\ClassIdentity\DomainSupport::binaryToId((string) $photo['class_photo_id'])],
-            [
-                'archive_date' => $archiveDate,
-                'date_precision' => $precision,
-                'date_confidence' => $confidence,
-                'date_source' => $dateSource,
-                'event_label' => $eventLabel,
-                'official' => $official,
-                'add_album_ids' => [(string) $mapping['class_album_id']],
-                'remove_album_ids' => [],
-            ],
+            [$classPhotoId],
+            $changes,
             $reason,
             false,
         );
+        return [
+            'class_photo_id' => $classPhotoId,
+            'projection_kinds' => ProjectionMutationBoundary::archiveKinds($changes),
+            'projection_rebuild_mode' => (string) ($bulkResult['projection_rebuild_mode'] ?? ''),
+        ];
     }
 
     public static function eraLabel(string $era): string

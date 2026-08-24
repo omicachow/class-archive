@@ -18,6 +18,10 @@ function photoMapFail(string $message): never
     throw new RuntimeException($message);
 }
 
+final class PhotoMapRollback extends RuntimeException
+{
+}
+
 if (PHP_SAPI !== 'cli' || !function_exists('posix_geteuid') || !function_exists('posix_getpwuid')) {
     fwrite(STDERR, "CLASS_ARCHIVE_PHOTO_MAPPING=FAIL reason=cli_posix_required\n");
     exit(1);
@@ -60,6 +64,11 @@ $suffix = hexdec(substr($run, 0, 5));
 $firstId = 15000000 + ($suffix % 500000);
 $secondId = $firstId + 500000;
 $photoTable = '`' . $repository->table('photo') . '`';
+$projectionTable = '`' . $repository->table('read_projection') . '`';
+$projectionBefore = $repository->fetchAll(
+    'SELECT `projection_key`,`state`,HEX(`generation`) AS `generation`,`invalidated_reason`,`invalidated_at`,`updated_at` '
+        . 'FROM ' . $projectionTable . ' ORDER BY `projection_key`',
+);
 $assertions = 0;
 $failures = [];
 $assert = static function (bool $condition, string $label) use (&$assertions, &$failures): void {
@@ -99,64 +108,86 @@ $expectsDuplicate = static function (callable $callback, string $label) use (&$a
 $exit = 0;
 
 try {
-    ClassIdentity\Schema::fromPiwigo('0.1.0')->verifyCurrent();
-    $coreRows = query2array('SELECT `id` FROM ' . IMAGES_TABLE . ' WHERE `id` IN (' . $firstId . ',' . $secondId . ')');
-    if ($coreRows !== []) {
-        photoMapFail('reserved_piwigo_test_ids_occupied');
-    }
-    $existing = $repository->fetchOne(
-        'SELECT `class_photo_id` FROM ' . $photoTable . ' WHERE `piwigo_image_id` IN (?, ?) LIMIT 1',
-        [$firstId, $secondId],
-    );
-    if ($existing !== null) {
-        photoMapFail('reserved_piwigo_mapping_ids_occupied');
-    }
-
-    $service = new ClassIdentity\ClassArchivePhotoMappingService($repository);
-    $checksum = hash('sha256', 'class-archive-photo-map-contract:' . $run);
-    $first = $service->ensurePiwigoMapping($firstId, $checksum, 'upload/contract-' . $run . '.jpg');
-    $assert(is_string($first['class_photo_id'] ?? null) && ($first['piwigo_image_id'] ?? null) === $firstId, 'create_opaque_mapping');
-    $assert(array_key_exists('immich_asset_id', $first) && $first['immich_asset_id'] === null && ($first['state'] ?? null) === 'ACTIVE', 'immich_nullable_active_mapping');
-    $same = $service->ensurePiwigoMapping($firstId, $checksum, 'upload/contract-' . $run . '.jpg');
-    $assert(($same['class_photo_id'] ?? null) === ($first['class_photo_id'] ?? null), 'mapping_id_stable');
-    $assetId = ClassIdentity\ClassArchivePhoto::generateId();
-    $service->bindImmichAsset((string) $first['class_photo_id'], $assetId);
-    $bound = $service->findByClassPhotoId((string) $first['class_photo_id']);
-    $assert(($bound['immich_asset_id'] ?? null) === $assetId, 'future_immich_link_internal_only');
-    $second = $service->ensurePiwigoMapping($secondId, $checksum, 'upload/contract-second-' . $run . '.jpg');
-    $complete = $service->activeImmichAssetBindings([(string) $first['class_photo_id']]);
-    $assert(($complete[(string) $first['class_photo_id']] ?? null) === $assetId, 'complete_immich_binding_lookup');
-    $expects(
-        static fn () => $service->activeImmichAssetBindings([(string) $first['class_photo_id'], (string) $second['class_photo_id']]),
-        'class_archive_photo_immich_binding_incomplete',
-        'partial_immich_binding_fails_closed',
-    );
-    $expectsDuplicate(
-        static fn () => $service->bindImmichAsset((string) $second['class_photo_id'], $assetId),
-        'immich_asset_unique',
-    );
-    $expects(
-        static fn () => $service->ensurePiwigoMapping($firstId, str_repeat('b', 64), 'upload/contract-' . $run . '.jpg'),
-        'class_archive_photo_mapping_drift',
-        'digest_drift_marks_mapping_stale',
-    );
-    $stale = $service->findByPiwigoImageId($firstId);
-    $assert(($stale['state'] ?? null) === 'STALE', 'mapping_drift_fail_closed_state');
-} catch (Throwable $error) {
-    $failures[] = 'unexpected:' . get_class($error) . ':' . $error->getMessage();
-} finally {
-    try {
-        $repository->execute('DELETE FROM ' . $photoTable . ' WHERE `piwigo_image_id` IN (?, ?)', [$firstId, $secondId]);
-        $remaining = $repository->fetchOne(
-            'SELECT COUNT(*) AS `count` FROM ' . $photoTable . ' WHERE `piwigo_image_id` IN (?, ?)',
+    $repository->transaction(function (ClassIdentity\Repository $repository) use (
+        $firstId,
+        $secondId,
+        $photoTable,
+        $run,
+        $assert,
+        $expects,
+        $expectsDuplicate,
+    ): never {
+        ClassIdentity\Schema::fromPiwigo('0.1.0')->verifyCurrent();
+        $coreRows = query2array('SELECT `id` FROM ' . IMAGES_TABLE . ' WHERE `id` IN (' . $firstId . ',' . $secondId . ')');
+        if ($coreRows !== []) {
+            photoMapFail('reserved_piwigo_test_ids_occupied');
+        }
+        $existing = $repository->fetchOne(
+            'SELECT `class_photo_id` FROM ' . $photoTable . ' WHERE `piwigo_image_id` IN (?, ?) LIMIT 1',
             [$firstId, $secondId],
         );
-        if ((int) ($remaining['count'] ?? -1) !== 0) {
-            $failures[] = 'cleanup_mapping_rows';
+        if ($existing !== null) {
+            photoMapFail('reserved_piwigo_mapping_ids_occupied');
         }
-    } catch (Throwable $error) {
-        $failures[] = 'cleanup:' . get_class($error);
+
+        $service = new ClassIdentity\ClassArchivePhotoMappingService($repository);
+        $checksum = hash('sha256', 'class-archive-photo-map-contract:' . $run);
+        $first = $service->ensurePiwigoMapping($firstId, $checksum, 'upload/contract-' . $run . '.jpg');
+        $assert(is_string($first['class_photo_id'] ?? null) && ($first['piwigo_image_id'] ?? null) === $firstId, 'create_opaque_mapping');
+        $assert(array_key_exists('immich_asset_id', $first) && $first['immich_asset_id'] === null && ($first['state'] ?? null) === 'ACTIVE', 'immich_nullable_active_mapping');
+        $same = $service->ensurePiwigoMapping($firstId, $checksum, 'upload/contract-' . $run . '.jpg');
+        $assert(($same['class_photo_id'] ?? null) === ($first['class_photo_id'] ?? null), 'mapping_id_stable');
+        $assetId = ClassIdentity\ClassArchivePhoto::generateId();
+        $service->bindImmichAsset((string) $first['class_photo_id'], $assetId);
+        $bound = $service->findByClassPhotoId((string) $first['class_photo_id']);
+        $assert(($bound['immich_asset_id'] ?? null) === $assetId, 'future_immich_link_internal_only');
+        $second = $service->ensurePiwigoMapping($secondId, $checksum, 'upload/contract-second-' . $run . '.jpg');
+        $complete = $service->activeImmichAssetBindings([(string) $first['class_photo_id']]);
+        $assert(($complete[(string) $first['class_photo_id']] ?? null) === $assetId, 'complete_immich_binding_lookup');
+        $expects(
+            static fn () => $service->activeImmichAssetBindings([(string) $first['class_photo_id'], (string) $second['class_photo_id']]),
+            'class_archive_photo_immich_binding_incomplete',
+            'partial_immich_binding_fails_closed',
+        );
+        $expectsDuplicate(
+            static fn () => $service->bindImmichAsset((string) $second['class_photo_id'], $assetId),
+            'immich_asset_unique',
+        );
+        $expects(
+            static fn () => $service->ensurePiwigoMapping($firstId, str_repeat('b', 64), 'upload/contract-' . $run . '.jpg'),
+            'class_archive_photo_mapping_drift',
+            'digest_drift_marks_mapping_stale',
+        );
+        $stale = $service->findByPiwigoImageId($firstId);
+        $assert(($stale['state'] ?? null) === 'STALE', 'mapping_drift_fail_closed_state');
+
+        // Every contract mutation, including projection invalidation, is
+        // rolled back together. The gate must never leave the shared
+        // synthetic runtime stale merely because it used impossible IDs.
+        throw new PhotoMapRollback('expected_test_rollback');
+    });
+    $failures[] = 'expected_test_rollback_missing';
+} catch (PhotoMapRollback $rollback) {
+    if ($rollback->getMessage() !== 'expected_test_rollback') {
+        $failures[] = 'unexpected_rollback_marker';
     }
+} catch (Throwable $error) {
+    $failures[] = 'unexpected:' . get_class($error) . ':' . $error->getMessage();
+}
+
+try {
+    $remaining = $repository->fetchOne(
+        'SELECT COUNT(*) AS `count` FROM ' . $photoTable . ' WHERE `piwigo_image_id` IN (?, ?)',
+        [$firstId, $secondId],
+    );
+    $assert((int) ($remaining['count'] ?? -1) === 0, 'cleanup_mapping_rows');
+    $projectionAfter = $repository->fetchAll(
+        'SELECT `projection_key`,`state`,HEX(`generation`) AS `generation`,`invalidated_reason`,`invalidated_at`,`updated_at` '
+            . 'FROM ' . $projectionTable . ' ORDER BY `projection_key`',
+    );
+    $assert($projectionAfter === $projectionBefore, 'cleanup_projection_rows');
+} catch (Throwable $error) {
+    $failures[] = 'cleanup:' . get_class($error);
 }
 
 if ($failures !== []) {

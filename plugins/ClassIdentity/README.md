@@ -30,8 +30,24 @@ for every migration. DDL is inspect/create/assert based so interrupted MariaDB
 DDL can be retried safely. A changed checksum, missing constraint, non-InnoDB
 engine or non-utf8mb4 table fails closed.
 
-Deactivation and uninstall never drop ClassIdentity data. Data erasure requires
-a separate, explicit, backed-up governance procedure.
+The native-mutation trigger integration is explicitly locked to **Piwigo
+16.4.0**. Activation, install migration and runtime schema attestation reject a
+different or unknown `PHPWG_VERSION`; a Core upgrade therefore requires a new
+source-schema review and lifecycle regression first. The 18 `BEFORE` triggers
+are plugin-owned MariaDB objects on `images`, `image_category` and `categories`.
+They are a database extension point, not a modification of any Piwigo Core
+source file.
+
+Deactivation first marks all six presentation projections stale, rotates the
+native source epoch, and then drops all 18 plugin-owned triggers. Uninstall
+repeats the same cleanup idempotently while retaining ClassIdentity data.
+Reactivation/reinstall restores and attests the exact trigger definitions, then
+again rotates the epoch and invalidates all projections before migration may
+complete. This prevents native writes made while inactive from reviving an old
+ACTIVE projection. Retirement deliberately remains available after an
+accidental unsupported Core upgrade so cleanup cannot be blocked by the version
+guard. Data erasure still requires a separate, explicit, backed-up governance
+procedure.
 
 ## Tables
 

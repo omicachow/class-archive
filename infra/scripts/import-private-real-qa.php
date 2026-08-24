@@ -290,7 +290,21 @@ try {
             if (!hash_equals($item['source_sha256'], $checksum)) {
                 throw new RuntimeException('piwigo_original_hash_mismatch');
             }
-            $mapping->ensurePiwigoMapping($imageId, $checksum, $reference);
+            $canonical = $mapping->ensurePiwigoMapping($imageId, $checksum, $reference);
+            if (class_exists('ClassArchiveDerivativeWarmupQueue', false)) {
+                $warmupQueued = \ClassArchiveDerivativeWarmupQueue::enqueueBestEffort(
+                    (string) ($canonical['class_photo_id'] ?? ''),
+                    $imageId,
+                );
+                if ($warmupQueued && class_exists('ClassArchiveDerivativeCacheWarmer', false)) {
+                    // The importer processes one committed image at a time;
+                    // resizing is never performed inside a database transaction.
+                    \ClassArchiveDerivativeCacheWarmer::warmBestEffort(
+                        (string) ($canonical['class_photo_id'] ?? ''),
+                        $imageId,
+                    );
+                }
+            }
             ++$imported;
         } catch (Throwable $error) {
             if ($imageId > 0) {

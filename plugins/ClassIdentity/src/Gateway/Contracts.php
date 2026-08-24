@@ -68,6 +68,19 @@ interface PiwigoAdapter
 }
 
 /**
+ * Optional persistent point-read capability.
+ *
+ * The returned row is still only a candidate: GatewayPolicy and the current
+ * principal are evaluated after the lookup.  Implementations must return
+ * null for an unknown UUID and must throw when their durable projection is
+ * missing or stale; falling back to a full-library scan is forbidden.
+ */
+interface PointPiwigoAdapter extends PiwigoAdapter
+{
+    public function photoCandidate(string $classPhotoId): ?GatewayPhotoCandidate;
+}
+
+/**
  * Future Immich enrichment adapter. It receives only policy-approved canonical
  * photo ids and must return candidate memberships, never authoritative counts.
  */
@@ -125,6 +138,9 @@ final class GatewayPhotoCandidate
         private readonly string $dateSource = 'UNKNOWN',
         private readonly ?string $eventLabel = null,
         array $albumCategoryIds = [],
+        private readonly ?string $mediaRevision = null,
+        private readonly ?int $sourceWidth = null,
+        private readonly ?int $sourceHeight = null,
     ) {
         ClassArchivePhoto::idToBinary($classPhotoId);
         if ($era !== null && !in_array($era, ['HERITAGE', 'LIVING'], true)) {
@@ -147,6 +163,15 @@ final class GatewayPhotoCandidate
         }
         if ($eventLabel !== null && ($eventLabel === '' || strlen($eventLabel) > 190 || str_contains($eventLabel, "\0"))) {
             throw new \InvalidArgumentException('class_archive_gateway_event_label_invalid');
+        }
+        if ($mediaRevision !== null && preg_match('/\A[a-f0-9]{32}\z/D', $mediaRevision) !== 1) {
+            throw new \InvalidArgumentException('class_archive_gateway_media_revision_invalid');
+        }
+        if (($sourceWidth === null) !== ($sourceHeight === null)
+            || ($sourceWidth !== null && ($sourceWidth <= 0 || $sourceWidth > 200000))
+            || ($sourceHeight !== null && ($sourceHeight <= 0 || $sourceHeight > 200000))
+        ) {
+            throw new \InvalidArgumentException('class_archive_gateway_media_dimensions_invalid');
         }
         $normalizedAlbums = [];
         foreach ($albumLabels as $label) {
@@ -202,6 +227,24 @@ final class GatewayPhotoCandidate
             throw new \RuntimeException('class_archive_gateway_delivery_mapping_unavailable');
         }
         return $this->piwigoImageId;
+    }
+
+    /**
+     * Opaque content revision for private browser revalidation. It is derived
+     * from the managed checksum using a domain-separated one-way hash; the raw
+     * checksum and storage mapping never cross the Gateway boundary.
+     */
+    public function mediaRevision(): ?string
+    {
+        return $this->mediaRevision;
+    }
+
+    /** @return array{width:int,height:int}|null */
+    public function sourceDimensions(): ?array
+    {
+        return $this->sourceWidth === null || $this->sourceHeight === null
+            ? null
+            : ['width' => $this->sourceWidth, 'height' => $this->sourceHeight];
     }
 
     /** @return list<string> */
@@ -272,11 +315,77 @@ final class GatewayPhotoCandidate
             'date_source' => $this->dateSource,
             'event_label' => $this->eventLabel,
             'albums' => $this->albumLabels,
+            'media_revision' => $this->mediaRevision,
+            'width' => $this->sourceWidth,
+            'height' => $this->sourceHeight,
             // This is an explicit delivery contract, not a backend byte URL.
             // A client may construct the canonical UUID media route, which
             // still looks up this opaque id and calls MediaGuard server-side.
             'media' => ['delivery' => 'MEDIAGUARD_REQUIRED'],
         ];
+    }
+
+    /**
+     * Private, durable read-model representation. This array is written only
+     * to ClassIdentity-owned MariaDB tables and must never be serialized to a
+     * browser response.
+     *
+     * @return array<string,mixed>
+     */
+    public function readModelProjection(): array
+    {
+        return [
+            'class_photo_id' => $this->classPhotoId,
+            'era' => $this->era,
+            'state' => $this->state,
+            'mapping_state' => $this->mappingState,
+            'title' => $this->title,
+            'taken_at' => $this->takenAt,
+            'album_labels' => $this->albumLabels,
+            'search_text' => $this->searchText,
+            'piwigo_image_id' => $this->piwigoImageId,
+            'date_precision' => $this->datePrecision,
+            'date_source' => $this->dateSource,
+            'event_label' => $this->eventLabel,
+            'album_category_ids' => $this->albumCategoryIds,
+            'media_revision' => $this->mediaRevision,
+            'source_width' => $this->sourceWidth,
+            'source_height' => $this->sourceHeight,
+        ];
+    }
+
+    /** @param array<string,mixed> $row */
+    public static function fromReadModelProjection(array $row): self
+    {
+        foreach (['class_photo_id', 'state', 'mapping_state', 'search_text', 'date_precision', 'date_source'] as $required) {
+            if (!is_string($row[$required] ?? null)) {
+                throw new \RuntimeException('class_archive_gateway_read_photo_invalid');
+            }
+        }
+        if (!is_int($row['piwigo_image_id'] ?? null) || (int) $row['piwigo_image_id'] <= 0) {
+            throw new \RuntimeException('class_archive_gateway_read_photo_invalid');
+        }
+        if (!is_array($row['album_labels'] ?? null) || !is_array($row['album_category_ids'] ?? null)) {
+            throw new \RuntimeException('class_archive_gateway_read_photo_invalid');
+        }
+        return new self(
+            $row['class_photo_id'],
+            is_string($row['era'] ?? null) ? $row['era'] : null,
+            $row['state'],
+            $row['mapping_state'],
+            is_string($row['title'] ?? null) ? $row['title'] : null,
+            is_string($row['taken_at'] ?? null) ? $row['taken_at'] : null,
+            $row['album_labels'],
+            $row['search_text'],
+            (int) $row['piwigo_image_id'],
+            $row['date_precision'],
+            $row['date_source'],
+            is_string($row['event_label'] ?? null) ? $row['event_label'] : null,
+            array_map('intval', $row['album_category_ids']),
+            is_string($row['media_revision'] ?? null) ? $row['media_revision'] : null,
+            is_int($row['source_width'] ?? null) ? $row['source_width'] : null,
+            is_int($row['source_height'] ?? null) ? $row['source_height'] : null,
+        );
     }
 
     private static function contains(string $haystack, string $needle): bool

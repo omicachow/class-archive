@@ -96,6 +96,21 @@ function backupFreshnessStatus(): array
     ];
 }
 
+/** @param list<array<string,mixed>> $projections */
+function maintenanceProjectionState(array $projections, string $kind): string
+{
+    foreach ($projections as $projection) {
+        if (is_array($projection) && ($projection['kind'] ?? null) === $kind) {
+            $state = $projection['state'] ?? null;
+            if (is_string($state) && in_array($state, ['ACTIVE', 'STALE', 'BUILDING', 'FAILED'], true)) {
+                return $state;
+            }
+            break;
+        }
+    }
+    throw new RuntimeException('maintenance_projection_state_unavailable');
+}
+
 /** @return array<string, mixed> */
 function maintenanceRun(bool $applyRejectedCleanup): array
 {
@@ -125,8 +140,37 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         }
         $provisioning = \ClassIdentity\ProvisioningService::fromPiwigo()->expireDueFamilyInvitations();
         $expiredSpotlights = \ClassIdentity\SpotlightService::fromPiwigo()->expireDue();
+        // Always repair/warm the tiny Spotlight projection after deadline
+        // processing. This also recovers a prior create/cancel commit whose
+        // post-commit rebuild was interrupted; reads remain fail-closed until
+        // this explicit source rebuild succeeds.
+        $spotlightProjection = \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild(
+            [\ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT],
+            false,
+        );
         $cleanup = \ClassIdentitySubmissionService::fromPiwigo()->cleanupRejectedBinaries($retentionDays, $applyRejectedCleanup);
         $reconciliation = \ClassIdentity\ReconciliationService::fromPiwigo()->scanAndPersist();
+        // Precompute only bounded, canonical Piwigo derivatives. This is an
+        // explicit maintenance action; product reads never call the warmer.
+        $firstScreenWarmup = classArchivePhotoCacheWarm(
+            'first-screen',
+            ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'],
+            false,
+        );
+        $coverWarmup = classArchivePhotoCacheWarm(
+            'covers',
+            ['medium', 'large', 'preview'],
+            false,
+        );
+        // Durable recovery does not depend solely on a filesystem queue
+        // enqueue succeeding. Scan every ACTIVE canonical mapping from trusted
+        // database state during scheduled maintenance; fresh files are only
+        // stat-checked and missing fixed profiles use the same Piwigo pipeline.
+        $allRecoveryWarmup = classArchivePhotoCacheWarm(
+            'all',
+            ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'],
+            false,
+        );
         $attestation = \ClassIdentity\MediaAttestation::status();
         $backup = backupFreshnessStatus();
         $attention = (
@@ -141,6 +185,10 @@ function maintenanceRun(bool $applyRejectedCleanup): array
                 'result' => 'PASS',
                 'expired' => $expiredSpotlights,
                 'automatic_scope' => 'SERVER_DEADLINE_ONLY',
+                'projection_state' => maintenanceProjectionState(
+                    $spotlightProjection['projections'] ?? [],
+                    \ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT,
+                ),
             ],
             'rejected_binary_cleanup' => [
                 'retention_days' => $retentionDays,
@@ -158,6 +206,31 @@ function maintenanceRun(bool $applyRejectedCleanup): array
             'media_permission_verification' => [
                 'derivative_files' => (int) (($reconciliation['derivative']['file_count'] ?? 0)),
                 'unsafe_entries' => count($reconciliation['derivative']['unsafe_entries'] ?? []),
+            ],
+            'photo_derivative_warmup' => [
+                'result' => 'PASS',
+                'first_screen' => [
+                    'selected_images' => (int) $firstScreenWarmup['selected_images'],
+                    'checked' => (int) $firstScreenWarmup['checked'],
+                    'cached' => (int) $firstScreenWarmup['cached'],
+                    'generated' => (int) $firstScreenWarmup['generated'],
+                    'source_reuse' => (int) $firstScreenWarmup['source_reuse'],
+                ],
+                'covers' => [
+                    'selected_images' => (int) $coverWarmup['selected_images'],
+                    'checked' => (int) $coverWarmup['checked'],
+                    'cached' => (int) $coverWarmup['cached'],
+                    'generated' => (int) $coverWarmup['generated'],
+                    'source_reuse' => (int) $coverWarmup['source_reuse'],
+                ],
+                'all_recovery' => [
+                    'selected_images' => (int) $allRecoveryWarmup['selected_images'],
+                    'checked' => (int) $allRecoveryWarmup['checked'],
+                    'cached' => (int) $allRecoveryWarmup['cached'],
+                    'generated' => (int) $allRecoveryWarmup['generated'],
+                    'source_reuse' => (int) $allRecoveryWarmup['source_reuse'],
+                    'queue_quarantined' => (int) ($allRecoveryWarmup['queue_quarantined'] ?? 0),
+                ],
             ],
             'media_attestation' => [
                 'state' => (string) ($attestation['state'] ?? 'MISSING'),
@@ -186,6 +259,7 @@ try {
     require PHPWG_ROOT_PATH . 'include/common.inc.php';
     ob_end_clean();
     require_once PHPWG_ROOT_PATH . 'plugins/ClassIdentity/main.inc.php';
+    require_once __DIR__ . '/warm-photo-cache.php';
     $record = maintenanceRun($arguments['apply_rejected_cleanup']);
     $output = [
         'maintenance_version' => $record['maintenance_version'],

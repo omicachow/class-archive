@@ -34,6 +34,15 @@ function Invoke-Docker([string[]]$arguments) {
     return $output
 }
 
+function Invoke-ProjectionRebuild {
+    $output = Invoke-Docker ($compose + @(
+        'exec','-T','--user','nginx','piwigo','php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php','--scope=all','--json'
+    ))
+    try { $result = ("$output" | ConvertFrom-Json -ErrorAction Stop) } catch { throw 'archive_timeline_runtime_projection_rebuild_invalid' }
+    if ([string]$result.result -ne 'PASS') { throw 'archive_timeline_runtime_projection_rebuild_failed' }
+}
+
 if(-not(Test-Path -LiteralPath $envPath) -or -not(Test-Path -LiteralPath $spikeEnvPath)){throw 'archive_timeline_runtime_missing_local_environment'}
 $settings=Read-Env $envPath
 $port=[int]$settings['CLASS_ARCHIVE_HTTP_PORT']
@@ -52,6 +61,10 @@ try {
     $preparedOutput=Invoke-Docker ($compose+@('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_ALLOW_TIMELINE_RUNTIME_FIXTURE=1','piwigo','php','/workspace/tests/phase2/archive-timeline-runtime-fixture.php','prepare',$run))
     if(("$preparedOutput") -notmatch 'ARCHIVE_TIMELINE_RUNTIME_FIXTURE=READY'){throw 'archive_timeline_runtime_prepare_failed'}
     $prepared=$true
+    # This fixture writes directly for deterministic fault injection. Product
+    # writes use the incremental mutation boundary; a direct test write must
+    # explicitly materialize the durable read model before GET is exercised.
+    Invoke-ProjectionRebuild
     [void](Invoke-Docker ($spike+@('up','-d','--force-recreate','immich-web-compat')))
     for($i=0;$i -lt 30;$i++){ $health=(wsl.exe -d Ubuntu --exec docker inspect --format '{{.State.Health.Status}}' 'class-archive-immich-spike-immich-web-compat-1').Trim(); if($health -eq 'healthy'){break}; Start-Sleep -Seconds 1 }
     if($health -ne 'healthy'){throw 'archive_timeline_runtime_bff_not_healthy'}
@@ -59,7 +72,12 @@ try {
     $login=Invoke-RestMethod -Uri $ws -Method Post -Body @{method='pwg.session.login';username='fixture-family';password=$fixturePassword} -WebSession $session -TimeoutSec 30
     if($login.stat -ne 'ok' -or -not [bool]$login.result){throw 'archive_timeline_runtime_family_login_failed'}
     $response=Invoke-WebRequest -UseBasicParsing -Uri ([Uri]::new($compat,'api/class-archive/timeline')) -WebSession $session -TimeoutSec 30
-    if($response.StatusCode -ne 200 -or $response.Headers['Cache-Control'] -notlike '*no-store*'){throw 'archive_timeline_runtime_projection_http_invalid'}
+    $cacheControl = [string]$response.Headers['Cache-Control']
+    $privateRevalidation = $cacheControl -like '*private*' -and $cacheControl -like '*no-cache*' `
+        -and $cacheControl -like '*must-revalidate*' -and $cacheControl -notlike '*public*'
+    if($response.StatusCode -ne 200 -or (-not ($cacheControl -like '*no-store*') -and -not $privateRevalidation)){
+        throw 'archive_timeline_runtime_projection_http_invalid'
+    }
     $payload=$response.Content|ConvertFrom-Json -ErrorAction Stop
     $groups=@($payload.groups)
     $labels=@($groups|ForEach-Object{[string]$_.label})
@@ -80,6 +98,7 @@ finally {
                 'exec','-T','--user','nginx','-e','CLASS_ARCHIVE_ALLOW_TIMELINE_RUNTIME_FIXTURE=1',
                 'piwigo','php','/workspace/tests/phase2/archive-timeline-runtime-fixture.php','cleanup',$run
             )))
+            Invoke-ProjectionRebuild
         } catch {
             $cleanupFailure = 'archive_timeline_runtime_cleanup_failed'
         }

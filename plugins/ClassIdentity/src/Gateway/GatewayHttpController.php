@@ -158,6 +158,7 @@ final class GatewayHttpController
             \ClassIdentity\PersonCurationService::fromPiwigo(),
             \ClassIdentity\SpotlightService::fromPiwigo(),
             \ClassIdentity\CanonicalPhotoService::fromPiwigo(),
+            ReadProjectionStore::fromPiwigo(),
         );
     }
 
@@ -172,9 +173,15 @@ final class GatewayHttpController
         }
         if ($segments === ['product-state']) {
             self::requireExactQuery([]);
-            $role = (string) ($gateway->me()['role'] ?? '');
+            $productState = $gateway->productState();
+            $role = (string) ($productState['role'] ?? '');
+            $presentationEpoch = (string) ($productState['presentation_epoch'] ?? '');
+            if (preg_match('/\A[a-f0-9]{64}\z/D', $presentationEpoch) !== 1) {
+                throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
+            }
             return [
                 'role' => $role,
+                'presentationEpoch' => $presentationEpoch,
                 'canManage' => $role === \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
                 'canSpotlight' => in_array($role, [\ClassIdentity\Access::ROLE_CLASSMATE, \ClassIdentity\Access::ROLE_TEACHER], true),
                 'csrfToken' => in_array($role, [
@@ -321,6 +328,7 @@ final class GatewayHttpController
             self::nullablePositiveInt($body['classmateIdentityId'] ?? null),
             self::reason($body),
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['created' => true, 'id' => (string) $result['class_person_id']];
     }
 
@@ -344,6 +352,7 @@ final class GatewayHttpController
             $cover,
             self::reason($body),
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['updated' => true, 'id' => (string) $result['class_person_id']];
     }
 
@@ -366,6 +375,7 @@ final class GatewayHttpController
             self::nullableUuid($body['coverPhotoId'] ?? null),
             $reason,
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['merged' => count($mergeIds), 'targetPersonId' => $target, 'mergeIds' => $mergeIds];
     }
 
@@ -382,6 +392,7 @@ final class GatewayHttpController
             $hidden ? 'HIDDEN' : 'VISIBLE',
             self::reason($body),
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['updated' => $count, 'hidden' => $hidden];
     }
 
@@ -390,6 +401,7 @@ final class GatewayHttpController
     {
         $mergeId = self::uuid($body['mergeId'] ?? null);
         \ClassIdentity\PersonCurationService::fromPiwigo()->revertMerge($userId, $mergeId, self::reason($body));
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['reverted' => true, 'id' => $mergeId];
     }
 
@@ -407,6 +419,7 @@ final class GatewayHttpController
             $photos,
             $reason,
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::PEOPLE]);
         return ['updated' => $updated];
     }
 
@@ -479,13 +492,29 @@ final class GatewayHttpController
         if (count(array_filter($changes, static fn(mixed $value): bool => $value !== null && $value !== [])) === 0) {
             throw new \InvalidArgumentException('class_archive_gateway_bulk_empty');
         }
-        return \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
+        $result = \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
             $userId,
             $photos,
             $changes,
             self::reason($body),
             $confirmed,
         );
+        $projectionKinds = self::archiveProjectionKinds($changes);
+        $rebuildMode = $result['projection_rebuild_mode'] ?? null;
+        unset($result['projection_rebuild_mode']);
+        // ClassIdentity-only archive metadata keeps the existing catalog
+        // generation and can publish the bounded photo set. Piwigo's native
+        // MyISAM guard intentionally rotates the catalog generation before an
+        // association write, so that path must publish a new persistent source
+        // generation before any aggregate becomes readable again.
+        if ($rebuildMode === 'FULL_NATIVE_SOURCE') {
+            ReadProjectionBuilder::rebuild();
+        } elseif ($rebuildMode === 'BOUNDED') {
+            self::rebuildPhotoProjection($photos, $projectionKinds);
+        } else {
+            throw new \RuntimeException('class_archive_bulk_projection_rebuild_mode_invalid');
+        }
+        return $result;
     }
 
     /** @param array<string,mixed> $body @return array<string,mixed> */
@@ -522,6 +551,10 @@ final class GatewayHttpController
             (string) $current['state'],
             self::reason($body),
         );
+        self::rebuildAggregateProjection([
+            ReadProjectionStore::ALBUMS,
+            ReadProjectionStore::SPOTLIGHT,
+        ]);
         return ['updated' => true, 'albumId' => (string) $result['class_album_id'], 'coverPhotoId' => $photoId];
     }
 
@@ -530,7 +563,22 @@ final class GatewayHttpController
     {
         $duplicateId = self::uuid($body['duplicateGroupId'] ?? null);
         $canonical = self::uuid($body['canonicalPhotoId'] ?? null);
-        \ClassIdentity\CanonicalPhotoService::fromPiwigo()->consolidateExact($userId, $duplicateId, $canonical, self::reason($body));
+        $projection = \ClassIdentity\CanonicalPhotoService::fromPiwigo()->consolidateExact(
+            $userId,
+            $duplicateId,
+            $canonical,
+            self::reason($body),
+        );
+        if (($projection['projection_rebuild_mode'] ?? null) === 'FULL_NATIVE_SOURCE') {
+            ReadProjectionBuilder::rebuild();
+        } elseif (($projection['projection_rebuild_mode'] ?? null) === 'BOUNDED') {
+            ReadProjectionBuilder::rebuildChangedPhotos(
+                (array) $projection['class_photo_ids'],
+                (array) $projection['projection_kinds'],
+            );
+        } else {
+            throw new \RuntimeException('class_archive_canonical_projection_rebuild_mode_invalid');
+        }
         return ['consolidated' => true, 'id' => $duplicateId, 'canonicalPhotoId' => $canonical];
     }
 
@@ -545,6 +593,7 @@ final class GatewayHttpController
             self::uuid($body['albumId'] ?? null),
             self::reason($body),
         );
+        self::rebuildAggregateProjection([ReadProjectionStore::SPOTLIGHT]);
         return [
             'created' => true,
             'id' => (string) $result['spotlight_id'],
@@ -558,7 +607,26 @@ final class GatewayHttpController
     {
         $id = self::uuid($body['spotlightId'] ?? null);
         \ClassIdentity\SpotlightService::fromPiwigo()->cancel($userId, $id, self::reason($body));
+        self::rebuildAggregateProjection([ReadProjectionStore::SPOTLIGHT]);
         return ['cancelled' => true, 'id' => $id];
+    }
+
+    /** @param list<string> $photoIds @param list<string> $kinds */
+    private static function rebuildPhotoProjection(array $photoIds, array $kinds): void
+    {
+        ReadProjectionBuilder::rebuildChangedPhotos($photoIds, $kinds);
+    }
+
+    /** @param array<string,mixed> $changes @return list<string> */
+    private static function archiveProjectionKinds(array $changes): array
+    {
+        return \ClassIdentity\ProjectionMutationBoundary::archiveKinds($changes);
+    }
+
+    /** @param list<string> $kinds */
+    private static function rebuildAggregateProjection(array $kinds): void
+    {
+        ReadProjectionBuilder::rebuild($kinds, false);
     }
 
     /** @param list<string> $allowed @param list<string> $required @return array<string,mixed> */
@@ -800,10 +868,16 @@ final class GatewayHttpController
             && is_string($segments[1])
             && ($segments[2] ?? null) === 'media'
             && is_string($segments[3])
-            && in_array($segments[3], ['thumbnail', 'preview', 'original'], true)
+            && in_array($segments[3], ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview', 'original'], true)
         ) {
             ClassArchivePhoto::idToBinary($segments[1]);
-            self::requireExactQuery([]);
+            // `v` is an optional bounded cache revision only. Visibility and
+            // byte delivery still resolve the UUID and re-enter MediaGuard on
+            // every request; this value is never an authorization credential.
+            $query = self::requireExactQuery(['v'], ['v']);
+            if (isset($query['v']) && preg_match('/\A[a-f0-9]{32}\z/D', $query['v']) !== 1) {
+                throw new \InvalidArgumentException('class_archive_gateway_media_revision_invalid');
+            }
             return ['media', $segments[1], null, $segments[3]];
         }
         if ($route === 'search' && count($segments) === 1) {
@@ -825,7 +899,7 @@ final class GatewayHttpController
     }
 
     /** @return array<string,string> */
-    private static function requireExactQuery(array $allowed): array
+    private static function requireExactQuery(array $allowed, array $optional = []): array
     {
         $rawQuery = $_SERVER['QUERY_STRING'] ?? '';
         if (!is_string($rawQuery)) {
@@ -861,7 +935,7 @@ final class GatewayHttpController
         }
 
         foreach ($allowed as $key) {
-            if (!isset($result[$key])) {
+            if (!isset($result[$key]) && !in_array($key, $optional, true)) {
                 throw new \InvalidArgumentException('class_archive_gateway_query_missing');
             }
         }
@@ -904,8 +978,12 @@ final class GatewayHttpController
                 $variant,
             );
             $request = $resolved['request'];
-            \ClassArchiveMediaGuard::assertDeliveryTarget($request);
             $decision = \ClassArchiveMediaGuard::authorize($request, $resolved['image']);
+            if ($decision->allowed) {
+                \ClassArchiveMediaGuard::assertDeliveryTarget($request);
+            }
+        } catch (\ClassArchiveMediaUnavailable) {
+            self::respondMediaDeny(503);
         } catch (\DomainException) {
             throw new \RuntimeException('class_archive_gateway_media_unavailable');
         }
@@ -972,7 +1050,11 @@ final class GatewayHttpController
         http_response_code($status);
         header('Content-Type: text/plain; charset=utf-8');
         if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'HEAD') {
-            echo $status === 404 ? 'Media not found.' : 'Media access denied.';
+            echo match ($status) {
+                404 => 'Media not found.',
+                503 => 'Media temporarily unavailable.',
+                default => 'Media access denied.',
+            };
         }
         exit;
     }

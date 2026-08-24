@@ -262,8 +262,8 @@ try {
         $assert(($routes[$route]['method'] ?? null) === 'GET' && ($routes[$route]['evidence'] ?? null) === 'CONTRACT_TESTED', 'route_contract_' . $route);
     }
     $assert(
-        ($routes['/api/photos/{id}/media/{thumbnail|preview|original}']['method'] ?? null) === 'GET, HEAD'
-        && ($routes['/api/photos/{id}/media/{thumbnail|preview|original}']['evidence'] ?? null) === 'CONTRACT_TESTED',
+        ($routes['/api/photos/{id}/media/{thumbnail|xsmall|small|medium|large|preview|original}']['method'] ?? null) === 'GET, HEAD'
+        && ($routes['/api/photos/{id}/media/{thumbnail|xsmall|small|medium|large|preview|original}']['evidence'] ?? null) === 'CONTRACT_TESTED',
         'route_contract_canonical_media',
     );
     $assert(GatewayRouteContract::publiclyBound() === true, 'routes_are_explicitly_http_bound');

@@ -353,7 +353,8 @@ final class ClassIdentitySubmissionService
         exit;
     }
 
-    public function review(int $submissionId, int $adminUserId, bool $approve, string $reason, ?int $albumId = null, ?string $archiveDate = null, string $precision = 'UNKNOWN', string $eventLabel = ''): void
+    /** @return array{class_photo_id:string,piwigo_image_id:int}|null */
+    public function review(int $submissionId, int $adminUserId, bool $approve, string $reason, ?int $albumId = null, ?string $archiveDate = null, string $precision = 'UNKNOWN', string $eventLabel = ''): ?array
     {
         $adminContext = $this->requireAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true);
@@ -362,21 +363,28 @@ final class ClassIdentitySubmissionService
         }
         $precision = self::normalizePrecision($precision);
         $archiveDate = self::normalizeDate($archiveDate, $precision);
-        $claimed = $this->repository->execute(
-            'UPDATE `' . $this->repository->table('submission') . '` SET `reviewed_by_principal_id`=?,`updated_at`=UTC_TIMESTAMP(6) '
-            . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id` IS NULL',
-            [(int) $adminContext['principal_id'], $submissionId],
-        );
-        if ($claimed !== 1) {
-            throw new InvalidArgumentException('submission_not_pending');
+
+        $preflightRow = null;
+        $sourcePath = null;
+        $thumbnailPath = null;
+        $eventLabel = self::boundedText($eventLabel, 190) ?? null;
+        $dateSource = self::archiveDateSource($archiveDate, $precision, $eventLabel);
+        if ($approve) {
+            // Every deterministic/read-only validation happens before the
+            // durable reviewer claim. A bad album, missing/corrupt pending
+            // original or unavailable Core pipeline therefore cannot strand a
+            // PENDING row or invalidate a previously ACTIVE read projection.
+            $preflightRow = $this->pendingApprovalCandidate($submissionId);
+            $albumId = $this->requireHeritageAlbum($albumId);
+            $sourcePath = $this->validatePendingApprovalSource($preflightRow);
+            $thumbnailPath = $this->resolveRef((string) $preflightRow['thumbnail_ref'], false);
+            $this->requirePiwigoApprovalPipeline();
+            if (!is_string($sourcePath) || !is_string($thumbnailPath) || !is_int($albumId)) {
+                throw new RuntimeException('submission_approval_preflight_incomplete');
+            }
         }
-        $row = $this->repository->fetchOne(
-            'SELECT * FROM `' . $this->repository->table('submission') . '` WHERE `id` = ? AND `state`=\'PENDING\' LIMIT 1',
-            [$submissionId],
-        );
-        if ($row === null) {
-            throw new InvalidArgumentException('submission_not_pending');
-        }
+
+        $row = $this->claimSubmissionForReview($submissionId, $adminContext);
 
         if (!$approve) {
             $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason): void {
@@ -404,83 +412,104 @@ final class ClassIdentitySubmissionService
                     'result' => 'SUCCESS',
                 ]);
             });
-            return;
+            return null;
         }
 
-        $albumId = $this->requireHeritageAlbum($albumId);
-        $sourcePath = $this->resolveRef((string) $row['storage_ref'], true);
-        if (!is_file($sourcePath) || is_link($sourcePath)) {
-            throw new RuntimeException('submission_original_missing');
-        }
-
-        require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
-        require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
-        if (!function_exists('add_uploaded_file') || !function_exists('associate_images_to_categories') || !function_exists('invalidate_user_cache')) {
-            throw new RuntimeException('piwigo_upload_pipeline_unavailable');
-        }
-
-        // Hold the ClassIdentity row lock while the Core pipeline runs. Core
-        // image/category tables are MyISAM, so this is a serialization guard,
-        // not a claim of cross-engine atomicity.
         try {
-            $imageId = add_uploaded_file($sourcePath, (string) $row['original_filename'], null, 0);
+            // Re-check the immutable row fingerprint, album boundary and file
+            // digest after acquiring the reviewer claim. This closes the
+            // preflight/claim TOCTOU window. A failure here is still before any
+            // Piwigo MyISAM/file mutation and can be compensated exactly.
+            if (!hash_equals(
+                self::approvalCandidateFingerprint($preflightRow),
+                self::approvalCandidateFingerprint($row),
+            )) {
+                throw new RuntimeException('submission_approval_preflight_drift');
+            }
+            if ($this->requireHeritageAlbum($albumId) !== $albumId) {
+                throw new RuntimeException('submission_approval_album_drift');
+            }
+            $claimedSourcePath = $this->validatePendingApprovalSource($row);
+            if (!hash_equals($sourcePath, $claimedSourcePath)) {
+                throw new RuntimeException('submission_approval_source_drift');
+            }
         } catch (Throwable $error) {
-            $this->repository->execute(
-                'UPDATE `' . $this->repository->table('submission') . '` SET `reviewed_by_principal_id`=NULL,`updated_at`=UTC_TIMESTAMP(6) WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id`=?',
-                [$submissionId, (int) $adminContext['principal_id']],
+            $this->releaseFailedApprovalClaim($row, $adminContext, $reason, $error);
+            throw $error;
+        }
+
+        $imageId = null;
+        try {
+            // Piwigo's image/category tables are MyISAM. The durable reviewer
+            // claim serializes competing reviews; a failed saga is released
+            // with an audited compensation below. The public projection stays
+            // on its prior ACTIVE generation until promotePendingMapping()
+            // atomically invalidates it with the final InnoDB state change.
+            $imageId = add_uploaded_file($sourcePath, (string) $row['original_filename'], null, 0);
+            if (!is_int($imageId) && !ctype_digit((string) $imageId)) {
+                throw new RuntimeException('piwigo_upload_pipeline_failed');
+            }
+            $imageId = (int) $imageId;
+            if ($imageId <= 0) {
+                throw new RuntimeException('piwigo_image_id_invalid');
+            }
+            associate_images_to_categories([$imageId], [$albumId]);
+            $this->chmodApprovedOriginal($imageId);
+            [$approvedChecksum, $approvedReference] = $this->approvedMediaReferenceAndChecksum($imageId);
+        } catch (Throwable $error) {
+            $this->releaseFailedApprovalClaim(
+                $row,
+                $adminContext,
+                $reason,
+                $error,
+                is_int($imageId) && $imageId > 0 ? $imageId : null,
             );
             throw $error;
         }
-        if (!is_int($imageId) && !ctype_digit((string) $imageId)) {
-            throw new RuntimeException('piwigo_upload_pipeline_failed');
-        }
-        $imageId = (int) $imageId;
-        if ($imageId <= 0) {
-            throw new RuntimeException('piwigo_image_id_invalid');
-        }
-        associate_images_to_categories([$imageId], [$albumId]);
-        $this->chmodApprovedOriginal($imageId);
-        [$approvedChecksum, $approvedReference] = $this->approvedMediaReferenceAndChecksum($imageId);
 
-        $eventLabel = self::boundedText($eventLabel, 190) ?? null;
-        $dateSource = self::archiveDateSource($archiveDate, $precision, $eventLabel);
-        $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $dateSource, $eventLabel, $approvedChecksum, $approvedReference): void {
-            $repository->execute(
-                'INSERT INTO `' . $repository->table('archive_image') . '` '
-                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) '
-                . 'VALUES (?, \'HERITAGE\', ?, ?, \'UNKNOWN\', ?, ?, 1, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
-                [$imageId, $archiveDate, $precision, $dateSource, $eventLabel, $submissionId],
-            );
-            (new ClassArchivePhotoMappingService($repository))->promotePendingMapping(
-                $submissionId,
-                $imageId,
-                $approvedChecksum,
-                $approvedReference,
-            );
-            $changed = $repository->execute(
-                'UPDATE `' . $repository->table('submission') . '` SET `state`=\'APPROVED\',`reviewed_at`=UTC_TIMESTAMP(6),'
-                . '`reviewed_by_principal_id`=?,`review_reason`=?,`approved_image_id`=?,`updated_at`=UTC_TIMESTAMP(6) '
-                . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id`=?',
-                [(int) $adminContext['principal_id'], $reason, $imageId, $submissionId, (int) $adminContext['principal_id']],
-            );
-            if ($changed !== 1) {
-                throw new RuntimeException('submission_review_race');
-            }
-            (new Audit($repository))->append([
-                'actor_principal_id' => (int) $adminContext['principal_id'],
-                'actor_user_id' => (int) $adminContext['piwigo_user_id'],
-                'actor_kind' => 'SYSTEM_ADMIN',
-                'action' => 'SUBMISSION_APPROVE',
-                'target_type' => 'SUBMISSION',
-                'target_id' => (string) $submissionId,
-                'target_identity_id' => (int) $row['identity_id'],
-                'target_seat_id' => (int) $row['seat_id'],
-                'old_value' => ['state' => 'PENDING'],
-                'new_value' => ['state' => 'APPROVED', 'piwigo_image_id' => $imageId, 'era' => 'HERITAGE', 'date_precision' => $precision, 'date_source' => $dateSource],
-                'reason' => $reason,
-                'result' => 'SUCCESS',
-            ]);
-        });
+        try {
+            $mapping = $this->repository->transaction(function (Repository $repository) use ($row, $submissionId, $adminContext, $reason, $imageId, $archiveDate, $precision, $dateSource, $eventLabel, $approvedChecksum, $approvedReference): array {
+                $repository->execute(
+                    'INSERT INTO `' . $repository->table('archive_image') . '` '
+                    . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) '
+                    . 'VALUES (?, \'HERITAGE\', ?, ?, \'UNKNOWN\', ?, ?, 1, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
+                    [$imageId, $archiveDate, $precision, $dateSource, $eventLabel, $submissionId],
+                );
+                $mapping = (new ClassArchivePhotoMappingService($repository))->promotePendingMapping(
+                    $submissionId,
+                    $imageId,
+                    $approvedChecksum,
+                    $approvedReference,
+                );
+                $changed = $repository->execute(
+                    'UPDATE `' . $repository->table('submission') . '` SET `state`=\'APPROVED\',`reviewed_at`=UTC_TIMESTAMP(6),'
+                    . '`reviewed_by_principal_id`=?,`review_reason`=?,`approved_image_id`=?,`updated_at`=UTC_TIMESTAMP(6) '
+                    . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id`=?',
+                    [(int) $adminContext['principal_id'], $reason, $imageId, $submissionId, (int) $adminContext['principal_id']],
+                );
+                if ($changed !== 1) {
+                    throw new RuntimeException('submission_review_race');
+                }
+                (new Audit($repository))->append([
+                    'actor_principal_id' => (int) $adminContext['principal_id'],
+                    'actor_user_id' => (int) $adminContext['piwigo_user_id'],
+                    'actor_kind' => 'SYSTEM_ADMIN',
+                    'action' => 'SUBMISSION_APPROVE',
+                    'target_type' => 'SUBMISSION',
+                    'target_id' => (string) $submissionId,
+                    'target_identity_id' => (int) $row['identity_id'],
+                    'target_seat_id' => (int) $row['seat_id'],
+                    'old_value' => ['state' => 'PENDING'],
+                    'new_value' => ['state' => 'APPROVED', 'piwigo_image_id' => $imageId, 'era' => 'HERITAGE', 'date_precision' => $precision, 'date_source' => $dateSource],
+                    'reason' => $reason,
+                    'result' => 'SUCCESS',
+                ]);
+                return $mapping;
+            });
+        } catch (Throwable $error) {
+            $this->releaseFailedApprovalClaim($row, $adminContext, $reason, $error, $imageId);
+            throw $error;
+        }
 
         // Piwigo persists a per-user gallery cache. A Family account that
         // browsed an otherwise-empty HERITAGE root before this approval can
@@ -491,7 +520,237 @@ final class ClassIdentitySubmissionService
         // a visibility-cache repair, not an authorization bypass.
         invalidate_user_cache();
 
-        $this->safeUnlink($this->resolveRef((string) $row['thumbnail_ref'], true));
+        $this->safeUnlink($thumbnailPath);
+        if (($mapping['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE) {
+            throw new RuntimeException('class_archive_submission_projection_mapping_missing');
+        }
+        if (class_exists('ClassArchiveDerivativeWarmupQueue', false)) {
+            $warmupQueued = \ClassArchiveDerivativeWarmupQueue::enqueueBestEffort(
+                (string) $mapping['class_photo_id'],
+                $imageId,
+            );
+            if ($warmupQueued && class_exists('ClassArchiveDerivativeCacheWarmer', false)) {
+                // This bounded resize runs only after the approval transaction
+                // committed, inside the explicit administrator write boundary.
+                // Failure preserves APPROVED truth and its durable marker;
+                // member reads remain cache-only and return a generic 503.
+                \ClassArchiveDerivativeCacheWarmer::warmBestEffort(
+                    (string) $mapping['class_photo_id'],
+                    $imageId,
+                );
+            }
+        }
+        return [
+            'class_photo_id' => (string) $mapping['class_photo_id'],
+            'piwigo_image_id' => $imageId,
+        ];
+    }
+
+    /** @return array<string,mixed> */
+    private function pendingApprovalCandidate(int $submissionId): array
+    {
+        $row = $this->repository->fetchOne(
+            'SELECT * FROM `' . $this->repository->table('submission') . '` '
+                . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id` IS NULL LIMIT 1',
+            [$submissionId],
+        );
+        if ($row === null) {
+            throw new InvalidArgumentException('submission_not_pending');
+        }
+        return $row;
+    }
+
+    /** @param array<string,mixed> $adminContext @return array<string,mixed> */
+    private function claimSubmissionForReview(int $submissionId, array $adminContext): array
+    {
+        return $this->repository->transaction(function (Repository $repository) use ($submissionId, $adminContext): array {
+            $candidate = $repository->fetchOne(
+                'SELECT * FROM `' . $repository->table('submission') . '` '
+                    . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id` IS NULL FOR UPDATE',
+                [$submissionId],
+            );
+            if ($candidate === null) {
+                throw new InvalidArgumentException('submission_not_pending');
+            }
+            $claimed = $repository->execute(
+                'UPDATE `' . $repository->table('submission') . '` SET `reviewed_by_principal_id`=?,`updated_at`=UTC_TIMESTAMP(6) '
+                    . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id` IS NULL',
+                [(int) $adminContext['principal_id'], $submissionId],
+            );
+            if ($claimed !== 1) {
+                throw new InvalidArgumentException('submission_not_pending');
+            }
+            $candidate['reviewed_by_principal_id'] = (int) $adminContext['principal_id'];
+            return $candidate;
+        });
+    }
+
+    /** @param array<string,mixed> $row */
+    private function validatePendingApprovalSource(array $row): string
+    {
+        $path = $this->resolveRef((string) ($row['storage_ref'] ?? ''), true);
+        if (!is_file($path) || is_link($path)) {
+            throw new RuntimeException('submission_original_missing');
+        }
+
+        $expectedSize = (int) ($row['byte_size'] ?? 0);
+        $actualSize = filesize($path);
+        if ($expectedSize <= 0 || !is_int($actualSize) || $actualSize !== $expectedSize) {
+            throw new RuntimeException('submission_original_size_drift');
+        }
+        $expectedChecksum = $row['sha256'] ?? null;
+        $actualChecksum = hash_file('sha256', $path, true);
+        if (
+            !is_string($expectedChecksum)
+            || strlen($expectedChecksum) !== 32
+            || !is_string($actualChecksum)
+            || !hash_equals($expectedChecksum, $actualChecksum)
+        ) {
+            throw new RuntimeException('submission_original_checksum_drift');
+        }
+
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mime = $finfo === false ? false : finfo_file($finfo, $path);
+        if ($finfo !== false) {
+            finfo_close($finfo);
+        }
+        $recordedMime = (string) ($row['mime_type'] ?? '');
+        $recordedExtension = strtolower((string) ($row['extension'] ?? ''));
+        if (
+            !is_string($mime)
+            || !isset(self::MIME_EXTENSIONS[$mime])
+            || !hash_equals($recordedMime, $mime)
+            || !hash_equals($recordedExtension, self::MIME_EXTENSIONS[$mime])
+        ) {
+            throw new RuntimeException('submission_original_format_drift');
+        }
+        $info = @getimagesize($path);
+        if (
+            !is_array($info)
+            || (int) ($info[0] ?? 0) !== (int) ($row['width'] ?? 0)
+            || (int) ($info[1] ?? 0) !== (int) ($row['height'] ?? 0)
+        ) {
+            throw new RuntimeException('submission_original_dimensions_drift');
+        }
+        return $path;
+    }
+
+    /** @param array<string,mixed> $row */
+    private static function approvalCandidateFingerprint(array $row): string
+    {
+        $checksum = $row['sha256'] ?? null;
+        if (!is_string($checksum) || strlen($checksum) !== 32) {
+            throw new RuntimeException('submission_original_checksum_invalid');
+        }
+        return hash('sha256', json_encode([
+            'id' => (int) ($row['id'] ?? 0),
+            'identity_id' => (int) ($row['identity_id'] ?? 0),
+            'seat_id' => (int) ($row['seat_id'] ?? 0),
+            'account_id' => (int) ($row['account_id'] ?? 0),
+            'principal_id' => (int) ($row['principal_id'] ?? 0),
+            'original_filename' => (string) ($row['original_filename'] ?? ''),
+            'storage_ref' => (string) ($row['storage_ref'] ?? ''),
+            'thumbnail_ref' => (string) ($row['thumbnail_ref'] ?? ''),
+            'mime_type' => (string) ($row['mime_type'] ?? ''),
+            'extension' => (string) ($row['extension'] ?? ''),
+            'byte_size' => (int) ($row['byte_size'] ?? 0),
+            'sha256' => bin2hex($checksum),
+            'width' => (int) ($row['width'] ?? 0),
+            'height' => (int) ($row['height'] ?? 0),
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    }
+
+    private function requirePiwigoApprovalPipeline(): void
+    {
+        require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
+        require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
+        if (!function_exists('add_uploaded_file') || !function_exists('associate_images_to_categories') || !function_exists('invalidate_user_cache')) {
+            throw new RuntimeException('piwigo_upload_pipeline_unavailable');
+        }
+    }
+
+    /**
+     * Release only the exact reviewer claim owned by this failed attempt. The
+     * failed audit and release share one transaction; a database/audit failure
+     * therefore cannot silently report compensation that did not persist.
+     *
+     * @param array<string,mixed> $row
+     * @param array<string,mixed> $adminContext
+     */
+    private function releaseFailedApprovalClaim(
+        array $row,
+        array $adminContext,
+        string $reason,
+        Throwable $error,
+        ?int $piwigoImageId = null,
+    ): void {
+        $submissionId = (int) ($row['id'] ?? 0);
+        $reviewerId = (int) ($adminContext['principal_id'] ?? 0);
+        if ($submissionId <= 0 || $reviewerId <= 0) {
+            throw new RuntimeException('submission_review_claim_compensation_invalid');
+        }
+        $errorCode = self::approvalFailureCode($error);
+        $this->repository->transaction(function (Repository $repository) use (
+            $row,
+            $adminContext,
+            $reason,
+            $submissionId,
+            $reviewerId,
+            $piwigoImageId,
+            $errorCode,
+        ): void {
+            $current = $repository->fetchOne(
+                'SELECT `state`,`reviewed_by_principal_id` FROM `' . $repository->table('submission') . '` WHERE `id`=? FOR UPDATE',
+                [$submissionId],
+            );
+            if ($current === null) {
+                throw new RuntimeException('submission_review_claim_compensation_missing');
+            }
+            if (($current['state'] ?? null) === 'APPROVED' && (int) ($current['reviewed_by_principal_id'] ?? 0) === $reviewerId) {
+                // A commit acknowledgement can fail after the server committed.
+                // Never turn an already-approved review back into PENDING.
+                return;
+            }
+            if (($current['state'] ?? null) !== 'PENDING' || (int) ($current['reviewed_by_principal_id'] ?? 0) !== $reviewerId) {
+                throw new RuntimeException('submission_review_claim_compensation_conflict');
+            }
+            $released = $repository->execute(
+                'UPDATE `' . $repository->table('submission') . '` SET `reviewed_by_principal_id`=NULL,`updated_at`=UTC_TIMESTAMP(6) '
+                    . 'WHERE `id`=? AND `state`=\'PENDING\' AND `reviewed_by_principal_id`=?',
+                [$submissionId, $reviewerId],
+            );
+            if ($released !== 1) {
+                throw new RuntimeException('submission_review_claim_compensation_race');
+            }
+            $newValue = ['state' => 'PENDING', 'result' => 'REVIEW_CLAIM_RELEASED'];
+            if ($piwigoImageId !== null && $piwigoImageId > 0) {
+                $newValue['piwigo_image_id'] = $piwigoImageId;
+            }
+            (new Audit($repository))->append([
+                'actor_principal_id' => $reviewerId,
+                'actor_user_id' => (int) ($adminContext['piwigo_user_id'] ?? 0),
+                'actor_kind' => 'SYSTEM_ADMIN',
+                'action' => 'SUBMISSION_APPROVE_ABORT',
+                'target_type' => 'SUBMISSION',
+                'target_id' => (string) $submissionId,
+                'target_identity_id' => (int) ($row['identity_id'] ?? 0),
+                'target_seat_id' => (int) ($row['seat_id'] ?? 0),
+                'old_value' => ['state' => 'PENDING'],
+                'new_value' => $newValue,
+                'reason' => $reason,
+                'result' => 'FAILED',
+                'error_code' => $errorCode,
+            ]);
+        });
+    }
+
+    private static function approvalFailureCode(Throwable $error): string
+    {
+        $message = $error->getMessage();
+        if (preg_match('/\A[A-Za-z][A-Za-z0-9_]{0,63}\z/D', $message) === 1) {
+            return strtoupper($message);
+        }
+        return 'SUBMISSION_APPROVE_FAILED';
     }
 
     /** @return array{original_name:string,mime:string,extension:string,size:int,sha256:string,width:int,height:int,tmp:string} */

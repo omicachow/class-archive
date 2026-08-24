@@ -683,6 +683,23 @@ function Provision-PiwigoFixtureAccounts([string]$Password) {
     }
 }
 
+function Rebuild-BridgeBackedReadProjections {
+    # AI-derived People/Memories are write-time projections. Enabling the
+    # isolated bridge must explicitly materialize them before the HTTP read
+    # path is exercised; GET is never allowed to fall back to a live Immich
+    # scan just because the bridge became available.
+    $text = Invoke-PiwigoCompose @(
+        'exec', '-T', '--user', 'nginx', 'piwigo',
+        'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php',
+        '--scope=aggregates', '--kinds=PEOPLE,MEMORIES', '--json'
+    )
+    try { $result = $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'bridge_projection_rebuild_response_invalid' }
+    Assert-Exact ([string]$result.result -eq 'PASS' `
+        -and @($result.aggregates.changed_kinds).Count -eq 2 `
+        -and @($result.aggregates.changed_kinds) -contains 'PEOPLE' `
+        -and @($result.aggregates.changed_kinds) -contains 'MEMORIES') 'bridge_projection_rebuild_invalid'
+}
+
 function Invoke-WS([Uri]$Uri, [Microsoft.PowerShell.Commands.WebRequestSession]$Session, [hashtable]$Body) {
     return Invoke-RestMethod -Uri $Uri -Method Post -Body $Body -WebSession $Session -TimeoutSec 30
 }
@@ -970,6 +987,8 @@ try {
     $enabled = Invoke-PiwigoFixture 'enable' $run ([ordered]@{ version = 1; token = $bridgeToken })
     Assert-Exact ([bool]$enabled.ok) 'bridge_enable_failed'
     Assert-PiwigoLifecycleUnchanged $piwigoRecordBefore 'after_bridge_enable'
+    Rebuild-BridgeBackedReadProjections
+    Assert-PiwigoLifecycleUnchanged $piwigoRecordBefore 'after_bridge_projection_rebuild'
     $bridgeToken = $null
     if ($BrowserE2E.IsPresent) {
         $script:stage = 'start_compatibility_browser_shell'

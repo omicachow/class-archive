@@ -15,7 +15,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
         'required' => [
             'main.inc.php', 'media-gateway.php', 'derivative-generator.php',
             'identity-derivative-fallback.php', 'src/MediaGuard.php',
-            'src/MediaFilePolicy.php',
+            'src/MediaFilePolicy.php', 'src/DerivativeWarmupQueue.php', 'src/DerivativeCacheWarmer.php',
         ],
     ],
     'ClassIdentity' => [
@@ -33,12 +33,13 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/MlArtifactAttestation.php',
             'src/ReconciliationService.php', 'src/MaintenanceStatus.php',
             'src/BackupRestoreEvidence.php',
-            'src/DomainSupport.php', 'src/PersonCurationService.php',
+            'src/DomainSupport.php', 'src/ProjectionMutationBoundary.php', 'src/PersonCurationService.php',
             'src/AlbumService.php', 'src/SpotlightService.php',
             'src/CanonicalPhotoService.php', 'src/BulkArchiveService.php',
+            'src/PhotoAppRedirect.php',
             'src/Gateway/Contracts.php', 'src/Gateway/GatewayPolicy.php',
-            'src/Gateway/GatewayService.php', 'src/Gateway/PiwigoGatewayAdapter.php',
-            'src/Gateway/BridgeImmichAdapter.php', 'src/Gateway/GatewayHttpController.php',
+            'src/Gateway/GatewayService.php', 'src/Gateway/ReadProjectionStore.php', 'src/Gateway/PiwigoGatewayAdapter.php',
+            'src/Gateway/BridgeImmichAdapter.php', 'src/Gateway/ReadProjectionBuilder.php', 'src/Gateway/GatewayHttpController.php',
         ],
     ],
 ];

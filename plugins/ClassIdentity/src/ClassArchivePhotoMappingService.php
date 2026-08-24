@@ -148,6 +148,16 @@ final class ClassArchivePhotoMappingService
                     !hash_equals((string) $mapped['media_checksum'], ClassArchivePhoto::checksumToHex($checksum))
                     || !hash_equals((string) $mapped['media_reference'], $mediaReference)
                 ) {
+                    // A previously published mapping must invalidate the
+                    // catalog even when its Piwigo image has disappeared.
+                    // The missing Core row is itself drift; retaining an
+                    // ACTIVE catalog in that case would keep stale metadata
+                    // and counts available after byte delivery starts denying.
+                    ProjectionMutationBoundary::invalidatePhotos(
+                        $repository,
+                        ProjectionMutationBoundary::allAggregateKinds(),
+                        'PHOTO_MAPPING_DRIFT',
+                    );
                     $changed = $repository->execute(
                         'UPDATE `' . $repository->table('photo') . '` SET `state` = ?, `updated_at` = UTC_TIMESTAMP(6) '
                         . 'WHERE `class_photo_id` = ? AND `state` = ?',
@@ -178,6 +188,13 @@ final class ClassArchivePhotoMappingService
                 );
                 if ($alreadyUsed !== null) {
                     continue;
+                }
+                if ($this->piwigoImageExists($repository, $piwigoImageId)) {
+                    ProjectionMutationBoundary::invalidatePhotos(
+                        $repository,
+                        ProjectionMutationBoundary::allAggregateKinds(),
+                        'PHOTO_MAPPING_CREATE',
+                    );
                 }
                 $repository->execute(
                     'INSERT INTO `' . $repository->table('photo') . '` '
@@ -309,6 +326,13 @@ final class ClassArchivePhotoMappingService
             if ($existingImage !== null) {
                 throw new \RuntimeException('class_archive_photo_piwigo_mapping_conflict');
             }
+            if ($this->piwigoImageExists($repository, $piwigoImageId)) {
+                ProjectionMutationBoundary::invalidatePhotos(
+                    $repository,
+                    ProjectionMutationBoundary::allAggregateKinds(),
+                    'PHOTO_MAPPING_PROMOTE',
+                );
+            }
             $changed = $repository->execute(
                 'UPDATE `' . $repository->table('photo') . '` SET `piwigo_image_id` = ?, `media_reference` = ?, `state` = ?, `updated_at` = UTC_TIMESTAMP(6) '
                 . 'WHERE `class_photo_id` = ? AND `state` = ?',
@@ -336,14 +360,24 @@ final class ClassArchivePhotoMappingService
         if ($assetId === null) {
             throw new \InvalidArgumentException('class_archive_photo_immich_asset_id_invalid');
         }
-        $changed = $this->repository->execute(
-            'UPDATE `' . $this->repository->table('photo') . '` SET `immich_asset_id` = ?, `updated_at` = UTC_TIMESTAMP(6) '
-            . 'WHERE `class_photo_id` = ? AND `state` = ?',
-            [$assetId, $binaryId, ClassArchivePhoto::STATE_ACTIVE],
-        );
-        if ($changed !== 1) {
-            throw new \RuntimeException('class_archive_photo_mapping_not_active');
-        }
+        $this->repository->transaction(function (Repository $repository) use ($assetId, $binaryId): void {
+            ProjectionMutationBoundary::invalidateAggregates(
+                $repository,
+                [
+                    \ClassIdentity\Gateway\ReadProjectionStore::PEOPLE,
+                    \ClassIdentity\Gateway\ReadProjectionStore::MEMORIES,
+                ],
+                'IMMICH_ASSET_BIND',
+            );
+            $changed = $repository->execute(
+                'UPDATE `' . $repository->table('photo') . '` SET `immich_asset_id` = ?, `updated_at` = UTC_TIMESTAMP(6) '
+                . 'WHERE `class_photo_id` = ? AND `state` = ?',
+                [$assetId, $binaryId, ClassArchivePhoto::STATE_ACTIVE],
+            );
+            if ($changed !== 1) {
+                throw new \RuntimeException('class_archive_photo_mapping_not_active');
+            }
+        });
     }
 
     /**
@@ -363,6 +397,18 @@ final class ClassArchivePhotoMappingService
         if ($changed > 1) {
             throw new \RuntimeException('class_archive_photo_pending_mapping_ambiguous');
         }
+    }
+
+    private function piwigoImageExists(Repository $repository, int $piwigoImageId): bool
+    {
+        global $prefixeTable;
+        if (!isset($prefixeTable) || !is_string($prefixeTable) || $prefixeTable === '') {
+            throw new \RuntimeException('class_archive_piwigo_prefix_unavailable');
+        }
+        return $repository->fetchOne(
+            'SELECT `id` FROM `' . $prefixeTable . 'images` WHERE `id`=? LIMIT 1',
+            [$piwigoImageId],
+        ) !== null;
     }
 
     /** @param array<string, mixed> $row @return array<string, mixed> */

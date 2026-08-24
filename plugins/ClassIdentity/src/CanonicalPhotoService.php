@@ -148,13 +148,15 @@ final class CanonicalPhotoService
     /**
      * Logical exact consolidation. The target receives the union of Piwigo
      * category associations; neither image row nor either file is removed.
+     *
+     * @return array{class_photo_ids:list<string>,projection_kinds:list<string>,projection_rebuild_mode:string}
      */
     public function consolidateExact(
         int $adminUserId,
         string $duplicateId,
         string $targetClassPhotoId,
         string $reason,
-    ): void {
+    ): array {
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true) ?? '';
         $duplicateBinary = DomainSupport::idToBinary($duplicateId);
@@ -217,6 +219,16 @@ final class CanonicalPhotoService
             $this->repository->transaction(function (Repository $repository) use (
                 $admin, $duplicateId, $duplicateBinary, $targetClassPhotoId, $targetBinary, $reason, $batchId,
             ): void {
+                // The PREPARED journal and native association triggers keep
+                // the multi-engine saga fail-closed, but a builder can recover
+                // those early epochs before this canonical source state is
+                // committed. Re-invalidate atomically with photo_duplicate so
+                // that recovery can never publish across the final commit.
+                ProjectionMutationBoundary::invalidatePhotos(
+                    $repository,
+                    ProjectionMutationBoundary::allAggregateKinds(),
+                    'CANONICAL_CONSOLIDATE_FINALIZE',
+                );
                 $locked = $repository->fetchOne(
                     'SELECT `state`,`relation_kind`,`left_class_photo_id`,`right_class_photo_id` FROM `'
                         . DomainSupport::table($repository, 'photo_duplicate') . '` WHERE `duplicate_id`=? FOR UPDATE',
@@ -259,6 +271,12 @@ final class CanonicalPhotoService
                     'result' => 'SUCCESS',
                 ]);
             });
+            // The source mutation is now durable. The caller must perform the
+            // returned bounded refresh, or a full rebuild when the native
+            // Piwigo association source changed; until then PHOTO_CATALOG and
+            // every canonical-sensitive aggregate remain STALE and reads fail
+            // closed.
+            return $this->canonicalProjectionRefresh($targetId, $aliasId, $addedCategories !== []);
         } catch (\Throwable $error) {
             $compensated = $this->removeOnlyAddedPiwigoAssociations((int) $target['piwigo_image_id'], $addedCategories);
             $this->finishConsolidationJournal(
@@ -276,15 +294,19 @@ final class CanonicalPhotoService
         }
     }
 
-    /** Revert only the logical alias. Album union is retained conservatively. */
-    public function revertConsolidation(int $adminUserId, string $duplicateId, string $reason): void
+    /**
+     * Revert only the logical alias. Album union is retained conservatively.
+     *
+     * @return array{class_photo_ids:list<string>,projection_kinds:list<string>,projection_rebuild_mode:string}
+     */
+    public function revertConsolidation(int $adminUserId, string $duplicateId, string $reason): array
     {
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true) ?? '';
-        $this->repository->transaction(function (Repository $repository) use ($admin, $duplicateId, $reason): void {
+        return $this->repository->transaction(function (Repository $repository) use ($admin, $duplicateId, $reason): array {
             $binary = DomainSupport::idToBinary($duplicateId);
             $row = $repository->fetchOne(
-                'SELECT `state`,`canonical_class_photo_id` FROM `' . DomainSupport::table($repository, 'photo_duplicate')
+                'SELECT `state`,`canonical_class_photo_id`,`left_class_photo_id`,`right_class_photo_id` FROM `' . DomainSupport::table($repository, 'photo_duplicate')
                     . '` WHERE `duplicate_id`=? FOR UPDATE',
                 [$binary],
             );
@@ -292,6 +314,17 @@ final class CanonicalPhotoService
                 throw new \RuntimeException('class_archive_photo_duplicate_not_consolidated');
             }
             $canonical = DomainSupport::binaryToId((string) $row['canonical_class_photo_id']);
+            $left = DomainSupport::binaryToId((string) $row['left_class_photo_id']);
+            $right = DomainSupport::binaryToId((string) $row['right_class_photo_id']);
+            if (!hash_equals($canonical, $left) && !hash_equals($canonical, $right)) {
+                throw new \RuntimeException('class_archive_photo_duplicate_mapping_invalid');
+            }
+            $alias = hash_equals($canonical, $left) ? $right : $left;
+            ProjectionMutationBoundary::invalidatePhotos(
+                $repository,
+                ProjectionMutationBoundary::allAggregateKinds(),
+                'CANONICAL_REVERT',
+            );
             $repository->execute(
                 'UPDATE `' . DomainSupport::table($repository, 'photo_duplicate') . '` '
                     . "SET `state`='REVERTED',`canonical_class_photo_id`=NULL,`reviewed_by_principal_id`=?,`reviewed_at`=UTC_TIMESTAMP(6),`updated_at`=UTC_TIMESTAMP(6) "
@@ -307,6 +340,7 @@ final class CanonicalPhotoService
                 'reason' => $reason,
                 'result' => 'SUCCESS',
             ]);
+            return $this->canonicalProjectionRefresh($canonical, $alias);
         });
     }
 
@@ -535,6 +569,11 @@ final class CanonicalPhotoService
         $this->repository->transaction(function (Repository $repository) use (
             $batchId, $admin, $duplicateId, $targetClassPhotoId, $aliasClassPhotoId, $reason, $summary,
         ): void {
+            ProjectionMutationBoundary::invalidatePhotos(
+                $repository,
+                ProjectionMutationBoundary::allAggregateKinds(),
+                'CANONICAL_CONSOLIDATE',
+            );
             $batch = DomainSupport::idToBinary($batchId);
             $repository->execute(
                 'INSERT INTO `' . DomainSupport::table($repository, 'batch_operation') . '` '
@@ -559,6 +598,34 @@ final class CanonicalPhotoService
                 );
             }
         });
+    }
+
+    /**
+     * The logical alias graph and target album union can change the public
+     * projection of both physical rows. Never refresh only the chosen target:
+     * the alias row must be rebound in the same catalog transaction before
+     * aggregates can become ACTIVE again.
+     *
+     * @return array{class_photo_ids:list<string>,projection_kinds:list<string>,projection_rebuild_mode:string}
+     */
+    private function canonicalProjectionRefresh(
+        string $targetClassPhotoId,
+        string $aliasClassPhotoId,
+        bool $nativeSourceMutated = false,
+    ): array
+    {
+        $target = strtolower($targetClassPhotoId);
+        $alias = strtolower($aliasClassPhotoId);
+        DomainSupport::idToBinary($target);
+        DomainSupport::idToBinary($alias);
+        if (hash_equals($target, $alias)) {
+            throw new \RuntimeException('class_archive_photo_duplicate_mapping_invalid');
+        }
+        return [
+            'class_photo_ids' => [$target, $alias],
+            'projection_kinds' => ProjectionMutationBoundary::allAggregateKinds(),
+            'projection_rebuild_mode' => $nativeSourceMutated ? 'FULL_NATIVE_SOURCE' : 'BOUNDED',
+        ];
     }
 
     private function finishConsolidationJournal(

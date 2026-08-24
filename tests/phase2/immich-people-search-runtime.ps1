@@ -329,8 +329,11 @@ try {
 
     New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
     $script:stage = 'prepare_piwigo_fixture'
-    $prepared = Invoke-PiwigoFixture 'prepare'
+    # Cleanup is safe and idempotent even when prepare fails before publishing
+    # its success response. Mark ownership before entering the crash-sensitive
+    # import so a partially written synthetic fixture cannot survive finally.
     $fixturePrepared = $true
+    $prepared = Invoke-PiwigoFixture 'prepare'
     $photos = @($prepared.photos)
     $catalog = @($prepared.catalog)
     Assert-Exact ([bool]$prepared.ok -and $photos.Count -eq 32 -and $catalog.Count -eq ($baselineOriginalCount + $photos.Count)) 'people_fixture_prepare_invalid'

@@ -6,6 +6,8 @@ set -eu
 # for the unprivileged maintenance runner to consume.
 
 umask 077
+LC_ALL=C
+export LC_ALL
 
 fail() {
   printf '%s\n' "BACKUP_FRESHNESS=FAILED code=$1" >&2
@@ -65,15 +67,66 @@ if [ -n "$latest_bundle" ]; then
   expected_count=7
   actual_count=$(wc -l < "$manifest" | tr -d '[:space:]')
   business_manifest=0
-  schema_contract='"class_identity_schema":{"version":8,"tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item"]}'
+  schema_contract='"class_identity_schema":{"version":12,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
   if [ -f "$latest_bundle/MANIFEST.json" ] && [ ! -L "$latest_bundle/MANIFEST.json" ] \
-     && grep -Eq '^\{"format":4,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$latest_bundle/MANIFEST.json" \
+     && grep -Eq '^\{"format":6,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$latest_bundle/MANIFEST.json" \
      && grep -Fq "$schema_contract" "$latest_bundle/MANIFEST.json"; then
     business_manifest=1
   fi
   valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|scripts\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
+  projection_cache_free=0
+  if ! gzip -dc "$latest_bundle/database.sql.gz" | grep -Eq '^INSERT INTO `[^`]+class_identity_(read_projection|read_photo)`'; then
+    projection_cache_free=1
+  fi
+  durable_epoch_valid=0
+  epoch_insert_stats=$(gzip -dc "$latest_bundle/database.sql.gz" | awk '
+    function tuple_count(row, i, char, quoted, escaped, depth, tuples) {
+      quoted=0; escaped=0; depth=0; tuples=0
+      for (i=1; i<=length(row); i++) {
+        char=substr(row,i,1)
+        if (quoted) {
+          if (escaped) escaped=0
+          else if (char == "\\") escaped=1
+          else if (char == "\047") quoted=0
+        } else if (char == "\047") quoted=1
+        else if (char == "(") { if (depth == 0) tuples++; depth++ }
+        else if (char == ")") { depth--; if (depth < 0) return -1 }
+      }
+      return quoted || depth != 0 ? -1 : tuples
+    }
+    function inspect(row) {
+      rows++
+      if (row ~ /^\(\047PIWIGO_NATIVE\047,/ && row ~ /\);$/ && tuple_count(row) == 1) valid++
+    }
+    /^INSERT INTO `[^`]+class_identity_native_source_epoch` VALUES[[:space:]]*\(/ {
+      headers++
+      row=$0
+      sub(/^.* VALUES[[:space:]]*/, "", row)
+      inspect(row)
+      next
+    }
+    /^INSERT INTO `[^`]+class_identity_native_source_epoch` VALUES[[:space:]]*$/ {
+      headers++
+      expect=1
+      next
+    }
+    expect { inspect($0); expect=0 }
+    END { print headers+0, rows+0, valid+0 }
+  ')
+  if gzip -dc "$latest_bundle/database.sql.gz" \
+       | awk '/^CREATE TABLE `[^`]+class_identity_native_source_epoch` \(/ { capture=1 } capture { print } capture && /^\) ENGINE=/ { exit }' \
+       | grep -Eq '^\) ENGINE=MyISAM ' \
+     && [ "$epoch_insert_stats" = '1 1 1' ]; then
+    durable_epoch_valid=1
+  fi
+  native_guard_count=$(gzip -dc "$latest_bundle/database.sql.gz" \
+    | grep -Eo 'TRIGGER `?[A-Za-z0-9_]+ci_(projection|source_epoch)_(images|image_category|categories)_b(i|u|d)`?' \
+    | sort -u | wc -l | tr -d '[:space:]')
   if [ "$actual_count" = "$expected_count" ] && [ "$valid_count" = "$expected_count" ] \
      && [ "$business_manifest" = 1 ] \
+     && [ "$projection_cache_free" = 1 ] \
+     && [ "$durable_epoch_valid" = 1 ] \
+     && [ "$native_guard_count" = 18 ] \
      && grep -Eq '^[0-9a-f]{64}  database\.sql\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  piwigo-data\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  uploads\.tar\.gz$' "$manifest" \

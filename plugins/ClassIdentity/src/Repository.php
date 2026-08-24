@@ -408,6 +408,9 @@ SQL, [$piwigoUserId]);
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',
+            'native_source_epoch',
+            'read_projection',
+            'read_photo',
         ];
     }
 }

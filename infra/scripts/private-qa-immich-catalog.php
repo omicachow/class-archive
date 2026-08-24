@@ -275,6 +275,18 @@ try {
             throw new RuntimeException('binding_asset_duplicate');
         }
         $repository->transaction(function (ClassIdentity\Repository $repository) use ($catalog, $bindings): void {
+            // This local-only bulk importer deliberately avoids hundreds of
+            // per-row transactions, but it must preserve the same durable
+            // write boundary as ClassArchivePhotoMappingService. Both People
+            // and Memories consume Immich bindings.
+            ClassIdentity\ProjectionMutationBoundary::invalidateAggregates(
+                $repository,
+                [
+                    ClassIdentity\Gateway\ReadProjectionStore::PEOPLE,
+                    ClassIdentity\Gateway\ReadProjectionStore::MEMORIES,
+                ],
+                'IMMICH_ASSET_BIND',
+            );
             foreach ($catalog['photos'] as $photo) {
                 $changed = $repository->execute(
                     'UPDATE `' . $repository->table('photo') . '` SET `immich_asset_id`=?,`updated_at`=UTC_TIMESTAMP(6) '

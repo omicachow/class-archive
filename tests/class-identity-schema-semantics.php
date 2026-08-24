@@ -34,6 +34,9 @@ const CI_SCHEMA_SUFFIXES = [
     'photo_duplicate',
     'batch_operation',
     'batch_operation_item',
+    'native_source_epoch',
+    'read_projection',
+    'read_photo',
 ];
 
 function schemaTestFail(string $message): never
@@ -198,12 +201,14 @@ if ($db->connect_errno !== 0 || !$db->set_charset('utf8mb4')) {
 }
 
 require dirname(__DIR__) . '/plugins/ClassIdentity/src/Schema.php';
+require __DIR__ . '/support/class-identity-native-projection-fixture.php';
 
 $runId = strtolower(bin2hex(random_bytes(6)));
 $sourcePrefix = $prefixeTable . 'class_identity_';
 $temporaryBasePrefix = 'ci_sem_' . $runId . '_';
 $temporaryPrefix = $temporaryBasePrefix . 'class_identity_';
 $createdTables = [];
+$createdNativeTables = [];
 $assertions = 0;
 
 try {
@@ -232,6 +237,11 @@ try {
         );
         $createdTables[] = $temporary;
     }
+    $createdNativeTables = classIdentityCreateNativeProjectionFixture(
+        $db,
+        $prefixeTable,
+        $temporaryBasePrefix,
+    );
     $foreignKeys = schemaTestCloneForeignKeys($db, $sourcePrefix, $temporaryPrefix, $runId);
     schemaTestExecute(
         $db,
@@ -240,6 +250,20 @@ try {
     );
 
     $schema = new ClassIdentity\Schema($db, $temporaryBasePrefix, '0.1.0');
+    // The migration ledger clone says v12 is applied, but CREATE TABLE LIKE
+    // intentionally does not copy triggers or singleton cache-control rows.
+    // Install the exact v11/v12 guards on disposable Core-table clones before
+    // attesting the temporary schema.
+    $nativeGuardMigration = new ReflectionMethod(
+        ClassIdentity\Schema::class,
+        'migrationNativePiwigoProjectionGuard',
+    );
+    $nativeGuardMigration->invoke($schema);
+    $durableEpochMigration = new ReflectionMethod(
+        ClassIdentity\Schema::class,
+        'migrationDurableNativeSourceEpoch',
+    );
+    $durableEpochMigration->invoke($schema);
     $schema->verifyCurrent();
     ++$assertions;
 
@@ -340,6 +364,15 @@ try {
         }
         $db->query('SET FOREIGN_KEY_CHECKS = 1');
     }
+    if ($createdNativeTables !== []) {
+        try {
+            classIdentityDropNativeProjectionFixture($db, $createdNativeTables);
+        } catch (Throwable $cleanupError) {
+            fwrite(STDERR, 'CLASS_IDENTITY_SCHEMA_SEMANTICS_NATIVE_CLEANUP=FAIL run=' . $runId
+                . ' reason=' . $cleanupError->getMessage() . "\n");
+            $exitCode = 1;
+        }
+    }
     $like = $db->real_escape_string($temporaryPrefix) . '%';
     $remaining = $db->query(
         "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE '{$like}'"
@@ -351,6 +384,21 @@ try {
     if ($remainingCount !== 0) {
         fwrite(STDERR, 'CLASS_IDENTITY_SCHEMA_SEMANTICS_CLEANUP=FAIL run=' . $runId
             . ' remaining=' . $remainingCount . "\n");
+        $exitCode = 1;
+    }
+    $nativeLike = $db->real_escape_string($temporaryBasePrefix) . '%';
+    $nativeRemaining = $db->query(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE '{$nativeLike}'"
+    );
+    $nativeRemainingCount = $nativeRemaining instanceof mysqli_result
+        ? (int) ($nativeRemaining->fetch_row()[0] ?? -1)
+        : -1;
+    if ($nativeRemaining instanceof mysqli_result) {
+        $nativeRemaining->free();
+    }
+    if ($nativeRemainingCount !== 0) {
+        fwrite(STDERR, 'CLASS_IDENTITY_SCHEMA_SEMANTICS_NATIVE_CLEANUP=FAIL run=' . $runId
+            . ' remaining=' . $nativeRemainingCount . "\n");
         $exitCode = 1;
     }
     $db->close();

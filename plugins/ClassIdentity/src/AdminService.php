@@ -980,6 +980,7 @@ SQL);
         return match ($action) {
             'SUBMISSION_CREATE' => '提交班级历史照片',
             'SUBMISSION_APPROVE' => '通过投稿',
+            'SUBMISSION_APPROVE_ABORT' => '投稿审核失败并释放占用',
             'SUBMISSION_REJECT' => '拒绝投稿',
             'REJECTED_BINARY_CLEANUP' => '清理已拒绝投稿二进制',
             'FAMILY_INVITATION_EXPIRE' => '回收过期家庭邀请',
@@ -1045,6 +1046,8 @@ SQL);
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',
+            'read_projection',
+            'read_photo',
         ];
         $missing = [];
         try {
@@ -1077,6 +1080,53 @@ SQL);
         $migration = $migrationVersion === Schema::CURRENT_VERSION && $missing === [] && $schemaVerified
             ? 'Current (' . $migrationVersion . ')'
             : 'Pending (' . $migrationVersion . '/' . Schema::CURRENT_VERSION . ')';
+
+        $photoProjection = [];
+        if ($database === 'Healthy' && !in_array('read_projection', $missing, true)) {
+            try {
+                $labels = [
+                    'PHOTO_CATALOG' => '照片目录',
+                    'TIMELINE' => '时间轴索引',
+                    'ALBUMS' => '相册索引',
+                    'PEOPLE' => '人物索引',
+                    'MEMORIES' => '回忆索引',
+                    'SPOTLIGHT' => '精选索引',
+                ];
+                $projectionByKind = [];
+                foreach (\ClassIdentity\Gateway\ReadProjectionStore::fromPiwigo()->status() as $item) {
+                    $projectionByKind[(string) $item['kind']] = $item;
+                }
+                foreach ($labels as $kind => $label) {
+                    if (!isset($projectionByKind[$kind])) {
+                        throw new RuntimeException('class_identity_admin_projection_status_incomplete');
+                    }
+                    $item = $projectionByKind[$kind];
+                    $state = (string) $item['state'];
+                    $count = max(0, (int) ($item['count'] ?? 0));
+                    $builtAt = is_string($item['built_at'] ?? null) && trim((string) $item['built_at']) !== ''
+                        ? (string) $item['built_at']
+                        : null;
+                    $photoProjection[] = $item + [
+                        'label' => $label,
+                        'state_label' => match ($state) {
+                            'ACTIVE' => '已就绪',
+                            'STALE' => '需要后台更新',
+                            'BUILDING' => '正在构建',
+                            'FAILED' => '构建失败',
+                            default => '状态异常',
+                        },
+                        'count_label' => $kind === 'PHOTO_CATALOG'
+                            ? $count . ' 张照片'
+                            : $count . ' 条分角色读取结果',
+                        'last_build_label' => $builtAt !== null
+                            ? '最近成功构建：' . $builtAt
+                            : '尚无成功构建记录',
+                    ];
+                }
+            } catch (Throwable) {
+                $photoProjection = [];
+            }
+        }
 
         $identityEnforcement = class_exists(\ClassIdentity\Access::class)
             && \ClassIdentity\Access::isEnforcementEnabled();
@@ -1220,6 +1270,49 @@ SQL);
         $backupFreshness = is_array($maintenanceTasks['backup_freshness'] ?? null)
             ? $maintenanceTasks['backup_freshness']
             : ['state' => 'MISSING', 'label' => '未找到', 'timestamp' => null];
+        $derivativeWarmup = is_array($maintenanceTasks['photo_derivative_warmup'] ?? null)
+            ? $maintenanceTasks['photo_derivative_warmup']
+            : [];
+        $warmupScopes = [];
+        $warmupDefinitions = [
+            'first_screen' => ['label' => '首屏照片', 'profile_count' => 6],
+            'covers' => ['label' => '相册与精选封面', 'profile_count' => 3],
+        ];
+        if (($derivativeWarmup['result'] ?? null) !== 'PASS') {
+            $warmupDefinitions = [];
+        }
+        foreach ($warmupDefinitions as $scope => $definition) {
+            $item = is_array($derivativeWarmup[$scope] ?? null) ? $derivativeWarmup[$scope] : null;
+            if ($item === null) {
+                $warmupScopes = [];
+                break;
+            }
+            $selectedImages = max(0, (int) ($item['selected_images'] ?? 0));
+            $checked = max(0, (int) ($item['checked'] ?? 0));
+            $cached = max(0, (int) ($item['cached'] ?? 0));
+            $generated = max(0, (int) ($item['generated'] ?? 0));
+            $sourceReuse = max(0, (int) ($item['source_reuse'] ?? 0));
+            $expected = $selectedImages * (int) $definition['profile_count'];
+            // source_reuse describes Piwigo's same-as-source decision and
+            // overlaps cached/generated; it is not a third delivery outcome.
+            if ($checked !== $expected || $cached + $generated !== $checked || $sourceReuse > $checked) {
+                $warmupScopes = [];
+                break;
+            }
+            $warmupScopes[] = [
+                'label' => (string) $definition['label'],
+                'selected_images' => $selectedImages,
+                'checked' => $checked,
+                'cached' => $cached,
+                'generated' => $generated,
+                'source_reuse' => $sourceReuse,
+                'coverage_label' => $checked > 0
+                    ? self::percentageLabel($cached + $generated, $checked)
+                    : '无待处理项',
+                'cache_reuse_label' => self::percentageLabel($cached, $checked),
+                'source_reuse_label' => self::percentageLabel($sourceReuse, $checked),
+            ];
+        }
 
         $productionBlockers = [];
         if ($database !== 'Healthy') {
@@ -1338,6 +1431,15 @@ SQL);
             'storage_total' => is_numeric($storageTotal) ? self::humanBytes((int) $storageTotal) : 'Unknown',
             'storage_free' => is_numeric($storageFree) ? self::humanBytes((int) $storageFree) : 'Unknown',
             'derivative_cache' => $derivativeWritable ? 'Writable' : 'Error',
+            'derivative_cache_label' => $derivativeWritable ? '目录可用' : '目录异常',
+            'derivative_warmup' => $warmupScopes,
+            'derivative_warmup_timestamp' => $warmupScopes !== [] && is_string($maintenance['timestamp'] ?? null)
+                ? (string) $maintenance['timestamp']
+                : null,
+            // No durable runtime request counter exists today. Keep this
+            // explicit instead of inferring a hit ratio from maintenance.
+            'derivative_runtime_metrics_label' => '尚未采集',
+            'photo_projection' => $photoProjection,
             'backup_last_success' => ($backupFreshness['state'] ?? null) === 'FRESH'
                 ? ('已校验 · ' . (string) ($backupFreshness['timestamp'] ?? ''))
                 : (string) ($backupFreshness['label'] ?? '未找到'),
@@ -1741,6 +1843,15 @@ SQL, 'ii', [$id, $id]) ?? 0);
     private static function base64Url(string $value): string
     {
         return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+    }
+
+    private static function percentageLabel(int $numerator, int $denominator): string
+    {
+        if ($denominator <= 0 || $numerator < 0 || $numerator > $denominator) {
+            return '尚无可计算数据';
+        }
+        $formatted = number_format(($numerator * 100) / $denominator, 1, '.', '');
+        return rtrim(rtrim($formatted, '0'), '.') . '%';
     }
 
     private static function humanBytes(int $bytes): string

@@ -62,6 +62,14 @@ final class AlbumService
                 }
                 return $mapped;
             }
+            ProjectionMutationBoundary::invalidateAggregates(
+                $repository,
+                [
+                    \ClassIdentity\Gateway\ReadProjectionStore::ALBUMS,
+                    \ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT,
+                ],
+                'ALBUM_MAPPING',
+            );
             for ($attempt = 0; $attempt < 3; ++$attempt) {
                 $classAlbumId = DomainSupport::generateId();
                 $binary = DomainSupport::idToBinary($classAlbumId);
@@ -141,6 +149,14 @@ final class AlbumService
             if ($before === null) {
                 throw new \RuntimeException('class_archive_album_not_found');
             }
+            ProjectionMutationBoundary::invalidateAggregates(
+                $repository,
+                [
+                    \ClassIdentity\Gateway\ReadProjectionStore::ALBUMS,
+                    \ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT,
+                ],
+                'ALBUM_MAPPING',
+            );
             $repository->execute(
                 'UPDATE `' . $table . '` SET `album_type`=?,`owner_principal_id`=?,`era`=?,`description`=?,'
                 . '`event_label`=?,`manual_cover_class_photo_id`=?,`state`=?,`updated_at`=UTC_TIMESTAMP(6) WHERE `class_album_id`=?',

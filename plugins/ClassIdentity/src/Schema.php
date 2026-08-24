@@ -15,11 +15,13 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 8;
+    public const CURRENT_VERSION = 12;
+    public const LOCKED_PIWIGO_VERSION = '16.4.0';
 
     private const COLLATION = 'utf8mb4_unicode_ci';
 
     private \mysqli $db;
+    private string $piwigoPrefix;
     private string $prefix;
     private string $pluginVersion;
 
@@ -33,11 +35,40 @@ final class Schema
         }
 
         $this->db = $db;
+        $this->piwigoPrefix = $tablePrefix;
         $this->prefix = $tablePrefix . 'class_identity_';
         $this->pluginVersion = $pluginVersion;
     }
 
     public static function fromPiwigo(string $pluginVersion): self
+    {
+        self::assertLockedPiwigoRuntime();
+
+        return self::fromPiwigoDatabase($pluginVersion);
+    }
+
+    /**
+     * Retirement must remain possible after an accidental Core upgrade.
+     * Activation is version-locked, but refusing cleanup would strand
+     * plugin-owned triggers on Piwigo's native tables.
+     */
+    public static function fromPiwigoForRetirement(string $pluginVersion): self
+    {
+        return self::fromPiwigoDatabase($pluginVersion);
+    }
+
+    public static function assertLockedPiwigoRuntime(?string $runtimeVersion = null): void
+    {
+        $actual = $runtimeVersion;
+        if ($actual === null) {
+            $actual = defined('PHPWG_VERSION') ? (string) PHPWG_VERSION : '';
+        }
+        if (!hash_equals(self::LOCKED_PIWIGO_VERSION, $actual)) {
+            throw new \RuntimeException('class_identity_unsupported_piwigo_runtime');
+        }
+    }
+
+    private static function fromPiwigoDatabase(string $pluginVersion): self
     {
         global $mysqli, $prefixeTable;
 
@@ -49,6 +80,89 @@ final class Schema
         }
 
         return new self($mysqli, $prefixeTable, $pluginVersion);
+    }
+
+    /**
+     * Restore plugin-owned guards before an inactive/retained installation is
+     * migrated again. If a guard family was absent or drifted, the complete
+     * role-neutral read model is invalidated after every trigger is installed.
+     * A native write before its individual trigger is restored is therefore
+     * still covered by the final invalidation/epoch rotation.
+     */
+    public function prepareNativeMutationProtectionForActivation(): void
+    {
+        self::assertLockedPiwigoRuntime();
+        if (!$this->tableExists('read_projection')) {
+            return;
+        }
+
+        $lockName = 'class_identity_native_lifecycle_' . hash('sha256', $this->prefix);
+        if (!$this->acquireAdvisoryLock($lockName)) {
+            throw new \RuntimeException('class_identity_native_lifecycle_lock_timeout');
+        }
+
+        try {
+            $repaired = false;
+            $projectionDefinitions = $this->nativeProjectionTriggerDefinitions();
+            if (!$this->nativeProjectionTriggersAreCurrent($projectionDefinitions)) {
+                $this->replaceNativeProjectionTriggers($projectionDefinitions);
+                $repaired = true;
+            }
+
+            if ($this->tableExists('native_source_epoch')) {
+                $epochDefinitions = $this->nativeSourceEpochTriggerDefinitions();
+                if (!$this->nativeProjectionTriggersAreCurrent($epochDefinitions)) {
+                    $this->replaceNativeProjectionTriggers($epochDefinitions);
+                    $repaired = true;
+                }
+            }
+
+            if ($repaired) {
+                $this->invalidateNativeLifecycleState('PLUGIN_LIFECYCLE_ACTIVATION');
+            }
+        } finally {
+            $this->releaseAdvisoryLock($lockName);
+        }
+    }
+
+    /**
+     * Deactivation/uninstall retain governed ClassIdentity data but remove all
+     * 18 plugin-owned triggers from native Piwigo tables. Projection rows are
+     * first made unusable, so any source writes after retirement can never be
+     * served from an old ACTIVE read model. This operation is idempotent and
+     * intentionally does not enforce the activation version lock: it must be
+     * possible to clean up safely after an accidental Core upgrade.
+     */
+    public function retireNativeMutationProtection(): void
+    {
+        $lockName = 'class_identity_native_lifecycle_' . hash('sha256', $this->prefix);
+        if (!$this->acquireAdvisoryLock($lockName)) {
+            throw new \RuntimeException('class_identity_native_lifecycle_lock_timeout');
+        }
+
+        try {
+            if ($this->tableExists('read_projection')) {
+                // Retirement must also clean up an interrupted installation
+                // whose projection/epoch singleton set is already incomplete.
+                // Every row that does exist is made STALE before the exact
+                // plugin-owned trigger names are removed.
+                $this->invalidateNativeLifecycleState('PLUGIN_LIFECYCLE_RETIRED', false);
+            }
+
+            foreach (array_merge(
+                $this->nativeSourceEpochTriggerDefinitions(),
+                $this->nativeProjectionTriggerDefinitions(),
+            ) as $definition) {
+                $this->executeRaw('DROP TRIGGER IF EXISTS ' . $this->quotedIdentifier($definition['name']));
+            }
+
+            $remaining = $this->pluginOwnedNativeTriggerRows();
+            if ($remaining !== []) {
+                throw new \RuntimeException('class_identity_native_lifecycle_trigger_retained');
+            }
+        } finally {
+            $this->releaseAdvisoryLock($lockName);
+        }
     }
 
     public function migrate(): void
@@ -196,6 +310,26 @@ final class Schema
                 'name' => '0008_photo_productization_domain',
                 'signature' => 'v1:person-curation:reversible-projection-merge:photo-rules:opaque-mixed-album:spotlight-24h:source-provenance:duplicate-review:crash-visible-journal:innodb:utf8mb4',
                 'method' => 'migrationPhotoProductizationDomain',
+            ],
+            9 => [
+                'name' => '0009_gateway_persistent_read_projection',
+                'signature' => 'v1:authorization-neutral-photo-catalog:atomic-generation:fail-closed-stale:dependency-invalidation:innodb:utf8mb4',
+                'method' => 'migrationGatewayReadProjection',
+            ],
+            10 => [
+                'name' => '0010_gateway_role_scoped_aggregate_projection',
+                'signature' => 'v1:full-heritage-aggregate-payload:timeline-albums-people-memories:catalog-bound:fail-closed:innodb:utf8mb4',
+                'method' => 'migrationGatewayAggregateProjection',
+            ],
+            11 => [
+                'name' => '0011_native_piwigo_projection_guard',
+                'signature' => 'v1:before-triggers:images-relevant-fields:image-category:categories:five-row-exact:fail-closed',
+                'method' => 'migrationNativePiwigoProjectionGuard',
+            ],
+            12 => [
+                'name' => '0012_durable_native_source_epoch',
+                'signature' => 'v1:myisam-source-epoch:cross-engine-rollback-safe:catalog-binding:initialized-projection-epochs:fail-closed',
+                'method' => 'migrationDurableNativeSourceEpoch',
             ],
         ];
     }
@@ -1004,6 +1138,523 @@ SQL);
         ]);
     }
 
+    /**
+     * Authorization-neutral, generation-swapped Gateway read model.
+     *
+     * The tables deliberately contain no principal, role or visibility
+     * result. They shorten source reads only; current authorization continues
+     * to be evaluated by GatewayPolicy for every HTTP request.
+     */
+    private function migrationGatewayReadProjection(): void
+    {
+        $projection = $this->quotedTable('read_projection');
+        $photo = $this->quotedTable('read_photo');
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$projection} (
+  `projection_key` VARCHAR(32) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'STALE',
+  `source_revision` BINARY(32) NULL,
+  `generation` BINARY(16) NULL,
+  `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `invalidated_reason` VARCHAR(64) NULL,
+  `built_at` DATETIME(6) NULL,
+  `invalidated_at` DATETIME(6) NULL,
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`projection_key`),
+  KEY `idx_ci_read_projection_state` (`state`,`updated_at`),
+  CONSTRAINT `chk_ci_read_projection_key` CHECK (`projection_key` IN ('PHOTO_CATALOG','TIMELINE','ALBUMS','PEOPLE','MEMORIES','SPOTLIGHT')),
+  CONSTRAINT `chk_ci_read_projection_state` CHECK (`state` IN ('ACTIVE','STALE','BUILDING','FAILED')),
+  CONSTRAINT `chk_ci_read_projection_active` CHECK ((`state` = 'ACTIVE' AND `source_revision` IS NOT NULL AND `generation` IS NOT NULL AND `built_at` IS NOT NULL AND `invalidated_reason` IS NULL AND `invalidated_at` IS NULL) OR (`state` <> 'ACTIVE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$photo} (
+  `class_photo_id` BINARY(16) NOT NULL,
+  `piwigo_image_id` MEDIUMINT(8) UNSIGNED NOT NULL,
+  `era` VARCHAR(16) NOT NULL,
+  `payload_json` JSON NOT NULL,
+  `row_digest` BINARY(32) NOT NULL,
+  `generation` BINARY(16) NOT NULL,
+  `built_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`class_photo_id`),
+  UNIQUE KEY `uq_ci_read_photo_piwigo` (`piwigo_image_id`),
+  KEY `idx_ci_read_photo_generation` (`generation`,`class_photo_id`),
+  KEY `idx_ci_read_photo_era` (`era`,`class_photo_id`),
+  CONSTRAINT `chk_ci_read_photo_era` CHECK (`era` IN ('HERITAGE','LIVING'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        foreach (['PHOTO_CATALOG', 'TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT'] as $key) {
+            $escaped = $this->db->real_escape_string($key);
+            $this->executeRaw("INSERT IGNORE INTO {$projection} (`projection_key`,`state`) VALUES ('{$escaped}','STALE')");
+        }
+
+        $this->assertTable('read_projection', [
+            'projection_key', 'state', 'source_revision', 'generation', 'item_count',
+            'invalidated_reason', 'built_at', 'invalidated_at', 'updated_at',
+        ]);
+        $this->assertTable('read_photo', [
+            'class_photo_id', 'piwigo_image_id', 'era', 'payload_json', 'row_digest',
+            'generation', 'built_at',
+        ]);
+    }
+
+    /**
+     * Durable role-scope aggregates. The JSON object contains only two
+     * presentation scopes (FULL and HERITAGE); it never stores a principal,
+     * Account, Seat or authorization decision. Runtime identity resolution
+     * remains mandatory before a scope may be selected.
+     */
+    private function migrationGatewayAggregateProjection(): void
+    {
+        $projection = $this->quotedTable('read_projection');
+        $this->ensureColumn(
+            'read_projection',
+            'payload_json',
+            "ALTER TABLE {$projection} ADD COLUMN `payload_json` JSON NULL AFTER `item_count`",
+        );
+        $this->ensureColumn(
+            'read_projection',
+            'payload_digest',
+            "ALTER TABLE {$projection} ADD COLUMN `payload_digest` BINARY(32) NULL AFTER `payload_json`",
+        );
+        $this->ensureColumn(
+            'read_projection',
+            'dependency_revision',
+            "ALTER TABLE {$projection} ADD COLUMN `dependency_revision` BINARY(32) NULL AFTER `payload_digest`",
+        );
+        $this->ensureCheckConstraint(
+            'read_projection',
+            'chk_ci_read_projection_aggregate_active',
+            "ALTER TABLE {$projection} ADD CONSTRAINT `chk_ci_read_projection_aggregate_active` CHECK ("
+                . "`projection_key` = 'PHOTO_CATALOG' OR `state` <> 'ACTIVE' OR ("
+                . '`payload_json` IS NOT NULL AND `payload_digest` IS NOT NULL AND `dependency_revision` IS NOT NULL))',
+        );
+        $this->assertTable('read_projection', [
+            'projection_key', 'state', 'source_revision', 'generation', 'item_count',
+            'payload_json', 'payload_digest', 'dependency_revision',
+            'invalidated_reason', 'built_at', 'invalidated_at', 'updated_at',
+        ]);
+    }
+
+    /**
+     * Fail-closed bridge for Piwigo's native content mutation surfaces.
+     *
+     * Piwigo 16.4.0 exposes useful notifications for uploads and deletions,
+     * but it has no complete pre-write event spanning image metadata, album
+     * associations and album updates. Post-write hooks are insufficient for
+     * a MyISAM source table: an unavailable projection database could leave
+     * an old ACTIVE read model after the Core write has already succeeded.
+     *
+     * These BEFORE triggers are plugin-owned database objects, not Core file
+     * changes. Every relevant native statement first rotates all five read
+     * generations and marks them STALE. The exact ROW_COUNT assertion means
+     * a missing projection row, a broken schema or an unavailable InnoDB
+     * target aborts the native MyISAM write before it changes archive state.
+     *
+     * The images UPDATE guard intentionally excludes hit, rating_score and
+     * lastmodified-only activity, so normal viewing does not invalidate the
+     * catalog. Every field that can affect displayed metadata, delivery,
+     * privacy, orientation or future location-aware presentation is covered.
+     */
+    private function migrationNativePiwigoProjectionGuard(): void
+    {
+        $this->assertNativePiwigoTable('images', [
+            'id', 'file', 'date_available', 'date_creation', 'name', 'comment',
+            'author', 'filesize', 'width', 'height', 'coi', 'representative_ext',
+            'date_metadata_update', 'path', 'storage_category_id', 'level',
+            'md5sum', 'added_by', 'rotation', 'latitude', 'longitude',
+        ]);
+        $this->assertNativePiwigoTable('image_category', ['image_id', 'category_id', 'rank']);
+        $this->assertNativePiwigoTable('categories', ['id']);
+
+        $this->replaceNativeProjectionTriggers($this->nativeProjectionTriggerDefinitions());
+    }
+
+    /**
+     * Durable source epoch for Piwigo's MyISAM mutation boundary.
+     *
+     * A trigger that writes only InnoDB metadata is not sufficient when a
+     * caller wraps a MyISAM source mutation in an explicit transaction: the
+     * source bytes persist after ROLLBACK while the InnoDB invalidation can be
+     * rolled back. This one-row MyISAM sentinel changes in the same
+     * non-transactional durability domain as the protected Piwigo tables.
+     * Every ACTIVE catalog is bound to its exact epoch and every read checks
+     * that binding before serving presentation data.
+     */
+    private function migrationDurableNativeSourceEpoch(): void
+    {
+        $epoch = $this->quotedTable('native_source_epoch');
+        $projection = $this->quotedTable('read_projection');
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$epoch} (
+  `source_key` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `generation` BINARY(16) NOT NULL,
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`source_key`),
+  CONSTRAINT `chk_ci_native_source_epoch_key` CHECK (`source_key` = 'PIWIGO_NATIVE')
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+        $this->ensureColumn(
+            'read_projection',
+            'native_source_generation',
+            "ALTER TABLE {$projection} ADD COLUMN `native_source_generation` BINARY(16) NULL AFTER `generation`",
+        );
+        $this->executeRaw(
+            "INSERT IGNORE INTO {$epoch} (`source_key`,`generation`,`updated_at`) "
+                . "VALUES ('PIWIGO_NATIVE',RANDOM_BYTES(16),UTC_TIMESTAMP(6))",
+        );
+        foreach (['PHOTO_CATALOG', 'TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT'] as $key) {
+            $escaped = $this->db->real_escape_string($key);
+            $this->executeRaw(
+                "INSERT IGNORE INTO {$projection} (`projection_key`,`state`,`generation`,`invalidated_reason`,`invalidated_at`) "
+                    . "VALUES ('{$escaped}','STALE',RANDOM_BYTES(16),'PROJECTION_EPOCH_INITIALIZED',UTC_TIMESTAMP(6))",
+            );
+        }
+        // Introducing the durable epoch deliberately invalidates the complete
+        // photo read model once. No pre-v12 ACTIVE catalog has an authenticated
+        // binding to the new sentinel, so retaining it would be fail-open.
+        $this->executeRaw(
+            "UPDATE {$projection} SET `state`='STALE',`generation`=COALESCE(`generation`,RANDOM_BYTES(16)),"
+                . "`native_source_generation`=CASE WHEN `projection_key`='PHOTO_CATALOG' THEN NULL ELSE `native_source_generation` END,"
+                . "`invalidated_reason`='DURABLE_SOURCE_EPOCH_REQUIRED',`invalidated_at`=UTC_TIMESTAMP(6),"
+                . "`updated_at`=UTC_TIMESTAMP(6) WHERE `projection_key` IN "
+                . "('PHOTO_CATALOG','TIMELINE','ALBUMS','PEOPLE','MEMORIES')",
+        );
+        $this->executeRaw(
+            "UPDATE {$projection} SET `state`='STALE',`generation`=RANDOM_BYTES(16),"
+                . "`invalidated_reason`='PROJECTION_EPOCH_INITIALIZED',`invalidated_at`=UTC_TIMESTAMP(6),"
+                . "`updated_at`=UTC_TIMESTAMP(6) WHERE `generation` IS NULL",
+        );
+        $this->ensureCheckConstraint(
+            'read_projection',
+            'chk_ci_read_projection_native_epoch_active',
+            "ALTER TABLE {$projection} ADD CONSTRAINT `chk_ci_read_projection_native_epoch_active` CHECK ("
+                . "`projection_key` <> 'PHOTO_CATALOG' OR `state` <> 'ACTIVE' OR `native_source_generation` IS NOT NULL)",
+        );
+
+        // Add a second trigger set instead of replacing the already-installed
+        // v11 guards. An online upgrade therefore never creates a window in
+        // which native Piwigo writes are unguarded.
+        foreach ($this->nativeSourceEpochTriggerDefinitions() as $definition) {
+            $name = $this->quotedIdentifier($definition['name']);
+            $table = $this->quotedIdentifier($definition['table']);
+            $existing = $this->informationSchemaRows(
+                'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS '
+                    . 'WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?',
+                [$definition['name']],
+            );
+            if ($existing === []) {
+                $this->executeRaw(
+                    "CREATE TRIGGER {$name} BEFORE {$definition['event']} ON {$table} "
+                    . 'FOR EACH ROW ' . $definition['statement'],
+                );
+            } elseif (count($existing) !== 1) {
+                throw new \RuntimeException('class_identity_native_source_epoch_trigger_ambiguous');
+            }
+        }
+
+        $this->assertTable('native_source_epoch', ['source_key', 'generation', 'updated_at'], 'MYISAM');
+        $this->assertTable('read_projection', [
+            'projection_key', 'state', 'source_revision', 'generation', 'native_source_generation', 'item_count',
+            'payload_json', 'payload_digest', 'dependency_revision',
+            'invalidated_reason', 'built_at', 'invalidated_at', 'updated_at',
+        ]);
+        $this->assertProjectionEpochsInitialized();
+        $this->assertNativeProjectionTriggers($this->nativeSourceEpochTriggerDefinitions());
+    }
+
+    /**
+     * @return list<array{name:string,table:string,event:string,statement:string}>
+     */
+    private function nativeProjectionTriggerDefinitions(): array
+    {
+        $images = $this->piwigoPrefix . 'images';
+        $imageCategory = $this->piwigoPrefix . 'image_category';
+        $categories = $this->piwigoPrefix . 'categories';
+        $invalidation = $this->nativeProjectionInvalidationStatement();
+        $imageFields = [
+            'file', 'date_available', 'date_creation', 'name', 'comment', 'author',
+            'filesize', 'width', 'height', 'coi', 'representative_ext',
+            'date_metadata_update', 'path', 'storage_category_id', 'level',
+            'md5sum', 'added_by', 'rotation', 'latitude', 'longitude',
+        ];
+        $changed = implode(
+            ' OR ',
+            array_map(
+                static fn(string $field): string => 'NOT (OLD.`' . $field . '` <=> NEW.`' . $field . '`)',
+                $imageFields,
+            ),
+        );
+
+        return [
+            $this->nativeTriggerDefinition('images_bi', $images, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition(
+                'images_bu',
+                $images,
+                'UPDATE',
+                "BEGIN IF {$changed} THEN {$invalidation} END IF; END",
+            ),
+            $this->nativeTriggerDefinition('images_bd', $images, 'DELETE', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('image_category_bi', $imageCategory, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('image_category_bu', $imageCategory, 'UPDATE', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('image_category_bd', $imageCategory, 'DELETE', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('categories_bi', $categories, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('categories_bu', $categories, 'UPDATE', "BEGIN {$invalidation} END"),
+            $this->nativeTriggerDefinition('categories_bd', $categories, 'DELETE', "BEGIN {$invalidation} END"),
+        ];
+    }
+
+    /** @return list<array{name:string,table:string,event:string,statement:string}> */
+    private function nativeSourceEpochTriggerDefinitions(): array
+    {
+        $images = $this->piwigoPrefix . 'images';
+        $imageCategory = $this->piwigoPrefix . 'image_category';
+        $categories = $this->piwigoPrefix . 'categories';
+        $invalidation = $this->nativeSourceEpochInvalidationStatement();
+        $imageFields = [
+            'file', 'date_available', 'date_creation', 'name', 'comment', 'author',
+            'filesize', 'width', 'height', 'coi', 'representative_ext',
+            'date_metadata_update', 'path', 'storage_category_id', 'level',
+            'md5sum', 'added_by', 'rotation', 'latitude', 'longitude',
+        ];
+        $changed = implode(
+            ' OR ',
+            array_map(
+                static fn(string $field): string => 'NOT (OLD.`' . $field . '` <=> NEW.`' . $field . '`)',
+                $imageFields,
+            ),
+        );
+        return [
+            $this->nativeSourceEpochTriggerDefinition('images_bi', $images, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('images_bu', $images, 'UPDATE', "BEGIN IF {$changed} THEN {$invalidation} END IF; END"),
+            $this->nativeSourceEpochTriggerDefinition('images_bd', $images, 'DELETE', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('image_category_bi', $imageCategory, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('image_category_bu', $imageCategory, 'UPDATE', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('image_category_bd', $imageCategory, 'DELETE', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('categories_bi', $categories, 'INSERT', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('categories_bu', $categories, 'UPDATE', "BEGIN {$invalidation} END"),
+            $this->nativeSourceEpochTriggerDefinition('categories_bd', $categories, 'DELETE', "BEGIN {$invalidation} END"),
+        ];
+    }
+
+    /** @return array{name:string,table:string,event:string,statement:string} */
+    private function nativeSourceEpochTriggerDefinition(
+        string $suffix,
+        string $table,
+        string $event,
+        string $statement,
+    ): array {
+        $name = $this->piwigoPrefix . 'ci_source_epoch_' . $suffix;
+        foreach ([$name, $table] as $identifier) {
+            if (preg_match('/\A[A-Za-z0-9_]{1,64}\z/D', $identifier) !== 1) {
+                throw new \RuntimeException('class_identity_native_source_epoch_identifier_invalid');
+            }
+        }
+        if (!in_array($event, ['INSERT', 'UPDATE', 'DELETE'], true)) {
+            throw new \RuntimeException('class_identity_native_source_epoch_event_invalid');
+        }
+        return ['name' => $name, 'table' => $table, 'event' => $event, 'statement' => $statement];
+    }
+
+    /** @return array{name:string,table:string,event:string,statement:string} */
+    private function nativeTriggerDefinition(
+        string $suffix,
+        string $table,
+        string $event,
+        string $statement,
+    ): array {
+        $name = $this->piwigoPrefix . 'ci_projection_' . $suffix;
+        foreach ([$name, $table] as $identifier) {
+            if (preg_match('/\A[A-Za-z0-9_]{1,64}\z/D', $identifier) !== 1) {
+                throw new \RuntimeException('class_identity_native_projection_identifier_invalid');
+            }
+        }
+        if (!in_array($event, ['INSERT', 'UPDATE', 'DELETE'], true)) {
+            throw new \RuntimeException('class_identity_native_projection_event_invalid');
+        }
+        return ['name' => $name, 'table' => $table, 'event' => $event, 'statement' => $statement];
+    }
+
+    private function nativeProjectionInvalidationStatement(): string
+    {
+        $projection = $this->quotedTable('read_projection');
+        return "UPDATE {$projection} SET `state`='STALE',`generation`=RANDOM_BYTES(16),"
+            . "`invalidated_reason`='NATIVE_PIWIGO_MUTATION',`invalidated_at`=UTC_TIMESTAMP(6),"
+            . "`updated_at`=UTC_TIMESTAMP(6) WHERE `projection_key` IN "
+            . "('PHOTO_CATALOG','TIMELINE','ALBUMS','PEOPLE','MEMORIES'); "
+            . "IF ROW_COUNT() <> 5 THEN SIGNAL SQLSTATE '45000' "
+            . "SET MESSAGE_TEXT='class_archive_projection_guard_failed'; END IF;";
+    }
+
+    private function nativeSourceEpochInvalidationStatement(): string
+    {
+        $epoch = $this->quotedTable('native_source_epoch');
+        return "UPDATE {$epoch} SET `generation`=RANDOM_BYTES(16),`updated_at`=UTC_TIMESTAMP(6) "
+            . "WHERE `source_key`='PIWIGO_NATIVE'; "
+            . "IF ROW_COUNT() <> 1 THEN SIGNAL SQLSTATE '45000' "
+            . "SET MESSAGE_TEXT='class_archive_source_epoch_guard_failed'; END IF;";
+    }
+
+    /** @param list<string> $requiredColumns */
+    private function assertNativePiwigoTable(string $suffix, array $requiredColumns): void
+    {
+        if (preg_match('/\A[A-Za-z0-9_]+\z/D', $suffix) !== 1) {
+            throw new \RuntimeException('class_identity_native_projection_table_invalid');
+        }
+        $name = $this->piwigoPrefix . $suffix;
+        $rows = $this->informationSchemaRows(
+            'SELECT ENGINE FROM information_schema.TABLES '
+                . 'WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND TABLE_TYPE=\'BASE TABLE\'',
+            [$name],
+        );
+        if (count($rows) !== 1 || strtoupper((string) ($rows[0]['ENGINE'] ?? '')) !== 'MYISAM') {
+            throw new \RuntimeException('class_identity_native_projection_source_invalid_' . $suffix);
+        }
+        $columns = $this->informationSchemaRows(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS '
+                . 'WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?',
+            [$name],
+        );
+        $actual = array_fill_keys(
+            array_map(static fn(array $row): string => (string) ($row['COLUMN_NAME'] ?? ''), $columns),
+            true,
+        );
+        foreach ($requiredColumns as $column) {
+            if (!isset($actual[$column])) {
+                throw new \RuntimeException('class_identity_native_projection_column_missing_' . $suffix . '_' . $column);
+            }
+        }
+    }
+
+    /** @param list<array{name:string,table:string,event:string,statement:string}>|null $definitions */
+    private function assertNativeProjectionTriggers(?array $definitions = null): void
+    {
+        foreach ($definitions ?? $this->nativeProjectionTriggerDefinitions() as $definition) {
+            $rows = $this->informationSchemaRows(
+                'SELECT EVENT_OBJECT_TABLE,ACTION_TIMING,EVENT_MANIPULATION,ACTION_STATEMENT '
+                    . 'FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?',
+                [$definition['name']],
+            );
+            if (count($rows) !== 1) {
+                throw new \RuntimeException('class_identity_native_projection_trigger_missing');
+            }
+            $row = $rows[0];
+            if (
+                ($row['EVENT_OBJECT_TABLE'] ?? null) !== $definition['table']
+                || strtoupper((string) ($row['ACTION_TIMING'] ?? '')) !== 'BEFORE'
+                || strtoupper((string) ($row['EVENT_MANIPULATION'] ?? '')) !== $definition['event']
+                || !hash_equals(
+                    self::normalizeTriggerStatement($definition['statement']),
+                    self::normalizeTriggerStatement((string) ($row['ACTION_STATEMENT'] ?? '')),
+                )
+            ) {
+                throw new \RuntimeException('class_identity_native_projection_trigger_drift');
+            }
+        }
+    }
+
+    /** @param list<array{name:string,table:string,event:string,statement:string}> $definitions */
+    private function replaceNativeProjectionTriggers(array $definitions): void
+    {
+        foreach ($definitions as $definition) {
+            $name = $this->quotedIdentifier($definition['name']);
+            $table = $this->quotedIdentifier($definition['table']);
+            $this->executeRaw("DROP TRIGGER IF EXISTS {$name}");
+            $this->executeRaw(
+                "CREATE TRIGGER {$name} BEFORE {$definition['event']} ON {$table} "
+                . 'FOR EACH ROW ' . $definition['statement'],
+            );
+        }
+        $this->assertNativeProjectionTriggers($definitions);
+    }
+
+    /** @param list<array{name:string,table:string,event:string,statement:string}> $definitions */
+    private function nativeProjectionTriggersAreCurrent(array $definitions): bool
+    {
+        foreach ($definitions as $definition) {
+            $rows = $this->informationSchemaRows(
+                'SELECT EVENT_OBJECT_TABLE,ACTION_TIMING,EVENT_MANIPULATION,ACTION_STATEMENT '
+                    . 'FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?',
+                [$definition['name']],
+            );
+            if (count($rows) !== 1) {
+                return false;
+            }
+            $row = $rows[0];
+            if (($row['EVENT_OBJECT_TABLE'] ?? null) !== $definition['table']
+                || strtoupper((string) ($row['ACTION_TIMING'] ?? '')) !== 'BEFORE'
+                || strtoupper((string) ($row['EVENT_MANIPULATION'] ?? '')) !== $definition['event']
+                || !hash_equals(
+                    self::normalizeTriggerStatement($definition['statement']),
+                    self::normalizeTriggerStatement((string) ($row['ACTION_STATEMENT'] ?? '')),
+                )
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function invalidateNativeLifecycleState(string $reason, bool $requireComplete = true): void
+    {
+        if (preg_match('/\A[A-Z0-9_]{1,64}\z/D', $reason) !== 1) {
+            throw new \RuntimeException('class_identity_native_lifecycle_reason_invalid');
+        }
+
+        if ($this->tableExists('native_source_epoch')) {
+            $epoch = $this->quotedTable('native_source_epoch');
+            $this->executeRaw(
+                "UPDATE {$epoch} SET `generation`=RANDOM_BYTES(16),`updated_at`=UTC_TIMESTAMP(6) "
+                    . "WHERE `source_key`='PIWIGO_NATIVE'",
+            );
+            if ($requireComplete && $this->db->affected_rows !== 1) {
+                throw new \RuntimeException('class_identity_native_lifecycle_epoch_invalid');
+            }
+        }
+
+        $projection = $this->quotedTable('read_projection');
+        $escapedReason = $this->db->real_escape_string($reason);
+        $this->executeRaw(
+            "UPDATE {$projection} SET `state`='STALE',`generation`=RANDOM_BYTES(16),"
+                . "`invalidated_reason`='{$escapedReason}',`invalidated_at`=UTC_TIMESTAMP(6),"
+                . "`updated_at`=UTC_TIMESTAMP(6) WHERE `projection_key` IN "
+                . "('PHOTO_CATALOG','TIMELINE','ALBUMS','PEOPLE','MEMORIES','SPOTLIGHT')",
+        );
+        if ($requireComplete && $this->db->affected_rows !== 6) {
+            throw new \RuntimeException('class_identity_native_lifecycle_projection_invalid');
+        }
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function pluginOwnedNativeTriggerRows(): array
+    {
+        $names = array_map(
+            static fn(array $definition): string => $definition['name'],
+            array_merge(
+                $this->nativeProjectionTriggerDefinitions(),
+                $this->nativeSourceEpochTriggerDefinitions(),
+            ),
+        );
+        $placeholders = implode(',', array_fill(0, count($names), '?'));
+        return $this->informationSchemaRows(
+            'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS '
+                . "WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ({$placeholders})",
+            $names,
+        );
+    }
+
+    private static function normalizeTriggerStatement(string $statement): string
+    {
+        $normalized = strtolower(str_replace('`', '', $statement));
+        $normalized = preg_replace('/\s+/u', '', $normalized);
+        if (!is_string($normalized) || $normalized === '') {
+            throw new \RuntimeException('class_identity_native_projection_trigger_invalid');
+        }
+        return $normalized;
+    }
+
     private function ensureMigrationLedger(): void
     {
         $ledger = $this->quotedTable('migration');
@@ -1128,6 +1779,15 @@ SQL);
         );
     }
 
+    private function tableExists(string $suffix): bool
+    {
+        return $this->informationSchemaExists(
+            'SELECT 1 FROM information_schema.TABLES '
+                . 'WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND TABLE_TYPE=\'BASE TABLE\' LIMIT 1',
+            [$this->table($suffix)],
+        );
+    }
+
     private function indexExists(string $table, string $index): bool
     {
         return $this->informationSchemaExists(
@@ -1166,6 +1826,57 @@ SQL);
             $actualDigest = $this->semanticDigest($suffix);
             if (!hash_equals($expectedDigest, $actualDigest)) {
                 throw new \RuntimeException('class_identity_schema_semantic_drift_' . $suffix);
+            }
+        }
+        $this->assertProjectionEpochsInitialized();
+        $this->assertNativeProjectionTriggers();
+        $this->assertNativeProjectionTriggers($this->nativeSourceEpochTriggerDefinitions());
+    }
+
+    private function assertProjectionEpochsInitialized(): void
+    {
+        $epochTable = $this->table('native_source_epoch');
+        $tableRows = $this->informationSchemaRows(
+            'SELECT ENGINE FROM information_schema.TABLES '
+                . 'WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND TABLE_TYPE=\'BASE TABLE\'',
+            [$epochTable],
+        );
+        if (count($tableRows) !== 1 || strtoupper((string) ($tableRows[0]['ENGINE'] ?? '')) !== 'MYISAM') {
+            throw new \RuntimeException('class_identity_native_source_epoch_engine_invalid');
+        }
+        $epochRows = $this->informationSchemaRows(
+            'SELECT `source_key`,`generation` FROM ' . $this->quotedTable('native_source_epoch'),
+            [],
+        );
+        if (count($epochRows) !== 1
+            || ($epochRows[0]['source_key'] ?? null) !== 'PIWIGO_NATIVE'
+            || !is_string($epochRows[0]['generation'] ?? null)
+            || strlen((string) $epochRows[0]['generation']) !== 16
+        ) {
+            throw new \RuntimeException('class_identity_native_source_epoch_invalid');
+        }
+        $rows = $this->informationSchemaRows(
+            'SELECT `projection_key`,`state`,`generation`,`native_source_generation` FROM '
+                . $this->quotedTable('read_projection') . ' ORDER BY `projection_key`',
+            [],
+        );
+        $expected = ['ALBUMS', 'MEMORIES', 'PEOPLE', 'PHOTO_CATALOG', 'SPOTLIGHT', 'TIMELINE'];
+        if (count($rows) !== count($expected)) {
+            throw new \RuntimeException('class_identity_projection_epoch_rows_incomplete');
+        }
+        foreach ($rows as $index => $row) {
+            if (($row['projection_key'] ?? null) !== $expected[$index]
+                || !is_string($row['generation'] ?? null)
+                || strlen((string) $row['generation']) !== 16
+            ) {
+                throw new \RuntimeException('class_identity_projection_epoch_invalid');
+            }
+            if (($row['projection_key'] ?? null) === 'PHOTO_CATALOG'
+                && ($row['state'] ?? null) === 'ACTIVE'
+                && (!is_string($row['native_source_generation'] ?? null)
+                    || !hash_equals((string) $epochRows[0]['generation'], (string) $row['native_source_generation']))
+            ) {
+                throw new \RuntimeException('class_identity_projection_native_epoch_binding_invalid');
             }
         }
     }
@@ -1211,6 +1922,11 @@ SQL);
             'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',
             'batch_operation' => '819f4bab9f845999655f333156b8a627589251e3c7221cde19e1132a8c0b39e7',
             'batch_operation_item' => '0cfec340df85bdbabc3ca5126511439b161a4dbfe0421e1cb37fb86a0af2487a',
+            // Generated from migration 9 on the locked MariaDB 11.8.8
+            // information_schema contract.
+            'native_source_epoch' => '38835ba61ef74fb5a7133a0ed32f50fad6bfda27fa97d932ae6a0f163d7c80cb',
+            'read_projection' => '50cd33236df8d42d76ba44b7dd9b3fe2a62b5e5023c4600f67e596f9846c1983',
+            'read_photo' => '017afaaaadbf02491813dab1b0ff6fb548af157e20f5ac4ec2f7fa3dbc0d83ec',
         ];
     }
 
@@ -1454,7 +2170,7 @@ SQL);
     }
 
     /** @param list<string> $requiredColumns */
-    private function assertTable(string $suffix, array $requiredColumns): void
+    private function assertTable(string $suffix, array $requiredColumns, string $expectedEngine = 'INNODB'): void
     {
         $statement = $this->prepare(
             'SELECT ENGINE, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
@@ -1471,7 +2187,9 @@ SQL);
         if (!is_array($row)) {
             throw new \RuntimeException('class_identity_missing_table_' . $suffix);
         }
-        if (strtoupper((string) $row['ENGINE']) !== 'INNODB') {
+        if (!in_array($expectedEngine, ['INNODB', 'MYISAM'], true)
+            || strtoupper((string) $row['ENGINE']) !== $expectedEngine
+        ) {
             throw new \RuntimeException('class_identity_wrong_engine_' . $suffix);
         }
         if (!str_starts_with(strtolower((string) $row['TABLE_COLLATION']), 'utf8mb4_')) {
@@ -1488,6 +2206,14 @@ SQL);
     private function quotedTable(string $suffix): string
     {
         return '`' . $this->table($suffix) . '`';
+    }
+
+    private function quotedIdentifier(string $identifier): string
+    {
+        if (preg_match('/\A[A-Za-z0-9_]{1,64}\z/D', $identifier) !== 1) {
+            throw new \RuntimeException('class_identity_schema_identifier_invalid');
+        }
+        return '`' . $identifier . '`';
     }
 
     /** @return list<string> */
@@ -1516,6 +2242,9 @@ SQL);
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',
+            'native_source_epoch',
+            'read_projection',
+            'read_photo',
         ];
     }
 

@@ -31,6 +31,7 @@ final class PersonCurationService
         $this->validateIdentityLink($classmateIdentityId);
 
         return $this->repository->transaction(function (Repository $repository) use ($admin, $displayName, $classmateIdentityId, $reason): array {
+            self::invalidatePeople($repository, 'PERSON_CREATE');
             for ($attempt = 0; $attempt < 3; ++$attempt) {
                 $id = DomainSupport::generateId();
                 $binary = DomainSupport::idToBinary($id);
@@ -104,6 +105,7 @@ final class PersonCurationService
             $admin, $classPersonId, $displayName, $classmateIdentityId, $visibility,
             $coverClassPhotoId, $coverBinary, $reason,
         ): array {
+            self::invalidatePeople($repository, 'PERSON_UPDATE');
             $binary = DomainSupport::idToBinary($classPersonId);
             $before = $repository->fetchOne(
                 'SELECT * FROM `' . $repository->table('person') . '` WHERE `class_person_id` = ? FOR UPDATE',
@@ -191,6 +193,7 @@ final class PersonCurationService
         return $this->repository->transaction(function (Repository $repository) use (
             $admin, $sourceIds, $targetClassPersonId, $targetCoverClassPhotoId, $targetCoverBinary, $reason,
         ): array {
+            self::invalidatePeople($repository, 'PERSON_MERGE');
             $allIds = array_values(array_unique(array_merge($sourceIds, [strtolower($targetClassPersonId)])));
             sort($allIds, SORT_STRING);
             $binaryIds = array_map([DomainSupport::class, 'idToBinary'], $allIds);
@@ -315,6 +318,7 @@ final class PersonCurationService
         }
         ksort($ids, SORT_STRING);
         return $this->repository->transaction(function (Repository $repository) use ($admin, $ids, $visibility, $reason): int {
+            self::invalidatePeople($repository, 'PERSON_VISIBILITY');
             $audit = new Audit($repository);
             foreach (array_keys($ids) as $id) {
                 $binary = DomainSupport::idToBinary($id);
@@ -346,6 +350,7 @@ final class PersonCurationService
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true) ?? '';
         $this->repository->transaction(function (Repository $repository) use ($admin, $mergeId, $reason): void {
+            self::invalidatePeople($repository, 'PERSON_MERGE_REVERT');
             $binary = DomainSupport::idToBinary($mergeId);
             $row = $repository->fetchOne(
                 'SELECT `source_class_person_id`,`target_class_person_id`,`state` FROM `'
@@ -393,6 +398,7 @@ final class PersonCurationService
         }
         $reason = Audit::validateReason($reason, true) ?? '';
         $this->repository->transaction(function (Repository $repository) use ($admin, $classPersonId, $classPhotoId, $rule, $reason): void {
+            self::invalidatePeople($repository, 'PERSON_PHOTO_RULE');
             $person = DomainSupport::idToBinary($classPersonId);
             $photo = DomainSupport::idToBinary($classPhotoId);
             $this->requireActivePerson($person, true);
@@ -427,6 +433,7 @@ final class PersonCurationService
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true) ?? '';
         $this->repository->transaction(function (Repository $repository) use ($admin, $classPersonId, $classPhotoId, $reason): void {
+            self::invalidatePeople($repository, 'PERSON_PHOTO_RULE');
             $changed = $repository->execute(
                 'DELETE FROM `' . DomainSupport::table($repository, 'person_photo_rule')
                 . '` WHERE `class_person_id` = ? AND `class_photo_id` = ?',
@@ -501,6 +508,7 @@ final class PersonCurationService
         return $this->repository->transaction(function (Repository $repository) use (
             $admin, $fromClassPersonId, $toClassPersonId, $photoIds, $reason,
         ): int {
+            self::invalidatePeople($repository, 'PERSON_PHOTOS');
             $from = DomainSupport::idToBinary($fromClassPersonId);
             $to = $toClassPersonId === null ? null : DomainSupport::idToBinary($toClassPersonId);
 
@@ -750,6 +758,15 @@ final class PersonCurationService
         }
         usort($result, static fn(array $a, array $b): int => strcmp((string) ($a['display_name'] ?? ''), (string) ($b['display_name'] ?? '')) ?: strcmp($a['class_person_id'], $b['class_person_id']));
         return $result;
+    }
+
+    private static function invalidatePeople(Repository $repository, string $reason): void
+    {
+        ProjectionMutationBoundary::invalidateAggregates(
+            $repository,
+            [\ClassIdentity\Gateway\ReadProjectionStore::PEOPLE],
+            $reason,
+        );
     }
 
     private function validateIdentityLink(?int $identityId): void

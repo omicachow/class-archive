@@ -28,6 +28,7 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 }
 $settings = Read-DotEnv $envPath
 $baseUri = [Uri]('http://127.0.0.1:' + $settings['CLASS_ARCHIVE_HTTP_PORT'] + '/')
+$photoAppSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'infra\immich-spike\photo-ui\app.js'))
 $composeBase = @(
     '-d', 'Ubuntu', '--cd', $projectRoot, '--',
     'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml'
@@ -70,7 +71,11 @@ try {
     $picture = Invoke-WebRequest -UseBasicParsing -Uri ([Uri]::new($baseUri, $pictureLink.href)) -WebSession $session -TimeoutSec 30
     Assert-True ($picture.Content -match 'id="startPhotoSwipe"') 'Fullscreen PhotoSwipe trigger is missing.'
     Assert-True ($picture.Content -match 'new PhotoSwipe\(') 'PhotoSwipe viewer integration is missing.'
-    Assert-True ($picture.Content -match '<link rel="prefetch" href="i\.php\?/.+-me\.') 'Adjacent preview preload is missing.'
+    # The member Photo UI now owns adjacent viewer prefetch. The Piwigo
+    # technical viewer no longer emits a static <link rel="prefetch"> whose
+    # URL could outlive the current presentation/session scope.
+    Assert-True ($photoAppSource -match 'function prefetchAdjacentPreviews\(') 'Adjacent preview preload controller is missing.'
+    Assert-True ($photoAppSource -match "new Image\(\)[\s\S]{0,320}mediaUrl\(adjacent\.id, 'preview'") 'Adjacent preview preload is not MediaGuard-routed.'
     Assert-True ($picture.Content -match '(?:src|data-src)="(?:i\.php\?/|_data/i/)upload/.+-me\.') 'Viewer does not default to a screen-sized preview.'
     Assert-True ($picture.Content -match 'href="action\.php\?id=[0-9]+&amp;part=e&amp;download"') 'Explicit original download action is missing.'
 

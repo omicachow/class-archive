@@ -34,6 +34,7 @@ final class SpotlightService
         return $this->repository->transaction(function (Repository $repository) use (
             $owner, $ownerPrincipalId, $classAlbumId, $albumBinary, $starts, $expires, $reason,
         ): array {
+            self::invalidateSpotlight($repository, 'SPOTLIGHT_CREATE');
             $this->expireDueInTransaction($repository);
             $album = $repository->fetchOne(
                 'SELECT `piwigo_category_id`,`album_type`,`owner_principal_id`,`state` FROM `'
@@ -100,6 +101,7 @@ final class SpotlightService
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $reason = Audit::validateReason($reason, true) ?? '';
         $this->repository->transaction(function (Repository $repository) use ($admin, $spotlightId, $reason): void {
+            self::invalidateSpotlight($repository, 'SPOTLIGHT_CANCEL');
             $binary = DomainSupport::idToBinary($spotlightId);
             $row = $repository->fetchOne(
                 'SELECT `class_album_id`,`state` FROM `' . DomainSupport::table($repository, 'spotlight')
@@ -147,6 +149,21 @@ final class SpotlightService
             Access::ROLE_CLASSMATE, Access::ROLE_TEACHER, Access::ROLE_FAMILY, Access::ROLE_ANONYMOUS,
             Access::ROLE_SYSTEM_ADMIN,
         ]);
+        $this->expireDue();
+        return $this->activeForProjection($visibleClassAlbumIds);
+    }
+
+    /**
+     * Build-only, authorization-neutral source projection. The caller must
+     * supply album ids that have already passed the FULL or HERITAGE Gateway
+     * policy. This method never returns owner/principal ids and never mutates
+     * expiry state while a projection build token is in flight.
+     *
+     * @param list<string> $visibleClassAlbumIds
+     * @return list<array<string,mixed>>
+     */
+    public function activeForProjection(array $visibleClassAlbumIds): array
+    {
         if ($visibleClassAlbumIds === []) {
             return [];
         }
@@ -157,7 +174,6 @@ final class SpotlightService
         if (count($ids) > 1000) {
             throw new \InvalidArgumentException('class_archive_spotlight_album_batch_invalid');
         }
-        $this->expireDue();
         global $prefixeTable;
         $rows = $this->repository->fetchAll(
             'SELECT s.`spotlight_id`,s.`class_album_id`,s.`starts_at`,s.`expires_at`,a.`piwigo_category_id`,a.`album_type`,a.`era`,c.`name` '
@@ -211,6 +227,7 @@ final class SpotlightService
         if ($rows === []) {
             return 0;
         }
+        self::invalidateSpotlight($repository, 'SPOTLIGHT_EXPIRE');
         $changed = $repository->execute(
             'UPDATE `' . DomainSupport::table($repository, 'spotlight')
                 . "` SET `state`='EXPIRED',`updated_at`=UTC_TIMESTAMP(6) WHERE `state`='ACTIVE' AND `expires_at` <= UTC_TIMESTAMP(6)",
@@ -228,6 +245,15 @@ final class SpotlightService
             ]);
         }
         return $changed;
+    }
+
+    private static function invalidateSpotlight(Repository $repository, string $reason): void
+    {
+        (new \ClassIdentity\Gateway\ReadProjectionStore($repository))->invalidate(
+            [\ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT],
+            $reason,
+            false,
+        );
     }
 
     private function requireMemberVisibleCategory(int $categoryId, int $expectedGroupId): void

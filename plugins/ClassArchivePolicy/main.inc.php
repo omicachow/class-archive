@@ -19,6 +19,8 @@ defined('CLASS_ARCHIVE_POLICY_VERSION') or define('CLASS_ARCHIVE_POLICY_VERSION'
 
 require_once CLASS_ARCHIVE_POLICY_PATH . 'src/MediaGuard.php';
 require_once CLASS_ARCHIVE_POLICY_PATH . 'src/MediaFilePolicy.php';
+require_once CLASS_ARCHIVE_POLICY_PATH . 'src/DerivativeWarmupQueue.php';
+require_once CLASS_ARCHIVE_POLICY_PATH . 'src/DerivativeCacheWarmer.php';
 
 /**
  * This hook is deliberately small. Nginx routes every media byte path through
