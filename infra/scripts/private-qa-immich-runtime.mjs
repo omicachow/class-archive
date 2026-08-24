@@ -101,14 +101,24 @@ function queueActive(statistics, code) {
 async function waitForQueue(token, name, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let observed = false;
+  let idleObservations = 0;
   while (Date.now() < deadline) {
     const result = await request(`queue_${name}`, `/queues/${name}`, 'GET', undefined, token);
     const statistics = result?.statistics;
     if (!statistics || typeof statistics !== 'object') fail(`queue_${name}_shape_invalid`);
     const values = ['active', 'completed', 'delayed', 'failed', 'paused', 'waiting'].map((key) => statistics[key]);
     if (!values.every(Number.isSafeInteger) || statistics.failed > 0) fail(`queue_${name}_statistics_invalid`);
-    if (queueActive(statistics, `queue_${name}`)) observed = true;
-    if (!queueActive(statistics, `queue_${name}`) && (observed || statistics.completed > 0)) return statistics.completed;
+    if (queueActive(statistics, `queue_${name}`)) {
+      observed = true;
+      idleObservations = 0;
+    } else {
+      idleObservations += 1;
+    }
+    // Completed counters may be pruned to zero immediately. The triggering
+    // endpoint has already returned at this point, so five consecutive idle
+    // observations are a bounded, fail-closed completion signal; later
+    // People/Search result checks still have to succeed.
+    if (!queueActive(statistics, `queue_${name}`) && (observed || statistics.completed > 0 || idleObservations >= 5)) return statistics.completed;
     await delay(1_000);
   }
   fail(`queue_${name}_timeout`);
@@ -149,8 +159,9 @@ try {
 }
 
 try {
-  if (!exactKeys(input, ['version', 'scope', 'catalog_digest', 'email', 'password', 'name', 'library_name', 'photos'])
+  if (!exactKeys(input, ['version', 'scope', 'mode', 'catalog_digest', 'email', 'password', 'name', 'library_name', 'photos'])
     || input.version !== 1 || input.scope !== 'PRIVATE_REAL_DATA_QA') fail('input_shape_invalid');
+  const mode = text(input.mode, 'mode_invalid', 6, 7, /^(INITIAL|RESUME)$/);
   const catalogDigest = text(input.catalog_digest, 'catalog_digest_invalid', 64, 64, /^[0-9a-f]{64}$/);
   const email = text(input.email, 'email_invalid', 8, 190, /^[A-Za-z0-9._+-]+@private\.invalid$/);
   const password = text(input.password, 'password_invalid', 32, 190, /^[A-Za-z0-9._~-]+$/);
@@ -182,69 +193,129 @@ try {
   }
   const verifyMs = Date.now() - verifyStarted;
 
-  const admin = await request('admin_signup', '/auth/admin-sign-up', 'POST', { email, password, name });
-  const adminId = uuid(admin?.id, 'admin_id_invalid');
+  let adminId;
+  if (mode === 'INITIAL') {
+    const admin = await request('admin_signup', '/auth/admin-sign-up', 'POST', { email, password, name });
+    adminId = uuid(admin?.id, 'admin_id_invalid');
+  }
   const login = await request('technical_login', '/auth/login', 'POST', { email, password });
   const accessToken = text(login?.accessToken, 'access_token_invalid', 32, 8192, /^[A-Za-z0-9._~-]+$/);
-  if (login?.isAdmin !== true || login?.userId !== adminId) fail('technical_identity_invalid');
+  const loginAdminId = uuid(login?.userId, 'login_user_id_invalid');
+  if (login?.isAdmin !== true || (adminId !== undefined && loginAdminId !== adminId)) fail('technical_identity_invalid');
+  adminId = loginAdminId;
 
-  const library = await request('library_create', '/libraries', 'POST', {
-    ownerId: adminId,
-    name: libraryName,
-    importPaths: ['/external/piwigo-upload', '/external/piwigo-galleries'],
-  }, accessToken);
-  const libraryId = uuid(library?.id, 'library_id_invalid');
-  if (!Array.isArray(library?.importPaths) || library.importPaths.length !== 2
-    || !library.importPaths.includes('/external/piwigo-upload') || !library.importPaths.includes('/external/piwigo-galleries')) fail('library_paths_invalid');
-
-  const scanStarted = Date.now();
-  await request('library_scan', `/libraries/${libraryId}/scan`, 'POST', undefined, accessToken);
-  let indexed = false;
-  for (let attempt = 0; attempt < 900; attempt += 1) {
-    const stats = await request('library_statistics', `/libraries/${libraryId}/statistics`, 'GET', undefined, accessToken);
-    if (!Number.isSafeInteger(stats?.total) || stats.total < 0 || stats.total > photos.length) fail('library_statistics_invalid');
-    if (stats.total === photos.length) {
-      indexed = true;
-      break;
+  let library;
+  let scanMs = 0;
+  if (mode === 'INITIAL') {
+    library = await request('library_create', '/libraries', 'POST', {
+      ownerId: adminId,
+      name: libraryName,
+      importPaths: ['/external/piwigo-upload', '/external/piwigo-galleries'],
+    }, accessToken);
+    const createdLibraryId = uuid(library?.id, 'library_id_invalid');
+    const scanStarted = Date.now();
+    await request('library_scan', `/libraries/${createdLibraryId}/scan`, 'POST', undefined, accessToken);
+    let indexed = false;
+    for (let attempt = 0; attempt < 900; attempt += 1) {
+      const stats = await request('library_statistics', `/libraries/${createdLibraryId}/statistics`, 'GET', undefined, accessToken);
+      if (!Number.isSafeInteger(stats?.total) || stats.total < 0 || stats.total > photos.length) fail('library_statistics_invalid');
+      if (stats.total === photos.length) {
+        indexed = true;
+        break;
+      }
+      await delay(1_000);
     }
+    if (!indexed) fail('library_scan_incomplete');
+    scanMs = Date.now() - scanStarted;
+  } else {
+    const libraries = await request('libraries_list', '/libraries', 'GET', undefined, accessToken);
+    if (!Array.isArray(libraries) || libraries.length !== 1) fail('resume_library_count_invalid');
+    library = libraries[0];
+  }
+
+  const libraryId = uuid(library?.id, 'library_id_invalid');
+  if (uuid(library?.ownerId, 'library_owner_id_invalid') !== adminId
+    || library?.name !== libraryName
+    || !Array.isArray(library?.importPaths)
+    || library.importPaths.length !== 2
+    || !library.importPaths.includes('/external/piwigo-upload')
+    || !library.importPaths.includes('/external/piwigo-galleries')) fail('library_identity_invalid');
+
+  const libraryStats = await request('library_statistics_final', `/libraries/${libraryId}/statistics`, 'GET', undefined, accessToken);
+  if (!Number.isSafeInteger(libraryStats?.total) || libraryStats.total !== photos.length
+    || !Number.isSafeInteger(libraryStats?.photos) || !Number.isSafeInteger(libraryStats?.videos)
+    || libraryStats.photos + libraryStats.videos !== photos.length) fail('library_statistics_mismatch');
+
+  // Immich v3.1.0's legacy `originalPath` metadata filter is a substring
+  // predicate, not an exact lookup.  Enumerate the one expected library via
+  // the official stable large-assets API (bounded to 1000).  Polling this
+  // metadata-backed endpoint is also a stronger completion proof than Redis
+  // queue counters, whose completed values may be pruned to zero after a
+  // previous interrupted run.
+  let items = [];
+  for (let attempt = 0; attempt < 900; attempt += 1) {
+    items = await request(
+      'library_asset_inventory',
+      `/search/large-assets?libraryId=${encodeURIComponent(libraryId)}&minFileSize=0&size=1000`,
+      'POST',
+      undefined,
+      accessToken,
+    );
+    if (!Array.isArray(items) || items.length > photos.length) fail('asset_inventory_count_invalid');
+    if (items.length === photos.length) break;
     await delay(1_000);
   }
-  if (!indexed) fail('library_scan_incomplete');
-  const scanMs = Date.now() - scanStarted;
+  if (!Array.isArray(items) || items.length !== photos.length) fail('asset_inventory_count_invalid');
 
-  await waitForQueue(accessToken, 'metadataExtraction', 900_000);
-  const bindings = [];
-  for (const photo of photos) {
-    const result = await request('asset_lookup', '/search/metadata', 'POST', {
-      libraryId,
-      originalPath: photo.path,
-      page: 1,
-      size: 2,
-    }, accessToken);
-    const items = result?.assets?.items;
-    if (!Array.isArray(items) || items.length !== 1 || items[0]?.originalPath !== photo.path || items[0]?.isExternal !== true) fail('asset_path_lookup_invalid');
-    bindings.push({ class_photo_id: photo.class_photo_id, immich_asset_id: uuid(items[0]?.id, 'asset_id_invalid') });
+  const assetsByPath = new Map();
+  const inventoryIds = new Set();
+  for (const item of items) {
+    const assetId = uuid(item?.id, 'asset_id_invalid');
+    const originalPath = text(item?.originalPath, 'asset_path_invalid', 2, 1024);
+    // AssetResponseDto does not expose the internal `isExternal` column in
+    // v3.1.0. A non-null exact libraryId, exact owner and a path inside the
+    // two validated external import roots provide the equivalent proof.
+    if (uuid(item?.libraryId, 'asset_library_id_invalid') !== libraryId
+      || uuid(item?.ownerId, 'asset_owner_id_invalid') !== adminId
+      || inventoryIds.has(assetId) || assetsByPath.has(originalPath)) fail('asset_inventory_ambiguous');
+    inventoryIds.add(assetId);
+    assetsByPath.set(originalPath, assetId);
   }
-  if (new Set(bindings.map((item) => item.immich_asset_id)).size !== photos.length) fail('asset_binding_duplicate');
+  if (assetsByPath.size !== paths.size || [...assetsByPath.keys()].some((path) => !paths.has(path))) fail('asset_inventory_unexpected_path');
+
+  const bindings = photos.map((photo) => {
+    const assetId = assetsByPath.get(photo.path);
+    if (assetId === undefined) fail('asset_inventory_missing_path');
+    return { class_photo_id: photo.class_photo_id, immich_asset_id: assetId };
+  });
+  if (bindings.length !== photos.length || new Set(bindings.map((item) => item.immich_asset_id)).size !== photos.length) fail('asset_binding_duplicate');
 
   const assetIds = bindings.map((item) => item.immich_asset_id);
-  const faceStarted = Date.now();
-  await request('refresh_faces', '/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }, accessToken, 60_000);
-  const faceJobs = await waitForQueue(accessToken, 'faceDetection', 1_800_000);
-  const faceMs = Date.now() - faceStarted;
+  let faceJobs = 0;
+  let recognitionJobs = 0;
+  let smartJobs = 0;
+  let faceMs = 0;
+  let recognitionMs = 0;
+  let searchIndexMs = 0;
+  if (mode === 'INITIAL') {
+    const faceStarted = Date.now();
+    await request('refresh_faces', '/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }, accessToken, 60_000);
+    faceJobs = await waitForQueue(accessToken, 'faceDetection', 1_800_000);
+    faceMs = Date.now() - faceStarted;
 
-  const recognitionStarted = Date.now();
-  await startQueueIfIdle(accessToken, 'facialRecognition');
-  const recognitionJobs = await waitForQueue(accessToken, 'facialRecognition', 1_800_000);
-  const recognitionMs = Date.now() - recognitionStarted;
+    const recognitionStarted = Date.now();
+    await startQueueIfIdle(accessToken, 'facialRecognition');
+    recognitionJobs = await waitForQueue(accessToken, 'facialRecognition', 1_800_000);
+    recognitionMs = Date.now() - recognitionStarted;
 
-  const searchIndexStarted = Date.now();
-  await startQueueIfIdle(accessToken, 'smartSearch');
-  const smartJobs = await waitForQueue(accessToken, 'smartSearch', 1_800_000);
-  const searchIndexMs = Date.now() - searchIndexStarted;
+    const searchIndexStarted = Date.now();
+    await startQueueIfIdle(accessToken, 'smartSearch');
+    smartJobs = await waitForQueue(accessToken, 'smartSearch', 1_800_000);
+    searchIndexMs = Date.now() - searchIndexStarted;
+  }
 
   const people = await request('people', '/people?size=500&withHidden=false', 'GET', undefined, accessToken);
-  if (!Array.isArray(people?.people)) fail('people_response_invalid');
+  if (!Array.isArray(people?.people) || people.people.length < 1) fail('people_response_invalid');
   const searchQueries = [
     ['zh_classroom', '教室里的照片'],
     ['zh_playground', '操场上的合照'],
@@ -264,6 +335,7 @@ try {
     searchCounts[key] = items.length;
   }
   const searchMs = Date.now() - searchStarted;
+  if (Object.values(searchCounts).some((count) => !Number.isSafeInteger(count) || count < 1)) fail('search_runtime_empty');
 
   const output = {
     version: 1,
@@ -277,6 +349,7 @@ try {
       face_jobs: faceJobs,
       recognition_jobs: recognitionJobs,
       smart_jobs: smartJobs,
+      reused_existing_indexes: mode === 'RESUME',
       search_counts: searchCounts,
       timings_ms: {
         mounted_sha256: verifyMs,

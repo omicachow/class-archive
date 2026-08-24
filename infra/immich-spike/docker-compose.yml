@@ -104,6 +104,12 @@ services:
       - immich_gateway_secret:/run/secrets:ro
     tmpfs:
       - /tmp:mode=1777,size=8m
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/healthz').then(function(r){process.exit(r.status === 200 ? 0 : 1)}).catch(function(){process.exit(1)})\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
     networks:
       immich_bridge_internal: {}
       # Match the fixed authority in BridgeImmichAdapter. The alias lives only
@@ -135,6 +141,8 @@ services:
       - immich_gateway_secret:/run/secrets:rw
     network_mode: "none"
     restart: "no"
+    healthcheck:
+      disable: true
 
   # Local-only Web compatibility spike. The service serves the verified
   # upstream static build but receives no Immich/Piwigo database or original
@@ -177,7 +185,11 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
-    networks: [class_archive_gateway]
+    networks:
+      class_archive_gateway:
+        # nginx trusts only this BFF address (not every container on the
+        # shared internal bridge) to restore an IP-bound browser session.
+        ipv4_address: 172.23.0.10
     restart: "no"
 
   redis:

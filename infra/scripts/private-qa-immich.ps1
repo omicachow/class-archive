@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'status', 'provision')]
+    [ValidateSet('validate', 'status', 'provision', 'resume', 'finish')]
     [string]$Action = 'validate'
 )
 
@@ -28,8 +28,12 @@ $immichProject = 'class_archive_private_qa_immich'
 $catalogScript = '/workspace/infra/scripts/private-qa-immich-catalog.php'
 $runtimeScriptHost = 'infra/scripts/private-qa-immich-runtime.mjs'
 $runtimeScriptContainer = '/tmp/class-archive-private-qa-immich-runtime.mjs'
+$passwordResetScriptHost = 'infra/scripts/private-qa-immich-reset-admin.mjs'
+$passwordResetScriptContainer = '/tmp/class-archive-private-qa-immich-reset-admin.mjs'
 $runtimeInputContainer = '/tmp/class-archive-private-qa-immich-runtime-input.json'
 $runtimeOutputContainer = '/tmp/class-archive-private-qa-immich-runtime-output.json'
+$passwordResetInputContainer = '/tmp/class-archive-private-qa-immich-password-reset-input.txt'
+$passwordResetOutputContainer = '/tmp/class-archive-private-qa-immich-password-reset-output.txt'
 $catalogContainer = '/tmp/class-archive-private-qa-immich-catalog.json'
 $bindingContainer = '/tmp/class-archive-private-qa-immich-bindings.json'
 $enableContainer = '/tmp/class-archive-private-qa-immich-enable.json'
@@ -75,6 +79,17 @@ function Write-OwnerOnlyJson([string]$Path, [object]$Value) {
     $raw = $null
     Set-ClassArchiveOwnerOnlyFileAcl -Path $Path
     Assert-IgnoredOwnerOnly $Path 'private_json'
+}
+
+function Write-OwnerOnlyText([string]$Path, [string]$Value) {
+    if (Test-Path -LiteralPath $Path) { Fail 'private_output_not_clean' }
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void][IO.Directory]::CreateDirectory($directory)
+    }
+    [IO.File]::WriteAllText($Path, $Value, [Text.UTF8Encoding]::new($false))
+    Set-ClassArchiveOwnerOnlyFileAcl -Path $Path
+    Assert-IgnoredOwnerOnly $Path 'private_text'
 }
 
 function Remove-PrivateFile([string]$Path) {
@@ -147,6 +162,39 @@ function Get-ImmichCounts {
     return [ordered]@{ users = [int]$match.Groups[1].Value; libraries = [int]$match.Groups[2].Value; assets = [int]$match.Groups[3].Value; memories = [int]$match.Groups[4].Value }
 }
 
+function Get-ImmichAdminEmail {
+    $user = Read-DotEnvValue $immichEnv 'DB_USERNAME' 'postgres'
+    $database = Read-DotEnvValue $immichEnv 'DB_DATABASE_NAME' 'immich'
+    if ($user -notmatch '^[A-Za-z0-9_]{1,63}$' -or $database -notmatch '^[A-Za-z0-9_]{1,63}$') {
+        Fail 'immich_database_identity_invalid'
+    }
+    $sql = 'SELECT email FROM "user" WHERE "isAdmin" IS TRUE AND "deletedAt" IS NULL ORDER BY id;'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sql))
+    $output = Invoke-ImmichCompose @('exec', '-T', 'database', 'sh', '-lc', ('echo ' + $encoded + ' | base64 -d | psql -U ' + $user + ' -d ' + $database + ' -At'))
+    $rows = @($output -split "`r?`n" | Where-Object { $_ -ne '' })
+    Assert-Exact ($rows.Count -eq 1 -and $rows[0] -match '^class-archive-private-[0-9a-f]{16}@private\.invalid$') 'immich_admin_identity_invalid'
+    return [string]$rows[0]
+}
+
+function Reset-ImmichAdminPassword([string]$HostInput, [string]$Password) {
+    $script:stage = 'resume_credential_file'
+    Write-OwnerOnlyText $HostInput $Password
+    $script:stage = 'resume_credential_copy'
+    [void](Invoke-ImmichCompose @('cp', $HostInput.Substring($projectRoot.Length + 1).Replace('\', '/'), ('immich-server:' + $passwordResetInputContainer)))
+    [void](Invoke-ImmichCompose @('cp', $passwordResetScriptHost, ('immich-server:' + $passwordResetScriptContainer)))
+    $script:stage = 'resume_credential_permissions'
+    [void](Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'sh', '-lc', ('chown 0:0 ' + $passwordResetInputContainer + ' ' + $passwordResetScriptContainer + ' && chmod 0600 ' + $passwordResetInputContainer + ' && chmod 0500 ' + $passwordResetScriptContainer)))
+    $script:stage = 'resume_credential_rotation'
+    $resetResult = (Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'node', $passwordResetScriptContainer)).Trim()
+    if ($resetResult -ne 'RESET_PASS') {
+        $safeCode = if ($resetResult -match '^RESET_[A-Z_]{1,40}$') { $resetResult.ToLowerInvariant() } else { 'reset_marker_invalid' }
+        Fail $safeCode
+    }
+    $script:stage = 'resume_credential_cleanup'
+    [void](Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'rm', '-f', '--', $passwordResetScriptContainer))
+    Remove-PrivateFile $HostInput
+}
+
 function Assert-Container([string]$Name, [bool]$RequireHealth) {
     $status = (Invoke-UbuntuDocker @('inspect', $Name, '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{json .HostConfig.PortBindings}}')).Trim()
     $parts = $status -split '\|', 3
@@ -186,10 +234,15 @@ try {
         exit 0
     }
 
-    $script:stage = 'pristine_precondition'
-    Assert-Exact ($counts.users -eq 0 -and $counts.libraries -eq 0 -and $counts.assets -eq 0 -and $counts.memories -eq 0) 'immich_pristine_required'
-    foreach ($path in @($runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer, $catalogContainer, $bindingContainer, $enableContainer)) {
-        $service = if ($path -in @($runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer)) { 'immich-server' } else { 'piwigo' }
+    $script:stage = 'state_precondition'
+    if ($Action -eq 'provision') {
+        Assert-Exact ($counts.users -eq 0 -and $counts.libraries -eq 0 -and $counts.assets -eq 0 -and $counts.memories -eq 0) 'immich_pristine_required'
+    } else {
+        Assert-Exact ($Action -in @('resume', 'finish') -and $counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le 500 -and $counts.memories -eq 0) 'immich_resume_state_invalid'
+    }
+    $immichTemporary = @($runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer, $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer)
+    foreach ($path in @($immichTemporary + @($catalogContainer, $bindingContainer, $enableContainer))) {
+        $service = if ($path -in $immichTemporary) { 'immich-server' } else { 'piwigo' }
         $probe = if ($service -eq 'immich-server') { Invoke-ImmichCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) } else { Invoke-PiwigoCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) }
         Assert-Exact ($probe.Trim() -eq '0') 'container_temporary_not_clean'
     }
@@ -203,6 +256,7 @@ try {
     $bindingHost = Join-Path $work 'bindings.json'
     $enableHost = Join-Path $work 'enable.json'
     $bridgeHost = Join-Path $work 'bridge-secret.json'
+    $passwordResetHost = Join-Path $work 'password-reset-input.txt'
     $sanitizedReport = Join-Path $reportRoot 'private-immich-runtime.json'
     $technicalPassword = $null
     $accessToken = $null
@@ -210,21 +264,30 @@ try {
 
     try {
         $script:stage = 'catalog_export'
-        $catalogResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'export')
-        Assert-Exact ($catalogResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=export count=([0-9]+)$') 'catalog_export_failed'
+        $catalogAction = if ($Action -eq 'finish') { 'export-bound' } else { 'export' }
+        $catalogResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, $catalogAction)
+        Assert-Exact ($catalogResult -match ('^PRIVATE_QA_IMMICH_CATALOG=PASS action=' + [regex]::Escape($catalogAction) + ' count=([0-9]+)$')) 'catalog_export_failed'
         [void](Invoke-PiwigoCompose @('cp', ('piwigo:' + $catalogContainer), ('.codex-work/private-real-qa/runtime/immich/' + $run + '/catalog.json')))
         Set-ClassArchiveOwnerOnlyFileAcl -Path $catalogHost
         Assert-IgnoredOwnerOnly $catalogHost 'catalog'
         $catalog = Get-Content -LiteralPath $catalogHost -Raw | ConvertFrom-Json -ErrorAction Stop
         Assert-Exact ($catalog.version -eq 1 -and $catalog.scope -eq 'PRIVATE_REAL_DATA_QA' -and [int]$catalog.count -eq @($catalog.photos).Count -and [int]$catalog.count -le 500 -and [string]$catalog.catalog_digest -match '^[0-9a-f]{64}$') 'catalog_shape_invalid'
+        if ($Action -in @('resume', 'finish')) {
+            Assert-Exact ($counts.assets -eq [int]$catalog.count) 'immich_resume_asset_count_mismatch'
+        }
 
         $script:stage = 'runtime_input'
         $technicalPassword = New-SecretText
+        $technicalEmail = if ($Action -in @('resume', 'finish')) { Get-ImmichAdminEmail } else { 'class-archive-private-' + $run + '@private.invalid' }
+        if ($Action -in @('resume', 'finish')) {
+            Reset-ImmichAdminPassword -HostInput $passwordResetHost -Password $technicalPassword
+        }
         $nodeInput = [ordered]@{
             version = 1
             scope = 'PRIVATE_REAL_DATA_QA'
+            mode = if ($Action -in @('resume', 'finish')) { 'RESUME' } else { 'INITIAL' }
             catalog_digest = [string]$catalog.catalog_digest
-            email = ('class-archive-private-' + $run + '@private.invalid')
+            email = $technicalEmail
             password = $technicalPassword
             name = 'Class Archive Private QA Technical User'
             library_name = 'Class Archive Private QA Library'
@@ -251,21 +314,36 @@ try {
         $accessToken = [string]$runtime.access_token
         Assert-Exact ($accessToken -match '^[A-Za-z0-9._~-]{32,8192}$') 'access_token_invalid'
 
-        $script:stage = 'canonical_bind'
-        Write-OwnerOnlyJson $bindingHost ([ordered]@{ version = 1; scope = 'PRIVATE_REAL_DATA_QA'; catalog_digest = [string]$catalog.catalog_digest; assets = @($runtime.assets) })
-        [void](Invoke-PiwigoCompose @('cp', ('.codex-work/private-real-qa/runtime/immich/' + $run + '/bindings.json'), ('piwigo:' + $bindingContainer)))
-        [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $bindingContainer + ' && chmod 0600 ' + $bindingContainer)))
-        $bindResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'bind')
-        Assert-Exact ($bindResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=bind count=([0-9]+)$') 'binding_failed'
+        if ($Action -ne 'finish') {
+            $script:stage = 'canonical_bind'
+            Write-OwnerOnlyJson $bindingHost ([ordered]@{ version = 1; scope = 'PRIVATE_REAL_DATA_QA'; catalog_digest = [string]$catalog.catalog_digest; assets = @($runtime.assets) })
+            [void](Invoke-PiwigoCompose @('cp', ('.codex-work/private-real-qa/runtime/immich/' + $run + '/bindings.json'), ('piwigo:' + $bindingContainer)))
+            [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $bindingContainer + ' && chmod 0600 ' + $bindingContainer)))
+            $bindResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'bind')
+            Assert-Exact ($bindResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=bind count=([0-9]+)$') 'binding_failed'
+        }
 
-        $script:stage = 'bridge_secret_stage'
+        $script:stage = 'bridge_stager_start'
         $bridgeToken = New-SecretText
         Write-OwnerOnlyJson $bridgeHost ([ordered]@{ version = 1; bridge_token = $bridgeToken; immich_access_token = $accessToken })
         [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'up', '-d', 'immich-gateway-secret-stager'))
+        $script:stage = 'bridge_secret_clean'
         $empty = Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'sh', '-lc', 'find /run/secrets -mindepth 1 -maxdepth 1 -print -quit')
         Assert-Exact ([string]::IsNullOrWhiteSpace($empty)) 'bridge_secret_volume_not_clean'
+        $script:stage = 'bridge_secret_copy'
         [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'cp', ('.codex-work/private-real-qa/runtime/immich/' + $run + '/bridge-secret.json'), 'immich-gateway-secret-stager:/run/secrets/bridge.json'))
-        [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'sh', '-lc', 'chown 65532:65532 /run/secrets/bridge.json && chmod 0600 /run/secrets/bridge.json && test "$(stat -c %a:%u:%h /run/secrets/bridge.json)" = 600:65532:1'))
+        $script:stage = 'bridge_secret_mode'
+        # The stager deliberately has CAP_CHOWN but not CAP_FOWNER. Set mode
+        # while root still owns the copied inode, then transfer ownership.
+        [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'chmod', '0600', '/run/secrets/bridge.json'))
+        $script:stage = 'bridge_secret_owner'
+        [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'chown', '65532:65532', '/run/secrets/bridge.json'))
+        $script:stage = 'bridge_secret_verify'
+        $secretMode = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'stat', '-c', '%a', '/run/secrets/bridge.json')).Trim()
+        $secretOwner = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'stat', '-c', '%u', '/run/secrets/bridge.json')).Trim()
+        $secretLinks = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'stat', '-c', '%h', '/run/secrets/bridge.json')).Trim()
+        Assert-Exact ($secretMode -eq '600' -and $secretOwner -eq '65532' -and $secretLinks -eq '1') 'bridge_secret_permissions_invalid'
+        $script:stage = 'gateway_start'
         [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'up', '-d', 'immich-gateway'))
         Start-Sleep -Seconds 2
         $gatewayId = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-q', 'immich-gateway')).Trim()
@@ -296,14 +374,14 @@ try {
             media_mount = 'PIWIGO_ORIGINALS_READ_ONLY'
             media_delivery = 'MEDIAGUARD_ONLY'
         })
-        Write-Output ("PRIVATE_QA_IMMICH=PASS action=provision assets={0} people={1} assertions={2} evidence=RUNTIME_TESTED" -f [int]$catalog.count, [int]$runtime.metrics.people_count, $script:assertions)
+        Write-Output ("PRIVATE_QA_IMMICH=PASS action={0} assets={1} people={2} assertions={3} evidence=RUNTIME_TESTED" -f $Action, [int]$catalog.count, [int]$runtime.metrics.people_count, $script:assertions)
     } finally {
         $technicalPassword = $null
         $accessToken = $null
         $bridgeToken = $null
-        try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer))) } catch { }
-        try { [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $enableContainer))) } catch { }
-        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $enableHost, $bridgeHost)) {
+        try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
+        try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $enableContainer))) } catch { }
+        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $enableHost, $bridgeHost, $passwordResetHost)) {
             try { Remove-PrivateFile $path } catch { }
         }
         # The catalog contains only opaque private runtime references and is

@@ -79,6 +79,11 @@ networks:
   immich_gateway:
     labels:
       com.classarchive.scope: private-real-qa
+    ipam:
+      config:
+        # Dedicated, deterministic private-QA bridge. It must remain distinct
+        # from the canonical 172.23/16 metadata bridge.
+        - subnet: 172.27.0.0/16
 
 volumes:
   piwigo_data:

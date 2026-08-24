@@ -38,6 +38,9 @@ services:
       CLASS_ARCHIVE_CORE_PUBLIC_PORT: "8190"
     volumes:
       - ./photo-ui:/photo-ui:ro
+    networks:
+      class_archive_gateway:
+        ipv4_address: 172.27.0.10
     logging:
       driver: local
       options:

@@ -37,7 +37,7 @@ if (getenv('CLASS_ARCHIVE_PRIVATE_REAL_QA') !== '1'
     privateQaImmichFail('private_runtime_required');
 }
 $action = (string) ($_SERVER['argv'][1] ?? '');
-if (!in_array($action, ['export', 'bind', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
+if (!in_array($action, ['export', 'export-bound', 'bind', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
     privateQaImmichFail('action_invalid');
 }
 
@@ -234,6 +234,14 @@ try {
         $catalog = privateQaImmichCatalog($repository, true);
         privateQaImmichWriteExclusive(PRIVATE_QA_CATALOG_OUTPUT, $catalog);
         fwrite(STDOUT, 'PRIVATE_QA_IMMICH_CATALOG=PASS action=export count=' . $catalog['count'] . "\n");
+        exit(0);
+    }
+
+    if ($action === 'export-bound') {
+        privateQaImmichAssertBridgeDisabled($repository);
+        $catalog = privateQaImmichCatalog($repository, false);
+        privateQaImmichWriteExclusive(PRIVATE_QA_CATALOG_OUTPUT, $catalog);
+        fwrite(STDOUT, 'PRIVATE_QA_IMMICH_CATALOG=PASS action=export-bound count=' . $catalog['count'] . "\n");
         exit(0);
     }
 

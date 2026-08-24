@@ -218,6 +218,11 @@ networks:
     name: ${CLASS_ARCHIVE_GATEWAY_NETWORK:-class_archive_immich_gateway}
     driver: bridge
     internal: true
+    ipam:
+      config:
+        # nginx trusts this exact metadata-only bridge when restoring the
+        # browser source address for Piwigo's IP-bound session check.
+        - subnet: 172.23.0.0/16
 
 volumes:
   piwigo_data:
