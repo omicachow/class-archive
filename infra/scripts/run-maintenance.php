@@ -9,6 +9,9 @@ declare(strict_types=1);
  * future container scheduler. It contains no credentials, accepts no file
  * paths, and defaults to read-only checks. The optional rejected-binary
  * cleanup only processes explicitly aged REJECTED submission references.
+ * Server-expired Spotlight rows are the other narrow mutation: their exact
+ * UTC deadline and EXPIRED target state make the operation deterministic,
+ * idempotent and audit-backed.
  */
 
 const CLASS_ARCHIVE_MAINTENANCE_ROOT = '/var/www/html/piwigo';
@@ -121,6 +124,7 @@ function maintenanceRun(bool $applyRejectedCleanup): array
             throw new RuntimeException('maintenance_already_running');
         }
         $provisioning = \ClassIdentity\ProvisioningService::fromPiwigo()->expireDueFamilyInvitations();
+        $expiredSpotlights = \ClassIdentity\SpotlightService::fromPiwigo()->expireDue();
         $cleanup = \ClassIdentitySubmissionService::fromPiwigo()->cleanupRejectedBinaries($retentionDays, $applyRejectedCleanup);
         $reconciliation = \ClassIdentity\ReconciliationService::fromPiwigo()->scanAndPersist();
         $attestation = \ClassIdentity\MediaAttestation::status();
@@ -133,6 +137,11 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         );
         $tasks = [
             'expired_invitations' => $provisioning,
+            'expired_spotlights' => [
+                'result' => 'PASS',
+                'expired' => $expiredSpotlights,
+                'automatic_scope' => 'SERVER_DEADLINE_ONLY',
+            ],
             'rejected_binary_cleanup' => [
                 'retention_days' => $retentionDays,
                 'apply' => $applyRejectedCleanup,

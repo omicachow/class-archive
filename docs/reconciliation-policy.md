@@ -1,6 +1,6 @@
 # 数据一致性核对策略
 
-状态：localhost 合成基线已验证。该策略用于 Piwigo 的媒体图谱与 ClassIdentity InnoDB 业务图谱之间无法完全原子提交的场景。
+状态：既有 localhost 合成基线曾通过；加入 v8 产品域检查后须重新运行维护，旧摘要因 reconciler digest 变化自动失效。该策略用于 Piwigo 的媒体图谱与 ClassIdentity InnoDB 业务图谱之间无法完全原子提交的场景。
 
 ## 运行方式
 
@@ -26,21 +26,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\run-main
 - 投稿 Pending/Rejected 二进制与记录状态是否一致；
 - 档案元数据是否引用已存在图片；
 - 多相册关联是否完整；
+- 批量整理/精确重复归并的 `PREPARED`、`MANUAL_REVIEW` 与子项计数是否存在半提交；
+- 稳定相册 UUID 是否仍映射到正确 Era 下的 Piwigo 相册，封面是否属于该相册，社区相册所有者是否仍为有效同学/教师账号；
+- 人物封面、成员关联、人工照片修正规则和可逆合并链是否仍有效且无环；
+- 精确重复关系的校验摘要、Era、逻辑 canonical/alias 是否一致，来源证明是否仍匹配 canonical 原图；
+- 24 小时精选是否存在到期未落盘、失效相册或失效所有者；
 - 未受管原图、缺失原图、异常衍生图、符号链接或不安全模式；
 - 过期 Family 邀请、被拒投稿的保留期；
 - 媒体访问安全证明和备份新鲜度。
 
-当前合成基线扫描结果为 `PASS`、`issue_count=0`、`checked_images=72`。
+历史合成基线扫描结果为 `PASS`、`issue_count=0`、`checked_images=72`；该数字不冒充新增 v8 检查的运行结果。
 
 ## 处置等级
 
 | 等级 | 含义 | 自动行为 |
 |---|---|---|
-| `SAFE_AUTO_FIX` | 已有精确、可逆或幂等领域操作的状态 | 仅过期邀请与明确达到保留期的被拒投稿可由专用服务处理 |
+| `SAFE_AUTO_FIX` | 已有精确、可逆或幂等领域操作的状态 | 仅过期邀请、达到保留期的被拒投稿，以及严格按服务器 UTC 截止时间过期的精选可由专用服务处理 |
 | `MANUAL_REVIEW` | 可能需要业务判断或可能影响照片关联 | 只记录，绝不自动改相册、图片或身份绑定 |
 | `QUARANTINE` | 存在未受管物理媒体或高风险边界 | 只标记隔离候选，绝不自动删除 |
 
 结构性错误不会被维护器“猜测修复”。例如，发现 Piwigo 图片行但原图缺失、Approved 投稿没有关联目标相册、档案元数据指向不存在图片时，系统会要求人工处理。
+
+批量操作日志一旦停留在 `PREPARED` 或进入 `MANUAL_REVIEW`，维护器只报告，不会猜测 Piwigo 的非事务相册写入是否应提交或回滚。精选过期是例外：`ACTIVE + expires_at <= UTC_TIMESTAMP(6)` 具有唯一、幂等的目标状态，维护器会调用领域服务改为 `EXPIRED` 并写系统 Audit。
 
 ## 被拒投稿清理
 

@@ -62,24 +62,25 @@ verified_files=0
 if [ -n "$latest_bundle" ]; then
   bundle_name=$latest_name
   manifest="$latest_bundle/SHA256SUMS"
-  expected_count=6
+  expected_count=7
   actual_count=$(wc -l < "$manifest" | tr -d '[:space:]')
-  manifest_file=0
-  if grep -Eq '^[0-9a-f]{64}  MANIFEST\.json$' "$manifest"; then
-    manifest_file=1
-  fi
-  if [ "$manifest_file" = 1 ]; then
-    expected_count=7
+  business_manifest=0
+  schema_contract='"class_identity_schema":{"version":8,"tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item"]}'
+  if [ -f "$latest_bundle/MANIFEST.json" ] && [ ! -L "$latest_bundle/MANIFEST.json" ] \
+     && grep -Eq '^\{"format":4,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$latest_bundle/MANIFEST.json" \
+     && grep -Fq "$schema_contract" "$latest_bundle/MANIFEST.json"; then
+    business_manifest=1
   fi
   valid_count=$(grep -Ec '^[0-9a-f]{64}  (database\.sql\.gz|piwigo-data\.tar\.gz|uploads\.tar\.gz|galleries\.tar\.gz|scripts\.tar\.gz|COMPLETE|MANIFEST\.json)$' "$manifest" || true)
   if [ "$actual_count" = "$expected_count" ] && [ "$valid_count" = "$expected_count" ] \
+     && [ "$business_manifest" = 1 ] \
      && grep -Eq '^[0-9a-f]{64}  database\.sql\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  piwigo-data\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  uploads\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  galleries\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  scripts\.tar\.gz$' "$manifest" \
      && grep -Eq '^[0-9a-f]{64}  COMPLETE$' "$manifest" \
-     && { [ "$manifest_file" = 0 ] || grep -Eq '^[0-9a-f]{64}  MANIFEST\.json$' "$manifest"; } \
+     && grep -Eq '^[0-9a-f]{64}  MANIFEST\.json$' "$manifest" \
      && (cd "$latest_bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
     complete="$latest_bundle/COMPLETE"
     mtime=$(stat -c %Y "$complete")

@@ -1037,6 +1037,14 @@ SQL);
             'archive_image',
             'photo',
             'person',
+            'person_merge',
+            'person_photo_rule',
+            'album',
+            'spotlight',
+            'photo_source',
+            'photo_duplicate',
+            'batch_operation',
+            'batch_operation_item',
         ];
         $missing = [];
         try {
@@ -1617,6 +1625,14 @@ SQL, 'ii', [$id, $id]) ?? 0);
             'archive_image',
             'photo',
             'person',
+            'person_merge',
+            'person_photo_rule',
+            'album',
+            'spotlight',
+            'photo_source',
+            'photo_duplicate',
+            'batch_operation',
+            'batch_operation_item',
         ];
         if (!in_array($suffix, $allowed, true)) {
             throw new InvalidArgumentException('class_identity_unknown_table');

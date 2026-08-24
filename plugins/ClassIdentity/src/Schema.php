@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 7;
+    public const CURRENT_VERSION = 8;
 
     private const COLLATION = 'utf8mb4_unicode_ci';
 
@@ -191,6 +191,11 @@ final class Schema
                 'name' => '0007_timeline_source_person_mapping',
                 'signature' => 'v1:archive-date-source:no-upload-time-fallback:opaque-ai-cluster-person:optional-identity-link:innodb:utf8mb4',
                 'method' => 'migrationTimelineSourceAndPersonMapping',
+            ],
+            8 => [
+                'name' => '0008_photo_productization_domain',
+                'signature' => 'v1:person-curation:reversible-projection-merge:photo-rules:opaque-mixed-album:spotlight-24h:source-provenance:duplicate-review:crash-visible-journal:innodb:utf8mb4',
+                'method' => 'migrationPhotoProductizationDomain',
             ],
         ];
     }
@@ -706,6 +711,299 @@ SQL);
         ]);
     }
 
+    /**
+     * Product-facing curation is deliberately an overlay on Piwigo/Immich.
+     *
+     * No table below mutates an Immich face cluster or makes it a roster
+     * identity.  Person merge/correction rows are reversible presentation
+     * rules, album ids are opaque Class Archive ids mapped to Piwigo, and
+     * duplicate consolidation is a logical relationship which never deletes
+     * either physical original.  The batch journal is the InnoDB half of a
+     * conservative compensation saga around Piwigo's legacy category tables.
+     */
+    private function migrationPhotoProductizationDomain(): void
+    {
+        $person = $this->quotedTable('person');
+        $photo = $this->quotedTable('photo');
+        $identity = $this->quotedTable('identity');
+        $principal = $this->quotedTable('principal');
+        $personMerge = $this->quotedTable('person_merge');
+        $personPhotoRule = $this->quotedTable('person_photo_rule');
+        $album = $this->quotedTable('album');
+        $spotlight = $this->quotedTable('spotlight');
+        $photoSource = $this->quotedTable('photo_source');
+        $photoDuplicate = $this->quotedTable('photo_duplicate');
+        $batchOperation = $this->quotedTable('batch_operation');
+        $batchItem = $this->quotedTable('batch_operation_item');
+
+        $fk = static fn(string $purpose, string $table): string => 'fk_ci_' . $purpose . '_'
+            . substr(hash('sha256', $table), 0, 12);
+
+        $this->ensureColumn(
+            'person',
+            'manual_cover_class_photo_id',
+            'ALTER TABLE ' . $person . ' ADD COLUMN `manual_cover_class_photo_id` BINARY(16) NULL AFTER `classmate_identity_id`',
+        );
+        $this->ensureColumn(
+            'person',
+            'visibility',
+            "ALTER TABLE {$person} ADD COLUMN `visibility` VARCHAR(16) NOT NULL DEFAULT 'VISIBLE' AFTER `source_kind`",
+        );
+        $this->ensureColumn(
+            'person',
+            'lock_version',
+            'ALTER TABLE ' . $person . ' ADD COLUMN `lock_version` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `state`',
+        );
+        $this->ensureIndex(
+            'person',
+            'idx_ci_person_visibility_state',
+            'ALTER TABLE ' . $person . ' ADD KEY `idx_ci_person_visibility_state` (`visibility`,`state`,`updated_at`)',
+        );
+        $this->ensureForeignKey(
+            'person',
+            $fk('person_cover', $this->table('person')),
+            'ALTER TABLE ' . $person . ' ADD CONSTRAINT `' . $fk('person_cover', $this->table('person'))
+                . '` FOREIGN KEY (`manual_cover_class_photo_id`) REFERENCES ' . $photo
+                . ' (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT',
+        );
+        $this->ensureCheckConstraint(
+            'person',
+            'chk_ci_person_visibility',
+            "ALTER TABLE {$person} ADD CONSTRAINT `chk_ci_person_visibility` CHECK (`visibility` IN ('VISIBLE', 'HIDDEN'))",
+        );
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$personMerge} (
+  `merge_id` BINARY(16) NOT NULL,
+  `source_class_person_id` BINARY(16) NOT NULL,
+  `target_class_person_id` BINARY(16) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `active_source_class_person_id` BINARY(16) GENERATED ALWAYS AS (CASE WHEN `state` = 'ACTIVE' THEN `source_class_person_id` ELSE NULL END) PERSISTENT,
+  `created_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `reverted_by_principal_id` BIGINT UNSIGNED NULL,
+  `reason` VARCHAR(500) NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `reverted_at` DATETIME(6) NULL,
+  PRIMARY KEY (`merge_id`),
+  UNIQUE KEY `uq_ci_person_merge_active_source` (`active_source_class_person_id`),
+  KEY `idx_ci_person_merge_target_state` (`target_class_person_id`,`state`),
+  CONSTRAINT `{$fk('person_merge_source', $this->table('person_merge'))}` FOREIGN KEY (`source_class_person_id`) REFERENCES {$person} (`class_person_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('person_merge_target', $this->table('person_merge'))}` FOREIGN KEY (`target_class_person_id`) REFERENCES {$person} (`class_person_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('person_merge_created', $this->table('person_merge'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('person_merge_reverted', $this->table('person_merge'))}` FOREIGN KEY (`reverted_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_person_merge_state` CHECK (`state` IN ('ACTIVE', 'REVERTED')),
+  CONSTRAINT `chk_ci_person_merge_distinct` CHECK (`source_class_person_id` <> `target_class_person_id`),
+  CONSTRAINT `chk_ci_person_merge_reversion` CHECK ((`state` = 'ACTIVE' AND `reverted_by_principal_id` IS NULL AND `reverted_at` IS NULL) OR (`state` = 'REVERTED' AND `reverted_by_principal_id` IS NOT NULL AND `reverted_at` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$personPhotoRule} (
+  `class_person_id` BINARY(16) NOT NULL,
+  `class_photo_id` BINARY(16) NOT NULL,
+  `rule` VARCHAR(16) NOT NULL,
+  `updated_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `reason` VARCHAR(500) NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`class_person_id`,`class_photo_id`),
+  KEY `idx_ci_person_photo_rule_photo` (`class_photo_id`,`rule`),
+  CONSTRAINT `{$fk('person_photo_person', $this->table('person_photo_rule'))}` FOREIGN KEY (`class_person_id`) REFERENCES {$person} (`class_person_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('person_photo_photo', $this->table('person_photo_rule'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('person_photo_actor', $this->table('person_photo_rule'))}` FOREIGN KEY (`updated_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_person_photo_rule` CHECK (`rule` IN ('INCLUDE', 'EXCLUDE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$album} (
+  `class_album_id` BINARY(16) NOT NULL,
+  `piwigo_category_id` MEDIUMINT(8) UNSIGNED NOT NULL,
+  `album_type` VARCHAR(16) NOT NULL,
+  `owner_principal_id` BIGINT UNSIGNED NULL,
+  `era` VARCHAR(16) NOT NULL,
+  `description` TEXT NULL,
+  `event_label` VARCHAR(190) NULL,
+  `manual_cover_class_photo_id` BINARY(16) NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`class_album_id`),
+  UNIQUE KEY `uq_ci_album_piwigo_category` (`piwigo_category_id`),
+  KEY `idx_ci_album_type_era_state` (`album_type`,`era`,`state`),
+  KEY `idx_ci_album_owner_state` (`owner_principal_id`,`state`),
+  CONSTRAINT `{$fk('album_owner', $this->table('album'))}` FOREIGN KEY (`owner_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('album_cover', $this->table('album'))}` FOREIGN KEY (`manual_cover_class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_album_type` CHECK (`album_type` IN ('OFFICIAL', 'COMMUNITY')),
+  CONSTRAINT `chk_ci_album_era` CHECK (`era` IN ('HERITAGE', 'LIVING', 'MIXED')),
+  CONSTRAINT `chk_ci_album_state` CHECK (`state` IN ('ACTIVE', 'HIDDEN', 'RETIRED')),
+  CONSTRAINT `chk_ci_album_owner` CHECK ((`album_type` = 'OFFICIAL' AND `owner_principal_id` IS NULL) OR (`album_type` = 'COMMUNITY' AND `owner_principal_id` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$spotlight} (
+  `spotlight_id` BINARY(16) NOT NULL,
+  `owner_principal_id` BIGINT UNSIGNED NOT NULL,
+  `class_album_id` BINARY(16) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `active_owner_principal_id` BIGINT UNSIGNED GENERATED ALWAYS AS (CASE WHEN `state` = 'ACTIVE' THEN `owner_principal_id` ELSE NULL END) PERSISTENT,
+  `starts_at` DATETIME(6) NOT NULL,
+  `expires_at` DATETIME(6) NOT NULL,
+  `cancelled_at` DATETIME(6) NULL,
+  `cancelled_by_principal_id` BIGINT UNSIGNED NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`spotlight_id`),
+  UNIQUE KEY `uq_ci_spotlight_active_owner` (`active_owner_principal_id`),
+  KEY `idx_ci_spotlight_state_expiry` (`state`,`expires_at`),
+  KEY `idx_ci_spotlight_album_state` (`class_album_id`,`state`),
+  CONSTRAINT `{$fk('spotlight_owner', $this->table('spotlight'))}` FOREIGN KEY (`owner_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('spotlight_album', $this->table('spotlight'))}` FOREIGN KEY (`class_album_id`) REFERENCES {$album} (`class_album_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('spotlight_cancel', $this->table('spotlight'))}` FOREIGN KEY (`cancelled_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_spotlight_state` CHECK (`state` IN ('ACTIVE', 'EXPIRED', 'CANCELLED')),
+  CONSTRAINT `chk_ci_spotlight_duration` CHECK (TIMESTAMPDIFF(SECOND, `starts_at`, `expires_at`) = 86400),
+  CONSTRAINT `chk_ci_spotlight_cancel` CHECK ((`state` = 'CANCELLED' AND `cancelled_at` IS NOT NULL AND `cancelled_by_principal_id` IS NOT NULL) OR (`state` <> 'CANCELLED' AND `cancelled_at` IS NULL AND `cancelled_by_principal_id` IS NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$photoSource} (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `class_photo_id` BINARY(16) NOT NULL,
+  `source_kind` VARCHAR(24) NOT NULL,
+  `provenance_code` VARCHAR(64) NOT NULL,
+  `source_reference_digest` BINARY(32) NULL,
+  `original_filename_digest` BINARY(32) NULL,
+  `source_checksum` BINARY(32) NOT NULL,
+  `byte_size` BIGINT UNSIGNED NOT NULL,
+  `observed_at` DATETIME(6) NULL,
+  `created_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_ci_photo_source_provenance` (`class_photo_id`,`source_kind`,`provenance_code`),
+  KEY `idx_ci_photo_source_checksum` (`source_checksum`,`class_photo_id`),
+  CONSTRAINT `{$fk('photo_source_photo', $this->table('photo_source'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_source_actor', $this->table('photo_source'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'MIGRATION', 'OTHER')),
+  CONSTRAINT `chk_ci_photo_source_size` CHECK (`byte_size` > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$photoDuplicate} (
+  `duplicate_id` BINARY(16) NOT NULL,
+  `left_class_photo_id` BINARY(16) NOT NULL,
+  `right_class_photo_id` BINARY(16) NOT NULL,
+  `relation_kind` VARCHAR(16) NOT NULL,
+  `similarity` DECIMAL(6,5) NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'CANDIDATE',
+  `canonical_class_photo_id` BINARY(16) NULL,
+  `active_alias_class_photo_id` BINARY(16) GENERATED ALWAYS AS (CASE WHEN `state` = 'CONSOLIDATED' AND `canonical_class_photo_id` = `left_class_photo_id` THEN `right_class_photo_id` WHEN `state` = 'CONSOLIDATED' AND `canonical_class_photo_id` = `right_class_photo_id` THEN `left_class_photo_id` ELSE NULL END) PERSISTENT,
+  `created_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `reviewed_by_principal_id` BIGINT UNSIGNED NULL,
+  `reason` VARCHAR(500) NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `reviewed_at` DATETIME(6) NULL,
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`duplicate_id`),
+  UNIQUE KEY `uq_ci_photo_duplicate_pair` (`left_class_photo_id`,`right_class_photo_id`,`relation_kind`),
+  UNIQUE KEY `uq_ci_photo_duplicate_active_alias` (`active_alias_class_photo_id`),
+  KEY `idx_ci_photo_duplicate_state_kind` (`state`,`relation_kind`,`updated_at`),
+  CONSTRAINT `{$fk('photo_duplicate_left', $this->table('photo_duplicate'))}` FOREIGN KEY (`left_class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_duplicate_right', $this->table('photo_duplicate'))}` FOREIGN KEY (`right_class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_duplicate_canonical', $this->table('photo_duplicate'))}` FOREIGN KEY (`canonical_class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_duplicate_created', $this->table('photo_duplicate'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_duplicate_reviewed', $this->table('photo_duplicate'))}` FOREIGN KEY (`reviewed_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_photo_duplicate_kind` CHECK (`relation_kind` IN ('EXACT', 'NEAR')),
+  CONSTRAINT `chk_ci_photo_duplicate_state` CHECK (`state` IN ('CANDIDATE', 'REJECTED', 'CONSOLIDATED', 'REVERTED')),
+  CONSTRAINT `chk_ci_photo_duplicate_distinct` CHECK (`left_class_photo_id` <> `right_class_photo_id`),
+  CONSTRAINT `chk_ci_photo_duplicate_similarity` CHECK (`similarity` IS NULL OR (`similarity` >= 0 AND `similarity` <= 1)),
+  CONSTRAINT `chk_ci_photo_duplicate_canonical` CHECK ((`state` = 'CONSOLIDATED' AND (`canonical_class_photo_id` = `left_class_photo_id` OR `canonical_class_photo_id` = `right_class_photo_id`) AND `relation_kind` = 'EXACT') OR (`state` <> 'CONSOLIDATED' AND `canonical_class_photo_id` IS NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$batchOperation} (
+  `batch_id` BINARY(16) NOT NULL,
+  `actor_principal_id` BIGINT UNSIGNED NOT NULL,
+  `operation_type` VARCHAR(32) NOT NULL,
+  `state` VARCHAR(24) NOT NULL DEFAULT 'PREPARED',
+  `payload_digest` BINARY(32) NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL,
+  `applied_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `failed_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `high_risk_confirmed` TINYINT(1) NOT NULL DEFAULT 0,
+  `reason` VARCHAR(500) NOT NULL,
+  `error_code` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `completed_at` DATETIME(6) NULL,
+  PRIMARY KEY (`batch_id`),
+  KEY `idx_ci_batch_state_created` (`state`,`created_at`),
+  CONSTRAINT `{$fk('batch_actor', $this->table('batch_operation'))}` FOREIGN KEY (`actor_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_batch_type` CHECK (`operation_type` IN ('ARCHIVE_BULK_UPDATE', 'EXACT_DUPLICATE_CONSOLIDATE')),
+  CONSTRAINT `chk_ci_batch_state` CHECK (`state` IN ('PREPARED', 'APPLIED', 'FAILED', 'COMPENSATED', 'MANUAL_REVIEW')),
+  CONSTRAINT `chk_ci_batch_counts` CHECK (`item_count` > 0 AND `applied_count` <= `item_count` AND `failed_count` <= `item_count`),
+  CONSTRAINT `chk_ci_batch_high_risk` CHECK (`high_risk_confirmed` IN (0, 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$batchItem} (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `batch_id` BINARY(16) NOT NULL,
+  `class_photo_id` BINARY(16) NOT NULL,
+  `state` VARCHAR(24) NOT NULL DEFAULT 'PREPARED',
+  `before_value` JSON NOT NULL,
+  `after_value` JSON NOT NULL,
+  `error_code` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_ci_batch_item_photo` (`batch_id`,`class_photo_id`),
+  KEY `idx_ci_batch_item_state` (`batch_id`,`state`),
+  CONSTRAINT `{$fk('batch_item_batch', $this->table('batch_operation_item'))}` FOREIGN KEY (`batch_id`) REFERENCES {$batchOperation} (`batch_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('batch_item_photo', $this->table('batch_operation_item'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_batch_item_state` CHECK (`state` IN ('PREPARED', 'APPLIED', 'FAILED', 'COMPENSATED', 'MANUAL_REVIEW'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('person', [
+            'class_person_id', 'manual_cover_class_photo_id', 'visibility', 'lock_version',
+        ]);
+        $this->assertTable('person_merge', [
+            'merge_id', 'source_class_person_id', 'target_class_person_id', 'state',
+            'active_source_class_person_id', 'created_by_principal_id', 'reverted_by_principal_id',
+        ]);
+        $this->assertTable('person_photo_rule', [
+            'class_person_id', 'class_photo_id', 'rule', 'updated_by_principal_id',
+        ]);
+        $this->assertTable('album', [
+            'class_album_id', 'piwigo_category_id', 'album_type', 'owner_principal_id',
+            'era', 'description', 'event_label', 'manual_cover_class_photo_id', 'state',
+        ]);
+        $this->assertTable('spotlight', [
+            'spotlight_id', 'owner_principal_id', 'class_album_id', 'state',
+            'active_owner_principal_id', 'starts_at', 'expires_at',
+        ]);
+        $this->assertTable('photo_source', [
+            'id', 'class_photo_id', 'source_kind', 'provenance_code', 'source_reference_digest',
+            'original_filename_digest', 'source_checksum', 'byte_size',
+        ]);
+        $this->assertTable('photo_duplicate', [
+            'duplicate_id', 'left_class_photo_id', 'right_class_photo_id', 'relation_kind',
+            'state', 'canonical_class_photo_id', 'active_alias_class_photo_id',
+        ]);
+        $this->assertTable('batch_operation', [
+            'batch_id', 'actor_principal_id', 'operation_type', 'state', 'payload_digest',
+            'item_count', 'applied_count', 'failed_count', 'high_risk_confirmed',
+        ]);
+        $this->assertTable('batch_operation_item', [
+            'id', 'batch_id', 'class_photo_id', 'state', 'before_value', 'after_value',
+        ]);
+    }
+
     private function ensureMigrationLedger(): void
     {
         $ledger = $this->quotedTable('migration');
@@ -902,9 +1200,17 @@ SQL);
             // Generated from the locked MariaDB 11.8.8 information_schema
             // contract by tests/phase2/class-photo-schema-semantics.php.
             'photo' => 'd165182447f6d8eef53add07cca881edd8b9273e5ba56411a81c959aaebd42e4',
-            // Generated before migration by the isolated semantic fixture in
-            // tests/phase2/class-person-timeline-schema-semantics.php.
-            'person' => '2a168b8aa4e61a766ea39ae93a3f66295c8e756b339a010947e8d04c17f7f2d6',
+            // Generated from migration 8 on an isolated MariaDB 11.8.8
+            // fixture. The fixture contains only disposable dependency rows.
+            'person' => '057428d4584745f190db85426a2c40a797ef84468054949ac6e8e9c43413c02c',
+            'person_merge' => '9593a0ab6aa938d5324a778b26ae605f68bff509103e32b2e3aea44a27d0578e',
+            'person_photo_rule' => '1cfd7d1394a6ab6cc357ff8492fb2dbd1ab3a8c27c8c2d6b2fbdb461d6192011',
+            'album' => '5f3a5e5b67c9e6fd534faaf48f3d327cb5b090a5bce9aaaed6001a79021100b6',
+            'spotlight' => 'a83686fe1cbfbaa193aafa90e3b0f208e02c5b0feaa0249bb8b7f62d7673e11b',
+            'photo_source' => '34fc6599faa44aa6cab60ccce9161aee4c384d337a1e67cc639c7557d94832e0',
+            'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',
+            'batch_operation' => '819f4bab9f845999655f333156b8a627589251e3c7221cde19e1132a8c0b39e7',
+            'batch_operation_item' => '0cfec340df85bdbabc3ca5126511439b161a4dbfe0421e1cb37fb86a0af2487a',
         ];
     }
 
@@ -1202,6 +1508,14 @@ SQL);
             'archive_image',
             'photo',
             'person',
+            'person_merge',
+            'person_photo_rule',
+            'album',
+            'spotlight',
+            'photo_source',
+            'photo_duplicate',
+            'batch_operation',
+            'batch_operation_item',
         ];
     }
 

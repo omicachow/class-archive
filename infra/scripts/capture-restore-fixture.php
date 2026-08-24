@@ -113,7 +113,17 @@ $tables = [
     'submission' => 'SELECT `id`,`seat_id`,`state`,`approved_image_id`,`reviewed_at`,`date_precision` FROM `' . $ci . 'submission` ORDER BY `id` ASC',
     'archive_image' => 'SELECT `id`,`piwigo_image_id`,`era`,`source_submission_id`,`date_precision`,`official` FROM `' . $ci . 'archive_image` ORDER BY `id` ASC',
     'photo' => 'SELECT HEX(`class_photo_id`) AS `class_photo_id`,`piwigo_image_id`,`source_submission_id`,HEX(`media_checksum`) AS `media_checksum`,`state` FROM `' . $ci . 'photo` ORDER BY `created_at` ASC',
+    'person' => 'SELECT HEX(`class_person_id`) AS `class_person_id`,`immich_person_id`,`display_name`,`classmate_identity_id`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`source_kind`,`visibility`,`state`,`lock_version` FROM `' . $ci . 'person` ORDER BY `created_at` ASC',
+    'person_merge' => 'SELECT HEX(`merge_id`) AS `merge_id`,HEX(`source_class_person_id`) AS `source_class_person_id`,HEX(`target_class_person_id`) AS `target_class_person_id`,`state`,`created_by_principal_id`,`reverted_by_principal_id`,`created_at`,`reverted_at` FROM `' . $ci . 'person_merge` ORDER BY `created_at`,`merge_id` ASC',
+    'person_photo_rule' => 'SELECT HEX(`class_person_id`) AS `class_person_id`,HEX(`class_photo_id`) AS `class_photo_id`,`rule`,`updated_by_principal_id`,`created_at`,`updated_at` FROM `' . $ci . 'person_photo_rule` ORDER BY `class_person_id`,`class_photo_id` ASC',
+    'album' => 'SELECT HEX(`class_album_id`) AS `class_album_id`,`piwigo_category_id`,`album_type`,`owner_principal_id`,`era`,`event_label`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`state` FROM `' . $ci . 'album` ORDER BY `created_at`,`class_album_id` ASC',
+    'spotlight' => 'SELECT HEX(`spotlight_id`) AS `spotlight_id`,`owner_principal_id`,HEX(`class_album_id`) AS `class_album_id`,`state`,`starts_at`,`expires_at`,`cancelled_at`,`cancelled_by_principal_id` FROM `' . $ci . 'spotlight` ORDER BY `created_at`,`spotlight_id` ASC',
+    'photo_source' => 'SELECT `id`,HEX(`class_photo_id`) AS `class_photo_id`,`source_kind`,`provenance_code`,HEX(`source_reference_digest`) AS `source_reference_digest`,HEX(`original_filename_digest`) AS `original_filename_digest`,HEX(`source_checksum`) AS `source_checksum`,`byte_size`,`observed_at`,`created_by_principal_id` FROM `' . $ci . 'photo_source` ORDER BY `id` ASC',
+    'photo_duplicate' => 'SELECT HEX(`duplicate_id`) AS `duplicate_id`,HEX(`left_class_photo_id`) AS `left_class_photo_id`,HEX(`right_class_photo_id`) AS `right_class_photo_id`,`relation_kind`,`similarity`,`state`,HEX(`canonical_class_photo_id`) AS `canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reviewed_at` FROM `' . $ci . 'photo_duplicate` ORDER BY `created_at`,`duplicate_id` ASC',
+    'batch_operation' => 'SELECT HEX(`batch_id`) AS `batch_id`,`actor_principal_id`,`operation_type`,`state`,HEX(`payload_digest`) AS `payload_digest`,`item_count`,`applied_count`,`failed_count`,`high_risk_confirmed`,`error_code`,`created_at`,`updated_at`,`completed_at` FROM `' . $ci . 'batch_operation` ORDER BY `created_at`,`batch_id` ASC',
+    'batch_operation_item' => 'SELECT `id`,HEX(`batch_id`) AS `batch_id`,HEX(`class_photo_id`) AS `class_photo_id`,`state`,SHA2(CAST(`before_value` AS CHAR),256) AS `before_sha256`,SHA2(CAST(`after_value` AS CHAR),256) AS `after_sha256`,`error_code`,`created_at`,`updated_at` FROM `' . $ci . 'batch_operation_item` ORDER BY `id` ASC',
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
+    'migration' => 'SELECT `version`,`migration_name`,HEX(`checksum`) AS `checksum`,`plugin_version`,`applied_at` FROM `' . $ci . 'migration` ORDER BY `version` ASC',
 ];
 $summary = [];
 foreach ($tables as $name => $query) {
@@ -126,6 +136,6 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
     fixtureFail('multi_album_query_failed');
 }
 $summary['multi_album_images'] = (int) $row['count'];
-$payload = ['fixture_version' => 1, 'summary' => $summary];
+$payload = ['fixture_version' => 2, 'class_identity_schema_version' => 8, 'summary' => $summary];
 $payload['fixture_sha256'] = hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
 fwrite(STDOUT, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");

@@ -10,6 +10,20 @@ function caPasswordFail(string $message): never
     exit(1);
 }
 
+function caAssertPasswordPersisted(int $userId, string $password): void
+{
+    global $conf;
+    $rows = query2array('SELECT password FROM ' . USERS_TABLE . ' WHERE id = ' . $userId);
+    if (count($rows) !== 1
+        || !is_string($rows[0]['password'] ?? null)
+        || !isset($conf['password_verify'])
+        || !is_callable($conf['password_verify'])
+        || !$conf['password_verify']($password, (string) $rows[0]['password'], $userId)
+    ) {
+        caPasswordFail('The persisted SYSTEM_ADMIN password hash could not be verified.');
+    }
+}
+
 if (PHP_SAPI !== 'cli'
     || !function_exists('posix_geteuid')
     || !function_exists('posix_getpwuid')
@@ -100,6 +114,7 @@ if ($identityTableRows === []) {
     }
     single_update(USERS_TABLE, ['password' => $hash], ['id' => $webmasterId]);
     unset($hash);
+    caAssertPasswordPersisted($webmasterId, $password);
     delete_user_sessions($webmasterId);
     if (function_exists('deactivate_user_auth_keys')) {
         deactivate_user_auth_keys($webmasterId);
@@ -217,6 +232,7 @@ try {
         },
     );
     \ClassIdentity\CoreAdapter::setPassword($userId, $password);
+    caAssertPasswordPersisted($userId, $password);
     unset($password);
     \ClassIdentity\Audit::fromPiwigo()->append($baseEvent + [
         'action' => 'PRINCIPAL_SECURITY_CHANGE',

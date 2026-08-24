@@ -76,20 +76,23 @@ final class ClassIdentityArchiveService
         }
         $albumId = (int) $created['id'];
         try {
-            (new Audit($this->repository))->append([
-                'actor_principal_id' => (int) $admin['principal_id'],
-                'actor_user_id' => (int) $admin['piwigo_user_id'],
-                'actor_kind' => 'SYSTEM_ADMIN',
-                'action' => 'ARCHIVE_ALBUM_CREATE',
-                'target_type' => 'ALBUM',
-                'target_id' => (string) $albumId,
-                'new_value' => ['era' => $era, 'name' => $name, 'official' => 1],
-                'reason' => $reason,
-                'result' => 'SUCCESS',
-            ]);
+            // Piwigo remains the album manager, while the product-facing
+            // opaque id and audit are created by the Class Archive domain.
+            // The public UI never serializes this numeric category id.
+            \ClassIdentity\AlbumService::fromPiwigo()->ensureMapping(
+                $adminUserId,
+                $albumId,
+                'OFFICIAL',
+                $era,
+                null,
+                $comment,
+                null,
+                null,
+                $reason,
+            );
         } catch (Throwable $error) {
-            // The Core category tables are MyISAM. A newly created, empty
-            // album is safe to remove if its audit event cannot be recorded.
+            // The Core category tables are MyISAM. A newly created empty album
+            // is safe to remove when its stable mapping/audit did not commit.
             if (function_exists('delete_categories')) {
                 try {
                     delete_categories([$albumId], 'no_delete');
@@ -164,48 +167,59 @@ final class ClassIdentityArchiveService
         }
         $this->imageExists($imageId);
         $selectedAlbum = $this->requireEraAlbum($era, $albumId);
-        global $prefixeTable;
-
-        $this->repository->transaction(function (Repository $repository) use ($admin, $imageId, $era, $archiveDate, $precision, $confidence, $dateSource, $eventLabel, $official, $reason): void {
-            $before = $repository->fetchOne(
-                'SELECT `era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official` FROM `' . $repository->table('archive_image') . '` WHERE `piwigo_image_id` = ? FOR UPDATE',
-                [$imageId],
-            );
-            $repository->execute(
-                'INSERT INTO `' . $repository->table('archive_image') . '` '
-                . '(`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,`event_label`,`official`,`created_at`,`updated_at`) '
-                . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)) '
-                . 'ON DUPLICATE KEY UPDATE `era`=VALUES(`era`),`archive_date`=VALUES(`archive_date`),`date_precision`=VALUES(`date_precision`),'
-                . '`date_confidence`=VALUES(`date_confidence`),`date_source`=VALUES(`date_source`),`event_label`=VALUES(`event_label`),`official`=VALUES(`official`),`updated_at`=UTC_TIMESTAMP(6)',
-                [$imageId, $era, $archiveDate, $precision, $confidence, $dateSource, $eventLabel, $official ? 1 : 0],
-            );
-            (new Audit($repository))->append([
-                'actor_principal_id' => (int) $admin['principal_id'],
-                'actor_user_id' => (int) $admin['piwigo_user_id'],
-                'actor_kind' => 'SYSTEM_ADMIN',
-                'action' => 'ARCHIVE_METADATA_UPDATE',
-                'target_type' => 'IMAGE',
-                'target_id' => (string) $imageId,
-                'old_value' => $before ?? ['state' => 'UNRECORDED'],
-                'new_value' => [
-                    'era' => $era,
-                    'archive_date' => $archiveDate,
-                    'date_precision' => $precision,
-                    'date_confidence' => $confidence,
-                    'date_source' => $dateSource,
-                    'event_label' => $eventLabel,
-                    'official' => $official ? 1 : 0,
-                ],
-                'reason' => $reason,
-                'result' => 'SUCCESS',
-            ]);
-        });
-
-        if (function_exists('associate_images_to_categories')) {
-            associate_images_to_categories([$imageId], [$selectedAlbum]);
-        } else {
-            throw new RuntimeException('piwigo_album_service_unavailable');
+        $photo = $this->repository->fetchOne(
+            'SELECT `class_photo_id`,`state` FROM `' . $this->repository->table('photo') . '` WHERE `piwigo_image_id`=? LIMIT 1',
+            [$imageId],
+        );
+        $before = $this->repository->fetchOne(
+            'SELECT `era` FROM `' . $this->repository->table('archive_image') . '` WHERE `piwigo_image_id`=? LIMIT 1',
+            [$imageId],
+        );
+        if ($photo === null || ($photo['state'] ?? null) !== \ClassIdentity\ClassArchivePhoto::STATE_ACTIVE || $before === null) {
+            throw new RuntimeException('archive_canonical_mapping_required');
         }
+        if (($before['era'] ?? null) !== $era) {
+            // The legacy single-item form has no complete old-album removal
+            // review. Era transitions are therefore confined to the new bulk
+            // organizer, which has explicit confirmation and compensation.
+            throw new RuntimeException('archive_era_change_requires_photo_ui');
+        }
+
+        $albumService = \ClassIdentity\AlbumService::fromPiwigo();
+        $mapping = $albumService->findByPiwigoCategoryId($selectedAlbum);
+        if ($mapping === null) {
+            $mapping = $albumService->ensureMapping(
+                $adminUserId,
+                $selectedAlbum,
+                'OFFICIAL',
+                $era,
+                null,
+                null,
+                null,
+                null,
+                $reason,
+            );
+        }
+        if (($mapping['album_type'] ?? null) !== 'OFFICIAL' || ($mapping['era'] ?? null) !== $era) {
+            throw new RuntimeException('archive_album_mapping_conflict');
+        }
+
+        \ClassIdentity\BulkArchiveService::fromPiwigo()->apply(
+            $adminUserId,
+            [\ClassIdentity\DomainSupport::binaryToId((string) $photo['class_photo_id'])],
+            [
+                'archive_date' => $archiveDate,
+                'date_precision' => $precision,
+                'date_confidence' => $confidence,
+                'date_source' => $dateSource,
+                'event_label' => $eventLabel,
+                'official' => $official,
+                'add_album_ids' => [(string) $mapping['class_album_id']],
+                'remove_album_ids' => [],
+            ],
+            $reason,
+            false,
+        );
     }
 
     public static function eraLabel(string $era): string

@@ -400,6 +400,14 @@ SQL, [$piwigoUserId]);
             'archive_image',
             'photo',
             'person',
+            'person_merge',
+            'person_photo_rule',
+            'album',
+            'spotlight',
+            'photo_source',
+            'photo_duplicate',
+            'batch_operation',
+            'batch_operation_item',
         ];
     }
 }

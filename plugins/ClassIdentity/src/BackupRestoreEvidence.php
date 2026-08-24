@@ -12,7 +12,10 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class BackupRestoreEvidence
 {
-    public const VERSION = 1;
+    public const VERSION = 2;
+    public const FIXTURE_VERSION = 2;
+    public const CLASS_IDENTITY_SCHEMA_VERSION = 8;
+    public const BACKUP_MANIFEST_FORMAT = 4;
     public const FRESHNESS_SECONDS = 90 * 86400;
 
     private const DATA_DIRECTORY = '_data/class-archive';
@@ -32,6 +35,9 @@ final class BackupRestoreEvidence
             'timestamp' => gmdate('c'),
             'bundle' => $bundle,
             'fixture_sha256' => $fixtureSha256,
+            'fixture_version' => self::FIXTURE_VERSION,
+            'class_identity_schema_version' => self::CLASS_IDENTITY_SCHEMA_VERSION,
+            'backup_manifest_format' => self::BACKUP_MANIFEST_FORMAT,
             'rto_seconds' => $rtoSeconds,
             'result' => 'PASS',
         ];
@@ -99,6 +105,9 @@ final class BackupRestoreEvidence
             || strtotime((string) $record['timestamp']) === false
             || !is_string($record['fixture_sha256'] ?? null)
             || preg_match('/\A[0-9a-f]{64}\z/D', (string) $record['fixture_sha256']) !== 1
+            || (int) ($record['fixture_version'] ?? 0) !== self::FIXTURE_VERSION
+            || (int) ($record['class_identity_schema_version'] ?? 0) !== self::CLASS_IDENTITY_SCHEMA_VERSION
+            || (int) ($record['backup_manifest_format'] ?? 0) !== self::BACKUP_MANIFEST_FORMAT
             || ($record['result'] ?? null) !== 'PASS') {
             return self::missing('备份恢复演练记录需要重新执行。');
         }
@@ -132,11 +141,26 @@ final class BackupRestoreEvidence
 
     private static function selfDigest(): string
     {
-        $hash = hash_file('sha256', __FILE__);
-        if (!is_string($hash)) {
-            throw new \RuntimeException('class_identity_backup_restore_digest_unavailable');
+        $paths = [
+            __FILE__,
+            '/workspace/infra/docker-compose.yml',
+            '/workspace/infra/scripts/capture-restore-fixture.php',
+            '/workspace/infra/scripts/audit-backup.sh',
+            '/workspace/infra/scripts/restore-backup.sh',
+            '/workspace/infra/scripts/backup-restore-drill.ps1',
+        ];
+        $context = hash_init('sha256');
+        foreach ($paths as $path) {
+            if (!is_file($path) || is_link($path)) {
+                throw new \RuntimeException('class_identity_backup_restore_digest_unavailable');
+            }
+            $hash = hash_file('sha256', $path);
+            if (!is_string($hash)) {
+                throw new \RuntimeException('class_identity_backup_restore_digest_unavailable');
+            }
+            hash_update($context, basename($path) . "\0" . $hash . "\n");
         }
-        return $hash;
+        return hash_final($context);
     }
 
     /** @return array<string, mixed> */

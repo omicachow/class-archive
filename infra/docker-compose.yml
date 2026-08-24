@@ -131,6 +131,32 @@ services:
           exit 1
         }
         mkdir "$${partial_bundle}"
+        # Do not publish a v8 manifest by assertion alone. Resolve the one
+        # installed ClassIdentity prefix and prove every declared table plus
+        # migration 8 exists before taking the database snapshot.
+        set -- $$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COUNT(*),COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$$'")
+        test "$${#}" = 2 && test "$${1}" = 1 || {
+          echo "Refusing backup: ClassIdentity migration table is missing or ambiguous." >&2
+          exit 1
+        }
+        ci_migration="$${2}"
+        case "$${ci_migration}" in ''|*[!A-Za-z0-9_]*) echo "Refusing backup: ClassIdentity table prefix is invalid." >&2; exit 1 ;; esac
+        ci_base="$${ci_migration%migration}"
+        ci_version=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COALESCE(MAX(version),0) FROM $${ci_migration}")
+        test "$${ci_version}" = 8 || {
+          echo "Refusing backup: ClassIdentity schema v8 is not current." >&2
+          exit 1
+        }
+        for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_duplicate batch_operation batch_operation_item; do
+          ci_table_count=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+            -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$${ci_base}$${suffix}'")
+          test "$${ci_table_count}" = 1 || {
+            echo "Refusing backup: required ClassIdentity v8 table is missing." >&2
+            exit 1
+          }
+        done
         # Piwigo and several mature plugins still use MyISAM tables. The app is
         # stopped by dev.ps1 before this service runs, and --lock-all-tables
         # gives those tables a consistent database snapshot.
@@ -147,7 +173,10 @@ services:
         # must restore it byte-for-byte with the other durable volumes.
         tar -C /source/scripts -czf "$${partial_bundle}/scripts.tar.gz" .
         printf 'completed_at=%s\n' "$${stamp}" > "$${partial_bundle}/COMPLETE"
-        printf '{"format":3,"created_at":"%s","files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
+        # The SQL dump already contains every table. The explicit v8 inventory
+        # makes restore evidence reject an older bundle whose manifest cannot
+        # prove that the product-domain tables were part of its contract.
+        printf '{"format":4,"created_at":"%s","class_identity_schema":{"version":8,"tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item"]},"files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
         cd "$${partial_bundle}"
         sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json > SHA256SUMS
         sha256sum -c SHA256SUMS

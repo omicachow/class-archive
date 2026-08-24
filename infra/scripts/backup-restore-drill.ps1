@@ -195,6 +195,27 @@ function Save-JsonArtifact {
 
 function Assert-CanonicalFixture {
     param([Parameter(Mandatory = $true)]$Fixture)
+    if ([int]$Fixture.fixture_version -ne 2 -or [int]$Fixture.class_identity_schema_version -ne 8) {
+        throw 'Refusing destructive drill: restore fixture does not attest the ClassIdentity v8 product schema.'
+    }
+    $v8State = @(
+        'person',
+        'person_merge',
+        'person_photo_rule',
+        'album',
+        'spotlight',
+        'photo_source',
+        'photo_duplicate',
+        'batch_operation',
+        'batch_operation_item',
+        'migration'
+    )
+    foreach ($name in $v8State) {
+        $property = $Fixture.summary.PSObject.Properties[$name]
+        if ($null -eq $property -or $null -eq $property.Value.count -or [string]$property.Value.sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "Refusing destructive drill: restore fixture is missing deterministic v8 state: $name"
+        }
+    }
     if (
         [int]$Fixture.summary.images.count -ne 72 -or
         [int]$Fixture.summary.physical_originals.count -ne 72 -or

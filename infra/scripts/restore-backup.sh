@@ -37,6 +37,14 @@ for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz s
 done
 (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1) || fail restore_checksum_failed
 
+# Format 4 binds the backup contract to the complete ClassIdentity v8 table
+# set. An older bundle may still contain a valid SQL dump, but it is not valid
+# evidence for the Phase 3.2 product domain and is therefore rejected before
+# any target is cleared.
+schema_contract='"class_identity_schema":{"version":8,"tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item"]}'
+grep -Eq '^\{"format":4,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
+grep -Fq "$schema_contract" "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
+
 assert_archive_safe() {
   archive=$1
   if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
@@ -68,6 +76,24 @@ done
 existing_tables=$(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" -e 'SHOW TABLES' | wc -l | tr -d '[:space:]')
 [ "$existing_tables" = 0 ] || fail restore_database_not_empty
 gzip -dc "$bundle/database.sql.gz" | mariadb --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" || fail restore_database_failed
+
+# Re-check the manifest's v8 claim against the restored database before any
+# application volume is repopulated. Identifiers are accepted only from the
+# server's own alphanumeric table inventory and are never caller supplied.
+set -- $(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
+  -e "SELECT COUNT(*),COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$'")
+[ "$#" = 2 ] && [ "$1" = 1 ] || fail restore_class_identity_schema_ambiguous
+ci_migration=$2
+case "$ci_migration" in ''|*[!A-Za-z0-9_]*) fail restore_class_identity_schema_invalid ;; esac
+ci_base=${ci_migration%migration}
+ci_version=$(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
+  -e "SELECT COALESCE(MAX(version),0) FROM $ci_migration")
+[ "$ci_version" = 8 ] || fail restore_class_identity_schema_invalid
+for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_duplicate batch_operation batch_operation_item; do
+  ci_table_count=$(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
+    -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$ci_base$suffix'")
+  [ "$ci_table_count" = 1 ] || fail restore_class_identity_schema_invalid
+done
 tar -C /target/piwigo --no-same-owner -xzf "$bundle/piwigo-data.tar.gz" || fail restore_piwigo_data_failed
 tar -C /target/uploads --no-same-owner -xzf "$bundle/uploads.tar.gz" || fail restore_uploads_failed
 tar -C /target/galleries --no-same-owner -xzf "$bundle/galleries.tar.gz" || fail restore_galleries_failed
