@@ -91,6 +91,24 @@ final class GatewayHttpController
             if ($product !== null) {
                 self::respond(200, $product);
             }
+            if ($segments === ['timeline']) {
+                $query = self::requireExactQuery(['cursor', 'limit'], ['cursor', 'limit']);
+                $cursor = $query['cursor'] ?? null;
+                if ($cursor !== null && preg_match('/\A[A-Za-z0-9_-]{48}\z/D', $cursor) !== 1) {
+                    throw new \InvalidArgumentException('class_archive_gateway_timeline_cursor_invalid');
+                }
+                $limit = null;
+                if (isset($query['limit'])) {
+                    if (preg_match('/\A[1-9][0-9]{0,2}\z/D', $query['limit']) !== 1) {
+                        throw new \InvalidArgumentException('class_archive_gateway_timeline_limit_invalid');
+                    }
+                    $limit = (int) $query['limit'];
+                    if ($limit > 240) {
+                        throw new \InvalidArgumentException('class_archive_gateway_timeline_limit_invalid');
+                    }
+                }
+                self::respond(200, $gateway->timeline($cursor, $limit));
+            }
             [$route, $photoId, $searchQuery, $mediaVariant] = self::parseRoute($segments);
             $response = match ($route) {
                 'photos' => $photoId === null ? $gateway->photos() : self::knownPhoto($gateway, $photoId),

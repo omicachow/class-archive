@@ -742,10 +742,11 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
             }
         }
         if (!$dryRun && $changedPhotoIds !== []) {
-            \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
-                array_values(array_unique($changedPhotoIds)),
-                \ClassIdentity\ProjectionMutationBoundary::allAggregateKinds(),
-            );
+            // Native image metadata writes advance the protected Piwigo source
+            // epoch. A bounded refresh is valid only while the catalog epoch is
+            // unchanged, so publish one complete generation after the batch.
+            // This remains maintenance/write-time work, never an HTTP read.
+            \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
             $result['projection_rebuilt'] = true;
         }
         foreach ($completedQueueEntries as $entry) {

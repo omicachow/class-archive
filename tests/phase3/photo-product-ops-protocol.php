@@ -31,6 +31,7 @@ $paths = [
     'gateway_http' => $root . '/plugins/ClassIdentity/src/Gateway/GatewayHttpController.php',
     'schema' => $root . '/plugins/ClassIdentity/src/Schema.php',
     'plugin_maintain' => $root . '/plugins/ClassIdentity/maintain.class.php',
+    'dev' => $root . '/infra/scripts/dev.ps1',
 ];
 $sources = [];
 foreach ($paths as $name => $path) {
@@ -99,6 +100,9 @@ $assert($retireInvalidate >= 0 && $retireDrop > $retireInvalidate, 'retirement m
 $assert(str_contains($sources['plugin_maintain'], '$schema->prepareNativeMutationProtectionForActivation();'), 'install/activation maintenance must restore native guards');
 $assert(substr_count($sources['plugin_maintain'], '$this->retireNativeMutationProtection();') >= 3, 'install/deactivate/uninstall lifecycle must retire native guards');
 $assert(str_contains($sources['plugin_maintain'], 'fromPiwigoForRetirement'), 'retirement must remain available after an accidental unsupported Core upgrade');
+$phase0StateTransition = $position($sources['dev'], "'tests\\phase0\\media-guard-state-transitions.ps1'");
+$phase0ProjectionRecovery = $position($sources['dev'], "'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php'");
+$assert($phase0StateTransition >= 0 && $phase0ProjectionRecovery > $phase0StateTransition, 'phase0 native fixtures must restore the persistent read projection');
 $assert($projectionDataOmission > $databaseDump, 'backup must preserve projection DDL while omitting cache rows');
 $assert(str_contains($sources['compose'], '--ignore-table-data="$${DB_NAME}.$${ci_base}read_photo"'), 'backup does not omit read_photo cache rows');
 $assert(str_contains($sources['compose'], 'rebuildable projection cache leaked into the SQL snapshot'), 'backup does not verify that projection cache rows were omitted');

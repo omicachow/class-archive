@@ -27,6 +27,9 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class GatewayService
 {
+    private const TIMELINE_PAGE_DEFAULT = 120;
+    private const TIMELINE_PAGE_MAX = 240;
+
     /**
      * Request-scoped, policy-filtered canonical projection. Keeping the raw
      * approved ids alongside their canonical ids lets AI enrichment preserve
@@ -35,6 +38,12 @@ final class GatewayService
      * @var array{photos:list<GatewayPhotoCandidate>,raw_photos:list<GatewayPhotoCandidate>,raw_ids:list<string>,id_map:array<string,string>}|null
      */
     private ?array $visiblePhotoResolution = null;
+
+    /** @var array{total:int,groups:list<array<string,mixed>>}|null */
+    private ?array $timelineProjection = null;
+
+    /** Raw 32-byte presentation snapshot; public but never an authorization credential. */
+    private ?string $timelineSnapshot = null;
 
     public function __construct(
         private readonly IdentityAdapter $identity,
@@ -46,6 +55,11 @@ final class GatewayService
         private readonly ?SpotlightService $spotlightDomain = null,
         private readonly ?CanonicalPhotoService $canonicalDomain = null,
         private readonly ?ReadProjectionStore $readProjection = null,
+        // Tests may inject a deterministic non-production root. Runtime uses
+        // the already-provisioned server-only pseudonym root and derives a
+        // separate timeline key below; the presentation epoch is public and
+        // must never be accepted as HMAC key material.
+        private readonly ?string $timelineCursorRootSecret = null,
     ) {
     }
 
@@ -82,17 +96,37 @@ final class GatewayService
     /** @return array<string, mixed>|null */
     public function photo(string $classPhotoId): ?array
     {
+        $scope = $this->readProjection !== null ? $this->projectionScope() : null;
+        $before = $scope !== null ? $this->readProjection?->presentationEpoch($scope) : null;
+        $projection = null;
         if ($this->piwigo instanceof PointPiwigoAdapter) {
             $photo = $this->pointVisiblePhoto($classPhotoId);
-            return $photo?->publicProjection();
-        }
-        foreach ($this->visiblePhotos() as $photo) {
-            if (hash_equals($photo->id(), $classPhotoId)) {
-                return $photo->publicProjection();
+            $projection = $photo?->publicProjection();
+        } else {
+            foreach ($this->visiblePhotos() as $photo) {
+                if (hash_equals($photo->id(), $classPhotoId)) {
+                    $projection = $photo->publicProjection();
+                    break;
+                }
             }
         }
-        // Never distinguish hidden from unknown canonical ids.
-        return null;
+        if ($projection === null) {
+            // Never distinguish hidden from unknown canonical ids.
+            return null;
+        }
+        if ($scope !== null && is_string($before)) {
+            $after = $this->readProjection?->presentationEpoch($scope);
+            if (!is_string($after) || preg_match('/\A[a-f0-9]{64}\z/D', $after) !== 1
+                || !hash_equals($before, $after)
+            ) {
+                throw new \RuntimeException('class_archive_gateway_photo_snapshot_changed');
+            }
+            // The BFF consumes this binding and replaces it with an opaque,
+            // browser-session cache scope. It is not a photo identifier or an
+            // authorization credential and is never rendered by the UI.
+            $projection['presentation_epoch'] = $after;
+        }
+        return $projection;
     }
 
     /**
@@ -148,13 +182,229 @@ final class GatewayService
         }
     }
 
-    /** @return array{total:int,groups:list<array<string,mixed>>} */
-    public function timeline(): array
+    /**
+     * Return one bounded, stable page from the current role-filtered timeline.
+     * The cursor is only a position in an authenticated projection snapshot;
+     * it is never accepted as an authorization credential.
+     *
+     * @return array{total:int,count:int,limit:int,groups:list<array<string,mixed>>,has_more:bool,next_cursor:?string}
+     */
+    public function timeline(?string $cursor = null, ?int $limit = null): array
     {
-        if ($this->readProjection !== null) {
-            return $this->readProjection->aggregate(ReadProjectionStore::TIMELINE, $this->projectionScope());
+        $limit ??= self::TIMELINE_PAGE_DEFAULT;
+        if ($limit < 1 || $limit > self::TIMELINE_PAGE_MAX) {
+            throw new \InvalidArgumentException('class_archive_gateway_timeline_limit_invalid');
         }
-        return $this->computeTimeline();
+        $timeline = $this->timelineProjection;
+        if ($timeline === null) {
+            if ($this->readProjection !== null) {
+                $scope = $this->projectionScope();
+                $before = $this->readProjection->presentationEpoch($scope);
+                $timeline = $this->readProjection->aggregate(ReadProjectionStore::TIMELINE, $scope);
+                $after = $this->readProjection->presentationEpoch($scope);
+                if (preg_match('/\A[a-f0-9]{64}\z/D', $before) !== 1
+                    || !hash_equals($before, $after)
+                ) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_snapshot_changed');
+                }
+                $snapshot = hex2bin($before);
+                if (!is_string($snapshot) || strlen($snapshot) !== 32) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_snapshot_invalid');
+                }
+                $this->timelineSnapshot = $snapshot;
+            } else {
+                $timeline = $this->computeTimeline();
+                try {
+                    $this->timelineSnapshot = hash(
+                        'sha256',
+                        json_encode($timeline, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+                        true,
+                    );
+                } catch (\Throwable $error) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid', 0, $error);
+                }
+            }
+            $this->timelineProjection = $timeline;
+        }
+        if (!is_string($this->timelineSnapshot) || strlen($this->timelineSnapshot) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_timeline_snapshot_invalid');
+        }
+        $page = self::paginateTimeline(
+            $timeline,
+            $cursor,
+            $limit,
+            $this->timelineSnapshot,
+            $this->timelineCursorSigningKey(),
+        );
+        $page['presentation_epoch'] = bin2hex($this->timelineSnapshot);
+        return $page;
+    }
+
+    /**
+     * @param array<string,mixed> $timeline
+     * @return array{total:int,count:int,limit:int,groups:list<array<string,mixed>>,has_more:bool,next_cursor:?string}
+     */
+    private static function paginateTimeline(
+        array $timeline,
+        ?string $cursor,
+        int $limit,
+        string $snapshot,
+        string $signingKey,
+    ): array
+    {
+        $total = $timeline['total'] ?? null;
+        $groups = $timeline['groups'] ?? null;
+        if (!is_int($total) || $total < 0 || !is_array($groups) || !array_is_list($groups)) {
+            throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid');
+        }
+
+        $seenPhotoIds = [];
+        $calculatedTotal = 0;
+        foreach ($groups as $group) {
+            if (!is_array($group)
+                || !is_string($group['key'] ?? null)
+                || !is_string($group['label'] ?? null)
+                || !is_string($group['kind'] ?? null)
+                || !is_int($group['total'] ?? null)
+                || !is_array($group['items'] ?? null)
+                || !array_is_list($group['items'])
+                || $group['total'] < 1
+                || $group['total'] !== count($group['items'])
+            ) {
+                throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid');
+            }
+            foreach ($group['items'] as $photo) {
+                if (!is_array($photo) || !is_string($photo['id'] ?? null)) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid');
+                }
+                try {
+                    ClassArchivePhoto::idToBinary($photo['id']);
+                } catch (\Throwable $error) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid', 0, $error);
+                }
+                $photoId = strtolower($photo['id']);
+                if (isset($seenPhotoIds[$photoId])) {
+                    throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid');
+                }
+                $seenPhotoIds[$photoId] = true;
+            }
+            $calculatedTotal += $group['total'];
+        }
+        if ($calculatedTotal !== $total || ($total === 0 && $groups !== [])) {
+            throw new \RuntimeException('class_archive_gateway_timeline_projection_invalid');
+        }
+
+        if (strlen($snapshot) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_timeline_snapshot_invalid');
+        }
+        if (strlen($signingKey) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_timeline_cursor_secret_unavailable');
+        }
+        $offset = self::decodeTimelineCursor($cursor, $snapshot, $total, $signingKey);
+        $end = min($total, $offset + $limit);
+        $pageGroups = [];
+        $position = 0;
+        $pageCount = 0;
+        foreach ($groups as $group) {
+            $groupStart = $position;
+            $groupEnd = $position + $group['total'];
+            $position = $groupEnd;
+            if ($groupEnd <= $offset) {
+                continue;
+            }
+            if ($groupStart >= $end) {
+                break;
+            }
+            $sliceStart = max(0, $offset - $groupStart);
+            $sliceLength = min($groupEnd, $end) - ($groupStart + $sliceStart);
+            if ($sliceLength <= 0) {
+                continue;
+            }
+            $items = array_slice($group['items'], $sliceStart, $sliceLength);
+            $pageGroups[] = [
+                'key' => $group['key'],
+                'label' => $group['label'],
+                'kind' => $group['kind'],
+                'total' => $group['total'],
+                'count' => count($items),
+                'items' => $items,
+            ];
+            $pageCount += count($items);
+        }
+        if ($pageCount !== $end - $offset) {
+            throw new \RuntimeException('class_archive_gateway_timeline_page_invalid');
+        }
+        $hasMore = $end < $total;
+        return [
+            'total' => $total,
+            'count' => $pageCount,
+            'limit' => $limit,
+            'groups' => $pageGroups,
+            'has_more' => $hasMore,
+            'next_cursor' => $hasMore ? self::encodeTimelineCursor($end, $snapshot, $signingKey) : null,
+        ];
+    }
+
+    private function timelineCursorSigningKey(): string
+    {
+        $root = $this->timelineCursorRootSecret;
+        if ($root === null) {
+            $environment = getenv('CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET');
+            $root = is_string($environment) ? $environment : null;
+        }
+        if (!is_string($root) || strlen($root) < 32 || strlen($root) > 4096) {
+            throw new \RuntimeException('class_archive_gateway_timeline_cursor_secret_unavailable');
+        }
+        return hash_hmac(
+            'sha256',
+            "class-archive/timeline-cursor-signing/v1\0",
+            $root,
+            true,
+        );
+    }
+
+    private static function encodeTimelineCursor(int $offset, string $snapshot, string $signingKey): string
+    {
+        if ($offset <= 0 || strlen($snapshot) !== 32 || strlen($signingKey) !== 32 || $offset > 0xffffffff) {
+            throw new \RuntimeException('class_archive_gateway_timeline_cursor_invalid');
+        }
+        $packedOffset = pack('N', $offset);
+        $mac = hash_hmac('sha256', $packedOffset . $snapshot, $signingKey, true);
+        return rtrim(strtr(base64_encode($packedOffset . $mac), '+/', '-_'), '=');
+    }
+
+    private static function decodeTimelineCursor(
+        ?string $cursor,
+        string $snapshot,
+        int $total,
+        string $signingKey,
+    ): int
+    {
+        if ($cursor === null) {
+            return 0;
+        }
+        if (preg_match('/\A[A-Za-z0-9_-]{48}\z/D', $cursor) !== 1) {
+            throw new \InvalidArgumentException('class_archive_gateway_timeline_cursor_invalid');
+        }
+        $decoded = base64_decode(strtr($cursor, '-_', '+/'), true);
+        if (!is_string($decoded) || strlen($decoded) !== 36) {
+            throw new \InvalidArgumentException('class_archive_gateway_timeline_cursor_invalid');
+        }
+        $unpacked = unpack('Noffset', substr($decoded, 0, 4));
+        $offset = is_array($unpacked) ? (int) ($unpacked['offset'] ?? 0) : 0;
+        if (strlen($signingKey) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_timeline_cursor_secret_unavailable');
+        }
+        $expectedMac = hash_hmac(
+            'sha256',
+            substr($decoded, 0, 4) . $snapshot,
+            $signingKey,
+            true,
+        );
+        if ($offset <= 0 || $offset >= $total || !hash_equals($expectedMac, substr($decoded, 4))) {
+            throw new \InvalidArgumentException('class_archive_gateway_timeline_cursor_invalid');
+        }
+        return $offset;
     }
 
     /** @return array{total:int,groups:list<array<string,mixed>>} */

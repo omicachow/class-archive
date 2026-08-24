@@ -161,14 +161,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 if ($approved === null) {
                     throw new RuntimeException('submission_approval_projection_missing');
                 }
-                // Approval already invalidates the exact promoted photo and
-                // every dependent aggregate through promotePendingMapping().
-                // Publish only that committed photo instead of making one
-                // administrator review rebuild the whole gallery.
-                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
-                    [(string) $approved['class_photo_id']],
-                    \ClassIdentity\ProjectionMutationBoundary::allAggregateKinds(),
-                );
+                // Approval creates a new native Piwigo image/category row, so
+                // the current catalog generation has no row for this UUID and
+                // its native-source epoch has advanced. A point refresh is
+                // valid only for an already-published photo. Publish a complete
+                // catalog generation here on the explicit administrator write
+                // path; member GETs remain projection-only and fail closed.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
                 ClassIdentityHttp::flash('success', '投稿已通过并收录到班级历史。');
                 ClassIdentityHttp::redirectTo('submissions');
 

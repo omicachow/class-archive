@@ -74,6 +74,20 @@ function Invoke-JsonGet([string]$Uri, [Microsoft.PowerShell.Commands.WebRequestS
     return Invoke-RestMethod -Uri $Uri -Method Get -WebSession $Session -Headers @{ Accept = 'application/json' } -TimeoutSec 30
 }
 
+function ConvertTo-StableTimelinePayload([object]$Payload) {
+    # presentation_epoch and next_cursor are deliberately revision-bound and
+    # must change after a write/rollback cycle. Compare only the authorized
+    # timeline content so the recovery test does not mistake safe cache
+    # invalidation for business-payload drift.
+    return ([ordered]@{
+        total = $Payload.total
+        count = $Payload.count
+        limit = $Payload.limit
+        groups = @($Payload.groups)
+        hasMore = $Payload.hasMore
+    } | ConvertTo-Json -Depth 30 -Compress)
+}
+
 function Invoke-ArchiveMutation(
     [Microsoft.PowerShell.Commands.WebRequestSession]$Session,
     [string]$Csrf,
@@ -203,7 +217,7 @@ try {
             -and [string]$productState.presentationEpoch -match '^[a-f0-9]{64}$' `
             -and [string]$productState.cacheScope -match '^[a-f0-9]{32}$') 'read_projection_runtime_admin_state_invalid'
 
-        $beforeTimelinePayload = (Invoke-JsonGet 'http://127.0.0.1:8091/api/class-archive/timeline' $session) | ConvertTo-Json -Depth 30 -Compress
+        $beforeTimelinePayload = ConvertTo-StableTimelinePayload (Invoke-JsonGet 'http://127.0.0.1:8091/api/class-archive/timeline' $session)
         $before = Get-Snapshot
         $candidate = $before.mutation_candidate
         $photoId = [string]$candidate.id
@@ -251,11 +265,11 @@ try {
         }
         Assert-True ((Projection $before 'PHOTO_CATALOG').source_revision -eq (Projection $afterRollback 'PHOTO_CATALOG').source_revision) 'read_projection_runtime_rollback_catalog_digest_failed'
         foreach ($kind in @('TIMELINE','MEMORIES')) {
-            Assert-True ((Projection $before $kind).state -eq (Projection $afterRollback $kind).state `
-                -and (Projection $before $kind).item_count -eq (Projection $afterRollback $kind).item_count `
-                -and (Projection $afterMutation $kind).generation -ne (Projection $afterRollback $kind).generation) ('read_projection_runtime_rollback_projection_state_failed_' + $kind.ToLowerInvariant())
+            Assert-True ((Projection $before $kind).state -eq (Projection $afterRollback $kind).state) ('read_projection_runtime_rollback_projection_state_failed_' + $kind.ToLowerInvariant())
+            Assert-True ((Projection $before $kind).item_count -eq (Projection $afterRollback $kind).item_count) ('read_projection_runtime_rollback_projection_count_failed_' + $kind.ToLowerInvariant())
+            Assert-True ((Projection $afterMutation $kind).generation -ne (Projection $afterRollback $kind).generation) ('read_projection_runtime_rollback_projection_generation_failed_' + $kind.ToLowerInvariant())
         }
-        $afterRollbackTimelinePayload = (Invoke-JsonGet 'http://127.0.0.1:8091/api/class-archive/timeline' $session) | ConvertTo-Json -Depth 30 -Compress
+        $afterRollbackTimelinePayload = ConvertTo-StableTimelinePayload (Invoke-JsonGet 'http://127.0.0.1:8091/api/class-archive/timeline' $session)
         Assert-True ($beforeTimelinePayload -ceq $afterRollbackTimelinePayload) 'read_projection_runtime_rollback_timeline_payload_failed'
 
         $script:Stage = 'restart'

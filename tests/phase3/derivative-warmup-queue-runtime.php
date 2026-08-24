@@ -144,6 +144,7 @@ $completed = false;
 $assertions = 0;
 $fixturePaths = [];
 $quarantineFixturePaths = [];
+$metadataFixture = null;
 try {
     chdir('/var/www/html/piwigo') || throw new RuntimeException('root_unavailable');
     define('PHPWG_ROOT_PATH', './');
@@ -163,9 +164,12 @@ try {
     }
     $repository = \ClassIdentity\Repository::fromPiwigo();
     $rows = $repository->fetchAll(
-        'SELECT HEX(`class_photo_id`) AS `class_photo_id_hex`,`piwigo_image_id` '
-        . 'FROM `' . $repository->table('photo') . '` WHERE `state`=\'ACTIVE\' '
-        . 'AND `piwigo_image_id` IS NOT NULL ORDER BY `piwigo_image_id` ASC LIMIT 100',
+        'SELECT HEX(pm.`class_photo_id`) AS `class_photo_id_hex`,pm.`piwigo_image_id`,'
+        . 'i.`width`,i.`height`,i.`rotation` FROM `' . $repository->table('photo') . '` pm '
+        . 'JOIN `' . $prefixeTable . 'images` i ON i.`id`=pm.`piwigo_image_id` '
+        . 'WHERE pm.`state`=\'ACTIVE\' AND pm.`piwigo_image_id` IS NOT NULL '
+        . 'AND i.`width`>0 AND i.`height`>0 AND i.`rotation` IS NOT NULL '
+        . 'ORDER BY pm.`piwigo_image_id` ASC LIMIT 100',
     );
     $before = ClassArchiveDerivativeWarmupQueue::pending();
     $already = [];
@@ -181,6 +185,12 @@ try {
         ];
         if (!isset($already[$candidate['class_photo_id'] . ':' . $candidate['piwigo_image_id']])) {
             $queued = $candidate;
+            $metadataFixture = [
+                'piwigo_image_id' => $candidate['piwigo_image_id'],
+                'width' => (int) ($row['width'] ?? 0),
+                'height' => (int) ($row['height'] ?? 0),
+                'rotation' => (int) ($row['rotation'] ?? -1),
+            ];
             break;
         }
     }
@@ -285,6 +295,22 @@ try {
         throw new RuntimeException('queue_lock_not_private_regular_empty');
     }
 
+    if (!is_array($metadataFixture)
+        || $repository->execute(
+            'UPDATE `' . $prefixeTable . 'images` SET `width`=0,`height`=0,`rotation`=NULL WHERE `id`=?',
+            [$queued['piwigo_image_id']],
+        ) !== 1
+    ) {
+        throw new RuntimeException('metadata_fixture_invalidation_failed');
+    }
+    ++$assertions;
+    $projectionState = $repository->fetchOne(
+        'SELECT `state` FROM `' . $repository->table('read_projection') . '` WHERE `projection_key`=\'PHOTO_CATALOG\' LIMIT 1',
+    );
+    if (($projectionState['state'] ?? null) !== 'STALE') {
+        throw new RuntimeException('metadata_fixture_did_not_stale_projection');
+    }
+
     ClassArchiveDerivativeWarmupQueue::enqueue($queued['class_photo_id'], $queued['piwigo_image_id']);
     $afterEnqueue = ClassArchiveDerivativeWarmupQueue::pending();
     $matches = array_values(array_filter(
@@ -308,6 +334,24 @@ try {
         || (int) ($immediate['cached'] ?? 0) + (int) ($immediate['generated'] ?? 0) !== 6) {
         throw new RuntimeException('immediate_exact_warmup_incomplete');
     }
+    $restoredMetadata = $repository->fetchOne(
+        'SELECT `width`,`height`,`rotation` FROM `' . $prefixeTable . 'images` WHERE `id`=? LIMIT 1',
+        [$queued['piwigo_image_id']],
+    );
+    ++$assertions;
+    if ($restoredMetadata === null
+        || (int) ($restoredMetadata['width'] ?? 0) !== $metadataFixture['width']
+        || (int) ($restoredMetadata['height'] ?? 0) !== $metadataFixture['height']
+        || (int) ($restoredMetadata['rotation'] ?? -1) !== $metadataFixture['rotation']
+    ) {
+        throw new RuntimeException('metadata_fixture_not_restored');
+    }
+    ++$assertions;
+    foreach ((new \ClassIdentity\Gateway\ReadProjectionStore($repository))->status() as $projection) {
+        if (($projection['state'] ?? null) !== 'ACTIVE') {
+            throw new RuntimeException('metadata_normalization_projection_not_republished');
+        }
+    }
     ++$assertions;
     if (array_filter(
         ClassArchiveDerivativeWarmupQueue::pending(),
@@ -317,7 +361,15 @@ try {
     }
 
     // Requeue the same exact mapping to prove the periodic maintenance path
-    // remains an idempotent recovery consumer after immediate prewarm.
+    // remains a recovery consumer after immediate prewarm. Reintroduce the
+    // same missing native metadata so the batch path must normalize it and
+    // publish exactly one complete catalog generation after all selected rows.
+    if ($repository->execute(
+        'UPDATE `' . $prefixeTable . 'images` SET `width`=0,`height`=0,`rotation`=NULL WHERE `id`=?',
+        [$queued['piwigo_image_id']],
+    ) !== 1) {
+        throw new RuntimeException('maintenance_metadata_fixture_invalidation_failed');
+    }
     ClassArchiveDerivativeWarmupQueue::enqueue($queued['class_photo_id'], $queued['piwigo_image_id']);
     $profiles = array_keys(classArchivePhotoCacheCanonicalProfiles());
     $result = classArchivePhotoCacheWarm('first-screen', $profiles, false);
@@ -328,6 +380,28 @@ try {
     ++$assertions;
     if ((int) ($result['queued'] ?? -1) < 1 || (int) ($result['queue_completed'] ?? 0) < 1) {
         throw new RuntimeException('queued_mapping_not_processed');
+    }
+    ++$assertions;
+    if ((int) ($result['metadata_normalized'] ?? 0) !== 1 || ($result['projection_rebuilt'] ?? null) !== true) {
+        throw new RuntimeException('maintenance_metadata_projection_recovery_missing');
+    }
+    $maintenanceMetadata = $repository->fetchOne(
+        'SELECT `width`,`height`,`rotation` FROM `' . $prefixeTable . 'images` WHERE `id`=? LIMIT 1',
+        [$queued['piwigo_image_id']],
+    );
+    ++$assertions;
+    if ($maintenanceMetadata === null
+        || (int) ($maintenanceMetadata['width'] ?? 0) !== $metadataFixture['width']
+        || (int) ($maintenanceMetadata['height'] ?? 0) !== $metadataFixture['height']
+        || (int) ($maintenanceMetadata['rotation'] ?? -1) !== $metadataFixture['rotation']
+    ) {
+        throw new RuntimeException('maintenance_metadata_fixture_not_restored');
+    }
+    ++$assertions;
+    foreach ((new \ClassIdentity\Gateway\ReadProjectionStore($repository))->status() as $projection) {
+        if (($projection['state'] ?? null) !== 'ACTIVE') {
+            throw new RuntimeException('maintenance_metadata_projection_not_republished');
+        }
     }
     ++$assertions;
     if ((int) ($result['queue_retained'] ?? -1) !== 0) {
@@ -356,6 +430,23 @@ try {
         . ' generated=' . (int) ($result['generated'] ?? 0)
         . ' cached=' . (int) ($result['cached'] ?? 0) . "\n");
 } catch (Throwable $error) {
+    if (is_array($metadataFixture) && isset($repository, $prefixeTable)) {
+        try {
+            $repository->execute(
+                'UPDATE `' . $prefixeTable . 'images` SET `width`=?,`height`=?,`rotation`=? WHERE `id`=?',
+                [
+                    $metadataFixture['width'],
+                    $metadataFixture['height'],
+                    $metadataFixture['rotation'],
+                    $metadataFixture['piwigo_image_id'],
+                ],
+            );
+            \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+        } catch (Throwable) {
+            // Keep the original test failure. The canonical phase-0 reset is
+            // still required before a failed fixture may be rerun.
+        }
+    }
     foreach ($fixturePaths as $fixturePath) {
         if (file_exists($fixturePath) || is_link($fixturePath)) {
             @unlink($fixturePath);

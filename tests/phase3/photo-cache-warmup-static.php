@@ -82,9 +82,9 @@ $assert(str_contains($source, '@chmod($target[\'absolute\'], 0660)'), 'derivativ
 $assert(str_contains($source, 'classArchivePhotoCacheNormalizeSourceMetadata'), 'source_metadata_precompute_missing');
 $assert(str_contains($source, '\\pwg_image::get_rotation_angle($source)'), 'piwigo_rotation_reader_not_reused');
 $assert(str_contains($source, "'would_normalize_metadata'"), 'metadata_dry_run_evidence_missing');
-$assert(str_contains($source, $gatewayNamespace . 'ReadProjectionBuilder::rebuildChangedPhotos(') && !str_contains($source, $gatewayNamespace . 'ReadProjectionBuilder::rebuild();'), 'metadata_change_must_use_bounded_projection_rebuild');
+$assert(str_contains($source, $gatewayNamespace . 'ReadProjectionBuilder::rebuild();') && !str_contains($source, $gatewayNamespace . 'ReadProjectionBuilder::rebuildChangedPhotos('), 'native_metadata_batch_must_publish_full_catalog_generation');
 $assert(str_contains($source, $classIdentityNamespace . 'ProjectionMutationBoundary::allAggregateKinds()'), 'metadata_change_all_aggregate_dependencies_missing');
-$assert(strpos($source, 'rebuildChangedPhotos(') < strpos($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'maintenance_marker_consumed_before_projection_recovery');
+$assert(strpos($source, 'ReadProjectionBuilder::rebuild();') < strpos($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'maintenance_marker_consumed_before_projection_recovery');
 $assert(!str_contains($source, 'imagecreatefrom'), 'custom_resize_pipeline_detected');
 $assert(str_contains($source, 'classArchivePhotoCacheGenerateIdentity'), 'tiny_source_maintenance_generation_missing');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
@@ -93,6 +93,7 @@ $assert(str_contains($queue, "'class_photo_id' => \$classPhotoId, 'piwigo_image_
 $assert(!str_contains($queue, 'source_path') && !str_contains($queue, 'derivative_path'), 'queue_must_not_store_media_paths');
 $assert(str_contains($submission, 'ClassArchiveDerivativeWarmupQueue::enqueueBestEffort('), 'submission_approval_warmup_handoff_missing');
 $assert(str_contains($privateImport, 'ClassArchiveDerivativeWarmupQueue::enqueueBestEffort('), 'controlled_import_warmup_handoff_missing');
+$assert(str_contains($privateImport, 'ReadProjectionBuilder::rebuild();'), 'controlled_import_must_publish_full_catalog_after_native_batch');
 $assert(str_contains($submission, 'ClassArchiveDerivativeCacheWarmer::warmBestEffort('), 'submission_write_side_prewarm_missing');
 $assert(str_contains($privateImport, 'ClassArchiveDerivativeCacheWarmer::warmBestEffort('), 'controlled_import_write_side_prewarm_missing');
 $assert(strpos($submission, 'ClassArchiveDerivativeCacheWarmer::warmBestEffort(') > strpos($submission, '$this->repository->transaction('), 'submission_prewarm_inside_business_transaction');
@@ -100,17 +101,16 @@ $approvalStart = strpos($adminController, "case 'approve_submission':");
 $approvalEnd = strpos($adminController, "case 'reject_submission':");
 $assert($approvalStart !== false && $approvalEnd !== false && $approvalStart < $approvalEnd, 'submission_approval_controller_boundary_missing');
 $approvalController = substr($adminController, $approvalStart, $approvalEnd - $approvalStart);
-$assert(str_contains($approvalController, 'ReadProjectionBuilder::rebuildChangedPhotos(')
-    && str_contains($approvalController, 'ProjectionMutationBoundary::allAggregateKinds()')
-    && !str_contains($approvalController, 'ReadProjectionBuilder::rebuild();'), 'submission_approval_must_use_bounded_projection_rebuild');
+$assert(str_contains($approvalController, 'ReadProjectionBuilder::rebuild();')
+    && !str_contains($approvalController, 'ReadProjectionBuilder::rebuildChangedPhotos('), 'submission_approval_new_native_image_must_publish_full_catalog');
 $assert(str_contains($immediate, 'private const MAX_RUNTIME_SECONDS = 30.0'), 'immediate_prewarm_not_bounded');
 $assert(str_contains($immediate, '$mode !== 0660 && (!@chmod('), 'persistent_lock_mode_not_safely_reused');
 $assert(substr_count($immediate, '$mode !== 0660 && (!@chmod(') >= 2, 'persistent_derivative_mode_not_safely_reused');
 $assert(str_contains($immediate, 'pm.`class_photo_id`=UNHEX(REPLACE(?,') && str_contains($immediate, 'pm.`piwigo_image_id`=?'), 'immediate_prewarm_not_bound_to_exact_mapping');
 $assert(str_contains($immediate, 'ClassArchiveDerivativeWarmupQueue::complete('), 'immediate_success_does_not_complete_marker');
-$assert(str_contains($immediate, 'ReadProjectionBuilder::rebuildChangedPhotos(') && !str_contains($immediate, 'ReadProjectionBuilder::rebuild();'), 'single_photo_prewarm_must_not_rebuild_full_projection');
+$assert(str_contains($immediate, 'ReadProjectionBuilder::rebuild();') && !str_contains($immediate, 'ReadProjectionBuilder::rebuildChangedPhotos('), 'single_photo_native_metadata_update_must_publish_full_catalog_generation');
 $assert(str_contains($immediate, 'ProjectionMutationBoundary::invalidatePhotos(') && str_contains($immediate, 'ProjectionMutationBoundary::allAggregateKinds()'), 'single_photo_metadata_invalidation_dependencies_missing');
-$assert(strpos($immediate, 'ReadProjectionBuilder::rebuildChangedPhotos(') < strpos($immediate, 'ClassArchiveDerivativeWarmupQueue::complete('), 'marker_consumed_before_projection_recovery');
+$assert(strpos($immediate, 'ReadProjectionBuilder::rebuild();') < strpos($immediate, 'ClassArchiveDerivativeWarmupQueue::complete('), 'marker_consumed_before_projection_recovery');
 $assert(str_contains($immediate, '/plugins/ClassArchivePolicy/derivative-generator.php') && str_contains($immediate, 'new pwg_image($source)'), 'immediate_prewarm_not_reusing_piwigo_pipeline');
 $assert(!str_contains($immediate, "\$_SERVER['REQUEST_METHOD']") && !str_contains($immediate, 'media-gateway.php'), 'member_request_dispatch_leaked_into_write_side_warmer');
 $assert(str_contains($immediate, "get_class(\$error)") && !str_contains($immediate, "error_log(\$classPhotoId") && !str_contains($immediate, "error_log(\$relative"), 'immediate_prewarm_log_may_leak_identity_or_path');

@@ -44,12 +44,23 @@ let productStateStatus = 200;
 let productStateDelayMs = 0;
 let timelineStatus = 200;
 let timelineDelayMs = 0;
+let assetScopeOverride = null;
 
-const timeline = () => actor === 'family' ? { total: 0, groups: [] } : {
+const timeline = () => actor === 'family' ? {
+  total: 0, count: 0, limit: 120, hasMore: false, nextCursor: null, cacheScope: scopes.family, groups: [],
+} : {
   total: 1,
+  count: 1,
+  limit: 120,
+  hasMore: false,
+  nextCursor: null,
+  cacheScope: scopes.classmate,
   groups: [{
     label: '毕业后动态',
+    key: 'year:2025',
+    kind: 'YEAR',
     total: 1,
+    count: 1,
     items: [{
       id: livingPhotoId,
       title: '浏览权限边界测试照片',
@@ -92,7 +103,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, locale: 'zh-CN' });
   await context.route('**/*', async (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname === '/photos') {
+    if (url.pathname === '/photos' || /^\/photos\/[0-9a-f-]{36}$/i.test(url.pathname)) {
       await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: versioned(htmlSource) });
       return;
     }
@@ -139,6 +150,18 @@ try {
     }
     if (url.pathname === '/api/class-archive/spotlight') {
       await json(route, 200, { active: false, item: null });
+      return;
+    }
+    if (url.pathname === `/api/assets/${livingPhotoId}`) {
+      await json(route, 200, {
+        id: livingPhotoId,
+        originalFileName: '浏览权限边界测试照片',
+        classArchiveDate: { label: '2025年', precision: '仅确定到年份', source: '管理员确认' },
+        classArchiveMediaRevision: photoRevision,
+        classArchiveWidth: 1200,
+        classArchiveHeight: 800,
+        classArchiveCacheScope: assetScopeOverride ?? scopes[actor],
+      });
       return;
     }
     if (/^\/api\/assets\/[0-9a-f-]{36}\/thumbnail$/i.test(url.pathname)) {
@@ -222,6 +245,17 @@ try {
   await photoPage.locator('.error-state').waitFor({ state: 'visible', timeout: 10_000 });
   check(await photoPage.locator('.photo-card').count() === 0, 'projection_failure_retained_stale_photo');
   check(await photoPage.locator('.error-state').count() === 1, 'projection_failure_safe_state_missing');
+
+  timelineStatus = 200;
+  timelineDelayMs = 0;
+  assetScopeOverride = null;
+  await photoPage.goto(`http://127.0.0.1:8091/photos/${livingPhotoId}`, { waitUntil: 'domcontentloaded' });
+  await photoPage.locator('.viewer-image').waitFor({ state: 'visible' });
+  check(await photoPage.locator('.viewer-image').count() === 1, 'scope_bound_viewer_missing');
+  assetScopeOverride = scopes.family;
+  await photoPage.reload({ waitUntil: 'domcontentloaded' });
+  await photoPage.locator('.error-state').waitFor({ state: 'visible' });
+  check(await photoPage.locator('.viewer-image').count() === 0, 'mixed_scope_viewer_was_rendered');
 
   await context.close();
   process.stdout.write(`PHOTO_CACHE_BROWSER_LIFECYCLE=PASS assertions=${assertions} browser=chromium lifecycle=controlled-visibility data=SYNTHETIC_ONLY\n`);

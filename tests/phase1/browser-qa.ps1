@@ -177,6 +177,20 @@ function Assert-PhotoBaseline {
     }
 }
 
+function Invoke-ReadProjectionRebuild {
+    $args = @(
+        '-d', 'Ubuntu', '--cd', $projectRoot, '--',
+        'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml',
+        'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all'
+    )
+    $result = Invoke-QuietWsl -WslArguments $args
+    $lines = @($result.Output | ForEach-Object { [string]$_ })
+    if ($result.ExitCode -ne 0 -or -not ($lines | Where-Object { $_ -match '^READ_PROJECTION_REBUILD=PASS\b' })) {
+        throw 'Browser QA cleanup could not restore the persistent photo read projections.'
+    }
+}
+
 if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) { throw 'Missing ignored .env.piwigo.' }
 if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'Bundled Node runtime is unavailable.' }
 if (-not (Test-Path -LiteralPath $chrome -PathType Leaf)) { throw 'Local Google Chrome is unavailable for browser acceptance.' }
@@ -334,6 +348,14 @@ try {
         }
         try { Assert-PhotoBaseline }
         catch { $script:cleanupErrors.Add('photo baseline') }
+        if ($script:cleanupErrors.Count -eq 0) {
+            # Browser QA creates and then removes native Piwigo image rows.
+            # Native BEFORE triggers correctly leave the presentation cache
+            # stale; publish a fresh canonical 72-photo snapshot only after
+            # cleanup has proved that the business baseline is restored.
+            try { Invoke-ReadProjectionRebuild }
+            catch { $script:cleanupErrors.Add('photo read projections') }
+        }
     }
     if (Test-Path -LiteralPath $profileDir) {
         try { Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction Stop }

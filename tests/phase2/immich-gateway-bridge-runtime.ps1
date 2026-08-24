@@ -657,6 +657,16 @@ function Invoke-PiwigoFixture([string]$Action, [string]$Run, $RequestPayload = $
     try { return ($text | ConvertFrom-Json -ErrorAction Stop) } catch { throw 'fixture_response_invalid' }
 }
 
+function Invoke-PiwigoReadProjectionRebuild {
+    $text = Invoke-PiwigoCompose @(
+        'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all'
+    )
+    if ($text -notmatch '(?m)^READ_PROJECTION_REBUILD=PASS\b') {
+        throw 'piwigo_projection_cleanup_rebuild_failed'
+    }
+}
+
 function Provision-PiwigoFixtureAccounts([string]$Password) {
     if ($Password -notmatch '^[A-Za-z0-9_-]{24,190}$' -or $null -ne $script:piwigoFixturePasswordPath) {
         throw 'fixture_password_arguments_invalid'
@@ -1273,6 +1283,12 @@ try {
                 $script:stage = 'cleanup_piwigo_fixture'
                 $cleanup = Invoke-PiwigoFixture 'cleanup' $run
                 Assert-Exact ([bool]$cleanup.ok) 'piwigo_fixture_cleanup_invalid'
+                # Binding and cleanup deliberately change canonical mapping
+                # source generations. Once the bridge is disabled and its
+                # temporary mappings are gone, publish a baseline projection
+                # again so the next reader does not inherit an AI-available
+                # payload from the disposable run.
+                Invoke-PiwigoReadProjectionRebuild
                 $cleanupComplete = $true
                 break
             } catch {

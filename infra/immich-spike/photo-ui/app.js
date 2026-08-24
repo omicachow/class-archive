@@ -1,6 +1,7 @@
 import { applyDocumentTranslations, t } from './i18n.js?v=__PHOTO_UI_ASSET_REV__';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TIMELINE_CURSOR = /^[A-Za-z0-9_-]{48}$/;
 const app = document.getElementById('app');
 const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my']);
 const MUTATION_PATHS = new Set([
@@ -16,7 +17,7 @@ const MUTATION_PATHS = new Set([
   '/api/class-archive/spotlight/create',
   '/api/class-archive/spotlight/cancel',
 ]);
-const PRESENTATION_CACHE_PREFIX = 'class-archive-photo-ui-v2:';
+const PRESENTATION_CACHE_PREFIX = 'class-archive-photo-ui-v3:';
 const PRESENTATION_CACHE_SCOPE_KEY = `${PRESENTATION_CACHE_PREFIX}active-scope`;
 const PRESENTATION_CACHE_PATHS = new Set([
   '/api/class-archive/timeline',
@@ -36,6 +37,7 @@ const runtime = {
   cacheScope: null,
   sessionValidationGeneration: 0,
   presentationFailureActive: false,
+  timelinePageObserver: null,
 };
 
 const navigation = Object.freeze([
@@ -165,6 +167,8 @@ function failClosedPresentation(error) {
   clearPresentationCache();
   concealPrivatePresentation();
   runtime.presentationFailureActive = true;
+  runtime.timelinePageObserver?.disconnect();
+  runtime.timelinePageObserver = null;
   if (error?.status === 401 || error?.status === 403) return;
   if (runtime.activeSelection) runtime.activeSelection.destroy();
   app.replaceChildren(errorState());
@@ -275,7 +279,7 @@ function clearPresentationCache() {
   try {
     for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
       const key = sessionStorage.key(index);
-      if (key?.startsWith(PRESENTATION_CACHE_PREFIX)) sessionStorage.removeItem(key);
+      if (key?.startsWith('class-archive-photo-ui-v')) sessionStorage.removeItem(key);
     }
   } catch {
     // A disabled/full browser storage area is a performance miss, never an
@@ -542,12 +546,24 @@ function normalizeArchivePhoto(photo) {
 }
 
 function normalizeTimeline(payload) {
-  if (!payload || !Number.isInteger(payload.total) || payload.total < 0 || !Array.isArray(payload.groups)) {
+  if (!payload || !Number.isInteger(payload.total) || payload.total < 0
+    || !Number.isInteger(payload.count) || payload.count < 0 || payload.count > payload.total
+    || !Number.isInteger(payload.limit) || payload.limit < 1 || payload.limit > 240
+    || payload.count > payload.limit || typeof payload.hasMore !== 'boolean'
+    || (payload.hasMore && (typeof payload.nextCursor !== 'string' || !TIMELINE_CURSOR.test(payload.nextCursor)))
+    || (!payload.hasMore && payload.nextCursor !== null)
+    || typeof payload.cacheScope !== 'string' || !/^[a-f0-9]{32}$/.test(payload.cacheScope)
+    || payload.cacheScope !== runtime.cacheScope || !Array.isArray(payload.groups)
+    || (payload.total === 0 && (payload.count !== 0 || payload.groups.length !== 0 || payload.hasMore))
+    || (payload.total > 0 && payload.count === 0)) {
     throw new Error('safe_timeline_invalid');
   }
   const ids = new Set();
   const groups = payload.groups.map((group) => {
-    if (!group || !Array.isArray(group.items) || !Number.isInteger(group.total) || group.total !== group.items.length) {
+    if (!group || typeof group.key !== 'string' || typeof group.kind !== 'string'
+      || !Array.isArray(group.items) || !Number.isInteger(group.total) || group.total < 1
+      || !Number.isInteger(group.count) || group.count < 1 || group.count > group.total
+      || group.count !== group.items.length) {
       throw new Error('safe_timeline_group_invalid');
     }
     const items = group.items.map(normalizeArchivePhoto);
@@ -556,13 +572,82 @@ function normalizeTimeline(payload) {
       ids.add(photo.id);
     }
     return {
+      key: group.key,
+      kind: group.kind,
       label: businessLabel(group.label, 'common.unknownDate'),
       total: group.total,
+      count: group.count,
       items,
     };
   });
-  if (ids.size !== payload.total) throw new Error('safe_timeline_total_invalid');
-  return { total: payload.total, groups };
+  if (ids.size !== payload.count) throw new Error('safe_timeline_total_invalid');
+  return {
+    total: payload.total,
+    count: payload.count,
+    limit: payload.limit,
+    groups,
+    hasMore: payload.hasMore,
+    nextCursor: payload.nextCursor,
+    cacheScope: payload.cacheScope,
+  };
+}
+
+function mergeTimelinePages(current, next) {
+  if (!current || !next || current.total !== next.total || current.limit !== next.limit
+    || current.cacheScope !== next.cacheScope || current.cacheScope !== runtime.cacheScope
+    || current.hasMore !== true || current.nextCursor === null) {
+    throw new Error('safe_timeline_page_state_invalid');
+  }
+  const groups = current.groups.map((group) => ({ ...group, items: [...group.items] }));
+  const byKey = new Map(groups.map((group) => [group.key, group]));
+  const ids = new Set(groups.flatMap((group) => group.items.map((photo) => photo.id)));
+  for (const incoming of next.groups) {
+    let target = byKey.get(incoming.key);
+    if (target === undefined) {
+      target = { ...incoming, items: [] };
+      groups.push(target);
+      byKey.set(incoming.key, target);
+    } else if (target.kind !== incoming.kind || target.label !== incoming.label || target.total !== incoming.total) {
+      throw new Error('safe_timeline_page_group_drift');
+    }
+    for (const photo of incoming.items) {
+      if (ids.has(photo.id)) throw new Error('safe_timeline_page_duplicate');
+      ids.add(photo.id);
+      target.items.push(photo);
+    }
+    target.count = target.items.length;
+    if (target.count > target.total) throw new Error('safe_timeline_page_group_overflow');
+  }
+  const count = ids.size;
+  if (count !== current.count + next.count || count > current.total
+    || (!next.hasMore && count !== current.total) || (next.hasMore && count >= current.total)) {
+    throw new Error('safe_timeline_page_total_invalid');
+  }
+  return {
+    total: current.total,
+    count,
+    limit: current.limit,
+    groups,
+    hasMore: next.hasMore,
+    nextCursor: next.nextCursor,
+    cacheScope: next.cacheScope,
+  };
+}
+
+function archivePhotoFromAsset(asset, id, expectedScope) {
+  if (!asset || typeof asset.id !== 'string' || asset.id.toLowerCase() !== id
+    || !asset.classArchiveDate || typeof asset.classArchiveDate !== 'object'
+    || typeof expectedScope !== 'string' || asset.classArchiveCacheScope !== expectedScope) {
+    throw new Error('safe_viewer_point_projection_invalid');
+  }
+  return normalizeArchivePhoto({
+    id,
+    title: asset.originalFileName,
+    archive_date: asset.classArchiveDate,
+    media_revision: asset.classArchiveMediaRevision,
+    width: asset.classArchiveWidth,
+    height: asset.classArchiveHeight,
+  });
 }
 
 function mediaUrl(id, size, revision = '') {
@@ -1100,10 +1185,11 @@ function spotlightHero(spotlight, state) {
   return hero;
 }
 
-function paintPhotos(timelinePayload, state, spotlightPayload) {
+function paintPhotos(timeline, state, spotlightPayload, loadMore = null) {
   assertPresentationActive();
   if (runtime.activeSelection) runtime.activeSelection.destroy();
-  const timeline = normalizeTimeline(timelinePayload);
+  runtime.timelinePageObserver?.disconnect();
+  runtime.timelinePageObserver = null;
   const spotlight = normalizeSpotlight(spotlightPayload);
   const page = element('div');
   append(page, pageHeader('photos.title', 'photos.lead', t('common.photosCount', { count: timeline.total })));
@@ -1134,6 +1220,35 @@ function paintPhotos(timelinePayload, state, spotlightPayload) {
     }
     if (controller) page.append(element('p', 'selection-hint', t('photos.selectionHint')));
   }
+  if (timeline.hasMore) {
+    if (typeof loadMore !== 'function' || !TIMELINE_CURSOR.test(timeline.nextCursor)) {
+      throw new Error('safe_timeline_loader_invalid');
+    }
+    const controls = element('div', 'timeline-page-controls');
+    const status = element('p', 'timeline-page-status', t('photos.loadedCount', { count: timeline.count, total: timeline.total }));
+    const button = element('button', 'secondary-button', t('photos.loadMore'));
+    button.type = 'button';
+    button.addEventListener('click', async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.textContent = t('photos.loadingMore');
+      try {
+        await loadMore(timeline.nextCursor);
+      } catch (error) {
+        failClosedPresentation(error);
+      }
+    });
+    append(controls, status, button);
+    page.append(controls);
+    if (typeof IntersectionObserver === 'function') {
+      runtime.timelinePageObserver = new IntersectionObserver((entries, observer) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        button.click();
+      }, { rootMargin: '900px 0px', threshold: 0.01 });
+      runtime.timelinePageObserver.observe(controls);
+    }
+  }
   shell('photos', page);
 }
 
@@ -1147,7 +1262,32 @@ async function renderPhotos() {
       presentationJson('/api/class-archive/spotlight'),
     ]);
     assertPresentationActive();
-    paintPhotos(timelineRead.value, state, spotlightRead.value);
+    let timeline = normalizeTimeline(timelineRead.value);
+    let spotlight = spotlightRead.value;
+    let timelineGeneration = 0;
+    let pageRequestActive = false;
+    const paint = () => paintPhotos(timeline, state, spotlight, timeline.hasMore ? async (requestedCursor) => {
+      if (pageRequestActive || requestedCursor !== timeline.nextCursor) {
+        throw new Error('safe_timeline_page_request_invalid');
+      }
+      pageRequestActive = true;
+      const generation = timelineGeneration;
+      const verifiedScope = runtime.cacheScope;
+      try {
+        const path = `/api/class-archive/timeline?cursor=${encodeURIComponent(requestedCursor)}&limit=${timeline.limit}`;
+        const next = normalizeTimeline(await apiJson(path, { cache: 'no-cache' }));
+        if (generation !== timelineGeneration) return;
+        if (runtime.presentationFailureActive || runtime.cacheScope !== verifiedScope
+          || document.visibilityState !== 'visible') {
+          throw new Error('safe_timeline_page_session_changed');
+        }
+        timeline = mergeTimelinePages(timeline, next);
+        paint();
+      } finally {
+        pageRequestActive = false;
+      }
+    } : null);
+    paint();
     if (timelineRead.refresh || spotlightRead.refresh) {
       Promise.all([
         timelineRead.refresh ?? Promise.resolve(timelineRead.value),
@@ -1157,7 +1297,10 @@ async function renderPhotos() {
         if (location.pathname !== '/photos') return;
         if (JSON.stringify(freshTimeline) === JSON.stringify(timelineRead.value)
           && JSON.stringify(freshSpotlight) === JSON.stringify(spotlightRead.value)) return;
-        paintPhotos(freshTimeline, state, freshSpotlight);
+        timelineGeneration += 1;
+        timeline = normalizeTimeline(freshTimeline);
+        spotlight = freshSpotlight;
+        paint();
       }).catch((error) => failClosedPresentation(error));
     }
   } catch {
@@ -1189,15 +1332,32 @@ function infoRow(labelKey, value) {
 async function renderViewer(id) {
   app.replaceChildren(loadingState());
   try {
+    const state = await productState();
+    const verifiedScope = state.cacheScope;
+    if (state.role === 'UNKNOWN' || !verifiedScope) throw new Error('safe_viewer_scope_unavailable');
     const [asset, timelineRead] = await Promise.all([
       apiJson(`/api/assets/${id}`),
       presentationJson('/api/class-archive/timeline'),
     ]);
     assertPresentationActive();
+    if (runtime.cacheScope !== verifiedScope || asset?.classArchiveCacheScope !== verifiedScope) {
+      throw new Error('safe_viewer_scope_changed');
+    }
     const timeline = normalizeTimeline(timelineRead.value);
-    const photos = timeline.groups.flatMap((group) => group.items);
-    const index = photos.findIndex((photo) => photo.id === id);
-    if (index < 0) throw new Error('safe_viewer_membership_invalid');
+    let photos = timeline.groups.flatMap((group) => group.items);
+    let index = photos.findIndex((photo) => photo.id === id);
+    if (index < 0) {
+      // A deep link may target a later timeline page. The point endpoint has
+      // already applied the same current-principal policy, so use its bounded
+      // presentation metadata without scanning every earlier page.
+      photos = [archivePhotoFromAsset(asset, id, verifiedScope)];
+      index = 0;
+    }
+    const confirmedState = normalizeProductState(await apiJson('/api/class-archive/product-state', { cache: 'no-store' }));
+    if (confirmedState.cacheScope !== verifiedScope || confirmedState.role !== state.role
+      || runtime.cacheScope !== verifiedScope) {
+      throw new Error('safe_viewer_scope_changed');
+    }
     const photo = photos[index];
     const title = businessLabel(asset?.originalFileName, 'accessibility.photo');
 

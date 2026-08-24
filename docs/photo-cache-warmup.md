@@ -49,11 +49,13 @@ delivery path.
   ambiguous mappings and generation failures retain the active marker and fail
   closed.
 - If Piwigo is missing source dimensions/rotation, the write-side warmer uses
-  the native guarded update and refreshes only that canonical photo plus its
-  affected aggregates. The all-scope maintenance command likewise collects the
-  exact changed canonical UUIDs and publishes a bounded refresh; it does not
-  substitute a whole-library rebuild. A single approval/import
-  never starts a whole-library projection rebuild.
+  the native guarded update. Native image-table writes advance the protected
+  Piwigo source epoch, so the old catalog generation can no longer be safely
+  point-refreshed. Immediate warmup publishes one complete generation; the
+  all-scope maintenance command batches every normalization and publishes only
+  once after the batch. Family approval and the private QA importer use the
+  same explicit write-path rule for newly created native image/category rows.
+  A member GET never performs that rebuild.
 - Existing fresh files are reused. A second and third run therefore generate
   zero files. Source and generated files must be regular, single-link inodes
   owned by the trusted media-root owner or the active service account and use
@@ -131,9 +133,10 @@ derivative inventory are immediately readable:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\read-projection-runtime.ps1 `
-  -CredentialFile .\.codex-work\...\credentials.json `
   -ConfirmSyntheticMutation -ConfirmServiceRestart
 ```
 
-The credential file must be owner-only, ignored and below `.codex-work`; its
-contents are never copied to the evidence report or command output.
+The runner mints and revokes an exact short-lived SYSTEM_ADMIN session through
+the server-side fixture. It rejects password credential files, never changes a
+human administrator password, and writes only aggregate timing/state evidence
+below the ignored `.codex-work` directory.

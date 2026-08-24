@@ -247,6 +247,16 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase0\media-guard-state-transitions.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # The tiny-preview and state-transition fixtures deliberately mutate
+        # native Piwigo rows, which advances the durable source epoch and makes
+        # presentation projections stale. Restore the canonical 72-photo read
+        # generation as part of successful fixture cleanup so MediaGuard
+        # attestation cannot leave the photo application unavailable.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php'
+        ))
         exit $LASTEXITCODE
     }
     'test-phase1' {
@@ -371,6 +381,16 @@ switch ($Action) {
         & wsl.exe @($composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/phase3/photo-product-ops-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/presentation-epoch-static.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/presentation-epoch-runtime.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & wsl.exe @($composeArguments + @(

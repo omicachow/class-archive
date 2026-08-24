@@ -206,10 +206,34 @@ async function login(context, role) {
 async function timelineContract(page, role) {
   const result = await page.evaluate(async () => {
     try {
-      const response = await fetch('/api/class-archive/timeline', { credentials: 'same-origin', cache: 'no-store' });
-      const payload = await response.json();
-      const ids = Array.isArray(payload?.groups) ? payload.groups.flatMap((group) => Array.isArray(group?.items) ? group.items.map((item) => item?.id) : []) : [];
-      return { status: response.status, total: payload?.total, ids, leak: /(?:piwigo_image|immich_asset|media_reference|identity_id|seat_id|account_id)/i.test(JSON.stringify(payload)) };
+      const ids = [];
+      const seen = new Set();
+      let cursor = null;
+      let total = null;
+      let cacheScope = null;
+      let leak = false;
+      do {
+        const query = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}&limit=120`;
+        const response = await fetch(`/api/class-archive/timeline${query}`, { credentials: 'same-origin', cache: 'no-store' });
+        const payload = await response.json();
+        if (response.status !== 200) return { status: response.status, total, ids: [], leak: true };
+        if (total === null) total = payload?.total;
+        if (cacheScope === null) cacheScope = payload?.cacheScope;
+        const pageIds = Array.isArray(payload?.groups)
+          ? payload.groups.flatMap((group) => Array.isArray(group?.items) ? group.items.map((item) => item?.id) : []) : [];
+        leak ||= /(?:piwigo_image|immich_asset|media_reference|identity_id|seat_id|account_id)/i.test(JSON.stringify(payload));
+        if (!Number.isInteger(payload?.count) || payload.count !== pageIds.length
+          || payload.total !== total || payload.cacheScope !== cacheScope
+          || pageIds.some((id) => typeof id !== 'string' || seen.has(id))) {
+          return { status: 503, total, ids: [], leak: true };
+        }
+        for (const id of pageIds) { seen.add(id); ids.push(id); }
+        cursor = payload?.hasMore === true ? payload?.nextCursor : null;
+        if (cursor !== null && (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{48}$/.test(cursor))) {
+          return { status: 503, total, ids: [], leak: true };
+        }
+      } while (cursor !== null);
+      return { status: 200, total, ids, leak };
     } catch { return { status: 0, total: null, ids: [], leak: true }; }
   });
   assert(result.status === 200 && Number.isInteger(result.total) && result.total >= 1 && result.ids.length === result.total, `${role}_timeline_contract`);

@@ -322,6 +322,13 @@ try {
             }
         }
     }
+    // add_uploaded_file() and the archive/mapping writes create native Piwigo
+    // rows and advance the protected source epoch. Publish exactly once after
+    // the batch; otherwise this isolated QA runtime retains a stale read model
+    // until unrelated maintenance happens to rebuild it.
+    if ($imported > 0) {
+        \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+    }
     invalidate_user_cache();
 } catch (Throwable $error) {
     privateQaFail('import_transaction_failed');

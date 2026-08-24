@@ -156,9 +156,10 @@ check(app.includes("mediaUrl(memory.coverPhotoId, 'large')") && css.includes('.m
 check(server.includes("'public, max-age=31536000, immutable'"), 'versioned app shell assets must use native immutable HTTP caching');
 check(server.includes("'private, no-cache, max-age=0, must-revalidate, no-transform'"), 'private media and metadata must revalidate rather than use public caching');
 check(server.includes("url.pathname === '/service-worker.js'") && server.includes("'Not found.'"), 'private media must not be retained by a service worker');
-check(server.includes('photoUiCacheScope(request, role, presentationEpoch, clientAddress)')
+check(server.includes('async function photoUiPrincipalContext(request, clientAddress)')
+  && server.includes('photoUiCacheScope(request, role, presentationEpoch, clientAddress)')
   && server.includes('.update(presentationEpoch)')
-  && server.includes('payload.role !== role'),
+  && server.includes("gatewayJson(request, '/api/product-state', clientAddress)"),
   'presentation cache scope must bind to a consistent fresh role and scoped projection epoch');
 check(server.includes("'/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app'"), 'login must return through Piwigo\'s canonical authenticated photo-first bridge');
 check(server.includes("fetchSite === 'same-site'") && server.includes("url.pathname === '/photos'") && server.includes("request.headers['sec-fetch-mode'] === 'navigate'") && server.includes("request.headers['sec-fetch-dest'] === 'document'"), 'cross-port login return must be limited to the exact top-level photos document');

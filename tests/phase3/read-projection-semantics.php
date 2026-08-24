@@ -127,9 +127,17 @@ try {
         new \ClassIdentity\Gateway\GatewayPhotoCandidate($heritageId, 'HERITAGE', 'ACTIVE', 'ACTIVE', '历史照片', '2023-10-18', ['班级档案'], '历史照片', 900001, 'DAY', 'ARCHIVE_CONFIRMED', null, [101]),
         new \ClassIdentity\Gateway\GatewayPhotoCandidate($livingId, 'LIVING', 'ACTIVE', 'ACTIVE', '毕业动态', null, ['后来'], '毕业动态', 900002, 'UNKNOWN', 'UNKNOWN', null, [102]),
     ];
+    $heritageProjection = $photos[0]->publicProjection();
+    $livingProjection = $photos[1]->publicProjection();
     $aggregatePayloads = [
         \ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL => [
-            \ClassIdentity\Gateway\ReadProjectionStore::TIMELINE => ['total' => 2, 'groups' => []],
+            \ClassIdentity\Gateway\ReadProjectionStore::TIMELINE => ['total' => 2, 'groups' => [[
+                'key' => 'month:2023-10', 'label' => '2023年10月', 'kind' => 'MONTH',
+                'total' => 1, 'items' => [$heritageProjection],
+            ], [
+                'key' => 'unknown', 'label' => '日期未知', 'kind' => 'UNKNOWN',
+                'total' => 1, 'items' => [$livingProjection],
+            ]]],
             \ClassIdentity\Gateway\ReadProjectionStore::ALBUMS => ['total' => 0, 'items' => []],
             \ClassIdentity\Gateway\ReadProjectionStore::PEOPLE => ['available' => true, 'total' => 1, 'items' => [[
                 'id' => $personId,
@@ -150,7 +158,10 @@ try {
             ]],
         ],
         \ClassIdentity\Gateway\ReadProjectionStore::SCOPE_HERITAGE => [
-            \ClassIdentity\Gateway\ReadProjectionStore::TIMELINE => ['total' => 1, 'groups' => []],
+            \ClassIdentity\Gateway\ReadProjectionStore::TIMELINE => ['total' => 1, 'groups' => [[
+                'key' => 'month:2023-10', 'label' => '2023年10月', 'kind' => 'MONTH',
+                'total' => 1, 'items' => [$heritageProjection],
+            ]]],
             \ClassIdentity\Gateway\ReadProjectionStore::ALBUMS => ['total' => 0, 'items' => []],
             \ClassIdentity\Gateway\ReadProjectionStore::PEOPLE => ['available' => true, 'total' => 1, 'items' => [[
                 'id' => $personId,

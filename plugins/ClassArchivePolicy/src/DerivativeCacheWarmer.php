@@ -108,13 +108,13 @@ final class ClassArchiveDerivativeCacheWarmer
                 if (!class_exists(\ClassIdentity\Gateway\ReadProjectionBuilder::class)) {
                     throw new RuntimeException('derivative_immediate_projection_rebuilder_unavailable');
                 }
-                // Metadata discovery is a native Piwigo write and therefore
-                // invalidates the projection. Rebuild before consuming the
-                // recovery marker so a failure remains safely retryable.
-                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
-                    [strtolower($classPhotoId)],
-                    \ClassIdentity\ProjectionMutationBoundary::allAggregateKinds(),
-                );
+                // Metadata discovery updates Piwigo's native image row. The
+                // native BEFORE trigger advances the source epoch, so the
+                // previously published catalog cannot be point-refreshed: its
+                // generation is deliberately bound to the old epoch. Publish
+                // one complete catalog generation on this write path before
+                // consuming the recovery marker. Member reads never rebuild.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
             }
             ClassArchiveDerivativeWarmupQueue::complete($classPhotoId, $imageId);
             return $result;

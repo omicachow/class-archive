@@ -572,34 +572,22 @@ final class ReadProjectionStore
             throw new \InvalidArgumentException('class_archive_read_aggregate_scope_invalid');
         }
 
-        $catalog = null;
-        $aggregateBindings = [];
+        $catalog = $this->activeCatalogState();
+        $aggregateBindings = $this->presentationAggregateBindings($catalog);
         foreach (self::AGGREGATE_KINDS as $kind) {
-            $binding = null;
-            $this->readAggregate($kind, $scope, $binding);
-            if (!is_array($binding)
-                || !is_array($binding['catalog'] ?? null)
-                || !is_array($binding['aggregate'] ?? null)
-            ) {
-                throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
-            }
-            if ($catalog === null) {
-                $catalog = $binding['catalog'];
-            } else {
-                $this->assertCatalogBindingsEqual($catalog, $binding['catalog']);
-            }
-            $aggregateBindings[$kind] = $binding['aggregate'];
-        }
-        if (!is_array($catalog)) {
-            throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
+            $this->invokeReadValidationHook('AGGREGATE:' . $kind);
+            $this->assertAggregateStateCurrent($kind, $aggregateBindings[$kind]);
+            $this->assertCatalogStateCurrent($catalog);
         }
 
-        // A kind may be invalidated after an earlier aggregate was decoded.
-        // Recheck the complete captured set immediately before issuing the
-        // cache revision so a stale/failed projection cannot authorize reuse.
-        $this->assertCatalogStateCurrent($catalog);
+        // A kind may be invalidated after an earlier checkpoint was validated.
+        // Re-read the complete metadata set immediately before issuing the
+        // cache revision so no stale/failed projection can authorize reuse.
+        $currentCatalog = $this->activeCatalogState();
+        $this->assertCatalogBindingsEqual($catalog, $currentCatalog);
+        $currentAggregateBindings = $this->presentationAggregateBindings($currentCatalog);
         foreach ($aggregateBindings as $kind => $binding) {
-            $this->assertAggregateStateCurrent($kind, $binding);
+            $this->assertAggregateBindingsEqual($binding, $currentAggregateBindings[$kind]);
         }
 
         $material = [
@@ -615,6 +603,62 @@ final class ReadProjectionStore
             'sha256',
             json_encode($material, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
         );
+    }
+
+    /**
+     * Capture and validate all aggregate epoch inputs without reading the
+     * role-scoped payload. Payload integrity remains enforced by aggregate()
+     * when a caller actually requests that payload.
+     *
+     * @param array<string,mixed> $catalog
+     * @return array<string,array<string,mixed>>
+     */
+    private function presentationAggregateBindings(array $catalog): array
+    {
+        $rows = $this->repository->fetchAll(
+            'SELECT `projection_key`,`state`,`source_revision`,`generation`,`item_count`,`payload_digest`,`dependency_revision` '
+                . 'FROM `' . $this->repository->table('read_projection') . '` WHERE `projection_key` IN '
+                . "('TIMELINE','ALBUMS','PEOPLE','MEMORIES','SPOTLIGHT') ORDER BY `projection_key`",
+        );
+        $byKind = [];
+        foreach ($rows as $row) {
+            $kind = is_string($row['projection_key'] ?? null) ? (string) $row['projection_key'] : '';
+            if (!in_array($kind, self::AGGREGATE_KINDS, true) || isset($byKind[$kind])) {
+                throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
+            }
+            $byKind[$kind] = $row;
+        }
+        if (count($byKind) !== count(self::AGGREGATE_KINDS)) {
+            throw new \RuntimeException('class_archive_read_aggregate_unavailable');
+        }
+
+        $bindings = [];
+        foreach (self::AGGREGATE_KINDS as $kind) {
+            $row = $byKind[$kind] ?? null;
+            if (!is_array($row)
+                || ($row['state'] ?? null) !== 'ACTIVE'
+                || !is_string($row['source_revision'] ?? null) || strlen((string) $row['source_revision']) !== 32
+                || !is_string($row['generation'] ?? null) || strlen((string) $row['generation']) !== 16
+                || !is_string($row['payload_digest'] ?? null) || strlen((string) $row['payload_digest']) !== 32
+                || !is_string($row['dependency_revision'] ?? null) || strlen((string) $row['dependency_revision']) !== 32
+                || (int) ($row['item_count'] ?? -1) < 0
+            ) {
+                throw new \RuntimeException('class_archive_read_aggregate_unavailable');
+            }
+            $expectedDependency = self::aggregateDependencyRevision($kind, [
+                'catalog_generation' => bin2hex((string) $catalog['generation']),
+                'catalog_revision' => bin2hex((string) $catalog['source_revision']),
+                'kind_epoch' => bin2hex((string) $row['generation']),
+            ]);
+            $sourceRevision = hash('sha256', $expectedDependency . (string) $row['payload_digest'], true);
+            if (!hash_equals($expectedDependency, (string) $row['dependency_revision'])
+                || !hash_equals($sourceRevision, (string) $row['source_revision'])
+            ) {
+                throw new \RuntimeException('class_archive_read_aggregate_digest_mismatch');
+            }
+            $bindings[$kind] = $row;
+        }
+        return $bindings;
     }
 
     /**
@@ -1154,6 +1198,12 @@ final class ReadProjectionStore
         if ($current === null || ($current['state'] ?? null) !== 'ACTIVE') {
             throw new \RuntimeException('class_archive_read_aggregate_unavailable');
         }
+        $this->assertAggregateBindingsEqual($bound, $current);
+    }
+
+    /** @param array<string,mixed> $bound @param array<string,mixed> $current */
+    private function assertAggregateBindingsEqual(array $bound, array $current): void
+    {
         foreach (['source_revision', 'generation', 'payload_digest', 'dependency_revision'] as $field) {
             if (!is_string($bound[$field] ?? null)
                 || !is_string($current[$field] ?? null)

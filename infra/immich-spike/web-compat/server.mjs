@@ -89,6 +89,16 @@ const photoUiGatewayMutationRoutes = new Map([
   ['/api/class-archive/spotlight/create', '/api/spotlight/create'],
   ['/api/class-archive/spotlight/cancel', '/api/spotlight/cancel'],
 ]);
+const timelineCursorPattern = /^[A-Za-z0-9_-]{48}$/;
+const timelinePageDefault = 120;
+const timelinePageMaximum = 240;
+// The legacy upstream timeline compatibility endpoints are not used by the
+// owned Photo UI, but remain bounded for the pinned Immich Web spike.  A
+// sequence of individually small Gateway pages must never become an unbounded
+// BFF accumulator or a multi-megabyte browser response.
+const timelineCompatibilityMaximumAssets = 20_000;
+const timelineCompatibilityMaximumPages = Math.ceil(timelineCompatibilityMaximumAssets / timelinePageMaximum);
+const timelineCompatibilityBucketMaximum = timelinePageMaximum;
 const coreRedirectTargets = new Map([
   // Piwigo permits only same-origin post-login targets.  The double-encoded
   // value survives its form round trip as the exact authenticated bridge
@@ -523,6 +533,10 @@ function respondJson(response, method, status, payload, options = {}) {
   let body = '{"error":"请求暂时无法安全确认"}';
   try {
     body = JSON.stringify(payload);
+    if (Buffer.byteLength(body, 'utf8') > 1024 * 1024) {
+      status = 503;
+      body = '{"error":"数据暂时无法安全确认"}';
+    }
   } catch {
     status = 503;
   }
@@ -1025,6 +1039,23 @@ async function principal(request, clientAddress) {
   return role;
 }
 
+async function photoUiPrincipalContext(request, clientAddress) {
+  const payload = await gatewayJson(request, '/api/product-state', clientAddress);
+  const role = payload?.role;
+  const presentationEpoch = payload?.presentationEpoch;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || typeof role !== 'string' || !knownRoles.has(role)
+    || typeof presentationEpoch !== 'string' || !/^[a-f0-9]{64}$/.test(presentationEpoch)) {
+    throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
+  }
+  return {
+    role,
+    presentationEpoch,
+    cacheScope: photoUiCacheScope(request, role, presentationEpoch, clientAddress),
+    payload,
+  };
+}
+
 function technicalUserId(role) {
   const bytes = createHash('sha256').update(`class-archive-immich-web-compat-v1\0${role}`).digest();
   // UUID-shaped, non-secret presentation compatibility id. It is intentionally
@@ -1080,6 +1111,16 @@ function exactQuery(url, allowed) {
   return seen;
 }
 
+function timelineGatewayPath(cursor = null, limit = timelinePageDefault) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > timelinePageMaximum
+    || (cursor !== null && (typeof cursor !== 'string' || !timelineCursorPattern.test(cursor)))) {
+    throw new TypeError('class_archive_web_compat_timeline_page_invalid');
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== null) query.set('cursor', cursor);
+  return `/api/timeline?${query}`;
+}
+
 function assertUuid(id) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
     throw new TypeError('class_archive_web_compat_photo_id_invalid');
@@ -1131,18 +1172,26 @@ function archiveDateProjection(photo) {
   };
 }
 
-function archiveTimelineProjection(payload) {
+function validateGatewayTimelinePage(payload) {
   const groups = Array.isArray(payload?.groups) ? payload.groups : null;
-  if (!groups || !Number.isInteger(payload?.total) || payload.total < 0) {
+  if (!groups || !Number.isInteger(payload?.total) || payload.total < 0
+    || !Number.isInteger(payload?.count) || payload.count < 0 || payload.count > payload.total
+    || !Number.isInteger(payload?.limit) || payload.limit < 1 || payload.limit > timelinePageMaximum
+    || payload.count > payload.limit || typeof payload?.has_more !== 'boolean'
+    || (payload.has_more && (typeof payload.next_cursor !== 'string' || !timelineCursorPattern.test(payload.next_cursor)))
+    || (!payload.has_more && payload.next_cursor !== null)
+    || (payload.total === 0 && (payload.count !== 0 || groups.length !== 0 || payload.has_more))
+    || (payload.total > 0 && payload.count === 0)) {
     throw new GatewayResponseError(503);
   }
   const keys = new Set();
-  const photoIds = new Set();
-  let total = 0;
-  const output = groups.map((group) => {
+  let count = 0;
+  for (const group of groups) {
     if (!group || typeof group !== 'object' || typeof group.key !== 'string' || typeof group.label !== 'string'
       || group.label.length < 1 || group.label.length > 190 || !Number.isInteger(group.total) || group.total < 1
-      || !['MONTH', 'YEAR', 'EVENT', 'UNKNOWN'].includes(group.kind) || !Array.isArray(group.items) || keys.has(group.key)) {
+      || !Number.isInteger(group.count) || group.count < 1 || group.count > group.total
+      || !['MONTH', 'YEAR', 'EVENT', 'UNKNOWN'].includes(group.kind) || !Array.isArray(group.items)
+      || group.items.length !== group.count || keys.has(group.key)) {
       throw new GatewayResponseError(503);
     }
     const keyMatchesKind = (group.kind === 'MONTH' && /^month:\d{4}-\d{2}$/.test(group.key))
@@ -1153,6 +1202,33 @@ function archiveTimelineProjection(payload) {
       throw new GatewayResponseError(503);
     }
     keys.add(group.key);
+    count += group.count;
+  }
+  if (count !== payload.count) throw new GatewayResponseError(503);
+  return {
+    total: payload.total,
+    count: payload.count,
+    limit: payload.limit,
+    groups,
+    hasMore: payload.has_more,
+    nextCursor: payload.next_cursor,
+    presentationEpoch: typeof payload.presentation_epoch === 'string'
+      && /^[a-f0-9]{64}$/.test(payload.presentation_epoch) ? payload.presentation_epoch : null,
+  };
+}
+
+function archiveTimelineProjection(payload, cacheScope = null, expectedPresentationEpoch = null) {
+  const page = validateGatewayTimelinePage(payload);
+  if (cacheScope !== null && (typeof cacheScope !== 'string' || !/^[a-f0-9]{32}$/.test(cacheScope))) {
+    throw new GatewayResponseError(503);
+  }
+  if (expectedPresentationEpoch !== null
+    && (page.presentationEpoch === null || page.presentationEpoch !== expectedPresentationEpoch)) {
+    throw new GatewayResponseError(503, 'timeline_presentation_scope_mismatch');
+  }
+  const photoIds = new Set();
+  let count = 0;
+  const output = page.groups.map((group) => {
     const items = group.items.map((photo) => {
       const id = assertUuid(photo?.id);
       if (photoIds.has(id)) {
@@ -1167,16 +1243,24 @@ function archiveTimelineProjection(payload) {
       if ((width === null) !== (height === null)) throw new GatewayResponseError(503);
       return { id, title, archive_date: archiveDateProjection(photo), media_revision: mediaRevision, width, height };
     });
-    if (items.length !== group.total) {
+    if (items.length !== group.count) {
       throw new GatewayResponseError(503);
     }
-    total += items.length;
-    return { key: group.key, label: group.label, kind: group.kind, total: group.total, items };
+    count += items.length;
+    return { key: group.key, label: group.label, kind: group.kind, total: group.total, count: group.count, items };
   });
-  if (total !== payload.total) {
+  if (count !== page.count) {
     throw new GatewayResponseError(503);
   }
-  return { total, groups: output };
+  return {
+    total: page.total,
+    count,
+    limit: page.limit,
+    groups: output,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    cacheScope,
+  };
 }
 
 function archiveMemoryProjection(payload) {
@@ -1254,11 +1338,16 @@ function compatibleAssetOwner(role) {
   };
 }
 
-function compatibleAsset(photo, role) {
+function compatibleAsset(photo, role, cacheScope = null) {
   const id = assertUuid(photo?.id);
   const date = photoDate(photo);
   const owner = compatibleAssetOwner(role);
   const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
+  const mediaRevision = typeof photo?.media_revision === 'string' && /^[a-f0-9]{32}$/.test(photo.media_revision)
+    ? photo.media_revision : null;
+  const width = Number.isInteger(photo?.width) && photo.width > 0 && photo.width <= 200000 ? photo.width : null;
+  const height = Number.isInteger(photo?.height) && photo.height > 0 && photo.height <= 200000 ? photo.height : null;
+  if ((width === null) !== (height === null)) throw new GatewayResponseError(503);
   return {
     id,
     ownerId: owner.id,
@@ -1318,6 +1407,14 @@ function compatibleAsset(photo, role) {
     hasMetadata: true,
     duplicateId: null,
     resized: true,
+    // Owned Photo UI point projection. This contains presentation metadata
+    // only, so a deep-linked photo does not require downloading every prior
+    // timeline page. The UUID media URL still re-enters MediaGuard.
+    classArchiveDate: archiveDateProjection(photo),
+    classArchiveMediaRevision: mediaRevision,
+    classArchiveWidth: width,
+    classArchiveHeight: height,
+    classArchiveCacheScope: typeof cacheScope === 'string' && /^[a-f0-9]{32}$/.test(cacheScope) ? cacheScope : null,
     checksum: null,
     width: 1600,
     height: 1067,
@@ -1362,7 +1459,7 @@ function parseMonth(value) {
   return match[1];
 }
 
-async function policyTimelinePhotos(request, clientAddress, personId = null) {
+async function policyTimelinePhotos(request, clientAddress, personId = null, expectedPresentationEpoch = null) {
   if (personId !== null) {
     // A Person route must not ask Immich for its full cluster and subtract
     // hidden assets afterwards. The canonical Gateway has already applied
@@ -1371,6 +1468,9 @@ async function policyTimelinePhotos(request, clientAddress, personId = null) {
     const items = Array.isArray(person?.items) ? person.items : null;
     if (items === null) {
       throw new GatewayResponseError(503);
+    }
+    if (items.length > timelineCompatibilityMaximumAssets) {
+      throw new GatewayResponseError(503, 'timeline_compatibility_budget');
     }
     const ids = new Set();
     return items.map((photo) => {
@@ -1383,26 +1483,48 @@ async function policyTimelinePhotos(request, clientAddress, personId = null) {
     });
   }
 
-  const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
-  const groups = Array.isArray(timeline?.groups) ? timeline.groups : null;
-  if (groups === null) {
-    throw new GatewayResponseError(503);
-  }
   const ids = new Set();
   const photos = [];
-  for (const group of groups) {
-    if (!Array.isArray(group?.items)) {
-      throw new GatewayResponseError(503);
+  const cursors = new Set();
+  let cursor = null;
+  let expectedTotal = null;
+  let pageCount = 0;
+  do {
+    pageCount += 1;
+    if (pageCount > timelineCompatibilityMaximumPages) {
+      throw new GatewayResponseError(503, 'timeline_compatibility_budget');
     }
-    for (const photo of group.items) {
-      const id = assertUuid(photo?.id);
-      if (ids.has(id)) {
-        throw new GatewayResponseError(503);
+    const page = validateGatewayTimelinePage(await gatewayJson(
+      request,
+      timelineGatewayPath(cursor, timelinePageMaximum),
+      clientAddress,
+    ));
+    if (expectedPresentationEpoch !== null && page.presentationEpoch !== expectedPresentationEpoch) {
+      throw new GatewayResponseError(503, 'timeline_presentation_scope_mismatch');
+    }
+    if (expectedTotal === null) {
+      expectedTotal = page.total;
+      if (expectedTotal > timelineCompatibilityMaximumAssets) {
+        throw new GatewayResponseError(503, 'timeline_compatibility_budget');
       }
-      ids.add(id);
-      photos.push(photo);
     }
-  }
+    if (page.total !== expectedTotal) throw new GatewayResponseError(503);
+    for (const group of page.groups) {
+      for (const photo of group.items) {
+        const id = assertUuid(photo?.id);
+        if (ids.has(id)) {
+          throw new GatewayResponseError(503);
+        }
+        ids.add(id);
+        photos.push(photo);
+      }
+    }
+    if (!page.hasMore) break;
+    if (cursors.has(page.nextCursor)) throw new GatewayResponseError(503);
+    cursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  } while (true);
+  if (expectedTotal === null || photos.length !== expectedTotal) throw new GatewayResponseError(503);
   return photos;
 }
 
@@ -1682,9 +1804,9 @@ async function handleApi(request, response, url, clientAddress) {
     respondJson(response, request.method, 400, { error: '请求格式无效' });
     return;
   }
-  let role;
+  let principalState;
   try {
-    role = await principal(request, clientAddress);
+    principalState = await photoUiPrincipalContext(request, clientAddress);
   } catch (error) {
     emitGatewayDiagnostic('principal', error);
     clearCompatibilityCookie(response);
@@ -1692,30 +1814,14 @@ async function handleApi(request, response, url, clientAddress) {
     respondJson(response, request.method, status, { error: status === 503 ? '数据暂时无法安全确认' : '需要班级相册登录' });
     return;
   }
+  const role = principalState.role;
 
   try {
     const readPath = photoUiGatewayReadRoutes.get(url.pathname);
     if (readPath) {
       exactQuery(url, new Set());
       if (url.pathname === '/api/class-archive/product-state') {
-        const result = await publicGatewayApi(request, readPath, clientAddress);
-        if (result.status !== 200) {
-          respond(response, request.method, result.status, 'application/json; charset=utf-8', result.body);
-          return;
-        }
-        let payload;
-        try {
-          payload = JSON.parse(result.body.toString('utf8'));
-        } catch {
-          throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
-        }
-        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-          || payload.role !== role
-          || typeof payload.presentationEpoch !== 'string'
-          || !/^[a-f0-9]{64}$/.test(payload.presentationEpoch)) {
-          throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
-        }
-        payload.cacheScope = photoUiCacheScope(request, role, payload.presentationEpoch, clientAddress);
+        const payload = { ...principalState.payload, cacheScope: principalState.cacheScope };
         // Product state includes the mutation CSRF value, so it remains
         // no-store even though ordinary presentation documents can revalidate.
         respondJson(response, request.method, 200, payload);
@@ -1827,7 +1933,12 @@ async function handleApi(request, response, url, clientAddress) {
         respondJson(response, request.method, 200, []);
         return;
       }
-      const photos = await policyTimelinePhotos(request, clientAddress, query.get('personId'));
+      const photos = await policyTimelinePhotos(
+        request,
+        clientAddress,
+        query.get('personId'),
+        principalState.presentationEpoch,
+      );
       const counts = new Map();
       for (const photo of photos) {
         // The generic Immich timeline is only safe for confirmed day-level
@@ -1856,18 +1967,40 @@ async function handleApi(request, response, url, clientAddress) {
         return;
       }
       const requestedMonth = parseMonth(timeBucket);
-      const photos = (await policyTimelinePhotos(request, clientAddress, query.get('personId')))
+      const photos = (await policyTimelinePhotos(
+        request,
+        clientAddress,
+        query.get('personId'),
+        principalState.presentationEpoch,
+      ))
         .filter((photo) => {
           const date = photoDate(photo);
           return date !== null && date.slice(0, 7) === requestedMonth;
         });
+      if (photos.length > timelineCompatibilityBucketMaximum) {
+        throw new GatewayResponseError(503, 'timeline_compatibility_bucket_budget');
+      }
       respondJson(response, request.method, 200, timeBucketResponse(photos, role));
       return;
     }
     if (url.pathname === '/api/class-archive/timeline') {
-      exactQuery(url, new Set());
-      const timeline = await gatewayJson(request, '/api/timeline', clientAddress);
-      respondJson(response, request.method, 200, archiveTimelineProjection(timeline));
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const cursor = query.get('cursor') ?? null;
+      const limitValue = query.get('limit');
+      if (cursor !== null && !timelineCursorPattern.test(cursor)) {
+        throw new TypeError('class_archive_web_compat_timeline_cursor_invalid');
+      }
+      const limit = limitValue === undefined ? timelinePageDefault : Number(limitValue);
+      if (!/^[1-9][0-9]{0,2}$/.test(limitValue ?? String(timelinePageDefault))
+        || !Number.isInteger(limit) || limit > timelinePageMaximum) {
+        throw new TypeError('class_archive_web_compat_timeline_limit_invalid');
+      }
+      const timeline = await gatewayJson(request, timelineGatewayPath(cursor, limit), clientAddress);
+      respondJson(response, request.method, 200, archiveTimelineProjection(
+        timeline,
+        principalState.cacheScope,
+        principalState.presentationEpoch,
+      ));
       return;
     }
     if (url.pathname === '/api/class-archive/memories') {
@@ -1991,7 +2124,10 @@ async function handleApi(request, response, url, clientAddress) {
       exactQuery(url, new Set());
       const id = assertUuid(assetMatch[1]);
       const photo = await gatewayJson(request, `/api/photos/${id}`, clientAddress);
-      respondJson(response, request.method, 200, compatibleAsset(photo, role));
+      if (photo?.presentation_epoch !== principalState.presentationEpoch) {
+        throw new GatewayResponseError(503, 'photo_presentation_scope_mismatch');
+      }
+      respondJson(response, request.method, 200, compatibleAsset(photo, role, principalState.cacheScope));
       return;
     }
     const thumbnailMatch = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(url.pathname);
