@@ -56,7 +56,10 @@ jobs:
         run: |
           set -euo pipefail
           php tests/phase3/photo-product-ops-protocol.php
+          php tests/phase3/responsive-media-contract.php
+          php tests/phase3/photo-cache-warmup-static.php
           node tests/phase3/photo-ui-static.mjs
+          node tests/phase3/photo-cache-contract.mjs
           node tests/phase3/photo-product-contract.mjs
 
       - name: Reject high-risk credential material

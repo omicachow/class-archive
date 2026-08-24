@@ -1,6 +1,6 @@
 # 合成环境备份与恢复演练
 
-状态：旧 schema 的本机合成演练曾通过；Phase 3.2 的 fixture v2 / manifest v4 必须重新执行后才恢复为已验证。不代表 NAS、异地或公网恢复能力。
+状态：旧 schema 的本机合成演练曾通过；ClassIdentity v12 的 fixture v4 / manifest v6 必须重新执行后才恢复为已验证。不代表 NAS、异地或公网恢复能力。
 
 ## 目标与边界
 
@@ -12,13 +12,17 @@
 
 备份包包含经 SHA-256 manifest 校验的以下组成部分：
 
-- MariaDB 数据库；
+- MariaDB 业务数据库，以及 `read_projection` / `read_photo` 的表结构（不包含投影缓存行）；
 - Piwigo 持久数据与上传原图；
-- galleries、衍生图缓存和 Class Archive 私有状态；
+- galleries 与 Class Archive 私有状态；
 - 持久化 `user.sh` 安全启动脚本；
-- 格式 4 备份 manifest、ClassIdentity schema v8 的完整业务表清单与每一项的校验摘要。
+- 格式 6 备份 manifest、ClassIdentity schema v12 的业务表清单、可重建投影表清单、18 个原生 Piwigo 投影/持久 source-epoch 保护触发器与每一项的校验摘要。
 
-因此它覆盖图片、`image_category` 多相册关系、ClassIdentity Principal/Seat/Account/Claim/Invite 状态、班级档案元数据、投稿记录、匿名状态、Audit 和 MediaGuard 运行配置，也明确覆盖 v8 的人物整理、人物修正规则、稳定相册、精选、来源证明、重复关系及批量操作日志。备份不包含 Docker 镜像、Git 工作树、真实 NAS 数据或任何生产 TLS/反向代理配置。
+因此它覆盖图片、`image_category` 多相册关系、ClassIdentity Principal/Seat/Account/Claim/Invite 状态、班级档案元数据、投稿记录、匿名状态、Audit 和 MediaGuard 运行配置，也明确覆盖人物整理、人物修正规则、稳定相册、精选、来源证明、重复关系、批量操作日志，以及 MyISAM `native_source_epoch` 的唯一 `PIWIGO_NATIVE` 持久哨兵行。备份不包含衍生图缓存、Gateway `PHOTO_CATALOG`、时间轴、相册、人物、回忆、精选投影 payload、浏览器缓存、Docker 镜像、Git 工作树、真实 NAS 数据或任何生产 TLS/反向代理配置。
+
+`read_projection` 和 `read_photo` 是授权中立的可丢弃读模型，不是业务真相。备份保留其 v12 DDL 以验证 schema，但通过 `mariadb-dump --ignore-table-data` 排除所有缓存行，包括 FULL/HERITAGE 角色范围的 aggregate payload。恢复器先确认两表均为空，再种入六条带独立 16-byte generation 的 `STALE` 控制记录；此时 `PHOTO_CATALOG.native_source_generation` 必须仍为 `NULL`，只能由后续重建绑定已恢复的 source-epoch 哨兵。Piwigo 健康后再由受限 CLI 以 `--scope=all` 根据 Piwigo/Class Archive 业务表确定性重建 `PHOTO_CATALOG`、时间轴、相册、人物、回忆和精选投影。验收要求 `PHOTO_CATALOG=ACTIVE/72`，且 `TIMELINE`、`ALBUMS`、`PEOPLE`、`MEMORIES`、`SPOTLIGHT` 五种 scope-aware aggregate 全部为 `ACTIVE`。浏览器缓存从不进入备份。
+
+Piwigo 衍生图同样是可重建缓存：恢复会得到空的 derivatives 卷，之后由既有 Piwigo derivative 管线和预热任务按需恢复。原图、媒体映射与权限策略才属于必须恢复的业务/媒体真相。
 
 ## 实测流程
 
@@ -30,14 +34,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 
 脚本先拒绝非 `72/72/8` 的运行态，然后：
 
-1. 记录确定性恢复指纹（fixture v2），逐表纳入 v8 新业务状态；
+1. 记录确定性业务恢复指纹（fixture v4），纳入 schema v12、持久 source epoch 与“全部读投影从业务真相重建”契约，但不把投影行写入指纹；
 2. 创建并独立审核完整备份；
 3. 若 isolated Immich server 正在只读挂载 Piwigo 原图，先验证其 compose 标签、目标路径和 `:ro` 挂载后，仅移除该可丢弃 server container；随后停止 Piwigo/MariaDB，且只删除本 Compose 带标签的合成卷；
 4. 从指定备份恢复，等待 HTTP 与 Docker healthcheck；
-5. 比较恢复前后指纹；
-6. 跑完整 Phase 0 与 Phase 1 回归；
-7. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
-8. 将运行证据写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
+5. 执行 `rebuild-photo-read-projection.php --scope=all`，验证 `PHOTO_CATALOG=ACTIVE/72`，且时间轴、相册、人物、回忆、精选五种物化 aggregate 均为 `ACTIVE`；
+6. 比较恢复前后业务指纹（投影 generation/built_at 不参与比较）；
+7. 跑完整 Phase 0 与 Phase 1 回归；
+8. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
+9. 将运行证据与 `read-projection-rebuild.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
 
 2026-08-22（本机，UTC 备份时间 2026-08-21）的历史 v1 演练结果为：
 
@@ -52,7 +57,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 
 RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 
-该历史结果不覆盖 Phase 3.2 新表，不能作为当前 v2 Gate 的 PASS。代码升级会主动使旧 System Health 证明失效；只有再次执行受控 `72/72/8` 破坏恢复演练并取得新的前后指纹后，才能记录 v2 PASS。
+该历史结果不覆盖当前 v12 持久 source epoch 与物化投影恢复策略，不能作为当前 v4 Gate 的 PASS。代码升级会主动使旧 System Health 证明失效；只有再次执行受控 `72/72/8` 破坏恢复演练、取得新的前后业务指纹并验证 catalog 与五种 aggregate 全部就绪后，才能记录 v4 PASS。
 
 ## 恢复后的安全检查
 
@@ -66,11 +71,11 @@ RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 
 失败时演练证据仍会保留在忽略目录中，便于定位；不会把失败写成成功状态。
 
-恢复器在清空任何合成目标卷之前，必须先验证 `MANIFEST.json` 的格式 4、schema version 8 和完整表清单；格式 3 等旧包不能作为 Phase 3.2 的恢复证明。恢复前后指纹会逐表比较，新表即使为空也必须拥有稳定的 count 与 SHA-256 证据。
+恢复器在清空任何合成目标卷之前，必须先验证 `MANIFEST.json` 的格式 6、schema version 12、业务表清单、可重建投影表清单与 `projection_rebuild=ALL`；格式 5 等旧包不能作为当前恢复证明。恢复前后指纹逐个比较业务表；投影缓存不进入指纹，而是以恢复后全量重建的状态、数量和独立 JSON 证据验收。
 
-备份器不会仅靠固定 JSON 声称 schema v8：在 `mariadb-dump` 前，它会解析唯一的 ClassIdentity migration 表，核对 migration 8 和全部声明表；恢复 SQL 后、解包应用卷前，恢复器会再次核对同一组数据库对象。
+备份器不会仅靠固定 JSON 声称 schema v12：在 `mariadb-dump` 前，它会解析唯一的 ClassIdentity migration 表，核对 migration 12、全部声明表、MyISAM/唯一行持久 source-epoch 哨兵和 18 个原生 Piwigo 投影/source-epoch 保护触发器；恢复 SQL 后、解包应用卷前，恢复器会再次核对同一组数据库对象，并拒绝任何夹带 catalog 或 aggregate 投影缓存数据的 v6 包。
 
-System Health 的恢复证明版本同步提升为 v2，并绑定 Compose 备份定义、fixture、恢复器与演练脚本摘要；其中任一实现变化，旧证明会自动变为“需要演练”，不会沿用一个只覆盖旧 schema 的绿色状态。
+System Health 的恢复证明版本同步提升为 v4，并绑定 Compose 备份定义、fixture、恢复器、全投影重建器与演练脚本摘要；其中任一实现变化，旧证明会自动变为“需要演练”，不会沿用一个只覆盖旧 schema 或部分投影的绿色状态。
 
 ## 运行限制
 

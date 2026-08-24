@@ -373,7 +373,65 @@ switch ($Action) {
             'php', '/workspace/tests/phase3/photo-product-ops-protocol.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/read-projection-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/spotlight-read-projection.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/final-source-invalidation-race.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/native-piwigo-projection-guard.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/plugin-native-trigger-lifecycle.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/bulk-archive-projection-runtime.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/canonical-projection-boundary.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/submission-review-preflight-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/responsive-media-contract.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/photo-cache-warmup-static.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx',
+            '-e', 'CLASS_ARCHIVE_ALLOW_DERIVATIVE_QUEUE_FIXTURE=1',
+            'piwigo', 'php', '/workspace/tests/phase3/derivative-warmup-queue-runtime.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-ui-static.mjs')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & node.exe (Join-Path $projectRoot 'tests\phase3\photo-cache-contract.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-product-contract.mjs')
         exit $LASTEXITCODE
