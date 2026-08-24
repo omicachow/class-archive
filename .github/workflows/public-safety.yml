@@ -33,7 +33,7 @@ jobs:
             & ./infra/scripts/verify-public-boundary.ps1 -Mode Outgoing -BaseRef $base
           } else {
             Write-Output 'PUBLIC_BOUNDARY_OUTGOING=SKIP reason=base_unavailable'
-          fi
+          }
 
       - name: Verify public boundary protocol
         shell: pwsh

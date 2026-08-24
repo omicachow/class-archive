@@ -190,3 +190,8 @@ try {
         }
     }
 }
+
+# PowerShell on Linux can otherwise propagate the final deliberately failing
+# native Git probe through $LASTEXITCODE even though every protocol assertion
+# passed. Make the successful contract explicit for GitHub Actions.
+exit 0
