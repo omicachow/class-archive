@@ -8,9 +8,12 @@ delivery path.
 
 - The command is CLI-only, refuses uid 0, takes no credentials or arbitrary
   filesystem path, and uses a non-blocking single-instance lock.
-- Only the canonical `thumbnail`, `xsmall`, `small`, `medium`, `large` and
-  product `preview` profiles are accepted. `preview` is Piwigo's fixed
-  `XLARGE` profile; custom dimensions are rejected.
+- The product cache uses only canonical `thumbnail`, `xsmall`, `small`,
+  `medium`, `large` and product `preview` profiles. `preview` is Piwigo's
+  fixed `XLARGE` profile. Recovery may additionally request Piwigo Core's
+  fixed `square` filmstrip profile so its classic picture page is immediately
+  healthy after an empty derivative volume is rebuilt. `square` is not a new
+  Class Archive API variant, and custom dimensions remain rejected.
 - `first-screen` selects at most 48 active canonical photo mappings,
   `covers` selects active Piwigo album cover mappings, and `all` selects all
   active canonical mappings. Mapping/reference drift fails closed.
@@ -74,8 +77,10 @@ delivery path.
 
 The normal maintenance runner warms the bounded first screen and album covers,
 then performs a controlled `all` recovery scan over ACTIVE canonical mappings.
-That final scan makes a failed filesystem enqueue recoverable: it reuses fresh
-files and prepares any missing fixed profile without relying on the marker.
+That final scan prepares the six product profiles plus Piwigo's fixed square
+filmstrip profile. It makes a failed filesystem enqueue or disposable-cache
+loss recoverable: fresh files are reused and missing fixed profiles do not
+depend on a member request or a marker.
 The cost belongs to the scheduled write-side maintenance window, never a member
 request.
 Operators can also run the command explicitly after an import or an approved

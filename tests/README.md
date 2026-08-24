@@ -386,7 +386,7 @@ never runs the destructive restore drill.
 .\infra\scripts\dev.ps1 test-phase3-contract
 ```
 
-The current verified focused run (2026-08-25) completed 851 assertions:
+The current verified focused run (2026-08-25) completed 856 assertions:
 
 | Gate | Assertions |
 |---|---:|
@@ -403,12 +403,12 @@ The current verified focused run (2026-08-25) completed 851 assertions:
 | Canonical projection boundary | 28 |
 | Submission-review preflight | 14 |
 | Responsive media contract | 23 |
-| Derivative warmup static contract | 77 |
+| Derivative warmup static contract | 82 |
 | Derivative queue runtime | 20 |
 | Photo UI static contract | 104 |
 | Photo cache contract | 59 |
 | Phase 3.2 product boundary | 130 |
-| **Total** | **851** |
+| **Total** | **856** |
 
 The native-trigger lifecycle fixture uses only disposable cloned Piwigo table
 DDL and synthetic rows. It proves the exact 16.4.0 compatibility lock,
@@ -417,7 +417,7 @@ reinstallation, epoch rotation and restored fail-closed invalidation without
 touching live Core tables. The same local command runs the queue crash-recovery runtime fixture with a
 dedicated opt-in environment flag. It creates only canonical UUID/image-ID
 markers and cleans its temporary and quarantine evidence before returning. The
-seven source-only PHP/Node suites scheduled by public CI account for 556 of the
+seven source-only PHP/Node suites scheduled by public CI account for 561 of the
 assertions above and use no private QA paths, images, manifests, credentials or
 network services. Public CI never starts Piwigo, resizes media or reads a
 private path. Assertion success is correctness evidence; the separate browser

@@ -1,6 +1,6 @@
 # 合成环境备份与恢复演练
 
-状态：旧 schema 的本机合成演练曾通过；ClassIdentity v12 的 fixture v4 / manifest v6 必须重新执行后才恢复为已验证。不代表 NAS、异地或公网恢复能力。
+状态：ClassIdentity v12、fixture v4、manifest v6 的本机合成破坏恢复演练已通过。不代表 NAS、异地或公网恢复能力。
 
 ## 目标与边界
 
@@ -22,7 +22,7 @@
 
 `read_projection` 和 `read_photo` 是授权中立的可丢弃读模型，不是业务真相。备份保留其 v12 DDL 以验证 schema，但通过 `mariadb-dump --ignore-table-data` 排除所有缓存行，包括 FULL/HERITAGE 角色范围的 aggregate payload。恢复器先确认两表均为空，再种入六条带独立 16-byte generation 的 `STALE` 控制记录；此时 `PHOTO_CATALOG.native_source_generation` 必须仍为 `NULL`，只能由后续重建绑定已恢复的 source-epoch 哨兵。Piwigo 健康后再由受限 CLI 以 `--scope=all` 根据 Piwigo/Class Archive 业务表确定性重建 `PHOTO_CATALOG`、时间轴、相册、人物、回忆和精选投影。验收要求 `PHOTO_CATALOG=ACTIVE/72`，且 `TIMELINE`、`ALBUMS`、`PEOPLE`、`MEMORIES`、`SPOTLIGHT` 五种 scope-aware aggregate 全部为 `ACTIVE`。浏览器缓存从不进入备份。
 
-Piwigo 衍生图同样是可重建缓存：恢复会得到空的 derivatives 卷，之后由既有 Piwigo derivative 管线和预热任务按需恢复。原图、媒体映射与权限策略才属于必须恢复的业务/媒体真相。
+Piwigo 衍生图同样是可重建缓存：恢复先得到空的 derivatives 卷，再由既有 Piwigo derivative 管线显式预热。恢复门禁覆盖 72 张图的 `square`、`thumbnail`、`xsmall`、`small`、`medium`、`large`、`preview` 七种固定规格，共 504 项；`square` 仅服务 Piwigo Core 照片页胶片栏，不扩张 Class Archive 的六种产品媒体 API。任何生成、文件模式、队列或可信路径校验失败都会中止恢复，不会让成员 HTTP 请求临时生成文件。原图、媒体映射与权限策略才属于必须恢复的业务/媒体真相。
 
 ## 实测流程
 
@@ -39,25 +39,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 3. 若 isolated Immich server 正在只读挂载 Piwigo 原图，先验证其 compose 标签、目标路径和 `:ro` 挂载后，仅移除该可丢弃 server container；随后停止 Piwigo/MariaDB，且只删除本 Compose 带标签的合成卷；
 4. 从指定备份恢复，等待 HTTP 与 Docker healthcheck；
 5. 执行 `rebuild-photo-read-projection.php --scope=all`，验证 `PHOTO_CATALOG=ACTIVE/72`，且时间轴、相册、人物、回忆、精选五种物化 aggregate 均为 `ACTIVE`；
-6. 比较恢复前后业务指纹（投影 generation/built_at 不参与比较）；
-7. 跑完整 Phase 0 与 Phase 1 回归；
-8. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
-9. 将运行证据与 `read-projection-rebuild.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
+6. 执行 `warm-photo-cache.php --scope=all`，验证 72 张合成图的七种固定 Piwigo 规格共 504 项全部可用，并保存 `derivative-warmup.json`；
+7. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
+8. 比较恢复前后业务指纹（投影 generation/built_at 不参与比较）；
+9. 跑完整 Phase 0 与 Phase 1 回归；
+10. 将运行证据、`read-projection-rebuild.json` 与 `derivative-warmup.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
 
-2026-08-22（本机，UTC 备份时间 2026-08-21）的历史 v1 演练结果为：
+2026-08-25（本机，UTC 备份时间 2026-08-24）的当前 v4 演练结果为：
 
 | 项目 | 结果 |
 |---|---|
-| 备份包 | `class-archive-20260821T183327Z` |
-| 确定性恢复指纹 | `ed7931477144dbd279e3c49c75a763c9aa9d0a648fca8d2ef09f57040addd8e8` |
+| 备份包 | `class-archive-20260824T231005Z`；manifest 7/7 文件 SHA-256 通过 |
+| 确定性恢复指纹 | `7289b58a85ca53f0d931ff6604affcab0e0d768b22d377bf5a30e96e367c35cd` |
 | 基线 | `72/72/8` 恢复前后一致 |
+| 读取投影 | `PHOTO_CATALOG=ACTIVE/72`；五种 aggregate 全部 `ACTIVE` |
+| 衍生图恢复 | 空卷重建 `504/504`；七种固定规格；0 个隔离/残留队列项 |
 | Phase 0 | PASS |
 | Phase 1 | PASS |
-| 从删除卷开始的粗略 RTO | 71 秒 |
+| 从删除卷开始到服务、投影、衍生图和 Immich 只读挂载恢复的粗略 RTO | 148 秒 |
 
 RTO 仅是本机一次合成演练的观测值，不是生产承诺。
-
-该历史结果不覆盖当前 v12 持久 source epoch 与物化投影恢复策略，不能作为当前 v4 Gate 的 PASS。代码升级会主动使旧 System Health 证明失效；只有再次执行受控 `72/72/8` 破坏恢复演练、取得新的前后业务指纹并验证 catalog 与五种 aggregate 全部就绪后，才能记录 v4 PASS。
+本次证据保存在被 Git 忽略的 `.codex-work/backup-restore-drill/20260825-070953/`。代码升级仍会主动使 System Health 的旧证明失效；实现摘要不一致时必须重新执行受控演练，不能沿用本次绿色状态。
 
 ## 恢复后的安全检查
 
@@ -66,6 +68,7 @@ RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 - Piwigo 与 MariaDB healthcheck；
 - 安全启动脚本 SHA-256 与模式 `0755`；
 - 原图/私有媒体模式符合 `0660` 策略；
+- 空衍生图卷只能通过受限 CLI 维护边界重建，504 个固定规格均验证为可信文件；
 - MediaGuard 的 HTTP 矩阵、低分辨率安全预览和状态转换；
 - ClassIdentity、投稿、匿名呈现、管理控制台与维护门禁的真实 HTTP 回归。
 

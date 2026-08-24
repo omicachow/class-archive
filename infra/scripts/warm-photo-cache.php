@@ -73,6 +73,12 @@ function classArchivePhotoCacheArguments(array $argv): array
 function classArchivePhotoCacheCanonicalProfiles(): array
 {
     return [
+        // Piwigo's classic picture page uses its fixed square profile for the
+        // active-filmstrip thumbnail. It is maintenance-only for Class Archive
+        // (the product API keeps its six responsive variants) but must be
+        // recoverable before the legacy/core HTTP regression is considered
+        // healthy.
+        'square' => 'IMG_SQUARE',
         'thumbnail' => 'IMG_THUMB',
         'xsmall' => 'IMG_XSMALL',
         'small' => 'IMG_SMALL',
@@ -83,6 +89,13 @@ function classArchivePhotoCacheCanonicalProfiles(): array
         // custom size or a second image pipeline.
         'preview' => 'IMG_XLARGE',
     ];
+}
+
+/** @param list<string> $requestedProfiles */
+function classArchivePhotoCacheCompletesQueuedWarmup(array $requestedProfiles): bool
+{
+    $productProfiles = ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'];
+    return array_diff($productProfiles, array_values(array_unique($requestedProfiles))) === [];
 }
 
 function classArchivePhotoCachePrepareRuntime(): void
@@ -621,11 +634,10 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
             }
             $pendingByImage[(int) $entry['piwigo_image_id']] = $entry;
         }
-        $allProfiles = array_keys($canonical);
-        $requestedProfiles = array_values(array_unique($profiles));
-        sort($allProfiles);
-        sort($requestedProfiles);
-        $completesQueuedWarmup = $allProfiles === $requestedProfiles;
+        // A marker is complete once every product variant exists. A recovery
+        // run may additionally warm the Piwigo-only square profile without
+        // preventing that exact product obligation from being consumed.
+        $completesQueuedWarmup = classArchivePhotoCacheCompletesQueuedWarmup($profiles);
         $result = [
             'warmup_version' => 1,
             'timestamp' => gmdate('Y-m-d\TH:i:s\Z'),

@@ -224,6 +224,62 @@ function Invoke-ReadProjectionRebuild {
     return $record
 }
 
+function Invoke-DerivativeWarmup {
+    $profiles = @('square', 'thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview')
+    $output = @(& "$env:SystemRoot\System32\wsl.exe" @($composeBase + @(
+        'exec', '-T', '--user', 'nginx', 'piwigo',
+        'php', '/workspace/infra/scripts/warm-photo-cache.php',
+        '--scope=all', "--profiles=$($profiles -join ',')", '--json'
+    )) 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw 'Could not rebuild Piwigo derivatives after restore.'
+    }
+    $jsonLine = @($output | Where-Object { ([string]$_).TrimStart().StartsWith('{') }) | Select-Object -Last 1
+    if ($null -eq $jsonLine) {
+        throw 'Derivative warmup did not emit JSON.'
+    }
+    try {
+        $record = ([string]$jsonLine | ConvertFrom-Json)
+    }
+    catch {
+        throw 'Derivative warmup JSON was invalid.'
+    }
+    $expectedChecks = 72 * $profiles.Count
+    $countFields = @(
+        'selected_images', 'checked', 'cached', 'generated', 'would_generate',
+        'source_reuse', 'mode_repairs', 'would_repair_mode', 'metadata_normalized',
+        'would_normalize_metadata', 'queued', 'queue_quarantined',
+        'queue_completed', 'queue_retained'
+    )
+    foreach ($field in $countFields) {
+        if ($null -eq $record.PSObject.Properties[$field] -or [int]$record.$field -lt 0) {
+            throw "Derivative warmup emitted an invalid count: $field"
+        }
+    }
+    if (
+        [int]$record.warmup_version -ne 1 -or
+        $record.result -ne 'PASS' -or
+        $record.scope -ne 'all' -or
+        [bool]$record.dry_run -or
+        (@($record.profiles) -join ',') -ne ($profiles -join ',') -or
+        [int]$record.selected_images -ne 72 -or
+        [int]$record.checked -ne $expectedChecks -or
+        ([int]$record.cached + [int]$record.generated) -ne $expectedChecks -or
+        [int]$record.would_generate -ne 0 -or
+        [int]$record.would_repair_mode -ne 0 -or
+        [int]$record.would_normalize_metadata -ne 0 -or
+        [int]$record.source_reuse -gt $expectedChecks -or
+        [int]$record.metadata_normalized -gt 72 -or
+        [int]$record.queue_quarantined -ne 0 -or
+        [int]$record.queue_retained -ne 0 -or
+        ([int]$record.queue_completed + [int]$record.queue_quarantined + [int]$record.queue_retained) -ne [int]$record.queued
+    ) {
+        throw 'Piwigo derivatives were not rebuilt for all 72 images and seven approved recovery profiles.'
+    }
+    return $record
+}
+
 function Save-JsonArtifact {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)]$Value)
     $path = Join-Path $workRoot $Name
@@ -395,6 +451,14 @@ try {
     $projectionRebuild = Invoke-ReadProjectionRebuild
     [void](Save-JsonArtifact -Name 'read-projection-rebuild.json' -Value $projectionRebuild)
 
+    # Derivatives are intentionally excluded from the business backup, but a
+    # restored product must not return transient 503s while each first viewer
+    # request regenerates cache entries. Rebuild the six approved Piwigo
+    # product profiles plus Piwigo Core's square filmstrip profile as bounded
+    # maintenance work before any HTTP regression runs.
+    $derivativeWarmup = Invoke-DerivativeWarmup
+    [void](Save-JsonArtifact -Name 'derivative-warmup.json' -Value $derivativeWarmup)
+
     Restore-ImmichOriginalMounts -State $immichMountState
 
     Invoke-Dev 'baseline-verify'
@@ -424,6 +488,10 @@ try {
         baseline = '72/72/8'
         photo_catalog_projection = 'ACTIVE/72'
         aggregate_projections = 'TIMELINE,ALBUMS,PEOPLE,MEMORIES,SPOTLIGHT=ACTIVE'
+        derivative_profiles = 'square,thumbnail,xsmall,small,medium,large,preview=READY'
+        derivative_checked = [int]$derivativeWarmup.checked
+        derivative_generated = [int]$derivativeWarmup.generated
+        derivative_cached = [int]$derivativeWarmup.cached
         phase0 = 'PASS'
         phase1 = 'PASS'
     }

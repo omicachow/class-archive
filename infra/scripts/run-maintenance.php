@@ -168,7 +168,7 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         // stat-checked and missing fixed profiles use the same Piwigo pipeline.
         $allRecoveryWarmup = classArchivePhotoCacheWarm(
             'all',
-            ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'],
+            ['square', 'thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'],
             false,
         );
         $attestation = \ClassIdentity\MediaAttestation::status();

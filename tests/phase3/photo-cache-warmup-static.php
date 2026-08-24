@@ -35,6 +35,16 @@ $custom = classArchivePhotoCacheArguments([
 $assert($custom['scope'] === 'covers', 'cover_scope_missing');
 $assert($custom['profiles'] === ['thumbnail', 'small'], 'profiles_not_deduplicated');
 $assert($custom['dry_run'] && $custom['json'], 'safe_output_flags_missing');
+$recovery = classArchivePhotoCacheArguments([
+    'warm-photo-cache.php',
+    '--scope=all',
+    '--profiles=square,thumbnail,xsmall,small,medium,large,preview',
+    '--json',
+]);
+$assert($recovery['profiles'][0] === 'square' && count($recovery['profiles']) === 7, 'core_square_recovery_profile_missing');
+$assert(classArchivePhotoCacheCompletesQueuedWarmup($defaults['profiles']), 'product_profiles_must_complete_queue');
+$assert(classArchivePhotoCacheCompletesQueuedWarmup($recovery['profiles']), 'recovery_superset_must_complete_queue');
+$assert(!classArchivePhotoCacheCompletesQueuedWarmup(['square', 'thumbnail', 'xsmall', 'small', 'medium', 'large']), 'incomplete_product_profiles_consumed_queue');
 $expects(
     static fn (): array => classArchivePhotoCacheArguments(['warm-photo-cache.php', '--scope=private-path']),
     'photo_cache_scope_invalid',
@@ -87,6 +97,8 @@ $assert(str_contains($source, $classIdentityNamespace . 'ProjectionMutationBound
 $assert(strpos($source, 'ReadProjectionBuilder::rebuild();') < strpos($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'maintenance_marker_consumed_before_projection_recovery');
 $assert(!str_contains($source, 'imagecreatefrom'), 'custom_resize_pipeline_detected');
 $assert(str_contains($source, 'classArchivePhotoCacheGenerateIdentity'), 'tiny_source_maintenance_generation_missing');
+$assert(str_contains($source, "'square' => 'IMG_SQUARE'")
+    && str_contains($source, 'classArchivePhotoCacheCompletesQueuedWarmup'), 'core_square_must_not_expand_product_queue_contract');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'successful_queue_completion_missing');
 $assert(str_contains($queue, "'class_photo_id' => \$classPhotoId, 'piwigo_image_id' => \$imageId"), 'queue_contains_noncanonical_identity');
@@ -131,7 +143,9 @@ $assert(!str_contains($mediaGuard, '/_class_archive_internal/generate/'), 'membe
 $assert(!str_contains($nginx, '/_class_archive_internal/generate/'), 'nginx_request_time_generator_still_reachable');
 $assert(str_contains($maintenance, "classArchivePhotoCacheWarm(\n            'first-screen'"), 'maintenance_first_screen_warmup_missing');
 $assert(str_contains($maintenance, "classArchivePhotoCacheWarm(\n            'covers'"), 'maintenance_cover_warmup_missing');
-$assert(str_contains($maintenance, "classArchivePhotoCacheWarm(\n            'all'") && str_contains($maintenance, "'all_recovery' => ["), 'durable_all_mapping_recovery_missing');
+$assert(str_contains($maintenance, "classArchivePhotoCacheWarm(\n            'all'")
+    && str_contains($maintenance, "['square', 'thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview']")
+    && str_contains($maintenance, "'all_recovery' => ["), 'durable_all_mapping_recovery_missing');
 $assert(str_contains($admin, '$cached + $generated !== $checked') && str_contains($admin, '$sourceReuse > $checked'), 'system_health_warmup_overlap_semantics_invalid');
 $assert(str_contains($admin, '$selectedImages * (int) $definition[\'profile_count\']'), 'system_health_warmup_coverage_denominator_unbound');
 $assert(str_contains($admin, 'self::percentageLabel($cached + $generated, $checked)')
@@ -156,4 +170,4 @@ $assert($percentageLabel->invoke(null, 1, 2) === '50%', 'system_health_reuse_rat
 $assert($percentageLabel->invoke(null, 0, 0) === '尚无可计算数据', 'system_health_empty_rate_must_be_uncollected');
 $assert($percentageLabel->invoke(null, 3, 2) === '尚无可计算数据', 'system_health_invalid_rate_must_fail_closed');
 
-fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=77\n");
+fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=82\n");
