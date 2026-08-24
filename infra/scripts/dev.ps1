@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase2-gateway-http', 'test-phase2-performance-contract', 'test-phase2-archive-timeline-runtime', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'test-phase2-immich-web-compat', 'phase2-ml-readiness', 'browser-qa', 'backup')]
+    [ValidateSet('up', 'stop', 'down', 'ps', 'logs', 'pull', 'config', 'bootstrap', 'extensions', 'extensions-verify', 'class-plugins', 'class-plugins-verify', 'identity-bootstrap', 'identity-bootstrap-synthetic', 'baseline-verify', 'seed', 'normalize-media-permissions', 'test-access', 'test-phase0', 'test-phase1', 'test-phase2-contract', 'test-phase3-contract', 'test-phase2-gateway-http', 'test-phase2-performance-contract', 'test-phase2-archive-timeline-runtime', 'test-phase2-runtime', 'test-phase2-runtime-integration', 'test-phase2-immich-gateway-bridge', 'test-phase2-immich-web-compat', 'phase2-ml-readiness', 'browser-qa', 'backup')]
     [string]$Action = 'ps'
 )
 
@@ -358,6 +358,24 @@ switch ($Action) {
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/phase2/gateway-contract.php'
         ))
+        exit $LASTEXITCODE
+    }
+    'test-phase3-contract' {
+        # Public-safe Phase 3.2 gates: real MariaDB semantics run under an
+        # isolated random prefix; UI/BFF checks are source-level contracts.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/photo-product-schema-semantics.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/photo-product-ops-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & node.exe (Join-Path $projectRoot 'tests\phase3\photo-ui-static.mjs')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & node.exe (Join-Path $projectRoot 'tests\phase3\photo-product-contract.mjs')
         exit $LASTEXITCODE
     }
     'test-phase2-gateway-http' {

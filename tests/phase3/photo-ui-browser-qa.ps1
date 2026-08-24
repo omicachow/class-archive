@@ -5,7 +5,9 @@ param(
     [string]$Environment,
 
     [Parameter(Mandatory = $true)]
-    [string]$CredentialFile
+    [string]$CredentialFile,
+
+    [switch]$ProductOnly
 )
 
 # Real Chromium QA for the owned Phase 3 Photo UI. The credential document is
@@ -53,7 +55,7 @@ $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($random) } finally { $rng.Dispose() }
 $runId = (($random | ForEach-Object { $_.ToString('x2') }) -join '')
 $screenshotBase = if ($Environment -eq 'private') {
-    Join-Path $projectRoot '.codex-work\private-real-qa\screenshots\phase3'
+    Join-Path $projectRoot '.codex-work\private-real-qa\screenshots\phase3-2'
 } else {
     Join-Path $projectRoot '.codex-work\screenshots\phase3'
 }
@@ -78,6 +80,7 @@ $names = @(
     'CLASS_ARCHIVE_PHASE3_SCREENSHOT_DIR',
     'CLASS_ARCHIVE_PHASE3_PROFILE_DIR',
     'CLASS_ARCHIVE_PHASE3_CHROME'
+    'CLASS_ARCHIVE_PHASE3_PRODUCT_ONLY'
 )
 $oldValues = @{}
 foreach ($name in $names) {
@@ -114,6 +117,7 @@ try {
     $env:CLASS_ARCHIVE_PHASE3_SCREENSHOT_DIR = $screenshotDirectory
     $env:CLASS_ARCHIVE_PHASE3_PROFILE_DIR = $profileDirectory
     $env:CLASS_ARCHIVE_PHASE3_CHROME = $chrome
+    $env:CLASS_ARCHIVE_PHASE3_PRODUCT_ONLY = if ($ProductOnly) { '1' } else { '0' }
 
     $previousErrorAction = $ErrorActionPreference
     try {

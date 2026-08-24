@@ -356,3 +356,29 @@ browser screenshots and interactions are independently labelled
 `BROWSER_E2E_TESTED`. People and Memories deliberately return empty data until
 a canonical aggregate adapter can demonstrate policy filtering instead of
 inventing or leaking memberships.
+
+## Phase 3.2 productization contracts
+
+`test-phase3-contract` is a public-safe, synthetic-only gate. It applies only
+migration 8 to disposable MariaDB tables under a random prefix, locks the new
+person-curation, album, Spotlight, provenance, dedupe and batch-journal schema
+fingerprints, and exercises representative ownership, duration, merge, dedupe
+and nonempty-batch constraints. The source-level checks separately prove the
+five-tab mobile information architecture, explicit BFF route allowlists,
+server-side SYSTEM_ADMIN people-management denial, CSRF/body bounds, stable
+album UUIDs, bulk archive controls, person curation, review-only near matches,
+structured-first search and the unchanged Gateway -> MediaGuard ->
+X-Accel-Redirect delivery chain. A separate read-only operations contract
+locks the v8 backup manifest/fixture, restore preflight ordering, conservative
+reconciliation findings, idempotent Spotlight expiry and System Health table
+coverage; it never runs the destructive restore drill.
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase3-contract
+```
+
+The current focused run reports 34 MariaDB schema/constraint assertions, 87
+Photo UI assertions, 126 Phase 3.2 product-boundary assertions and 93
+operations-boundary assertions. The source-only PHP/Node gates also run in
+public CI and use no private QA paths, images, manifests, credentials or
+network services.

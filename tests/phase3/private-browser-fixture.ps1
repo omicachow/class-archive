@@ -42,6 +42,7 @@ $wsUri = [Uri]("http://127.0.0.1:$corePort/ws.php?format=json")
 $photosUri = [Uri]("http://127.0.0.1:$corePort/api/photos")
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
+. (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
 
 function New-SecretText {
     $bytes = New-Object byte[] 36
@@ -101,6 +102,34 @@ function Provision-Fixtures([string]$Password, [string]$Run, [string]$HostPasswo
     }
 }
 
+function Get-PrivateSystemAdminUsername {
+    if ($Environment -ne 'private') { return $null }
+    $envFile = Join-Path $projectRoot 'infra\private-qa\.env.piwigo'
+    foreach ($line in [IO.File]::ReadAllLines($envFile)) {
+        if ($line.StartsWith('PIWIGO_ADMIN_USERNAME=')) {
+            $value = $line.Substring('PIWIGO_ADMIN_USERNAME='.Length)
+            if ($value -match '^[A-Za-z0-9_.@+-]{1,100}$') { return $value }
+            break
+        }
+    }
+    throw 'private_browser_admin_username_invalid'
+}
+
+function Provision-PrivateSystemAdmin([string]$Password, [string]$Username) {
+    if ($Environment -ne 'private') { return }
+    # Windows PowerShell 5.1 prefixes native pipeline stdin with a UTF-8 BOM.
+    # Use the shared byte-exact helper so the password verified by Chromium is
+    # exactly the password hashed by PHP, while the secret stays off argv.
+    $native = Invoke-ClassArchiveNativeWithInput -FileName 'wsl.exe' `
+        -Arguments ([string[]]($compose + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/set-system-admin-password.php', $Username
+        ))) -StandardInput $Password
+    if ([int]$native.ExitCode -ne 0 -or ($native.Output -join '') -notmatch '(?m)^SYSTEM_ADMIN_PASSWORD_UPDATED sessions=revoked\r?$') {
+        throw 'private_browser_admin_password_update_failed'
+    }
+}
+
 function Login-Classmate([string]$Password) {
     $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     $login = Invoke-RestMethod -Uri $wsUri -Method Post -Body @{
@@ -117,16 +146,63 @@ $run = (($runBytes | ForEach-Object { $_.ToString('x2') }) -join '')
 $work = Join-Path $privateRoot $run
 $passwordPath = Join-Path $work 'fixture-password.txt'
 $password = New-SecretText
+$rotateTarget = $null
+$rotateLeaseHandle = $null
 
 try {
-    Provision-Fixtures -Password $password -Run $run -HostPassword $passwordPath
     if ($Action -eq 'rotate') {
         if ([string]::IsNullOrWhiteSpace($CredentialFile)) { throw 'private_browser_credential_required' }
-        $target = (Resolve-Path -LiteralPath $CredentialFile).Path
-        Assert-PrivateFile $target
-        if ([IO.Path]::GetFileName($target) -ne 'credentials.json') { throw 'private_browser_credential_name_invalid' }
-        Remove-Item -LiteralPath $target -Force
-        if (Test-Path -LiteralPath $target) { throw 'private_browser_credential_cleanup_failed' }
+        $rotateTarget = (Resolve-Path -LiteralPath $CredentialFile).Path
+        Assert-PrivateFile $rotateTarget
+        if ([IO.Path]::GetFileName($rotateTarget) -ne 'credentials.json') { throw 'private_browser_credential_name_invalid' }
+        $bytes = [IO.File]::ReadAllBytes($rotateTarget)
+        if ($bytes.Length -lt 32 -or $bytes.Length -gt 65536) { throw 'private_browser_credential_size_invalid' }
+        try {
+            $document = ([Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json -ErrorAction Stop)
+        } finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+        }
+        $credentialVersion = [int]$document.version
+        if ($credentialVersion -notin @(1, 2) -or [string]$document.environment -ne $Environment) {
+            throw 'private_browser_credential_schema_invalid'
+        }
+        $rolesProperty = $document.PSObject.Properties['roles']
+        $adminProperty = if ($credentialVersion -eq 2 -and $null -ne $rolesProperty) {
+            $rolesProperty.Value.PSObject.Properties['admin']
+        } else { $null }
+        $adminRole = if ($null -ne $adminProperty) { $adminProperty.Value } else { $null }
+        if ($credentialVersion -eq 2 -and $null -eq $adminRole) {
+            throw 'private_browser_admin_credential_missing'
+        }
+        $leaseProperty = if ($null -ne $adminRole) { $adminRole.PSObject.Properties['leaseHandle'] } else { $null }
+        $rotateLeaseHandle = if ($null -ne $leaseProperty) { [string]$leaseProperty.Value } else { $null }
+        $document = $null
+        if ($credentialVersion -eq 2 -and $rotateLeaseHandle -match '^[a-f0-9]{24}$') {
+            $revocation = Invoke-ClassArchiveSessionFixture -ComposeBase ([string[]]$compose) `
+                -Action revoke -Handle $rotateLeaseHandle
+            if (-not [bool]$revocation.ok -or (-not [bool]$revocation.revoked -and -not [bool]$revocation.absent)) {
+                throw 'private_browser_admin_lease_cleanup_failed'
+            }
+        } elseif ($credentialVersion -eq 2 -and $Environment -eq 'private') {
+            # Version-2 documents produced before lease handles were added are
+            # still safely revocable: Provision-PrivateSystemAdmin below
+            # rotates the password and revokes every existing admin session
+            # before this owner-only file is removed. Never accept this legacy
+            # shape for the synthetic environment, which has no admin role.
+            $rotateLeaseHandle = $null
+        } elseif ($credentialVersion -eq 2) {
+            throw 'private_browser_admin_lease_invalid'
+        } elseif ($Environment -ne 'synthetic') {
+            throw 'private_browser_admin_lease_missing'
+        }
+    }
+
+    Provision-Fixtures -Password $password -Run $run -HostPassword $passwordPath
+    $adminUsername = Get-PrivateSystemAdminUsername
+    if ($null -ne $adminUsername) { Provision-PrivateSystemAdmin -Password $password -Username $adminUsername }
+    if ($Action -eq 'rotate') {
+        Remove-Item -LiteralPath $rotateTarget -Force
+        if (Test-Path -LiteralPath $rotateTarget) { throw 'private_browser_credential_cleanup_failed' }
         Write-Output ($fixtureLabel + '_BROWSER_FIXTURE=PASS action=rotate')
         exit 0
     }
@@ -137,20 +213,38 @@ try {
     $living = @($photos.items | Where-Object { [string]$_.era -eq 'LIVING' -and [string]$_.id -match '^[0-9a-f-]{36}$' } | Select-Object -First 1)
     if ($photos.total -lt 1 -or $living.Count -ne 1) { throw 'private_browser_living_fixture_missing' }
     $credentialPath = Join-Path $work 'credentials.json'
+    $roles = [ordered]@{
+        classmate = [ordered]@{ username = 'fixture-classmate'; password = $password }
+        family = [ordered]@{ username = 'fixture-family'; password = $password }
+        teacher = [ordered]@{ username = 'fixture-teacher'; password = $password }
+        anonymous = [ordered]@{ username = 'fixture-anonymous'; password = $password }
+    }
+    if ($null -ne $adminUsername) {
+        $lease = New-ClassArchiveSystemAdminSession `
+            -BaseUri ([Uri]'http://127.0.0.1:8190/') `
+            -ComposeBase ([string[]]$compose) `
+            -AdminUsername $adminUsername
+        $cookies = @($lease.Session.Cookies.GetCookies([Uri]'http://127.0.0.1:8190/') | Where-Object { $_.Name -eq 'pwg_id' })
+        if ($cookies.Count -ne 1 -or [string]$cookies[0].Value -notmatch '^[A-Za-z0-9,-]{16,128}$') {
+            try { Remove-ClassArchiveSystemAdminSession -Lease $lease } catch { }
+            throw 'private_browser_admin_cookie_invalid'
+        }
+        $roles.admin = [ordered]@{
+            username = $adminUsername
+            cookie = [string]$cookies[0].Value
+            leaseHandle = [string]$lease.Handle
+        }
+    }
     $credential = [ordered]@{
-        version = 1
+        version = if ($null -ne $adminUsername) { 2 } else { 1 }
         environment = $Environment
         familyDeniedPhotoId = [string]$living[0].id
-        roles = [ordered]@{
-            classmate = [ordered]@{ username = 'fixture-classmate'; password = $password }
-            family = [ordered]@{ username = 'fixture-family'; password = $password }
-            teacher = [ordered]@{ username = 'fixture-teacher'; password = $password }
-            anonymous = [ordered]@{ username = 'fixture-anonymous'; password = $password }
-        }
+        roles = $roles
     }
     Write-OwnerOnly $credentialPath ($credential | ConvertTo-Json -Compress -Depth 5)
     Write-Output ($fixtureLabel + '_BROWSER_FIXTURE=PASS action=prepare credential=' + $credentialPath)
 } finally {
     $password = $null
+    $rotateLeaseHandle = $null
     if (Test-Path -LiteralPath $passwordPath) { Remove-Item -LiteralPath $passwordPath -Force }
 }

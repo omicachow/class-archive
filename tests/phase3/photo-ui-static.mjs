@@ -69,6 +69,12 @@ check(server.includes('process.env.CLASS_ARCHIVE_CORE_PUBLIC_PORT === undefined'
 check(server.includes("response.setHeader('Location', '/class-archive-core/login')"), 'login handoff must first use a relative BFF redirect route');
 check(server.includes("['/class-archive-core/identity', '/index.php?/class-identity/my']"), 'core identity redirect must be bounded by a server-side allowlist');
 check(!server.includes('127.0.0.1:8090') && !app.includes(':8090'), 'owned UI and BFF must not hardcode the core HTTP port');
+const internalGatewayFetch = server.slice(
+  server.indexOf('async function fetchGatewayJson'),
+  server.indexOf('async function gatewayJson'),
+);
+check(internalGatewayFetch.includes('boundedGatewayBody(result)'), 'internal compatibility metadata must enforce the same 1 MiB response bound');
+check(!internalGatewayFetch.includes('result.json()'), 'internal compatibility metadata must not use an unbounded JSON buffer');
 check(server.includes("url.pathname === '/class-archive-about'"), 'legacy class-archive about route must remain available');
 check(server.includes("url.pathname === '/class-archive-timeline'"), 'legacy class-archive timeline route must remain available');
 check(server.includes('/class-archive-person/'), 'legacy class-archive person route must remain available');
@@ -78,6 +84,7 @@ check(app.includes("apiJson('/api/class-archive/timeline')"), 'timeline must use
 check(app.includes("apiJson('/api/people?size=500&withHidden=false')"), 'people must use the policy-filtered BFF endpoint');
 check(app.includes("apiJson('/api/search/metadata'"), 'hybrid search must use metadata search');
 check(app.includes("apiJson('/api/search/smart'"), 'hybrid search must use safe smart search');
+check(app.includes("apiJson(`/api/class-archive/search/hybrid?${params}`)"), 'search must prefer the structured Class Archive hybrid projection');
 check(app.includes("apiJson('/api/albums')"), 'albums must use the BFF contract');
 check(app.includes("apiJson('/api/class-archive/memories')"), 'memories must use the archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
@@ -102,7 +109,8 @@ check(app.includes('prefetchAdjacentPreviews(photos, index)'), 'viewer must pref
 check(app.includes("preview.src = mediaUrl(adjacent.id, 'preview')"), 'adjacent prefetch must remain on the BFF MediaGuard preview route');
 
 check(css.includes('--sidebar: 220px'), 'desktop sidebar must be 220px');
-check(css.includes('grid-template-columns: repeat(6, minmax(0, 1fr))'), 'mobile navigation must have six equal tabs');
+check(app.includes("const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my'])"), 'mobile navigation must use the five product tabs');
+check(css.includes('grid-template-columns: repeat(5, minmax(0, 1fr))'), 'mobile navigation must have five equal tabs');
 check(css.includes('env(safe-area-inset-bottom)'), 'mobile navigation must respect the safe area');
 check(css.includes('min-height: 52px'), 'mobile tab hit areas must exceed 44px');
 check(css.includes('@media (max-width: 760px)'), 'owned UI must include a mobile layout');
@@ -110,6 +118,10 @@ check(css.includes('@media (prefers-reduced-motion: reduce)'), 'owned UI must re
 check(css.includes('columns: 5 180px'), 'desktop photo grid must provide a dense masonry presentation');
 check(css.includes('object-fit: contain'), 'photo grid must preserve source composition instead of forcing a crop');
 check(css.includes('touch-action: none'), 'viewer touch surface must reserve gestures for swipe and pinch');
+check(css.includes('color: #f5f3ef; border-color: rgba(255,255,255,.18)'), 'viewer controls must keep readable contrast on the dark media surface');
+check(css.includes('.viewer-page[data-info-open="true"] .viewer-nav'), 'mobile Viewer navigation must not overlap the open information sheet');
+check(app.includes("history.scrollRestoration = 'manual'") && app.includes('window.scrollTo(0, 0)'), 'full-page product navigation must start at a stable top position');
+check(app.includes("new Intl.DateTimeFormat('zh-CN'"), 'Spotlight expiry must use a natural localized date instead of a raw database timestamp');
 check(!app.includes('createElementNS') && !app.includes('iconPaths'), 'owned UI must not hand-draw substitute icon assets');
 check(app.includes("mediaUrl(album.coverPhotoId, 'thumbnail')") && css.includes('.album-cover'), 'album cards must use authorized canonical cover artwork');
 check(app.includes("mediaUrl(memory.coverPhotoId, 'thumbnail')") && css.includes('.memory-card'), 'memory cards must use authorized archive cover artwork');

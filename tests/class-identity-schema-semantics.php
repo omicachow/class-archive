@@ -26,6 +26,14 @@ const CI_SCHEMA_SUFFIXES = [
     'archive_image',
     'photo',
     'person',
+    'person_merge',
+    'person_photo_rule',
+    'album',
+    'spotlight',
+    'photo_source',
+    'photo_duplicate',
+    'batch_operation',
+    'batch_operation_item',
 ];
 
 function schemaTestFail(string $message): never

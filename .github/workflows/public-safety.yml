@@ -51,6 +51,14 @@ jobs:
           7d4f5570cd81033d609b13d0c8fee55199b47360aef9728aa8835735e6a8379f  tests/fixtures/phase2-synthetic/fictional-cast-portraits.png
           SHA256
 
+      - name: Verify public Photo UI contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/phase3/photo-product-ops-protocol.php
+          node tests/phase3/photo-ui-static.mjs
+          node tests/phase3/photo-product-contract.mjs
+
       - name: Reject high-risk credential material
         shell: bash
         env:

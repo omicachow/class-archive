@@ -11,6 +11,8 @@ declare(strict_types=1);
  */
 
 const TIMELINE_SCHEMA_SUFFIXES = ['person', 'archive_image', 'submission', 'identity'];
+const TIMELINE_V7_ARCHIVE_DIGEST = '68c63c66f6ddba6063fdb5b1ee41be95b44f2916d632a35d8931700a46fecb6e';
+const TIMELINE_V7_PERSON_DIGEST = '2a168b8aa4e61a766ea39ae93a3f66295c8e756b339a010947e8d04c17f7f2d6';
 
 function timelineSchemaFail(string $message): never
 {
@@ -122,9 +124,12 @@ SQL) === false) {
     if ($derive) {
         fwrite(STDOUT, 'CLASS_ARCHIVE_TIMELINE_SCHEMA=DERIVED archive_image=' . $archiveDigest . ' person=' . $personDigest . ' run=' . $run . "\n");
     } else {
-        $expectedMethod = new ReflectionMethod(ClassIdentity\Schema::class, 'expectedSemanticDigests');
-        $expected = $expectedMethod->invoke(null);
-        if (!is_array($expected) || !hash_equals((string) ($expected['archive_image'] ?? ''), $archiveDigest) || !hash_equals((string) ($expected['person'] ?? ''), $personDigest)) {
+        // This fixture deliberately invokes only migration 7. Keep its locked
+        // fingerprints independent of the current schema's forward-only v8
+        // person-curation overlay.
+        if (!hash_equals(TIMELINE_V7_ARCHIVE_DIGEST, $archiveDigest)
+            || !hash_equals(TIMELINE_V7_PERSON_DIGEST, $personDigest)
+        ) {
             timelineSchemaFail('timeline_schema_expected_digest_mismatch');
         }
         fwrite(STDOUT, 'CLASS_ARCHIVE_TIMELINE_SCHEMA=PASS archive_image=' . $archiveDigest . ' person=' . $personDigest . ' run=' . $run . "\n");
