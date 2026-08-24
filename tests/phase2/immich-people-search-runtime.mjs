@@ -32,10 +32,11 @@ const RELEVANCE = Object.freeze({
   en_classroom: Object.freeze({ language: 'en', relevant: Object.freeze(['CLASSROOM']), acceptable: Object.freeze([]) }),
   en_night: Object.freeze({ language: 'en', relevant: Object.freeze(['NIGHT']), acceptable: Object.freeze([]) }),
 });
-// Keep direct upstream observations semantically identical to the
-// metadata-only bridge. A test must never compare a 100-item source page
-// against the bridge's documented 500-item candidate window.
+// Keep the upstream oracle semantically identical to the product boundary.
+// The bridge observes this bounded ranking window, filters it through the
+// caller's canonical policy membership, and only then takes the product Top-K.
 const SEARCH_CANDIDATE_LIMIT = 500;
+const SEARCH_RESULT_LIMIT = 50;
 const SEARCH_QUALITY_K = 5;
 
 class FixtureError extends Error {
@@ -438,6 +439,8 @@ try {
     person_count: people.people.length,
     recognition_jobs: recognitionJobs,
     search_results: searchResults,
+    search_candidate_limit: SEARCH_CANDIDATE_LIMIT,
+    search_result_limit: SEARCH_RESULT_LIMIT,
     search_quality: searchQuality,
     smart_jobs: smartJobs,
     timings_ms: {

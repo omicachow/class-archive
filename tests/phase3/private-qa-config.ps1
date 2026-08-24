@@ -129,6 +129,10 @@ TZ=Asia/Shanghai
 "@
     Write-PrivateFile $piwigoEnv $piwigoText
     Write-PrivateFile $immichEnv $immichText
+    $piwigoEnvWsl = @(& $wsl -d Ubuntu --exec wslpath -a $piwigoEnv 2>&1)
+    Assert-True ($LASTEXITCODE -eq 0 -and $piwigoEnvWsl.Count -eq 1) 'piwigo_env_wsl_path_failed'
+    $immichEnvWsl = @(& $wsl -d Ubuntu --exec wslpath -a $immichEnv 2>&1)
+    Assert-True ($LASTEXITCODE -eq 0 -and $immichEnvWsl.Count -eq 1) 'immich_env_wsl_path_failed'
 
     $positive = Invoke-Runner $piwigoEnv $immichEnv
     if ($positive.ExitCode -ne 0) {
@@ -170,6 +174,16 @@ TZ=Asia/Shanghai
     $defaultPublished = @($defaultPorts | ForEach-Object { [string](Property $_ 'published') } | Sort-Object)
     Assert-True (($defaultPublished -join ',') -eq '8090,8091') 'default_ports_changed'
     Assert-True ([string](Property (Property (Property $defaultPiwigo 'networks') 'immich_gateway') 'name') -eq 'class_archive_immich_gateway') 'default_gateway_changed'
+    $defaultGatewayIpam = @((Property (Property (Property $defaultPiwigo 'networks') 'immich_gateway') 'ipam'))
+    Assert-True (($defaultGatewayIpam | ConvertTo-Json -Compress -Depth 5) -match '172\.23\.0\.0/16') 'default_gateway_subnet_changed'
+
+    $privatePiwigo = Invoke-ComposeJson @(
+        'docker', 'compose', '--env-file', $piwigoEnvWsl[0],
+        '-f', 'infra/docker-compose.yml', '-f', 'infra/private-qa/docker-compose.override.yml',
+        'config', '--format', 'json'
+    )
+    $privateGatewayIpam = @((Property (Property (Property $privatePiwigo 'networks') 'immich_gateway') 'ipam'))
+    Assert-True (($privateGatewayIpam | ConvertTo-Json -Compress -Depth 5) -match '172\.27\.0\.0/16') 'private_gateway_subnet_changed'
 
     $defaultImmich = Invoke-ComposeJson @(
         'docker', 'compose', '--env-file', 'infra/immich-spike/.env.example',
@@ -187,9 +201,19 @@ TZ=Asia/Shanghai
     Assert-True ([string](Property (Property (Property $defaultImmich 'networks') 'class_archive_gateway') 'name') -eq 'class_archive_immich_gateway') 'default_immich_gateway_changed'
     $defaultWeb = Property (Property $defaultImmich 'services') 'immich-web-compat'
     Assert-True ([string](Property (Property $defaultWeb 'environment') 'CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT') -eq '8091') 'default_compat_port_changed'
+    Assert-True ([string](Property (Property (Property $defaultWeb 'networks') 'class_archive_gateway') 'ipv4_address') -eq '172.23.0.10') 'default_compat_gateway_address_changed'
+    $privateImmich = Invoke-ComposeJson @(
+        'docker', 'compose', '--env-file', $immichEnvWsl[0],
+        '-f', 'infra/immich-spike/docker-compose.yml', '-f', 'infra/private-qa/docker-compose.immich.override.yml',
+        '--profile', 'immich-web-compat', 'config', '--format', 'json'
+    )
+    $privateWeb = Property (Property $privateImmich 'services') 'immich-web-compat'
+    Assert-True ([string](Property (Property (Property $privateWeb 'networks') 'class_archive_gateway') 'ipv4_address') -eq '172.27.0.10') 'private_compat_gateway_address_changed'
     $nginxConfig = [IO.File]::ReadAllText((Join-Path $projectRoot 'infra\piwigo-nginx\nginx.conf'))
     Assert-True ($nginxConfig.Contains('proxy_set_header Host $http_host;')) 'compat_proxy_did_not_preserve_loopback_port'
     Assert-True (-not $nginxConfig.Contains('proxy_set_header Host "127.0.0.1:8091";')) 'compat_proxy_still_hardcodes_default_port'
+    Assert-True ($nginxConfig.Contains('set_real_ip_from 172.23.0.10/32;')) 'canonical_gateway_trust_missing'
+    Assert-True ($nginxConfig.Contains('set_real_ip_from 172.27.0.10/32;')) 'private_gateway_trust_missing'
 
     Write-Output "PRIVATE_QA_CONFIG_TEST=PASS assertions=$script:assertions evidence=CONFIG_ONLY"
     exit 0

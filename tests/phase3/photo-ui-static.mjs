@@ -79,7 +79,7 @@ check(app.includes("apiJson('/api/people?size=500&withHidden=false')"), 'people 
 check(app.includes("apiJson('/api/search/metadata'"), 'hybrid search must use metadata search');
 check(app.includes("apiJson('/api/search/smart'"), 'hybrid search must use safe smart search');
 check(app.includes("apiJson('/api/albums')"), 'albums must use the BFF contract');
-check(app.includes("apiJson('/api/memories')"), 'memories must use the BFF contract');
+check(app.includes("apiJson('/api/class-archive/memories')"), 'memories must use the archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
 check(app.includes("['thumbnail', 'preview'].includes(size)"), 'owned media helper must allow only thumbnail and preview');
 check(!app.includes('/original'), 'owned UI must not request an original endpoint');
@@ -111,6 +111,7 @@ check(css.includes('columns: 5 180px'), 'desktop photo grid must provide a dense
 check(css.includes('object-fit: contain'), 'photo grid must preserve source composition instead of forcing a crop');
 check(css.includes('touch-action: none'), 'viewer touch surface must reserve gestures for swipe and pinch');
 check(!app.includes('createElementNS') && !app.includes('iconPaths'), 'owned UI must not hand-draw substitute icon assets');
-check(!app.includes('album-cover') && !css.includes('.album-cover'), 'album cards must not fake missing cover artwork');
+check(app.includes("mediaUrl(album.coverPhotoId, 'thumbnail')") && css.includes('.album-cover'), 'album cards must use authorized canonical cover artwork');
+check(app.includes("mediaUrl(memory.coverPhotoId, 'thumbnail')") && css.includes('.memory-card'), 'memory cards must use authorized archive cover artwork');
 
 process.stdout.write(`${JSON.stringify({ suite: 'phase3-photo-ui-static', assertions, result: 'PASS' })}\n`);

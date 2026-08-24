@@ -355,9 +355,9 @@ try {
     Assert-True ($inspection.HostConfig.ReadonlyRootfs -eq $true) 'compat_rootfs_not_read_only'
     Assert-True ((@($inspection.HostConfig.CapDrop) -contains 'ALL') -and (@($inspection.HostConfig.SecurityOpt) -contains 'no-new-privileges:true')) 'compat_capability_hardening_missing'
     $mounts = @($inspection.Mounts)
-    Assert-True ($mounts.Count -eq 3) 'compat_unexpected_mount_count'
+    Assert-True ($mounts.Count -eq 4) 'compat_unexpected_mount_count'
     foreach ($mount in $mounts) {
-        Assert-True ($mount.RW -eq $false -and [string]$mount.Destination -in @('/compat', '/web', '/data')) 'compat_mount_not_narrow_read_only'
+        Assert-True ($mount.RW -eq $false -and [string]$mount.Destination -in @('/compat', '/photo-ui', '/web', '/data')) 'compat_mount_not_narrow_read_only'
     }
     $networkNames = @($inspection.NetworkSettings.Networks.PSObject.Properties | ForEach-Object { [string]$_.Name })
     Assert-True ($networkNames.Count -eq 1 -and $networkNames -contains 'class_archive_immich_gateway') 'compat_network_scope_invalid'
@@ -376,7 +376,11 @@ try {
 
     $guestRoot = Invoke-Http -Uri $compatUri -Session $sessions['GUEST']
     Assert-PrivateResponse -Response $guestRoot -Status 303 -Label 'guest web root'
-    Assert-True ($guestRoot.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'guest_web_login_redirect_invalid'
+    $guestLoginTarget = [Uri]::new($compatUri, $guestRoot.Location)
+    Assert-True ($guestLoginTarget.AbsoluteUri -eq [Uri]::new($compatUri, 'class-archive-core/login').AbsoluteUri) 'guest_web_login_redirect_invalid'
+    $guestLoginHandoff = Invoke-Http -Uri $guestLoginTarget -Session $sessions['GUEST']
+    Assert-PrivateResponse -Response $guestLoginHandoff -Status 303 -Label 'guest core login handoff'
+    Assert-True ($guestLoginHandoff.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'guest_core_login_handoff_invalid'
     $guestIndex = Invoke-Http -Uri ([Uri]::new($compatUri, 'index.html')) -Session $sessions['GUEST']
     Assert-PrivateResponse -Response $guestIndex -Status 303 -Label 'guest explicit index'
     $guestMe = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Session $sessions['GUEST']
@@ -393,23 +397,24 @@ try {
     }
 
     $classmateRoot = Invoke-Http -Uri $compatUri -Session $sessions['CLASSMATE']
-    Assert-PrivateResponse -Response $classmateRoot -Status 200 -Label 'classmate web root'
-    Assert-True ($classmateRoot.ContentType -like 'text/html*' -and $classmateRoot.Text.Contains('application-name" content="')) 'classmate_branding_document_invalid'
-    Assert-True ($classmateRoot.Text.Contains('/custom.css') -and -not $classmateRoot.Text.Contains('class_archive_gateway')) 'classmate_document_boundary_invalid'
+    Assert-PrivateResponse -Response $classmateRoot -Status 302 -Label 'classmate web root'
+    Assert-True ([Uri]::new($compatUri, $classmateRoot.Location).AbsoluteUri -eq [Uri]::new($compatUri, 'photos').AbsoluteUri) 'classmate_photo_home_redirect_invalid'
     $classmatePhotosRoute = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmatePhotosRoute -Status 200 -Label 'classmate photos route'
+    Assert-True ($classmatePhotosRoute.ContentType -like 'text/html*' -and $classmatePhotosRoute.Text.Contains('application-name" content="')) 'classmate_branding_document_invalid'
+    Assert-True ($classmatePhotosRoute.Text.Contains('/photo-ui/app.css') -and $classmatePhotosRoute.Text.Contains('/photo-ui/app.js') -and -not $classmatePhotosRoute.Text.Contains('class_archive_gateway')) 'classmate_document_boundary_invalid'
     $classmateLegalNotice = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-about')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmateLegalNotice -Status 200 -Label 'classmate legal notice'
     Assert-True ($classmateLegalNotice.ContentType -like 'text/html*' -and $classmateLegalNotice.Text.Contains('GNU AGPL-3.0-only') -and $classmateLegalNotice.Text.Contains('8aa95c67470a02a8ddedf03c2e52963af33065ff')) 'classmate_legal_notice_invalid'
     $guestArchiveTimeline = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-timeline')) -Session $sessions['GUEST']
     Assert-PrivateResponse -Response $guestArchiveTimeline -Status 303 -Label 'guest archive timeline'
-    Assert-True ($guestArchiveTimeline.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'guest_archive_timeline_login_redirect_invalid'
+    Assert-True ([Uri]::new($compatUri, $guestArchiveTimeline.Location).AbsoluteUri -eq [Uri]::new($compatUri, 'class-archive-core/login').AbsoluteUri) 'guest_archive_timeline_login_redirect_invalid'
     $classmateArchiveTimelinePage = Invoke-Http -Uri ([Uri]::new($compatUri, 'class-archive-timeline')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmateArchiveTimelinePage -Status 200 -Label 'classmate archive timeline page'
     Assert-True ($classmateArchiveTimelinePage.ContentType -like 'text/html*' -and $classmateArchiveTimelinePage.Text.Contains('档案时间轴') -and $classmateArchiveTimelinePage.Text.Contains('/api/class-archive/timeline')) 'classmate_archive_timeline_page_invalid'
     $authRoute = Invoke-Http -Uri ([Uri]::new($compatUri, 'auth/login')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $authRoute -Status 303 -Label 'upstream login route'
-    Assert-True ($authRoute.Location -eq "http://127.0.0.1:$httpPort/identification.php") 'upstream_login_route_not_redirected'
+    Assert-True ([Uri]::new($compatUri, $authRoute.Location).AbsoluteUri -eq [Uri]::new($compatUri, 'class-archive-core/login').AbsoluteUri) 'upstream_login_route_not_redirected'
 
     $unsafeMethod = Invoke-Http -Uri ([Uri]::new($compatUri, 'api/users/me')) -Session $sessions['CLASSMATE'] -Method POST -JsonBody '{}'
     Assert-PrivateResponse -Response $unsafeMethod -Status 405 -Label 'compat unsafe method'

@@ -905,7 +905,7 @@ try {
     $expectedBindingCount = if ($useRuntimePeopleSearch) { $baselineOriginalCount + @($snapshot.photos).Count } else { @($snapshot.photos).Count }
     Assert-Exact ($nodeResult.version -eq 1 -and @($nodeResult.assets).Count -eq $expectedBindingCount -and [string]$nodeResult.access_token -match '^[A-Za-z0-9._~-]{32,8192}$') 'immich_runtime_result_invalid'
     if ($useRuntimePeopleSearch) {
-        Assert-Exact (@($nodeResult.fixture_assets).Count -eq @($snapshot.photos).Count -and @($nodeResult.people).Count -ge 3 -and @($nodeResult.runtime.search_results).Count -eq 8 -and [int]$nodeResult.runtime.library_asset_count -eq ($baselineOriginalCount + @($snapshot.photos).Count)) 'immich_people_runtime_result_invalid'
+        Assert-Exact (@($nodeResult.fixture_assets).Count -eq @($snapshot.photos).Count -and @($nodeResult.people).Count -ge 3 -and @($nodeResult.runtime.search_results).Count -eq 8 -and [int]$nodeResult.runtime.search_candidate_limit -eq 500 -and [int]$nodeResult.runtime.search_result_limit -eq 50 -and [int]$nodeResult.runtime.library_asset_count -eq ($baselineOriginalCount + @($snapshot.photos).Count)) 'immich_people_runtime_result_invalid'
     }
     $assetIds = @($nodeResult.assets | ForEach-Object { [string]$_.immich_asset_id })
     Assert-Exact ($assetIds.Count -eq $expectedBindingCount -and ($assetIds | Select-Object -Unique).Count -eq $expectedBindingCount) 'immich_asset_bindings_invalid'
@@ -1091,8 +1091,8 @@ try {
             $query = [Uri]::EscapeDataString([string]$smartByName[$name].Query)
             $classmateSearch = Read-GatewayJson (Invoke-Gateway ([Uri]::new($baseUri, ('api/search/smart?q=' + $query))) $sessions['CLASSMATE']) ('classmate_smart_' + $name)
             $familySearch = Read-GatewayJson (Invoke-Gateway ([Uri]::new($baseUri, ('api/search/smart?q=' + $query))) $sessions['FAMILY']) ('family_smart_' + $name)
-            $expectedAll = @($smartByName[$name].Photos)
-            $expectedFamily = @($expectedAll | Where-Object { [string]$_.era -eq 'HERITAGE' })
+            $expectedAll = @($smartByName[$name].Photos | Select-Object -First 50)
+            $expectedFamily = @($smartByName[$name].Photos | Where-Object { [string]$_.era -eq 'HERITAGE' } | Select-Object -First 50)
             Assert-Exact ([bool]$classmateSearch.available -and [int]$classmateSearch.total -eq $expectedAll.Count -and @($classmateSearch.items).Count -eq $expectedAll.Count) ('classmate_smart_count_invalid_' + $name)
             Assert-Exact ([bool]$familySearch.available -and [int]$familySearch.total -eq $expectedFamily.Count -and @($familySearch.items).Count -eq $expectedFamily.Count) ('family_smart_count_invalid_' + $name)
             foreach ($item in @($classmateSearch.items)) { Assert-Exact ($allVisible.ContainsKey([string]$item.id)) ('classmate_smart_visibility_invalid_' + $name) }
@@ -1147,7 +1147,16 @@ try {
             $eraFaultStarted = $true
             $ambiguous = Read-GatewayJson (Invoke-Gateway $faultSearchUri $sessions['CLASSMATE']) 'ambiguous_era_search'
             $ambiguousIds = @($ambiguous.items | ForEach-Object { [string]$_.id })
-            Assert-Exact ([int]$ambiguous.total -eq ([int]$baselineFaultSearch.total - 1) -and $ambiguousIds -notcontains [string]$faultTarget[0].id) 'ambiguous_era_not_filtered'
+            # Search is a policy-filtered Top-K. If the baseline already fills
+            # K, removing one ambiguous candidate may safely promote the next
+            # authorized ranked candidate, so the public count need not fall
+            # by exactly one. Prove the ambiguous id is absent, the returned
+            # aggregate is self-consistent and bounded, and direct metadata
+            # lookup is equally opaque.
+            Assert-Exact ([int]$ambiguous.total -eq @($ambiguous.items).Count -and [int]$ambiguous.total -le [int]$baselineFaultSearch.total -and $ambiguousIds -notcontains [string]$faultTarget[0].id) 'ambiguous_era_not_filtered'
+            $ambiguousPhotoUri = [Uri]::new($baseUri, ('api/photos/' + [string]$faultTarget[0].id))
+            $ambiguousPhoto = Read-GatewayJson (Invoke-Gateway $ambiguousPhotoUri $sessions['CLASSMATE']) 'ambiguous_era_photo' 404
+            Assert-Exact ($ambiguousPhoto.error -is [string] -and $ambiguousPhoto.error.Length -gt 0) 'ambiguous_era_photo_not_filtered'
         } finally {
             if ($eraFaultStarted) {
                 $restored = Invoke-PiwigoFixture 'fault-era-stop' $run $faultPayload

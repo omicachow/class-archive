@@ -304,16 +304,18 @@ async function login(context, username, label) {
 async function openCompatibility(page, label) {
   stage = `${label}_timeline_navigation`;
   await goto(page, compatOrigin, '/', `${label}_compatibility_page`);
-  // The pinned upstream Web hydrates after the initial document response. Do
-  // not take the Timeline screenshot while the document is still a blank
-  // bootstrap canvas; require its navigation and a decoded MediaGuard image.
+  // Phase 3 owns the user-facing shell. Do not take the Timeline screenshot
+  // while its module is still a blank bootstrap canvas; require the complete
+  // six-destination product navigation and a decoded MediaGuard image.
   await page.waitForFunction(
-    () => document.querySelector('#dashboard-navbar') !== null,
+    () => document.querySelectorAll('.nav-list a.nav-link').length === 6
+      && document.querySelector('#main-content') !== null,
     undefined,
     { timeout: 15_000 },
   ).catch(() => null);
   stage = `${label}_timeline_nav_assertion`;
-  assert(await page.locator('#dashboard-navbar').count() === 1, `${label}_compatibility_navigation`);
+  assert(await page.locator('.nav-list a.nav-link').count() === 6
+    && await page.locator('#main-content').count() === 1, `${label}_compatibility_navigation`);
   stage = `${label}_timeline_media`;
   await waitForDecodedImages(page, 'img[src*="/api/assets/"]', 4, `${label}_timeline`);
   stage = `${label}_timeline_error_surface`;
@@ -417,11 +419,12 @@ async function navigatePeopleUi(page, label) {
     // A populated runtime starts a genuine gateway/MediaGuard round trip for
     // each visible cover. Poll instead of assuming a fixed desktop timing.
     await page.waitForFunction(
-      () => document.querySelectorAll('img[src*="/api/people/"]').length >= 1,
+      () => document.querySelectorAll('.people-grid .person-card img[src*="/api/assets/"]').length >= 1,
       undefined,
       { timeout: 10_000 },
     ).catch(() => null);
-    const peopleImages = await page.locator('img[src*="/api/people/"]').count();
+    const peopleSelector = '.people-grid .person-card img[src*="/api/assets/"]';
+    const peopleImages = await page.locator(peopleSelector).count();
     if (peopleImages < 1) {
       const peopleOk = trace.some((entry) => entry.people && entry.status === 200);
       const peopleError = trace.some((entry) => entry.people && entry.status >= 400);
@@ -433,7 +436,7 @@ async function navigatePeopleUi(page, label) {
       if (!peopleOk) fail(`${label}_people_ui_api_absent`);
       fail(`${label}_people_ui_render_missing`);
     }
-    await waitForDecodedImages(page, 'img[src*="/api/people/"]', Math.min(peopleImages, 3), `${label}_people_ui`);
+    await waitForDecodedImages(page, peopleSelector, Math.min(peopleImages, 3), `${label}_people_ui`);
     await assertNoVisibleServerFailure(page, `${label}_people_ui`);
     await assertNoVisibleImmichWriteControls(page, `${label}_people_ui`);
     assertions += 1;
@@ -462,10 +465,9 @@ async function navigateSearchUi(page, label) {
     } catch (error) {
       fail(`${label}_search_ui_navigation_${safePageScope(page)}_${safeNativeFailureClass(error)}`);
     }
-    // `main-search-bar` is the stable upstream v3.1.0 input id. Do not hinge
-    // browser acceptance on a translated placeholder or a non-existent
-    // input[type=search] attribute; the upstream Web uses input[type=text].
-    const input = page.locator('#main-search-bar').first();
+    // The product-owned search form exposes one semantic query field. Select
+    // by its stable structure rather than translated placeholder copy.
+    const input = page.locator('.search-form input.search-field[name="query"]').first();
     await input.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
     assert(await input.count() === 1 && await input.isVisible(), `${label}_search_ui_input`);
     await input.fill('有人拿着篮球');
@@ -473,7 +475,7 @@ async function navigateSearchUi(page, label) {
     // This verifies rendered, policy-filtered results rather than merely the
     // POST request. Every image source remains a BFF route that re-enters
     // MediaGuard; no test treats an upstream Immich URL as valid delivery.
-    const results = page.locator('img[src*="/api/assets/"]');
+    const results = page.locator('.search-photo-grid img[src*="/api/assets/"]');
     await results.first().waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
     if (await results.count() < 1) {
       const searchOk = trace.some((entry) => entry.search && entry.status === 200);
@@ -485,7 +487,7 @@ async function navigateSearchUi(page, label) {
       fail(`${label}_search_ui_render_missing`);
     }
     const renderedResultCount = await results.count();
-    await waitForDecodedImages(page, 'img[src*="/api/assets/"]', Math.min(renderedResultCount, 6), `${label}_search_ui`);
+    await waitForDecodedImages(page, '.search-photo-grid img[src*="/api/assets/"]', Math.min(renderedResultCount, 6), `${label}_search_ui`);
     await assertNoVisibleServerFailure(page, `${label}_search_ui`);
     await assertNoVisibleImmichWriteControls(page, `${label}_search_ui`);
     assertions += 1;
@@ -495,7 +497,7 @@ async function navigateSearchUi(page, label) {
 }
 
 async function openFirstSearchResultViewer(page, label) {
-  const image = page.locator('img[src*="/api/assets/"]').first();
+  const image = page.locator('.search-photo-grid img[src*="/api/assets/"]').first();
   assert(await image.count() === 1 && await image.isVisible(), `${label}_search_viewer_result`);
   const source = await image.getAttribute('src');
   const match = typeof source === 'string' ? /\/api\/assets\/([0-9a-f-]{36})\//i.exec(source) : null;
@@ -549,11 +551,15 @@ async function clickFirstPerson(page, label, people, expectedCounts) {
     }
   };
   page.on('response', collect);
-  const image = page.locator('img[src*="/api/people/"]').first();
+  const cardLink = page.locator('.people-grid a.person-card').first();
   try {
-    assert(await image.count() === 1, `${label}_person_ui_image`);
-    const person = people?.people?.[0];
-    assert(typeof person?.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(person.id), `${label}_person_detail_public_id`);
+    assert(await cardLink.count() === 1, `${label}_person_ui_card`);
+    const href = await cardLink.getAttribute('href');
+    const routeMatch = typeof href === 'string' ? /^\/people\/([0-9a-f-]{36})$/i.exec(href) : null;
+    assert(routeMatch !== null, `${label}_person_detail_public_id`);
+    const personId = routeMatch[1].toLowerCase();
+    const person = people?.people?.find((candidate) => candidate?.id?.toLowerCase() === personId);
+    assert(typeof person?.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(person.id), `${label}_person_detail_projection_id`);
     // The custom archive-aware Person projection preserves TERM/YEAR/EVENT
     // and UNKNOWN dates rather than coercing them into Immich's required
     // fileCreatedAt day. Its count is already role-filtered at the canonical
@@ -564,29 +570,7 @@ async function clickFirstPerson(page, label, people, expectedCounts) {
     assert(Number.isInteger(projection.json?.photo_count) && Array.isArray(projection.json?.items) && projection.json.photo_count === projection.json.items.length && Number.isInteger(expectedCount) && projection.json.photo_count === expectedCount, `${label}_person_detail_projection_shape`);
     assert(projection.json.photo_count >= 1, `${label}_person_detail_projection_count`);
     assertNoInternalLeak(projection.json, `${label}_person_detail_projection_internal_leak`);
-    const expectedRoute = `/class-archive-person/${person.id.toLowerCase()}`;
-    // Let the MutationObserver-backed compatibility shell bind the concrete
-    // card before activating it. This verifies a real visible card route,
-    // not a test-only direct navigation.
-    await page.waitForFunction(
-      ({ id, route }) => Array.from(document.querySelectorAll('img[src*="/api/people/"]')).some((candidate) => {
-        try {
-          const imageUrl = new URL(candidate.src, location.origin);
-          const match = /^\/api\/people\/([0-9a-f-]{36})\/thumbnail$/i.exec(imageUrl.pathname);
-          const anchor = candidate.closest('a');
-          return match?.[1]?.toLowerCase() === id && anchor?.dataset.classArchivePersonBound === '1' && anchor.getAttribute('href') === route;
-        } catch { return false; }
-      }),
-      { id: person.id.toLowerCase(), route: expectedRoute },
-      { timeout: 10_000 },
-    ).catch(() => null);
-    const cardLink = image.locator('xpath=ancestor::a[1]');
-    assert(await cardLink.count() === 1, `${label}_person_detail_archive_link`);
-    const href = await cardLink.getAttribute('href');
-    // The compatibility bootstrap normally rewrites the link immediately.
-    // The BFF also resolves the pinned upstream fallback /people/{id} link
-    // server-side after ACL validation, so keyboard/navigation timing cannot
-    // select Immich's fileCreatedAt-only Person timeline.
+    const expectedRoute = `/people/${person.id.toLowerCase()}`;
     assert(href === expectedRoute, `${label}_person_detail_archive_link_target`);
     try {
       await Promise.all([
@@ -597,21 +581,21 @@ async function clickFirstPerson(page, label, people, expectedCounts) {
       fail(`${label}_person_detail_archive_navigation_${safeNativeFailureClass(error)}`);
     }
     const personRoute = await page.evaluate(() => location.pathname);
-    assert(/^\/class-archive-person\/[0-9a-f-]{36}$/i.test(personRoute), `${label}_person_detail_archive_route`);
-    const grid = page.locator('#person-grid').first();
+    assert(/^\/people\/[0-9a-f-]{36}$/i.test(personRoute), `${label}_person_detail_archive_route`);
+    const grid = page.locator('.person-hero').first();
     await grid.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => null);
     assert(await grid.count() === 1 && await grid.isVisible(), `${label}_person_detail_grid`);
     await page.waitForFunction(
-      () => document.querySelectorAll('#person-grid .card').length >= 1,
+      () => document.querySelectorAll('.photo-grid .photo-card').length >= 1,
       undefined,
       { timeout: 15_000 },
     ).catch(() => null);
-    if (await page.locator('#person-grid .card').count() < 1) {
+    if (await page.locator('.photo-grid .photo-card').count() < 1) {
       const failure = trace.find((entry) => entry.status >= 400);
       if (failure) fail(`${label}_person_detail_${failure.kind}_${failure.status}`);
       fail(`${label}_person_detail_asset_grid_empty`);
     }
-    await waitForDecodedImages(page, '#person-grid img[src*="/api/assets/"]', Math.min(projection.json.photo_count, 4), `${label}_person_detail`);
+    await waitForDecodedImages(page, '.photo-grid img[src*="/api/assets/"]', Math.min(projection.json.photo_count, 4), `${label}_person_detail`);
     await assertNoVisibleServerFailure(page, `${label}_person_detail`);
   } finally {
     page.off('response', collect);

@@ -23,8 +23,12 @@ if (-not $credentialPath.StartsWith($workRoot + $separator, [StringComparison]::
     throw 'phase3_browser_credential_must_be_under_ignored_work_root'
 }
 
-& git -C $projectRoot check-ignore --quiet -- $credentialPath
+$credentialRelative = $credentialPath.Substring($projectRoot.Length + 1).Replace('\', '/')
+& git -C $projectRoot check-ignore --quiet --no-index -- $credentialRelative
 if ($LASTEXITCODE -ne 0) { throw 'phase3_browser_credential_is_not_git_ignored' }
+if (@(& git -C $projectRoot ls-files -- $credentialRelative).Count -ne 0) {
+    throw 'phase3_browser_credential_is_tracked'
+}
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
 Assert-ClassArchiveOwnerOnlyFileAcl -Path $credentialPath
@@ -53,8 +57,15 @@ $screenshotBase = if ($Environment -eq 'private') {
 } else {
     Join-Path $projectRoot '.codex-work\screenshots\phase3'
 }
-$screenshotDirectory = Join-Path $screenshotBase $runId
-$profileDirectory = Join-Path $projectRoot ('.codex-work\browser-profiles\phase3-' + $Environment + '-' + $runId)
+$screenshotDirectory = [IO.Path]::GetFullPath((Join-Path $screenshotBase $runId))
+$profileRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\browser-profiles'))
+$profileDirectory = [IO.Path]::GetFullPath((Join-Path $profileRoot ('phase3-' + $Environment + '-' + $runId)))
+if (-not $profileDirectory.StartsWith($profileRoot + $separator, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'phase3_browser_profile_path_invalid'
+}
+if (-not $screenshotDirectory.StartsWith(([IO.Path]::GetFullPath($screenshotBase) + $separator), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'phase3_browser_screenshot_path_invalid'
+}
 [void][IO.Directory]::CreateDirectory($screenshotDirectory)
 [void][IO.Directory]::CreateDirectory($profileDirectory)
 
@@ -134,6 +145,10 @@ finally {
     }
     if ($null -ne $oldNodePath) { $env:NODE_PATH = $oldNodePath } else { Remove-Item Env:NODE_PATH -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $profileDirectory) {
+        $resolvedProfile = (Resolve-Path -LiteralPath $profileDirectory).Path
+        if (-not $resolvedProfile.StartsWith($profileRoot + $separator, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'phase3_browser_profile_cleanup_path_invalid'
+        }
         Remove-Item -LiteralPath $profileDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

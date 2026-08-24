@@ -111,6 +111,7 @@ foreach ($fixtures as $username => $groupName) {
     }
 
     \ClassIdentity\CoreAdapter::setPassword((int) $userId, $password);
+    \ClassIdentity\CoreAdapter::revokeAllCredentials((int) $userId);
     single_update(USER_INFOS_TABLE, ['status' => 'normal'], ['user_id' => (int) $userId]);
     \ClassIdentity\CoreAdapter::reconcileManagedGroups((int) $userId, $groupName);
 

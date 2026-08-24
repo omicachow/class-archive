@@ -392,7 +392,10 @@ try {
         new NullImmichAdapter(),
     );
     $assert($nullImmich->people() === ['available' => false, 'total' => 0, 'items' => []], 'runtime_absent_people_unavailable_not_mocked');
-    $assert($nullImmich->memories() === ['available' => false, 'total' => 0, 'items' => []], 'runtime_absent_memories_unavailable_not_mocked');
+    $nullMemories = $nullImmich->memories();
+    $assert($nullMemories['available'] === true && $nullMemories['total'] === 1
+        && $nullMemories['items'][0]['cover_photo_id'] === $heritageId,
+        'runtime_absent_archive_memories_remain_available');
     $expects(static fn () => $nullImmich->smartSearch('操场'), 'class_archive_gateway_smart_search_unavailable', 'runtime_absent_smart_search_fail_closed');
 
     $unresolved = new GatewayService(new GatewayContractIdentityAdapter(null), $piwigo, $immich);
