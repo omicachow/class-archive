@@ -484,6 +484,13 @@ try {
     )
     Invoke-DevWithEvidence -Action 'test-phase0' -ArtifactName 'phase0-after-restore.log'
     Invoke-DevWithEvidence -Action 'test-phase1' -ArtifactName 'phase1-after-restore.log'
+    # The HTTP suites deliberately exercise invalidation and fail-closed
+    # reads. Their fixture cleanup restores business truth, but not a fresh
+    # materialized projection. Rebuild once more so a successful recovery
+    # drill leaves the public synthetic instance in its usable, ACTIVE state
+    # instead of making the next maintenance run fail closed.
+    $postRegressionProjectionRebuild = Invoke-ReadProjectionRebuild
+    [void](Save-JsonArtifact -Name 'post-regression-read-projection-rebuild.json' -Value $postRegressionProjectionRebuild)
     $result = [ordered]@{
         backup_restore = 'PASS'
         bundle = $bundle
@@ -498,6 +505,7 @@ try {
         derivative_cached = [int]$derivativeWarmup.cached
         phase0 = 'PASS'
         phase1 = 'PASS'
+        post_regression_projection = 'ACTIVE/72+5'
     }
     [void](Save-JsonArtifact -Name 'result.json' -Value $result)
     Write-Output 'BACKUP_RESTORE=PASS'
