@@ -21,6 +21,7 @@ $privateQaRoot = Join-Path $projectRoot '.codex-work\private-real-qa'
 $stagingRoot = Join-Path $privateQaRoot 'staging'
 $approvalPath = Join-Path $projectRoot '.codex-work\private-real-full\reports\cutover-approval.json'
 $wsl = "$env:SystemRoot\System32\wsl.exe"
+$script:stage = 'initializing'
 $legacyScope = 'private-real-qa'
 $legacyVolumes = @(
     'class_archive_private_qa_piwigo_data',
@@ -63,14 +64,14 @@ function Assert-IgnoredLocalFile([string]$Path, [string]$Code) {
 }
 
 function Assert-FullOwnerRuntime {
-    $candidate = @(& $wsl -d Ubuntu --exec docker ps --filter 'label=com.classarchive.scope=private-real-full' --format '{{.Names}}|{{.State}}' 2>&1)
+    $candidate = @(& $wsl -d Ubuntu --exec docker ps --filter 'label=com.classarchive.scope=private-real-full' --format '{{.Names}}|{{.State}}' 2>$null)
     if ($LASTEXITCODE -ne 0) { Stop-Retirement 'owner_runtime_inspect_failed' }
     $running = @($candidate | Where-Object { $_ -match '^class_archive_private_full_v3_(?:piwigo|immich)-[a-z0-9-]+-\d+\|running$' })
     if ($running.Count -lt 3) { Stop-Retirement 'full_owner_runtime_not_running' }
     $piwigo = @($running | Where-Object { $_ -match '^class_archive_private_full_v3_piwigo-piwigo-\d+\|running$' })
     if ($piwigo.Count -ne 1) { Stop-Retirement 'full_owner_piwigo_identity_invalid' }
     $piwigoName = ([string]$piwigo[0] -split '\|', 2)[0]
-    $portJson = @(& $wsl -d Ubuntu --exec docker inspect --format '{{json .NetworkSettings.Ports}}' $piwigoName 2>&1)
+    $portJson = @(& $wsl -d Ubuntu --exec docker inspect --format '{{json .NetworkSettings.Ports}}' $piwigoName 2>$null)
     if ($LASTEXITCODE -ne 0 -or $portJson.Count -ne 1) { Stop-Retirement 'full_owner_port_inspect_failed' }
     try { $ports = ([string]$portJson[0] | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-Retirement 'full_owner_port_inspect_failed' }
     $ownerCore = @($ports.'80/tcp' | Where-Object { $_.HostIp -eq '127.0.0.1' -and $_.HostPort -eq '8190' })
@@ -108,23 +109,34 @@ function Assert-LegacyVolume([string]$Volume) {
     if ($Volume -notmatch '^class_archive_private_qa_(?:piwigo|immich)_[a-z0-9_]+$') {
         Stop-Retirement 'legacy_volume_name_invalid'
     }
-    $record = @(& $wsl -d Ubuntu --exec docker volume inspect --format '{{.Name}}|{{index .Labels "com.classarchive.scope"}}' $Volume 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $record.Count -ne 1 -or $record[0] -ne ($Volume + '|' + $legacyScope)) {
+    # Ask Docker for only the labels and parse them locally. This avoids a
+    # nested Go-template string that Windows PowerShell can surface as a
+    # RemoteException before the fail-closed exit-code check runs.
+    $labelsJson = @(& $wsl -d Ubuntu --exec docker volume inspect --format '{{json .Labels}}' $Volume 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $labelsJson.Count -ne 1) {
+        Stop-Retirement 'legacy_volume_identity_invalid'
+    }
+    try { $labels = ([string]$labelsJson[0] | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-Retirement 'legacy_volume_identity_invalid' }
+    if ([string]$labels.'com.classarchive.scope' -ne $legacyScope) {
         Stop-Retirement 'legacy_volume_identity_invalid'
     }
 }
 
 function Get-LegacyContainers {
-    $records = @(& $wsl -d Ubuntu --exec docker ps -a --filter ('label=com.classarchive.scope=' + $legacyScope) --format '{{.Names}}|{{.State}}|{{.Label "com.classarchive.scope"}}' 2>&1)
+    $records = @(& $wsl -d Ubuntu --exec docker ps -a --filter ('label=com.classarchive.scope=' + $legacyScope) --format '{{.Names}}|{{.State}}' 2>$null)
     if ($LASTEXITCODE -ne 0) { Stop-Retirement 'legacy_container_inspect_failed' }
     $names = @()
     foreach ($record in $records) {
         if ([string]::IsNullOrWhiteSpace($record)) { continue }
-        $parts = [string]$record -split '\|', 3
-        if ($parts.Count -ne 3 -or $parts[2] -ne $legacyScope -or $parts[0] -notmatch '^class_archive_private_qa_(?:piwigo|immich)-[a-z0-9-]+-\d+$') {
+        $parts = [string]$record -split '\|', 2
+        if ($parts.Count -ne 2 -or $parts[0] -notmatch '^class_archive_private_qa_(?:piwigo|immich)-[a-z0-9-]+-\d+$') {
             Stop-Retirement 'legacy_container_identity_invalid'
         }
         if ($parts[1] -eq 'running') { Stop-Retirement 'legacy_container_still_running' }
+        $labelsJson = @(& $wsl -d Ubuntu --exec docker inspect --format '{{json .Config.Labels}}' $parts[0] 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $labelsJson.Count -ne 1) { Stop-Retirement 'legacy_container_identity_invalid' }
+        try { $labels = ([string]$labelsJson[0] | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-Retirement 'legacy_container_identity_invalid' }
+        if ([string]$labels.'com.classarchive.scope' -ne $legacyScope) { Stop-Retirement 'legacy_container_identity_invalid' }
         $names += $parts[0]
     }
     return @($names | Sort-Object -Unique)
@@ -150,10 +162,19 @@ function Assert-PrivateStagingRoot {
 }
 
 try {
+    $script:stage = 'full_owner_runtime'
     Assert-FullOwnerRuntime
+    $script:stage = 'approval'
     Assert-Approval
-    foreach ($volume in $legacyVolumes) { Assert-LegacyVolume $volume }
+    $legacyVolumeIndex = 0
+    foreach ($volume in $legacyVolumes) {
+        $legacyVolumeIndex++
+        $script:stage = ('legacy_volume_' + $legacyVolumeIndex)
+        Assert-LegacyVolume $volume
+    }
+    $script:stage = 'legacy_containers'
     $containers = Get-LegacyContainers
+    $script:stage = 'legacy_staging'
     $staging = Assert-PrivateStagingRoot
     if ($Action -eq 'validate') {
         $stagingState = if ($null -eq $staging) { 'absent' } else { 'verified' }
@@ -161,15 +182,18 @@ try {
         exit 0
     }
     if (-not $ConfirmRetirement) { Stop-Retirement 'retire_requires_confirm_retirement' }
+    $script:stage = 'remove_legacy_containers'
     foreach ($container in $containers) {
         & $wsl -d Ubuntu --exec docker rm $container 1>$null
         if ($LASTEXITCODE -ne 0) { Stop-Retirement 'legacy_container_remove_failed' }
     }
+    $script:stage = 'remove_legacy_volumes'
     foreach ($volume in $legacyVolumes) {
         Assert-LegacyVolume $volume
         & $wsl -d Ubuntu --exec docker volume rm $volume 1>$null
         if ($LASTEXITCODE -ne 0) { Stop-Retirement 'legacy_volume_remove_failed' }
     }
+    $script:stage = 'remove_legacy_staging'
     if ($null -ne $staging) {
         Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction Stop
     }
@@ -185,6 +209,8 @@ catch {
     }
     $type = $_.Exception.GetType().Name
     if ($type -notmatch '^[A-Za-z0-9]{1,64}$') { $type = 'Exception' }
-    Write-Output ('PRIVATE_QA_RETIRE=FAIL action=' + $Action + ' code=unexpected_' + $type)
+    $stage = [string]$script:stage
+    if ($stage -notmatch '^[a-z0-9_]{1,64}$') { $stage = 'unknown' }
+    Write-Output ('PRIVATE_QA_RETIRE=FAIL action=' + $Action + ' code=unexpected_' + $type + '_stage_' + $stage)
     exit 2
 }

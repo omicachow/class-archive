@@ -345,6 +345,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\dev.ps1 down
 ```
 
+`up` also starts the dedicated public synthetic compatibility BFF behind the
+loopback-only `8091` Piwigo nginx listener; it does not reuse a private QA
+service. `stop` and `down` stop that BFF together with the public synthetic
+runtime.
+
 `stop` and `down` preserve named volumes. **Never run `docker compose down -v`**
 for this project: `-v` deletes the persistent database, originals, application
 state and local backups. Never use volume deletion as a routine reset method.

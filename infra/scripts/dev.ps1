@@ -67,6 +67,22 @@ $composeArguments = @(
     '-f', 'infra/docker-compose.yml'
 )
 
+# The public synthetic Photo UI is deliberately a separate, internal-only BFF
+# behind Piwigo nginx. Keep its lifecycle tied to `dev up`/`dev stop` so 8091
+# never relies on a private QA compatibility service merely because it happens
+# to share a Docker host.
+$publicCompatComposeArguments = @(
+    '-d', 'Ubuntu',
+    '--cd', $projectRoot,
+    '--',
+    'docker', 'compose',
+    '--env-file', 'infra/immich-spike/.env',
+    '-f', 'infra/immich-spike/docker-compose.yml',
+    '-p', 'class-archive-immich-spike',
+    '--profile', 'immich-web-compat'
+)
+$publicCompatContainer = 'class-archive-immich-spike-immich-web-compat-1'
+
 $classPluginWorkflow = $false
 $classPluginSynthetic = $false
 
@@ -137,6 +153,42 @@ function Restore-PiwigoPersistentUserScript {
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not restore and run the pinned Piwigo media-permission hook.'
     }
+}
+
+function Wait-PublicCompatibilityReady {
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $state = @(& wsl.exe @($publicCompatComposeArguments + @(
+                'ps', '-q', 'immich-web-compat'
+            )) 2>$null)
+            $stateExit = $LASTEXITCODE
+            $containerId = if ($stateExit -eq 0 -and $state.Count -eq 1) { ([string]$state[0]).Trim() } else { '' }
+            if ($containerId -match '^[a-f0-9]{12,64}$') {
+                $health = @(& wsl.exe -d Ubuntu --exec docker inspect --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $publicCompatContainer 2>$null)
+                if ($LASTEXITCODE -eq 0 -and $health.Count -eq 1 -and ([string]$health[0]).Trim() -eq 'running|healthy') {
+                    return
+                }
+            }
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw 'Public synthetic compatibility BFF did not become healthy.'
+}
+
+function Start-PublicCompatibility {
+    & wsl.exe @($publicCompatComposeArguments + @('up', '-d', '--force-recreate', 'immich-web-compat'))
+    if ($LASTEXITCODE -ne 0) { throw 'Could not start the public synthetic compatibility BFF.' }
+    Wait-PublicCompatibilityReady
+}
+
+function Stop-PublicCompatibility {
+    & wsl.exe @($publicCompatComposeArguments + @('stop', 'immich-web-compat'))
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stop the public synthetic compatibility BFF.' }
 }
 
 if ($Action -eq 'up' -or $Action -eq 'stop' -or $Action -eq 'down') {
@@ -520,7 +572,7 @@ switch ($Action) {
         # Class Archive compatibility boundary. It is RUNTIME_TESTED only;
         # browser interaction is separately reported by browser QA evidence.
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            (Join-Path $projectRoot 'tests\phase2\immich-web-compat-http.ps1')
+            (Join-Path $projectRoot 'tests\phase2\immich-web-compat-http.ps1') -KeepRunning
         exit $LASTEXITCODE
     }
     'phase2-ml-readiness' {
@@ -626,6 +678,10 @@ try {
     & wsl.exe @commandArguments
     $commandExitCode = $LASTEXITCODE
 
+    if ($commandExitCode -eq 0 -and $Action -eq 'up') {
+        Start-PublicCompatibility
+    }
+
     if ($classPluginWorkflow -and $commandExitCode -eq 0) {
         # A successful installer intentionally leaves nginx in durable maintenance.
         # Restart clears PHP-FPM/opcache; every failure below returns with the exact
@@ -666,6 +722,9 @@ try {
     }
 
     if ($Action -eq 'stop' -or $Action -eq 'down') {
+        if ($commandExitCode -eq 0) {
+            Stop-PublicCompatibility
+        }
         Stop-KeepAlive
     }
 

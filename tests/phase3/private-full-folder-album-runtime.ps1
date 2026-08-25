@@ -1,8 +1,12 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('staging', 'owner')]
+    [string]$Mode = 'staging'
+)
 
-# Count-only local acceptance for the 8290/8291 private-full candidate. The
-# wrapper never opens the private manifest, staging tree, or source folders.
+# Count-only local acceptance for the private-full candidate before or after
+# blue/green cutover. The wrapper never opens the private manifest, staging
+# tree, or source folders.
 # Raw subprocess output is captured and suppressed so an unexpected dependency
 # error cannot echo a machine-specific path.
 
@@ -11,7 +15,22 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.staging'
+$modeConfig = if ($Mode -eq 'owner') {
+    @{
+        envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.owner'
+        envFile = 'infra/private-full/.env.piwigo.owner'
+        corePort = 8190
+        photoPort = 8191
+    }
+} else {
+    @{
+        envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.staging'
+        envFile = 'infra/private-full/.env.piwigo.staging'
+        corePort = 8290
+        photoPort = 8291
+    }
+}
+$envPath = [string]$modeConfig.envPath
 $runtimePath = Join-Path $PSScriptRoot 'private-full-folder-album-runtime.php'
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $curl = "$env:SystemRoot\System32\curl.exe"
@@ -58,7 +77,7 @@ try {
 
     $composePrefix = @(
         '-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose',
-        '--env-file', 'infra/private-full/.env.piwigo.staging',
+        '--env-file', [string]$modeConfig.envFile,
         '-f', 'infra/docker-compose.yml',
         '-f', 'infra/private-full/docker-compose.override.yml',
         '-p', 'class_archive_private_full_v3_piwigo'
@@ -71,12 +90,15 @@ try {
     $portRaw = @(& $wsl -d Ubuntu --exec docker port $containerIds[0] 2>&1)
     $portExit = $LASTEXITCODE
     $ports = @($portRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' } | Sort-Object)
-    $expectedPorts = @('80/tcp -> 127.0.0.1:8290', '8081/tcp -> 127.0.0.1:8291') | Sort-Object
+    $expectedPorts = @(
+        ('80/tcp -> 127.0.0.1:' + [int]$modeConfig.corePort),
+        ('8081/tcp -> 127.0.0.1:' + [int]$modeConfig.photoPort)
+    ) | Sort-Object
     Assert-Runtime ($portExit -eq 0 -and $ports.Count -eq 2) 'candidate_port_count_invalid'
     Assert-Runtime ([string]$ports[0] -eq [string]$expectedPorts[0] -and [string]$ports[1] -eq [string]$expectedPorts[1]) 'candidate_not_loopback_only'
 
-    $coreStatus = Get-LocalHttpStatus 'http://127.0.0.1:8290/identification.php' 8290
-    $photoStatus = Get-LocalHttpStatus 'http://127.0.0.1:8291/photos' 8291
+    $coreStatus = Get-LocalHttpStatus ('http://127.0.0.1:' + [int]$modeConfig.corePort + '/identification.php') ([int]$modeConfig.corePort)
+    $photoStatus = Get-LocalHttpStatus ('http://127.0.0.1:' + [int]$modeConfig.photoPort + '/photos') ([int]$modeConfig.photoPort)
     Assert-Runtime ($coreStatus -ge 200 -and $coreStatus -lt 400) 'candidate_core_not_ready'
     Assert-Runtime ($photoStatus -ge 200 -and $photoStatus -lt 400) 'candidate_photo_not_ready'
 
