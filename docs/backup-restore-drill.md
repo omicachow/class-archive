@@ -1,6 +1,6 @@
 # 合成环境备份与恢复演练
 
-状态：ClassIdentity v14、fixture v6、manifest v7 的本机合成破坏恢复契约已启用；旧 v4/v6 演练证据已按版本失效，必须重新运行本机合成演练后才可作为当前恢复证明。不代表 NAS、异地或公网恢复能力。
+状态：ClassIdentity v14、fixture v6、manifest v7 的本机合成破坏恢复演练已于 2026-08-26 重新通过；旧 v4/v6 演练证据已按版本失效。本结果不代表 NAS、异地或公网恢复能力。
 
 ## 目标与边界
 
@@ -43,9 +43,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 7. 恢复 Piwigo healthcheck 后按原先运行状态重建 Immich server container（不删除其 PostgreSQL/upload/model volumes）；
 8. 比较恢复前后业务指纹（投影 generation/built_at 不参与比较）；
 9. 跑完整 Phase 0 与 Phase 1 回归；
-10. 将运行证据、`read-projection-rebuild.json` 与 `derivative-warmup.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
+10. 在 HTTP 回归后再次重建投影，确认最终运行态仍为 `ACTIVE`；将运行证据、两次 projection rebuild 和 `derivative-warmup.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
 
-2026-08-25（本机，UTC 备份时间 2026-08-24）的 v4 演练结果仅作历史记录；其不满足当前 v6/v7 恢复契约，System Health 必须显示为需要重新验证，直到新演练完成。
+2026-08-26（本机，UTC 备份时间 2026-08-25）的当前 v6/v7 演练结果为：
+
+| 项目 | 结果 |
+|---|---|
+| 备份包 | `class-archive-20260825T195019Z`；manifest 7/7 文件 SHA-256 通过 |
+| 确定性恢复指纹 | `eeb3727e032664904ed1474144e3a5105a053fbaed89dbde9740395fc364eda4` |
+| 基线 | `72/72/8` 恢复前后一致 |
+| 读取投影 | `PHOTO_CATALOG=ACTIVE/72`；五种 aggregate 全部 `ACTIVE`；Phase 0/1 回归后再次重建并复核 |
+| 衍生图恢复 | 空卷重建 `504/504`；七种固定规格；0 个隔离/残留队列项 |
+| Phase 0 | PASS |
+| Phase 1 | PASS |
+| 从删除卷开始到服务、投影、衍生图和 Immich 只读挂载恢复的粗略 RTO | 132 秒 |
+
+当前运行证据保存在被 Git 忽略的 `.codex-work/backup-restore-drill/20260826-035007/`。System Health 已重新验证为当前恢复契约版本。
+
+2026-08-25（本机，UTC 备份时间 2026-08-24）的 v4 演练结果仅作历史记录；其不满足当前 v6/v7 恢复契约。
 
 | 项目 | 结果 |
 |---|---|
@@ -59,7 +74,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 | 从删除卷开始到服务、投影、衍生图和 Immich 只读挂载恢复的粗略 RTO | 148 秒 |
 
 RTO 仅是本机一次合成演练的观测值，不是生产承诺。
-本次证据保存在被 Git 忽略的 `.codex-work/backup-restore-drill/20260825-070953/`。代码升级仍会主动使 System Health 的旧证明失效；实现摘要不一致时必须重新执行受控演练，不能沿用本次绿色状态。
+该历史证据保存在被 Git 忽略的 `.codex-work/backup-restore-drill/20260825-070953/`。代码升级仍会主动使 System Health 的旧证明失效；实现摘要不一致时必须重新执行受控演练，不能沿用旧绿色状态。
 
 ## 恢复后的安全检查
 
