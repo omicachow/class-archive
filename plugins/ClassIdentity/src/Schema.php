@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 12;
+    public const CURRENT_VERSION = 14;
     public const LOCKED_PIWIGO_VERSION = '16.4.0';
 
     private const COLLATION = 'utf8mb4_unicode_ci';
@@ -330,6 +330,16 @@ final class Schema
                 'name' => '0012_durable_native_source_epoch',
                 'signature' => 'v1:myisam-source-epoch:cross-engine-rollback-safe:catalog-binding:initialized-projection-epochs:fail-closed',
                 'method' => 'migrationDurableNativeSourceEpoch',
+            ],
+            13 => [
+                'name' => '0013_private_full_library_import',
+                'signature' => 'v2:private-source-code-only:private-full-provenance:folder-path-digest:native-category-map:resumable-item-journal:sha256-exact-canonical-reuse:innodb:utf8mb4',
+                'method' => 'migrationPrivateFullLibraryImport',
+            ],
+            14 => [
+                'name' => '0014_private_full_native_checkpoint_recovery',
+                'signature' => 'v1:processing-failed-native-image-checkpoint:photo-null-until-canonical-publish:resumable-cross-engine-saga:innodb:utf8mb4',
+                'method' => 'migrationPrivateFullNativeCheckpointRecovery',
             ],
         ];
     }
@@ -1019,7 +1029,7 @@ CREATE TABLE IF NOT EXISTS {$photoSource} (
   KEY `idx_ci_photo_source_checksum` (`source_checksum`,`class_photo_id`),
   CONSTRAINT `{$fk('photo_source_photo', $this->table('photo_source'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
   CONSTRAINT `{$fk('photo_source_actor', $this->table('photo_source'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'MIGRATION', 'OTHER')),
+  CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'PRIVATE_FULL', 'MIGRATION', 'OTHER')),
   CONSTRAINT `chk_ci_photo_source_size` CHECK (`byte_size` > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL);
@@ -1363,6 +1373,176 @@ SQL);
         ]);
         $this->assertProjectionEpochsInitialized();
         $this->assertNativeProjectionTriggers($this->nativeSourceEpochTriggerDefinitions());
+    }
+
+    /**
+     * Private full-library import state.
+     *
+     * The source filesystem remains outside the database.  These tables keep
+     * only an allowlisted source collection code, displayable folder segment
+     * names, and cryptographic digests of source paths / filenames.  That is
+     * enough to resume a local import and preserve folder membership without
+     * ever making a workstation path or original filename part of the product
+     * data model.
+     */
+    private function migrationPrivateFullLibraryImport(): void
+    {
+        $principal = $this->quotedTable('principal');
+        $photo = $this->quotedTable('photo');
+        $album = $this->quotedTable('album');
+        $collection = $this->quotedTable('private_library_collection');
+        $folder = $this->quotedTable('private_library_folder');
+        $import = $this->quotedTable('private_library_import');
+        $item = $this->quotedTable('private_library_import_item');
+        $photoSource = $this->quotedTable('photo_source');
+        $fk = static fn(string $purpose, string $table): string => 'fk_ci_' . $purpose . '_'
+            . substr(hash('sha256', $table), 0, 12);
+
+        // Migration 8 created the first provenance vocabulary. A full local
+        // library must remain distinguishable from the disposable sample QA
+        // corpus, so converge that existing check before writing any v13
+        // journal rows. Replacement is inspect/create safe across a DDL
+        // interruption: a retry either finds the old check or reinstalls the
+        // target check.
+        $this->replaceCheckConstraint(
+            'photo_source',
+            'chk_ci_photo_source_kind',
+            "ALTER TABLE {$photoSource} ADD CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'PRIVATE_FULL', 'MIGRATION', 'OTHER'))",
+        );
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$collection} (
+  `source_collection_id` BINARY(16) NOT NULL,
+  `source_code` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `display_name` VARCHAR(190) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`source_collection_id`),
+  UNIQUE KEY `uq_ci_private_library_source_code` (`source_code`),
+  KEY `idx_ci_private_library_source_state` (`state`,`updated_at`),
+  CONSTRAINT `{$fk('private_library_collection_actor', $this->table('private_library_collection'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_private_library_collection_code` CHECK (`source_code` IN ('PRIVATE_SOURCE_A', 'PRIVATE_SOURCE_B')),
+  CONSTRAINT `chk_ci_private_library_collection_state` CHECK (`state` IN ('ACTIVE', 'RETIRED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$folder} (
+  `folder_id` BINARY(16) NOT NULL,
+  `source_collection_id` BINARY(16) NOT NULL,
+  `relative_path_digest` BINARY(32) NOT NULL,
+  `parent_folder_id` BINARY(16) NULL,
+  `piwigo_category_id` MEDIUMINT(8) UNSIGNED NOT NULL,
+  `class_album_id` BINARY(16) NOT NULL,
+  `display_name` VARCHAR(190) NOT NULL,
+  `depth` SMALLINT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`folder_id`),
+  UNIQUE KEY `uq_ci_private_library_folder_path` (`source_collection_id`,`relative_path_digest`),
+  UNIQUE KEY `uq_ci_private_library_folder_category` (`piwigo_category_id`),
+  UNIQUE KEY `uq_ci_private_library_folder_album` (`class_album_id`),
+  KEY `idx_ci_private_library_folder_parent` (`parent_folder_id`,`display_name`),
+  CONSTRAINT `{$fk('private_library_folder_collection', $this->table('private_library_folder'))}` FOREIGN KEY (`source_collection_id`) REFERENCES {$collection} (`source_collection_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('private_library_folder_parent', $this->table('private_library_folder'))}` FOREIGN KEY (`parent_folder_id`) REFERENCES {$folder} (`folder_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('private_library_folder_album', $this->table('private_library_folder'))}` FOREIGN KEY (`class_album_id`) REFERENCES {$album} (`class_album_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_private_library_folder_depth` CHECK (`depth` <= 255)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$import} (
+  `import_id` BINARY(16) NOT NULL,
+  `manifest_digest` BINARY(32) NOT NULL,
+  `manifest_version` SMALLINT UNSIGNED NOT NULL,
+  `item_total` INT UNSIGNED NOT NULL,
+  `state` VARCHAR(24) NOT NULL DEFAULT 'PREPARED',
+  `applied_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `deduplicated_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `failed_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `last_error_code` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  `created_by_principal_id` BIGINT UNSIGNED NOT NULL,
+  `started_at` DATETIME(6) NULL,
+  `completed_at` DATETIME(6) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`import_id`),
+  UNIQUE KEY `uq_ci_private_library_import_manifest` (`manifest_digest`),
+  KEY `idx_ci_private_library_import_state` (`state`,`updated_at`),
+  CONSTRAINT `{$fk('private_library_import_actor', $this->table('private_library_import'))}` FOREIGN KEY (`created_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_private_library_import_state` CHECK (`state` IN ('PREPARED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED')),
+  CONSTRAINT `chk_ci_private_library_import_counts` CHECK (`item_total` > 0 AND `applied_count` + `deduplicated_count` + `failed_count` <= `item_total`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$item} (
+  `import_id` BINARY(16) NOT NULL,
+  `item_digest` BINARY(32) NOT NULL,
+  `source_collection_id` BINARY(16) NOT NULL,
+  `folder_id` BINARY(16) NULL,
+  `source_reference_digest` BINARY(32) NOT NULL,
+  `original_filename_digest` BINARY(32) NOT NULL,
+  `source_checksum` BINARY(32) NOT NULL,
+  `staging_name_digest` BINARY(32) NOT NULL,
+  `byte_size` BIGINT UNSIGNED NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  `class_photo_id` BINARY(16) NULL,
+  `piwigo_image_id` MEDIUMINT(8) UNSIGNED NULL,
+  `attempt_count` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `last_error_code` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`import_id`,`item_digest`),
+  KEY `idx_ci_private_library_item_state` (`import_id`,`state`,`updated_at`),
+  KEY `idx_ci_private_library_item_checksum` (`source_checksum`,`state`),
+  KEY `idx_ci_private_library_item_photo` (`class_photo_id`),
+  CONSTRAINT `{$fk('private_library_item_import', $this->table('private_library_import_item'))}` FOREIGN KEY (`import_id`) REFERENCES {$import} (`import_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('private_library_item_collection', $this->table('private_library_import_item'))}` FOREIGN KEY (`source_collection_id`) REFERENCES {$collection} (`source_collection_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('private_library_item_folder', $this->table('private_library_import_item'))}` FOREIGN KEY (`folder_id`) REFERENCES {$folder} (`folder_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('private_library_item_photo', $this->table('private_library_import_item'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_private_library_item_state` CHECK (`state` IN ('PENDING', 'PROCESSING', 'APPLIED', 'DEDUPLICATED', 'FAILED')),
+  CONSTRAINT `chk_ci_private_library_item_size` CHECK (`byte_size` > 0),
+  CONSTRAINT `chk_ci_private_library_item_target` CHECK ((`state` IN ('APPLIED', 'DEDUPLICATED') AND `class_photo_id` IS NOT NULL AND `piwigo_image_id` IS NOT NULL) OR (`state` = 'PENDING' AND `class_photo_id` IS NULL AND `piwigo_image_id` IS NULL) OR (`state` IN ('PROCESSING', 'FAILED') AND `class_photo_id` IS NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('private_library_collection', [
+            'source_collection_id', 'source_code', 'display_name', 'state', 'created_by_principal_id',
+        ]);
+        $this->assertTable('private_library_folder', [
+            'folder_id', 'source_collection_id', 'relative_path_digest', 'parent_folder_id',
+            'piwigo_category_id', 'class_album_id', 'display_name', 'depth',
+        ]);
+        $this->assertTable('private_library_import', [
+            'import_id', 'manifest_digest', 'manifest_version', 'item_total', 'state',
+            'applied_count', 'deduplicated_count', 'failed_count', 'last_error_code',
+        ]);
+        $this->assertTable('private_library_import_item', [
+            'import_id', 'item_digest', 'source_collection_id', 'folder_id', 'source_reference_digest',
+            'original_filename_digest', 'source_checksum', 'staging_name_digest', 'byte_size',
+            'state', 'class_photo_id', 'piwigo_image_id', 'attempt_count', 'last_error_code',
+        ]);
+    }
+
+    /**
+     * The import journal is deliberately able to retain a verified native
+     * Piwigo image checkpoint while the InnoDB canonical mapping is still
+     * PROCESSING or after a retryable FAILED item.  Without this state, a
+     * crash between Piwigo's MyISAM write and mapping publication either
+     * loses the recovery anchor or forces a duplicate original.  A canonical
+     * photo id remains forbidden until APPLIED/DEDUPLICATED.
+     */
+    private function migrationPrivateFullNativeCheckpointRecovery(): void
+    {
+        $item = $this->quotedTable('private_library_import_item');
+        $this->replaceCheckConstraint(
+            'private_library_import_item',
+            'chk_ci_private_library_item_target',
+            "ALTER TABLE {$item} ADD CONSTRAINT `chk_ci_private_library_item_target` CHECK ((`state` IN ('APPLIED', 'DEDUPLICATED') AND `class_photo_id` IS NOT NULL AND `piwigo_image_id` IS NOT NULL) OR (`state` = 'PENDING' AND `class_photo_id` IS NULL AND `piwigo_image_id` IS NULL) OR (`state` IN ('PROCESSING', 'FAILED') AND `class_photo_id` IS NULL))",
+        );
     }
 
     /**
@@ -1771,6 +1951,26 @@ SQL);
         }
     }
 
+    /**
+     * Replace a named CHECK constraint with the exact locked vocabulary.
+     *
+     * MariaDB does not expose a portable ALTER ... IF EXISTS for every locked
+     * deployment target. Checking first makes a retry safe when an earlier
+     * run stopped between DROP and ADD; after a completed add, a retry simply
+     * converges the same named constraint again before the migration ledger is
+     * recorded.
+     */
+    private function replaceCheckConstraint(string $table, string $constraint, string $ddl): void
+    {
+        if ($this->constraintExists($table, $constraint, 'CHECK')) {
+            $this->executeRaw('ALTER TABLE ' . $this->quotedTable($table) . ' DROP CONSTRAINT `' . $constraint . '`');
+        }
+        $this->executeRaw($ddl);
+        if (!$this->constraintExists($table, $constraint, 'CHECK')) {
+            throw new \RuntimeException('class_identity_missing_replaced_check_constraint_' . $table . '_' . $constraint);
+        }
+    }
+
     private function columnExists(string $table, string $column): bool
     {
         return $this->informationSchemaExists(
@@ -1918,10 +2118,16 @@ SQL);
             'person_photo_rule' => '1cfd7d1394a6ab6cc357ff8492fb2dbd1ab3a8c27c8c2d6b2fbdb461d6192011',
             'album' => '5f3a5e5b67c9e6fd534faaf48f3d327cb5b090a5bce9aaaed6001a79021100b6',
             'spotlight' => 'a83686fe1cbfbaa193aafa90e3b0f208e02c5b0feaa0249bb8b7f62d7673e11b',
-            'photo_source' => '34fc6599faa44aa6cab60ccce9161aee4c384d337a1e67cc639c7557d94832e0',
+            'photo_source' => 'ce248992be43a980eea5988e661995e114c37a4cf27e396556c4a3e9cb5024d9',
             'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',
             'batch_operation' => '819f4bab9f845999655f333156b8a627589251e3c7221cde19e1132a8c0b39e7',
             'batch_operation_item' => '0cfec340df85bdbabc3ca5126511439b161a4dbfe0421e1cb37fb86a0af2487a',
+            // Derived by tests/phase3/private-full-library-schema-semantics.php
+            // against the locked MariaDB 11.8.8 runtime.
+            'private_library_collection' => '2bb1eb76f9f035f88cd89cc491880bcbd2bcb7ed6a9d8caa02391b5c00cc9d48',
+            'private_library_folder' => 'c8e84370cda5ea8e82c593d3fc2ef2b50ade2783e0a020a684e37a045c96eba0',
+            'private_library_import' => '82026d485e07eeca630f1b0e12a540a1d138bf6272fabc6b460722fcda32b50e',
+            'private_library_import_item' => 'c765a10a63fafa5d0234f300f6cd591c1eded8bc03527f62b986acb28abf222f',
             // Generated from migration 9 on the locked MariaDB 11.8.8
             // information_schema contract.
             'native_source_epoch' => '38835ba61ef74fb5a7133a0ed32f50fad6bfda27fa97d932ae6a0f163d7c80cb',
@@ -2242,6 +2448,10 @@ SQL);
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',
+            'private_library_collection',
+            'private_library_folder',
+            'private_library_import',
+            'private_library_import_item',
             'native_source_epoch',
             'read_projection',
             'read_photo',

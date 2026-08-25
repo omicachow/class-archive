@@ -1832,8 +1832,29 @@ async function handleApi(request, response, url, clientAddress) {
     }
     const albumMatch = /^\/api\/class-archive\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
     if (albumMatch) {
-      exactQuery(url, new Set());
-      await relayPublicGatewayApi(request, response, `/api/albums/${assertUuid(albumMatch[1])}`, clientAddress);
+      // Album detail is cursor-paginated by the canonical Gateway. Preserve
+      // only its two bounded opaque query fields; accepting a generic query
+      // here would turn this BFF route into an unreviewed proxy surface.
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const cursor = query.get('cursor');
+      const limit = query.get('limit');
+      // exactQuery() returns a Map, whose missing optional values are
+      // undefined. Check presence rather than truthiness so an ordinary
+      // first-page request with only `limit` remains valid, while malformed
+      // supplied values still fail closed before reaching the Gateway.
+      const hasCursor = query.has('cursor');
+      const hasLimit = query.has('limit');
+      if (hasCursor && !timelineCursorPattern.test(cursor)) {
+        throw new TypeError('class_archive_web_compat_album_cursor_invalid');
+      }
+      if (hasLimit && (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 240)) {
+        throw new TypeError('class_archive_web_compat_album_limit_invalid');
+      }
+      const params = new URLSearchParams();
+      if (hasCursor) params.set('cursor', cursor);
+      if (hasLimit) params.set('limit', limit);
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/albums/${assertUuid(albumMatch[1])}${suffix}`, clientAddress, { responseOptions: { metadata: true } });
       return;
     }
     if (url.pathname === '/api/class-archive/search/hybrid') {

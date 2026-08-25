@@ -459,7 +459,17 @@ switch ($Action) {
     'test-phase2-gateway-http' {
         # This verifies only the same-origin Class Archive Gateway backed by
         # Piwigo/ClassIdentity. It does not connect the API to Immich and does
-        # not constitute browser or Immich-adapter E2E evidence.
+        # not constitute browser or Immich-adapter E2E evidence. Earlier
+        # fixture suites intentionally invalidate the durable read projection
+        # during their cleanup. Rebuild the canonical synthetic projection
+        # first so this HTTP suite always begins from a verified, readable
+        # baseline instead of accidentally treating the expected fail-closed
+        # 503 state as an API regression.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase2\gateway-http.ps1')
         exit $LASTEXITCODE

@@ -110,8 +110,15 @@ final class Audit
         'provenance_code',
         'canonicalized',
         'item_count',
+        'item_total',
         'applied_count',
+        'deduplicated_count',
         'failed_count',
+        'manifest_version',
+        'source_code',
+        'source_collection_id',
+        'depth',
+        'error_code',
         'high_risk_confirmed',
     ];
 
@@ -381,6 +388,7 @@ final class Audit
                 'class_photo_id',
                 'class_person_id',
                 'class_album_id',
+                'source_collection_id',
                 'canonical_class_photo_id',
                 'cover_class_photo_id',
                 'duplicate_id',

@@ -108,13 +108,14 @@ if ($identityTableRows === []) {
         caPasswordFail('The exact pre-ClassIdentity Core webmaster could not be proven.');
     }
     $hash = $conf['password_hash']($password);
-    unset($password);
     if (!is_string($hash) || $hash === '') {
+        unset($password);
         caPasswordFail('Core password hashing failed.');
     }
     single_update(USERS_TABLE, ['password' => $hash], ['id' => $webmasterId]);
     unset($hash);
     caAssertPasswordPersisted($webmasterId, $password);
+    unset($password);
     delete_user_sessions($webmasterId);
     if (function_exists('deactivate_user_auth_keys')) {
         deactivate_user_auth_keys($webmasterId);

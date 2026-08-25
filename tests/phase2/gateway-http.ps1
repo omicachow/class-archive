@@ -416,9 +416,21 @@ try {
     Assert-PrivateJson $familyAlbumsResponse 200 'family albums'
     Assert-NoBackendLeak -Text $familyAlbumsResponse.Text -Label 'family albums'
     $familyAlbums = Get-Json -Response $familyAlbumsResponse -Label 'family albums'
-    $familyAlbumNames = @((Get-Items $familyAlbums) | ForEach-Object { [string]$_.name })
+    $familyAlbumItems = @(Get-Items $familyAlbums)
     $familyPhotoAlbumNames = @($familyItems | ForEach-Object { @($_.albums) } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
-    Assert-True (@($familyAlbumNames | Where-Object { $_ -notin $familyPhotoAlbumNames }).Count -eq 0) 'Family album aggregation included a hidden-only album.'
+    foreach ($album in $familyAlbumItems) {
+        $recursiveTotal = [int]$album.total
+        $directTotal = [int]$album.directTotal
+        # Folder-aware album projection may intentionally include an ancestor
+        # with no direct images. Its recursively computed count must still be
+        # visible to this Family principal; only a zero-visible-photo album is
+        # a hidden-only aggregate leak.
+        Assert-True ($recursiveTotal -gt 0) 'Family album aggregation included a hidden-only album.'
+        Assert-True ($directTotal -ge 0 -and $directTotal -le $recursiveTotal) 'Family album direct/recursive totals were inconsistent.'
+        if ($directTotal -gt 0) {
+            Assert-True ([string]$album.name -in $familyPhotoAlbumNames) 'Family direct album was absent from its visible photo projection.'
+        }
+    }
 
     $heritageTitles = @($classmateItems | Where-Object { [string]$_.era -eq 'HERITAGE' } | ForEach-Object { [string]$_.title })
     $searchTerm = $null

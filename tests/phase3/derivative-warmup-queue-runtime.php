@@ -145,6 +145,11 @@ $assertions = 0;
 $fixturePaths = [];
 $quarantineFixturePaths = [];
 $metadataFixture = null;
+$archiveFixtureImageId = null;
+$archiveFixtureCreated = false;
+$failureCode = null;
+$successOutput = null;
+$stage = 'startup';
 try {
     chdir('/var/www/html/piwigo') || throw new RuntimeException('root_unavailable');
     define('PHPWG_ROOT_PATH', './');
@@ -163,6 +168,46 @@ try {
         throw new RuntimeException('queue_class_unavailable');
     }
     $repository = \ClassIdentity\Repository::fromPiwigo();
+    $archive = '`' . $repository->table('archive_image') . '`';
+    $heritage = $repository->fetchOne(
+        'SELECT `id` FROM `' . $prefixeTable . "categories` WHERE `permalink`='class-archive-heritage' LIMIT 1",
+    );
+    $heritageId = (int) ($heritage['id'] ?? 0);
+    if ($heritageId <= 0) {
+        throw new RuntimeException('timeline_heritage_root_unavailable');
+    }
+    // The canonical public baseline deliberately contains no archive rows.
+    // The cache warmer now correctly derives its first-screen work set from
+    // the persisted timeline projection rather than approximating it with a
+    // live SQL scan, so this test must create one explicit, reversible
+    // HERITAGE fixture before it exercises that projection. It is removed and
+    // the no-archive baseline is republished in finally below.
+    $archiveFixture = $repository->fetchOne(
+        'SELECT p.`piwigo_image_id` FROM `' . $repository->table('photo') . '` p '
+            . 'JOIN `' . $prefixeTable . 'image_category` ic ON ic.`image_id`=p.`piwigo_image_id` '
+            . 'JOIN `' . $prefixeTable . 'categories` c ON c.`id`=ic.`category_id` '
+            . 'LEFT JOIN ' . $archive . ' a ON a.`piwigo_image_id`=p.`piwigo_image_id` '
+            . "WHERE p.`state`='ACTIVE' AND a.`id` IS NULL GROUP BY p.`piwigo_image_id` "
+            . 'HAVING MAX(CASE WHEN ic.`category_id`=? OR FIND_IN_SET(?,c.`uppercats`)>0 THEN 1 ELSE 0 END)=1 '
+            . 'ORDER BY p.`piwigo_image_id` ASC LIMIT 1',
+        [$heritageId, $heritageId],
+    );
+    $archiveFixtureImageId = (int) ($archiveFixture['piwigo_image_id'] ?? 0);
+    if ($archiveFixtureImageId <= 0) {
+        throw new RuntimeException('timeline_archive_fixture_unavailable');
+    }
+    if ($repository->execute(
+        "INSERT INTO {$archive} (`piwigo_image_id`,`era`,`archive_date`,`date_precision`,`date_confidence`,`date_source`,"
+            . "`event_label`,`official`,`source_submission_id`,`created_at`,`updated_at`) "
+            . "VALUES (?,'HERITAGE',NULL,'UNKNOWN','UNKNOWN','UNKNOWN',NULL,0,NULL,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+        [$archiveFixtureImageId],
+    ) !== 1) {
+        throw new RuntimeException('timeline_archive_fixture_insert_failed');
+    }
+    $archiveFixtureCreated = true;
+    $stage = 'timeline_fixture_rebuild';
+    \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+    ++$assertions;
     $rows = $repository->fetchAll(
         'SELECT HEX(pm.`class_photo_id`) AS `class_photo_id_hex`,pm.`piwigo_image_id`,'
         . 'i.`width`,i.`height`,i.`rotation` FROM `' . $repository->table('photo') . '` pm '
@@ -171,6 +216,7 @@ try {
         . 'AND i.`width`>0 AND i.`height`>0 AND i.`rotation` IS NOT NULL '
         . 'ORDER BY pm.`piwigo_image_id` ASC LIMIT 100',
     );
+    $stage = 'queue_initial_scan';
     $before = ClassArchiveDerivativeWarmupQueue::pending();
     $already = [];
     foreach ($before as $entry) {
@@ -325,6 +371,7 @@ try {
     if (!class_exists('ClassArchiveDerivativeCacheWarmer', false)) {
         throw new RuntimeException('immediate_warmer_class_unavailable');
     }
+    $stage = 'immediate_warm';
     $immediate = ClassArchiveDerivativeCacheWarmer::warm(
         $queued['class_photo_id'],
         $queued['piwigo_image_id'],
@@ -360,10 +407,11 @@ try {
         throw new RuntimeException('immediate_completed_marker_retained');
     }
 
-    // Requeue the same exact mapping to prove the periodic maintenance path
-    // remains a recovery consumer after immediate prewarm. Reintroduce the
-    // same missing native metadata so the batch path must normalize it and
-    // publish exactly one complete catalog generation after all selected rows.
+    // Requeue the same exact mapping to prove the explicit all-recovery
+    // maintenance path remains a consumer after immediate prewarm. Reintroduce
+    // the same missing native metadata so it normalizes every queued mapping
+    // before rebuilding the persisted timeline; a bounded first-screen pass
+    // must never use stale projection data as a SQL fallback.
     if ($repository->execute(
         'UPDATE `' . $prefixeTable . 'images` SET `width`=0,`height`=0,`rotation`=NULL WHERE `id`=?',
         [$queued['piwigo_image_id']],
@@ -372,7 +420,8 @@ try {
     }
     ClassArchiveDerivativeWarmupQueue::enqueue($queued['class_photo_id'], $queued['piwigo_image_id']);
     $profiles = array_keys(classArchivePhotoCacheCanonicalProfiles());
-    $result = classArchivePhotoCacheWarm('first-screen', $profiles, false);
+    $stage = 'batch_all_recovery_warm';
+    $result = classArchivePhotoCacheWarm('all', $profiles, false);
     ++$assertions;
     if (($result['result'] ?? null) !== 'PASS') {
         throw new RuntimeException('warmup_failed');
@@ -424,11 +473,11 @@ try {
         throw new RuntimeException('temp_fixture_cleanup_incomplete');
     }
 
-    fwrite(STDOUT, 'DERIVATIVE_WARMUP_QUEUE_RUNTIME=PASS assertions=' . $assertions
+    $successOutput = 'DERIVATIVE_WARMUP_QUEUE_RUNTIME=PASS assertions=' . $assertions
         . ' immediate_generated=' . (int) ($immediate['generated'] ?? 0)
         . ' immediate_cached=' . (int) ($immediate['cached'] ?? 0)
         . ' generated=' . (int) ($result['generated'] ?? 0)
-        . ' cached=' . (int) ($result['cached'] ?? 0) . "\n");
+        . ' cached=' . (int) ($result['cached'] ?? 0) . "\n";
 } catch (Throwable $error) {
     if (is_array($metadataFixture) && isset($repository, $prefixeTable)) {
         try {
@@ -470,5 +519,32 @@ try {
             // fail-closed and is safe for the next maintenance run.
         }
     }
-    warmQueueFail($error->getMessage());
+    $failureCode = $stage . '_' . $error->getMessage();
+} finally {
+    if ($archiveFixtureCreated && is_int($archiveFixtureImageId) && $archiveFixtureImageId > 0
+        && isset($repository, $prefixeTable)) {
+        try {
+            $archive = '`' . $repository->table('archive_image') . '`';
+            $deleted = $repository->execute(
+                "DELETE FROM {$archive} WHERE `piwigo_image_id`=? AND `source_submission_id` IS NULL "
+                    . "AND `era`='HERITAGE' AND `archive_date` IS NULL AND `date_precision`='UNKNOWN' "
+                    . "AND `date_confidence`='UNKNOWN' AND `date_source`='UNKNOWN' AND `event_label` IS NULL AND `official`=0",
+                [$archiveFixtureImageId],
+            );
+            if ($deleted !== 1) {
+                $failureCode ??= 'timeline_archive_fixture_cleanup_failed';
+            } else {
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+            }
+        } catch (Throwable) {
+            $failureCode ??= 'timeline_archive_fixture_cleanup_failed';
+        }
+    }
 }
+if (is_string($failureCode)) {
+    warmQueueFail($failureCode);
+}
+if (!is_string($successOutput)) {
+    warmQueueFail('success_output_missing');
+}
+fwrite(STDOUT, $successOutput);

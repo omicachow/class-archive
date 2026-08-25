@@ -32,6 +32,7 @@ require_once CLASS_IDENTITY_PATH . 'src/PersonCurationService.php';
 require_once CLASS_IDENTITY_PATH . 'src/AlbumService.php';
 require_once CLASS_IDENTITY_PATH . 'src/SpotlightService.php';
 require_once CLASS_IDENTITY_PATH . 'src/CanonicalPhotoService.php';
+require_once CLASS_IDENTITY_PATH . 'src/PrivateFullLibraryService.php';
 require_once CLASS_IDENTITY_PATH . 'src/BulkArchiveService.php';
 require_once CLASS_IDENTITY_PATH . 'src/CapabilityGuard.php';
 require_once CLASS_IDENTITY_PATH . 'src/AnonymousPresenter.php';

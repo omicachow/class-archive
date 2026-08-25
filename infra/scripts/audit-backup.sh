@@ -67,7 +67,7 @@ if [ -n "$latest_bundle" ]; then
   expected_count=7
   actual_count=$(wc -l < "$manifest" | tr -d '[:space:]')
   business_manifest=0
-  schema_contract='"class_identity_schema":{"version":12,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
+  schema_contract='"class_identity_schema":{"version":14,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
   if [ -f "$latest_bundle/MANIFEST.json" ] && [ ! -L "$latest_bundle/MANIFEST.json" ] \
      && grep -Eq '^\{"format":6,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$latest_bundle/MANIFEST.json" \
      && grep -Fq "$schema_contract" "$latest_bundle/MANIFEST.json"; then

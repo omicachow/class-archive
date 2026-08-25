@@ -1046,6 +1046,10 @@ SQL);
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',
+            'private_library_collection',
+            'private_library_folder',
+            'private_library_import',
+            'private_library_import_item',
             'read_projection',
             'read_photo',
         ];

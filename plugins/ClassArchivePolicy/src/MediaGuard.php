@@ -346,12 +346,39 @@ final class ClassArchiveMediaGuard
         if (!isset($definedTypes[$type])) {
             throw new DomainException('canonical_derivative_type_unavailable');
         }
-        $token = derivative_to_url($type);
-        if (!is_string($token) || !preg_match('/\A[A-Za-z0-9_]+\z/D', $token)) {
-            throw new DomainException('canonical_derivative_token_invalid');
+        if (!class_exists('SrcImage') || !class_exists('DerivativeImage')) {
+            throw new DomainException('canonical_derivative_pipeline_unavailable');
         }
 
-        $relativeDerivative = self::derivativePathFromSource($source, $token);
+        // Do not reconstruct a derivative filename from the requested profile.
+        // Piwigo may safely select a smaller effective profile when the source
+        // image does not need the requested transform. Its DerivativeImage
+        // object is the one authoritative mapping between that source and the
+        // already-warmed cache entry. Reconstructing a requested `-xl` path
+        // while Core selected `-la`, for example, makes a valid cache look
+        // missing and turns a normal preview into a fail-closed 503.
+        //
+        // Identity transforms remain special: Piwigo intentionally points
+        // them at the original, which Class Archive must never expose as a
+        // preview. The maintenance warmer writes a metadata-stripped cache
+        // entry at the requested profile token instead; resolve that same
+        // forced-safe location here. Neither path can trigger generation on a
+        // member request.
+        $derivative = DerivativeImage::get_one($type, new SrcImage($image));
+        if (!$derivative instanceof DerivativeImage) {
+            throw new DomainException('canonical_derivative_type_unavailable');
+        }
+
+        if ($derivative->same_as_source()) {
+            $token = derivative_to_url($type);
+            if (!is_string($token) || !preg_match('/\A[A-Za-z0-9_]+\z/D', $token)) {
+                throw new DomainException('canonical_derivative_token_invalid');
+            }
+            $relativeDerivative = self::derivativePathFromSource($source, $token);
+        } else {
+            $relativeDerivative = self::derivativePathFromPiwigo($derivative, $source);
+        }
+
         return [
             'request' => new ClassArchiveMediaRequest(
                 (int) $image['id'],
@@ -363,6 +390,36 @@ final class ClassArchiveMediaGuard
             ),
             'image' => $image,
         ];
+    }
+
+    /**
+     * Convert a Piwigo Core derivative cache location back into the strictly
+     * relative name understood by the guarded nginx internal location.
+     *
+     * @param DerivativeImage $derivative
+     */
+    private static function derivativePathFromPiwigo(DerivativeImage $derivative, string $source): string
+    {
+        $path = str_replace('\\', '/', $derivative->get_path());
+        $root = rtrim(str_replace('\\', '/', PHPWG_ROOT_PATH), '/') . '/_data/i/';
+        if (
+            $path === ''
+            || str_contains($path, "\0")
+            || !str_starts_with($path, $root)
+        ) {
+            throw new DomainException('canonical_derivative_path_invalid');
+        }
+
+        $relative = self::normalizeDerivativePath(substr($path, strlen($root)));
+        // The Core-calculated target must still describe exactly this original
+        // and a currently enabled derivative token. This is a fail-closed
+        // guard against an unexpected Core/plugin path shape; it also keeps
+        // the canonical route as strict as public derivative URLs.
+        if (self::sourcePathFromDerivative($relative) !== $source) {
+            throw new DomainException('canonical_derivative_path_invalid');
+        }
+
+        return $relative;
     }
 
     private static function thumbnailDerivativeType(): string

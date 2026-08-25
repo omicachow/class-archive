@@ -7,6 +7,10 @@ const LOCK_FILE_PATH = __DIR__ . '/../piwigo-extensions.lock.json';
 const INSTALLER_LOCK_FILENAME = '.class-archive-extension-installer.lock';
 const TREE_MARKER_FILENAME = '.class-archive-extension-lock.json';
 const TREE_DIGEST_ALGORITHM = 'sha256-tree-v1';
+// An optional, read-only cache is useful when the official upstream is slow
+// or intentionally unavailable during a controlled install. It is never
+// trusted: an archive is accepted only after its lock-file SHA-256 matches.
+const OPTIONAL_ARCHIVE_CACHE_PATH = '/class-archive-extension-cache';
 const MAX_ARCHIVE_BYTES = 134_217_728;
 const MAX_ARCHIVE_ENTRIES = 25_000;
 const MAX_ENTRY_BYTES = 134_217_728;
@@ -325,6 +329,66 @@ function downloadArchive(string $url, string $destination): void
     if ($size === false || $size <= 0 || $size > MAX_ARCHIVE_BYTES) {
         @unlink($destination);
         fail('Downloaded archive has an invalid size.');
+    }
+}
+
+/**
+ * Return a locally cached archive only when it is a regular, non-symlink file
+ * beneath the fixed cache mount. A cache hash mismatch is an integrity error,
+ * not a reason to fall back to a network download.
+ */
+function resolveVerifiedCachedArchive(array $extension): ?string
+{
+    if (!file_exists(OPTIONAL_ARCHIVE_CACHE_PATH) && !is_link(OPTIONAL_ARCHIVE_CACHE_PATH)) {
+        return null;
+    }
+    if (is_link(OPTIONAL_ARCHIVE_CACHE_PATH) || !is_dir(OPTIONAL_ARCHIVE_CACHE_PATH)) {
+        fail('The optional extension archive cache path is unsafe.');
+    }
+
+    $filename = $extension['id'] . '-' . $extension['sha256'] . '.zip';
+    $path = OPTIONAL_ARCHIVE_CACHE_PATH . DIRECTORY_SEPARATOR . $filename;
+    if (!file_exists($path) && !is_link($path)) {
+        return null;
+    }
+    if (is_link($path) || !is_file($path)) {
+        fail("Cached archive for {$extension['id']} is unsafe.");
+    }
+
+    $size = filesize($path);
+    if ($size === false || $size <= 0 || $size > MAX_ARCHIVE_BYTES) {
+        fail("Cached archive for {$extension['id']} has an invalid size.");
+    }
+    $digest = hash_file('sha256', $path);
+    if ($digest === false || !hash_equals($extension['sha256'], $digest)) {
+        fail("Cached archive SHA-256 mismatch for {$extension['id']}.");
+    }
+
+    return $path;
+}
+
+function copyVerifiedCachedArchive(string $source, string $destination): void
+{
+    $input = @fopen($source, 'rb');
+    $output = @fopen($destination, 'xb');
+    if ($input === false || $output === false) {
+        if (is_resource($input)) {
+            fclose($input);
+        }
+        if (is_resource($output)) {
+            fclose($output);
+        }
+        fail('Cannot prepare the verified cached extension archive.');
+    }
+
+    try {
+        $copied = stream_copy_to_stream($input, $output, MAX_ARCHIVE_BYTES + 1);
+        if ($copied === false || $copied <= 0 || $copied > MAX_ARCHIVE_BYTES || !fflush($output)) {
+            fail('Cannot safely copy the verified cached extension archive.');
+        }
+    } finally {
+        fclose($input);
+        fclose($output);
     }
 }
 
@@ -771,7 +835,13 @@ function installExtension(array $extension): void
     $archive = null;
 
     try {
-        downloadArchive($extension['downloadUrl'], $archivePath);
+        $cachedArchive = resolveVerifiedCachedArchive($extension);
+        if ($cachedArchive !== null) {
+            copyVerifiedCachedArchive($cachedArchive, $archivePath);
+            fwrite(STDOUT, "USING VERIFIED CACHE {$extension['type']} {$extension['id']} {$extension['version']}\n");
+        } else {
+            downloadArchive($extension['downloadUrl'], $archivePath);
+        }
         $actualArchiveDigest = hash_file('sha256', $archivePath);
         if ($actualArchiveDigest === false || !hash_equals($extension['sha256'], $actualArchiveDigest)) {
             fail("SHA-256 mismatch for {$extension['id']}.");

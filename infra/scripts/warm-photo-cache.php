@@ -123,6 +123,57 @@ function classArchivePhotoCachePrepareRuntime(): void
 }
 
 /**
+ * @return list<string>
+ */
+function classArchivePhotoCacheTimelineFirstScreenIds(): array
+{
+    if (!class_exists(\ClassIdentity\Gateway\ReadProjectionStore::class)) {
+        throw new RuntimeException('photo_cache_timeline_projection_unavailable');
+    }
+
+    // The photo UI consumes this already-built FULL timeline projection.  The
+    // warm set must use the exact same bucket and item order; a SQL-only
+    // approximation can select a different event/term bucket and leave the
+    // first viewer preview cold after a full import.
+    $timeline = \ClassIdentity\Gateway\ReadProjectionStore::fromPiwigo()->aggregate(
+        \ClassIdentity\Gateway\ReadProjectionStore::TIMELINE,
+        \ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL,
+    );
+    $groups = $timeline['groups'] ?? null;
+    if (!is_array($groups)) {
+        throw new RuntimeException('photo_cache_timeline_projection_invalid');
+    }
+
+    $result = [];
+    $seen = [];
+    foreach ($groups as $group) {
+        $items = is_array($group) ? ($group['items'] ?? null) : null;
+        if (!is_array($items)) {
+            throw new RuntimeException('photo_cache_timeline_projection_invalid');
+        }
+        foreach ($items as $item) {
+            $classPhotoId = is_array($item) && is_string($item['id'] ?? null)
+                ? strtolower((string) $item['id'])
+                : '';
+            try {
+                \ClassIdentity\ClassArchivePhoto::idToBinary($classPhotoId);
+            } catch (Throwable) {
+                throw new RuntimeException('photo_cache_timeline_projection_invalid');
+            }
+            if (isset($seen[$classPhotoId])) {
+                throw new RuntimeException('photo_cache_timeline_projection_duplicate');
+            }
+            $seen[$classPhotoId] = true;
+            $result[] = $classPhotoId;
+            if (count($result) === CLASS_ARCHIVE_PHOTO_CACHE_FIRST_SCREEN_LIMIT) {
+                return $result;
+            }
+        }
+    }
+    return $result;
+}
+
+/**
  * @param list<array{class_photo_id:string,piwigo_image_id:int}> $pending
  * @param-out list<array{class_photo_id:string,piwigo_image_id:int}> $quarantined
  * @return list<array<string,mixed>>
@@ -140,7 +191,17 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
     $coverJoin = $scope === 'covers'
         ? 'JOIN `' . $p . 'categories` c ON c.`representative_picture_id` = i.`id` '
         : '';
-    $limit = $scope === 'first-screen' ? ' LIMIT ' . CLASS_ARCHIVE_PHOTO_CACHE_FIRST_SCREEN_LIMIT : '';
+    $timelineIds = $scope === 'first-screen' ? classArchivePhotoCacheTimelineFirstScreenIds() : [];
+    if ($scope === 'first-screen' && $timelineIds === []) {
+        return [];
+    }
+    $timelineFilter = '';
+    $parameters = [];
+    if ($timelineIds !== []) {
+        $binaryIds = array_map([\ClassIdentity\ClassArchivePhoto::class, 'idToBinary'], $timelineIds);
+        $timelineFilter = ' AND pm.`class_photo_id` IN (' . implode(',', array_fill(0, count($binaryIds), '?')) . ')';
+        array_push($parameters, ...$binaryIds);
+    }
     $rows = $repository->fetchAll(
         'SELECT DISTINCT i.`id`,i.`path`,i.`file`,i.`width`,i.`height`,i.`rotation`,i.`representative_ext`, '
         . 'HEX(pm.`class_photo_id`) AS `class_photo_id_hex`,pm.`media_reference`,pm.`state` AS `mapping_state` '
@@ -148,10 +209,32 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
         . 'JOIN `' . $photo . '` pm ON pm.`piwigo_image_id` = i.`id` '
         . $coverJoin
         . 'LEFT JOIN `' . $archive . '` ai ON ai.`piwigo_image_id` = i.`id` '
-        . "WHERE pm.`state` = 'ACTIVE' "
+        . "WHERE pm.`state` = 'ACTIVE' " . $timelineFilter
         . 'ORDER BY ai.`archive_date` IS NULL ASC,ai.`archive_date` DESC,i.`id` DESC'
-        . $limit,
+        ,
+        $parameters,
     );
+    if ($timelineIds !== []) {
+        $byClassPhotoId = [];
+        foreach ($rows as $row) {
+            $binary = hex2bin((string) ($row['class_photo_id_hex'] ?? ''));
+            if (!is_string($binary) || strlen($binary) !== 16) {
+                throw new RuntimeException('photo_cache_timeline_projection_invalid');
+            }
+            $classPhotoId = \ClassIdentity\ClassArchivePhoto::binaryToId($binary);
+            if (isset($byClassPhotoId[$classPhotoId])) {
+                throw new RuntimeException('photo_cache_timeline_projection_duplicate');
+            }
+            $byClassPhotoId[$classPhotoId] = $row;
+        }
+        $rows = [];
+        foreach ($timelineIds as $classPhotoId) {
+            if (!isset($byClassPhotoId[$classPhotoId])) {
+                throw new RuntimeException('photo_cache_timeline_projection_incomplete');
+            }
+            $rows[] = $byClassPhotoId[$classPhotoId];
+        }
+    }
     $seen = [];
     foreach ($rows as $row) {
         $seen[(int) ($row['id'] ?? 0)] = true;
@@ -621,14 +704,20 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
         $pending = class_exists('ClassArchiveDerivativeWarmupQueue', false)
             ? \ClassArchiveDerivativeWarmupQueue::pending()
             : [];
+        // The durable queue represents a full, post-write recovery obligation.
+        // Do not let a bounded first-screen or cover pass accidentally expand
+        // into a whole-library job just because a large import has queued many
+        // active images.  The explicit `all` recovery pass owns queue drain;
+        // bounded passes leave every marker intact for that background work.
+        $pendingForScope = $scope === 'all' ? $pending : [];
         $quarantined = [];
-        $rows = classArchivePhotoCacheRows($scope, $pending, $quarantined);
+        $rows = classArchivePhotoCacheRows($scope, $pendingForScope, $quarantined);
         $quarantinedKeys = [];
         foreach ($quarantined as $entry) {
             $quarantinedKeys[$entry['class_photo_id'] . ':' . $entry['piwigo_image_id']] = true;
         }
         $pendingByImage = [];
-        foreach ($pending as $entry) {
+        foreach ($pendingForScope as $entry) {
             if (isset($quarantinedKeys[$entry['class_photo_id'] . ':' . $entry['piwigo_image_id']])) {
                 continue;
             }

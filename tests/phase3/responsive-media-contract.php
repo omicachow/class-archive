@@ -18,6 +18,7 @@ define('IMG_SMALL', 'sm');
 define('IMG_MEDIUM', 'me');
 define('IMG_LARGE', 'la');
 define('IMG_XLARGE', 'xl');
+define('IMG_CUSTOM', 'cu');
 
 final class ImageStdParams
 {
@@ -25,6 +26,52 @@ final class ImageStdParams
     public static function get_defined_type_map(): array
     {
         return array_fill_keys(['th', 'xs', 'sm', 'me', 'la', 'xl'], true);
+    }
+}
+
+final class SrcImage
+{
+    /** @param array<string,mixed> $row */
+    public function __construct(public readonly array $row)
+    {
+    }
+}
+
+/**
+ * A narrow Piwigo Core double. The XLARGE request deliberately resolves to
+ * LARGE, mirroring Core's safe fallback behavior for sources that do not need
+ * the requested transform. XS is deliberately an identity transform to prove
+ * Class Archive still uses its forced-safe cache entry rather than the
+ * original returned by Core.
+ */
+final class DerivativeImage
+{
+    private function __construct(
+        private readonly string $effectiveType,
+        private readonly bool $sameAsSource,
+    ) {
+    }
+
+    public static function get_one(string $type, SrcImage $source): ?self
+    {
+        unset($source);
+        if (!in_array($type, ['th', 'xs', 'sm', 'me', 'la', 'xl'], true)) {
+            return null;
+        }
+        return new self(
+            $type === 'xl' ? 'la' : $type,
+            $type === 'xs',
+        );
+    }
+
+    public function same_as_source(): bool
+    {
+        return $this->sameAsSource;
+    }
+
+    public function get_path(): string
+    {
+        return PHPWG_ROOT_PATH . '_data/i/upload/synthetic-' . $this->effectiveType . '.jpg';
     }
 }
 
@@ -178,7 +225,9 @@ $expectedTokens = [
     'small' => 'sm',
     'medium' => 'me',
     'large' => 'la',
-    'preview' => 'xl',
+    // This is a Core-selected fallback. Canonical delivery must use exactly
+    // the same warmed target, not reconstruct the requested `-xl` filename.
+    'preview' => 'la',
 ];
 if (!mkdir($runtimeRoot . '/_data/i/upload', 0700, true)) {
     throw new RuntimeException('responsive_media_derivative_root_unavailable');
@@ -194,6 +243,19 @@ foreach ($expectedTokens as $variant => $token) {
     $path = $resolved['request']->derivativePath;
     $assert(is_string($path) && str_ends_with($path, '-' . $token . '.jpg'), 'runtime_derivative_profile_' . $variant);
 }
+$preview = ClassArchiveMediaGuard::resolveCanonicalDelivery(42, 'preview');
+$assert(
+    is_string($preview['request']->derivativePath)
+    && str_ends_with($preview['request']->derivativePath, '-la.jpg')
+    && !str_ends_with($preview['request']->derivativePath, '-xl.jpg'),
+    'runtime_core_fallback_path_reused',
+);
+$identity = ClassArchiveMediaGuard::resolveCanonicalDelivery(42, 'xsmall');
+$assert(
+    is_string($identity['request']->derivativePath)
+    && str_ends_with($identity['request']->derivativePath, '-xs.jpg'),
+    'runtime_identity_uses_forced_safe_cache',
+);
 $hardlinkTarget = $runtimeRoot . '/_data/i/upload/synthetic-sm.jpg';
 $hardlinkPeer = $runtimeRoot . '/_data/i/upload/.synthetic-hardlink.test';
 if (!link($hardlinkTarget, $hardlinkPeer)) {
@@ -212,7 +274,7 @@ if (!unlink($hardlinkPeer)) {
 }
 ClassArchiveMediaGuard::assertDeliveryTarget($hardlinked['request']);
 $assert(true, 'runtime_hardlink_removal_recovers_delivery');
-$missing = $runtimeRoot . '/_data/i/upload/synthetic-xl.jpg';
+$missing = $runtimeRoot . '/_data/i/upload/synthetic-la.jpg';
 @unlink($missing);
 $missingDelivery = ClassArchiveMediaGuard::resolveCanonicalDelivery(42, 'preview');
 $expects(

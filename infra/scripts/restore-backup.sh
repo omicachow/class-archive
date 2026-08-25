@@ -39,11 +39,11 @@ for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz s
 done
 (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1) || fail restore_checksum_failed
 
-# Format 6 binds the backup contract to ClassIdentity v12 while explicitly
+# Format 6 binds the backup contract to ClassIdentity v13 while explicitly
 # separating business truth from all rebuildable read projections. An older
 # bundle may contain a valid SQL dump, but it cannot prove this recovery policy
 # and is therefore rejected before any target is cleared.
-schema_contract='"class_identity_schema":{"version":12,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
+schema_contract='"class_identity_schema":{"version":14,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
 grep -Eq '^\{"format":6,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
 grep -Fq "$schema_contract" "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
 
@@ -141,8 +141,8 @@ case "$ci_migration" in ''|*[!A-Za-z0-9_]*) fail restore_class_identity_schema_i
 ci_base=${ci_migration%migration}
 ci_version=$(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
   -e "SELECT COALESCE(MAX(version),0) FROM $ci_migration")
-[ "$ci_version" = 12 ] || fail restore_class_identity_schema_invalid
-for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_duplicate batch_operation batch_operation_item native_source_epoch read_projection read_photo; do
+[ "$ci_version" = 14 ] || fail restore_class_identity_schema_invalid
+for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_duplicate batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item native_source_epoch read_projection read_photo; do
   ci_table_count=$(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
     -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$ci_base$suffix'")
   [ "$ci_table_count" = 1 ] || fail restore_class_identity_schema_invalid

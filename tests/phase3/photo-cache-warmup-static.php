@@ -102,6 +102,13 @@ $assert(str_contains($source, "'square' => 'IMG_SQUARE'")
 $assert(str_contains($source, "clearstatcache(true, \$target['absolute']);")
     && str_contains($immediate, "clearstatcache(true, \$target['absolute']);"), 'child_generator_negative_stat_cache_not_cleared');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
+$assert(str_contains($source, '$pendingForScope = $scope === \'all\' ? $pending : [];')
+    && str_contains($source, 'classArchivePhotoCacheRows($scope, $pendingForScope, $quarantined)')
+    && str_contains($source, 'foreach ($pendingForScope as $entry)'), 'bounded_warmup_may_drain_full_library_queue');
+$assert(str_contains($source, 'classArchivePhotoCacheTimelineFirstScreenIds')
+    && str_contains($source, 'ReadProjectionStore::TIMELINE')
+    && str_contains($source, 'ReadProjectionStore::SCOPE_FULL')
+    && str_contains($source, 'photo_cache_timeline_projection_incomplete'), 'first_screen_warmup_not_bound_to_presentation_timeline');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'successful_queue_completion_missing');
 $assert(str_contains($queue, "'class_photo_id' => \$classPhotoId, 'piwigo_image_id' => \$imageId"), 'queue_contains_noncanonical_identity');
 $assert(!str_contains($queue, 'source_path') && !str_contains($queue, 'derivative_path'), 'queue_must_not_store_media_paths');
@@ -172,4 +179,4 @@ $assert($percentageLabel->invoke(null, 1, 2) === '50%', 'system_health_reuse_rat
 $assert($percentageLabel->invoke(null, 0, 0) === '尚无可计算数据', 'system_health_empty_rate_must_be_uncollected');
 $assert($percentageLabel->invoke(null, 3, 2) === '尚无可计算数据', 'system_health_invalid_rate_must_fail_closed');
 
-fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=83\n");
+fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=84\n");

@@ -34,6 +34,10 @@ const CI_SCHEMA_SUFFIXES = [
     'photo_duplicate',
     'batch_operation',
     'batch_operation_item',
+    'private_library_collection',
+    'private_library_folder',
+    'private_library_import',
+    'private_library_import_item',
     'native_source_epoch',
     'read_projection',
     'read_photo',
@@ -250,7 +254,7 @@ try {
     );
 
     $schema = new ClassIdentity\Schema($db, $temporaryBasePrefix, '0.1.0');
-    // The migration ledger clone says v12 is applied, but CREATE TABLE LIKE
+    // The migration ledger clone says v13 is applied, but CREATE TABLE LIKE
     // intentionally does not copy triggers or singleton cache-control rows.
     // Install the exact v11/v12 guards on disposable Core-table clones before
     // attesting the temporary schema.

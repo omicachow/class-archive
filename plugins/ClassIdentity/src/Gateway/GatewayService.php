@@ -29,6 +29,8 @@ final class GatewayService
 {
     private const TIMELINE_PAGE_DEFAULT = 120;
     private const TIMELINE_PAGE_MAX = 240;
+    private const ALBUM_PAGE_DEFAULT = 120;
+    private const ALBUM_PAGE_MAX = 240;
 
     /**
      * Request-scoped, policy-filtered canonical projection. Keeping the raw
@@ -407,6 +409,71 @@ final class GatewayService
         return $offset;
     }
 
+    /** Album cursors are bound to both the role-scoped projection and album id. */
+    private function albumCursorSigningKey(): string
+    {
+        $root = $this->timelineCursorRootSecret;
+        if ($root === null) {
+            $environment = getenv('CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET');
+            $root = is_string($environment) ? $environment : null;
+        }
+        if (!is_string($root) || strlen($root) < 32 || strlen($root) > 4096) {
+            throw new \RuntimeException('class_archive_gateway_album_cursor_secret_unavailable');
+        }
+        return hash_hmac(
+            'sha256',
+            "class-archive/album-cursor-signing/v1\0",
+            $root,
+            true,
+        );
+    }
+
+    private static function encodeAlbumCursor(int $offset, string $albumId, string $snapshot, string $signingKey): string
+    {
+        ClassArchivePhoto::idToBinary($albumId);
+        if ($offset <= 0 || $offset > 0xffffffff || strlen($snapshot) !== 32 || strlen($signingKey) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_album_cursor_invalid');
+        }
+        $packedOffset = pack('N', $offset);
+        $mac = hash_hmac('sha256', strtolower($albumId) . "\0" . $packedOffset . $snapshot, $signingKey, true);
+        return rtrim(strtr(base64_encode($packedOffset . $mac), '+/', '-_'), '=');
+    }
+
+    private static function decodeAlbumCursor(
+        ?string $cursor,
+        string $albumId,
+        string $snapshot,
+        int $total,
+        string $signingKey,
+    ): int {
+        ClassArchivePhoto::idToBinary($albumId);
+        if ($total < 0 || strlen($snapshot) !== 32 || strlen($signingKey) !== 32) {
+            throw new \RuntimeException('class_archive_gateway_album_cursor_invalid');
+        }
+        if ($cursor === null) {
+            return 0;
+        }
+        if (preg_match('/\A[A-Za-z0-9_-]{48}\z/D', $cursor) !== 1) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_cursor_invalid');
+        }
+        $decoded = base64_decode(strtr($cursor, '-_', '+/'), true);
+        if (!is_string($decoded) || strlen($decoded) !== 36) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_cursor_invalid');
+        }
+        $unpacked = unpack('Noffset', substr($decoded, 0, 4));
+        $offset = is_array($unpacked) ? (int) ($unpacked['offset'] ?? 0) : 0;
+        $expectedMac = hash_hmac(
+            'sha256',
+            strtolower($albumId) . "\0" . substr($decoded, 0, 4) . $snapshot,
+            $signingKey,
+            true,
+        );
+        if ($offset <= 0 || $offset >= $total || !hash_equals($expectedMac, substr($decoded, 4))) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_cursor_invalid');
+        }
+        return $offset;
+    }
+
     /** @return array{total:int,groups:list<array<string,mixed>>} */
     private function computeTimeline(): array
     {
@@ -448,7 +515,7 @@ final class GatewayService
             }
             $items = $this->applyAlbumCapabilities($items);
             foreach ($items as &$item) {
-                unset($item['items'], $item['photo_ids']);
+                unset($item['items'], $item['photo_ids'], $item['direct_photo_ids']);
             }
             unset($item);
             return ['total' => count($items), 'items' => $items];
@@ -476,16 +543,54 @@ final class GatewayService
     }
 
     /** @return array<string,mixed>|null */
-    public function album(string $classAlbumId): ?array
+    public function album(string $classAlbumId, ?string $cursor = null, ?int $limit = null): ?array
     {
         \ClassIdentity\DomainSupport::idToBinary($classAlbumId);
+        $limit ??= self::ALBUM_PAGE_DEFAULT;
+        if ($limit < 1 || $limit > self::ALBUM_PAGE_MAX) {
+            throw new \InvalidArgumentException('class_archive_gateway_album_limit_invalid');
+        }
         if ($this->readProjection !== null) {
-            $projection = $this->readProjection->aggregate(ReadProjectionStore::ALBUMS, $this->projectionScope());
+            $scope = $this->projectionScope();
+            $before = $this->readProjection->presentationEpoch($scope);
+            if (preg_match('/\A[a-f0-9]{64}\z/D', $before) !== 1) {
+                throw new \RuntimeException('class_archive_gateway_album_snapshot_invalid');
+            }
+            $projection = $this->readProjection->aggregate(ReadProjectionStore::ALBUMS, $scope);
+            $after = $this->readProjection->presentationEpoch($scope);
+            if (!hash_equals($before, $after)) {
+                throw new \RuntimeException('class_archive_gateway_album_snapshot_changed');
+            }
+            $snapshot = hex2bin($before);
+            if (!is_string($snapshot) || strlen($snapshot) !== 32) {
+                throw new \RuntimeException('class_archive_gateway_album_snapshot_invalid');
+            }
             $items = is_array($projection['items'] ?? null) ? $this->applyAlbumCapabilities($projection['items']) : [];
             foreach ($items as $album) {
                 if (is_array($album) && is_string($album['id'] ?? null) && hash_equals($album['id'], strtolower($classAlbumId))) {
                     $photoIds = $this->projectionPhotoIds($album);
-                    $album['items'] = $this->hydrateProjectionPhotos($photoIds);
+                    $total = count($photoIds);
+                    $offset = self::decodeAlbumCursor(
+                        $cursor,
+                        strtolower($classAlbumId),
+                        $snapshot,
+                        $total,
+                        $this->albumCursorSigningKey(),
+                    );
+                    $pageIds = array_slice($photoIds, $offset, $limit);
+                    if ($pageIds === [] && $total > 0) {
+                        throw new \RuntimeException('class_archive_gateway_album_page_invalid');
+                    }
+                    $album['items'] = $this->hydrateProjectionPhotos($pageIds);
+                    $end = $offset + count($pageIds);
+                    $hasMore = $end < $total;
+                    $album['total'] = $total;
+                    $album['count'] = count($pageIds);
+                    $album['limit'] = $limit;
+                    $album['has_more'] = $hasMore;
+                    $album['next_cursor'] = $hasMore
+                        ? self::encodeAlbumCursor($end, strtolower($classAlbumId), $snapshot, $this->albumCursorSigningKey())
+                        : null;
                     unset($album['photo_ids']);
                     return $album;
                 }
@@ -1053,6 +1158,7 @@ final class GatewayService
                         return (string) $photo['id'];
                     }, $photos);
                     unset($item['items']);
+                    unset($item['direct_photo_ids']);
                 }
                 unset($item);
                 return ['total' => count($items), 'items' => $items];
@@ -1462,10 +1568,32 @@ final class GatewayService
         $items = [];
         foreach ($mappings as $mapping) {
             $categoryId = (int) ($mapping['piwigo_category_id'] ?? 0);
+            $memberCategoryIds = $mapping['visible_category_ids'] ?? null;
+            if ($categoryId <= 0 || !is_array($memberCategoryIds) || $memberCategoryIds === []) {
+                throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+            }
+            $memberCategorySet = [];
+            foreach ($memberCategoryIds as $memberCategoryId) {
+                if (!is_int($memberCategoryId) || $memberCategoryId <= 0) {
+                    throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+                }
+                $memberCategorySet[$memberCategoryId] = true;
+            }
             $members = [];
+            $directMembers = [];
             foreach ($visible as $photo) {
-                if (in_array($categoryId, $photo->albumCategoryIds(), true)) {
+                $belongsToTree = false;
+                foreach ($photo->albumCategoryIds() as $photoCategoryId) {
+                    if (isset($memberCategorySet[$photoCategoryId])) {
+                        $belongsToTree = true;
+                        break;
+                    }
+                }
+                if ($belongsToTree) {
                     $members[] = $photo;
+                }
+                if (in_array($categoryId, $photo->albumCategoryIds(), true)) {
+                    $directMembers[] = $photo;
                 }
             }
             if ($members === []) {
@@ -1507,10 +1635,23 @@ final class GatewayService
                 'eventLabel' => $mapping['event_label'] ?? null,
                 'dateLabel' => $dateLabel,
                 'total' => count($members),
+                'directTotal' => count($directMembers),
                 'coverPhotoId' => $cover,
+                // This is a harmless presentation hint for the local full
+                // library album landing page. It contains no source path or
+                // provenance identifier and never participates in ACL.
+                'sourceRoot' => ($mapping['source_root'] ?? false) === true,
                 'owned' => $owned,
                 'canSpotlight' => $canSpotlight,
             ];
+            $parentId = $mapping['parent_class_album_id'] ?? null;
+            if ($parentId !== null) {
+                if (!is_string($parentId)) {
+                    throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+                }
+                ClassArchivePhoto::idToBinary($parentId);
+                $item['parentAlbumId'] = strtolower($parentId);
+            }
             if ($includePhotos) {
                 $item['items'] = array_map(static fn(GatewayPhotoCandidate $photo): array => $photo->publicProjection(), $members);
             }

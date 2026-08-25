@@ -7,10 +7,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..', '..');
 const read = (path) => readFile(resolve(root, path), 'utf8');
 
-const [schema, controller, gateway, server, app, css, i18n] = await Promise.all([
+const [schema, controller, gateway, albumService, server, app, css, i18n] = await Promise.all([
   read('plugins/ClassIdentity/src/Schema.php'),
   read('plugins/ClassIdentity/src/Gateway/GatewayHttpController.php'),
   read('plugins/ClassIdentity/src/Gateway/GatewayService.php'),
+  read('plugins/ClassIdentity/src/AlbumService.php'),
   read('infra/immich-spike/web-compat/server.mjs'),
   read('infra/immich-spike/photo-ui/app.js'),
   read('infra/immich-spike/photo-ui/app.css'),
@@ -23,11 +24,21 @@ function check(condition, message) {
   assertions += 1;
 }
 
-check(schema.includes('public const CURRENT_VERSION = 12;'), 'ClassIdentity schema must include the v12 durable native source epoch while preserving v8 productization');
+check(schema.includes('public const CURRENT_VERSION = 14;'), 'ClassIdentity schema must include the v14 native-checkpoint recovery while preserving v13 private-library journal, v12 durable native source epoch and v8 productization');
 check(schema.includes("'name' => '0008_photo_productization_domain'"), 'v8 migration must have a stable ledger name');
 check(schema.includes("'name' => '0012_durable_native_source_epoch'"), 'v12 migration must have a stable ledger name');
 check(schema.includes("CREATE TABLE IF NOT EXISTS {$epoch}") && schema.includes(') ENGINE=MyISAM'), 'v12 source epoch sentinel must remain durable in the native MyISAM domain');
 check(schema.includes("'source_key', 'generation', 'updated_at'"), 'v12 source epoch sentinel schema must remain fingerprinted');
+check(schema.includes("'name' => '0013_private_full_library_import'"), 'v13 private full-library import migration must have a stable ledger name');
+check(schema.includes("'name' => '0014_private_full_native_checkpoint_recovery'")
+  && schema.includes('migrationPrivateFullNativeCheckpointRecovery'), 'v14 must permit a verified native checkpoint before canonical publication');
+check(schema.includes("'PRIVATE_FULL'"), 'full private-library provenance must remain distinct from disposable PRIVATE_QA');
+for (const table of [
+  'private_library_collection', 'private_library_folder', 'private_library_import', 'private_library_import_item',
+]) {
+  check(schema.includes(`$this->quotedTable('${table}')`), `v13 must create ${table}`);
+  check(schema.includes(`'${table}' => '`), `v13 must lock the ${table} semantic fingerprint`);
+}
 for (const table of [
   'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source',
   'photo_duplicate', 'batch_operation', 'batch_operation_item',
@@ -107,6 +118,8 @@ check(gateway.includes("$smart = ['available' => false, 'total' => 0, 'items' =>
   && gateway.includes("'partial' => ($smart['available'] ?? false) !== true"), 'semantic search failure must degrade independently, report partial results and fail closed');
 check(gateway.includes("self::semanticQuery($query)"), 'hybrid search must use the bounded local bilingual normalization hook');
 check(gateway.includes("'total' => count($members)") && gateway.includes("'coverPhotoId' => $cover"), 'album counts and covers must be chosen from visible members');
+check(gateway.includes("'sourceRoot' => ($mapping['source_root'] ?? false) === true"), 'a private source-root hint must stay presentation-only and policy-neutral');
+check(albumService.includes('privateSourceRootAlbumIds') && albumService.includes("f.`parent_folder_id` IS NULL"), 'full-library source roots must be derived from the private folder hierarchy rather than a client path');
 check(controller.includes('DomainSupport::idToBinary($value)') && controller.includes('return strtolower($value)'), 'product detail routes must require normalized opaque UUIDs');
 
 check(app.includes("const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my'])"), 'mobile information architecture must use five tabs');
@@ -134,7 +147,19 @@ check(app.includes('sourcePersonId: person.id') && app.includes('photoIds,'), 'p
 check(app.includes("group.exact ? t('duplicates.exact') : t('duplicates.near')") && app.includes('if (!group.exact) return card;'), 'near duplicates must remain review-only in the UI');
 
 check(app.includes('card.href = `/albums/${album.id}`'), 'album cards must navigate by stable opaque album id');
-check(app.includes("apiJson(`/api/class-archive/albums/${id}`)"), 'album detail must use the Class Archive album contract');
+check(app.includes('function sourceCollectionPresentation(albums, hierarchy)') && app.includes("album.sourceRoot === true"), 'the album landing page must promote safe source-root collections without flattening membership');
+check(app.includes("apiJson(`/api/class-archive/albums/${id.toLowerCase()}?${params}`)"), 'album detail must use the Class Archive album contract with bounded cursor pagination');
+check(app.includes('window.scrollTo(0, 0);') && app.includes('newly opened Search'), 'top-level photo routes must reset the viewport after their rendered content settles');
+check(server.includes("const query = exactQuery(url, new Set(['cursor', 'limit']));")
+  && server.includes('class_archive_web_compat_album_cursor_invalid')
+  && server.includes('class_archive_web_compat_album_limit_invalid')
+  && server.includes("const hasCursor = query.has('cursor');")
+  && server.includes("const hasLimit = query.has('limit');")
+  && server.includes('if (hasCursor && !timelineCursorPattern.test(cursor))')
+  && server.includes('if (hasLimit && (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 240))')
+  && server.includes("if (hasCursor) params.set('cursor', cursor);")
+  && server.includes("if (hasLimit) params.set('limit', limit);")
+  && server.includes('`/api/albums/${assertUuid(albumMatch[1])}${suffix}`'), 'BFF album detail must relay only bounded canonical cursor pagination');
 check(app.includes("'/api/class-archive/manage/albums/cover'"), 'album covers must use an audited management endpoint');
 check(app.includes("{ albumId: album.id, durationHours: 24 }"), 'Spotlight creation must request the fixed 24-hour duration');
 check(app.includes("state.canSpotlight && album.owned && album.canSpotlight"), 'Spotlight UI must require role and ownership capabilities');
@@ -153,6 +178,7 @@ check(app.includes("if (state.canManage)") && app.includes("'/people/manage'"), 
 
 for (const key of [
   'photos.bulkTitle', 'people.manageTitle', 'albums.official', 'albums.community',
+  'albums.sourceCollections', 'albums.sourceCollectionsLead',
   'spotlight.eyebrow', 'search.structured', 'search.smartBeta', 'my.currentRole',
 ]) {
   check(i18n.includes(`'${key}'`), `i18n must centralize ${key}`);

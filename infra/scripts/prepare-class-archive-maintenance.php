@@ -84,7 +84,17 @@ function classifyMarker(string $path, int $nginxUid, int $nginxGid): array
     }
 
     $state = 'UNKNOWN';
-    if ($uid === $nginxUid && $gid === $nginxGid && ($mode & 0777) === 0600) {
+    if (
+        $uid === $nginxUid
+        && $gid === $nginxGid
+        // Docker's named-volume ACL normalizer can expose the ACL mask as
+        // 0660/0670 after the initial atomic 0600 publish, while retaining
+        // the exact nginx owner/group and no permissions for "other".  Those
+        // three forms are equivalently private inside the pinned container;
+        // accepting no broader mode prevents a harmless restart from leaving
+        // the fail-closed maintenance gate permanently stuck.
+        && in_array(($mode & 0777), [0600, 0660, 0670], true)
+    ) {
         $state = 'TRUSTED';
     } else {
         $directory = @lstat(CLASS_ARCHIVE_PREPARE_DATA);

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 /**
  * Static Phase 3.2 gate for backup, maintenance, reconciliation and System
- * Health coverage of the ClassIdentity v12 product-domain state and the
+ * Health coverage of the ClassIdentity v13 product-domain state and the
  * cache-free materialized read-projection recovery contract.
  *
  * The destructive restore drill remains a separate, explicitly confirmed
@@ -74,20 +74,39 @@ foreach ($businessTables as $table) {
     $assert(str_contains($sources['admin'], "'{$table}',"), "System Health omits {$table}");
 }
 
-$assert(str_contains($sources['fixture'], "'fixture_version' => 4"), 'restore fixture version was not advanced');
-$assert(str_contains($sources['fixture'], "'class_identity_schema_version' => 12"), 'restore fixture does not attest schema v12');
+// The full private library is a durable business import, but its fixture
+// representation must remain path-free and must never expose original source
+// filenames. These tables are included in backup/restore and health checks as
+// opaque import/provenance state, not as a public data source.
+$privateLibraryTables = [
+    'private_library_collection',
+    'private_library_folder',
+    'private_library_import',
+    'private_library_import_item',
+];
+foreach ($privateLibraryTables as $table) {
+    $assert(str_contains($sources['fixture'], "'{$table}' =>"), "restore fixture omits {$table}");
+    $assert(str_contains($sources['compose'], '"' . $table . '"'), "backup manifest omits {$table}");
+    $assert(str_contains($sources['restore'], '"' . $table . '"'), "restore verifier omits {$table}");
+    $assert(str_contains($sources['audit'], '"' . $table . '"'), "backup auditor omits {$table}");
+    $assert(str_contains($sources['admin'], "'{$table}',"), "System Health omits {$table}");
+    $assert(str_contains($sources['schema'], "'{$table}'"), "schema omits {$table}");
+}
+
+$assert(str_contains($sources['fixture'], "'fixture_version' => 5"), 'restore fixture version was not advanced');
+$assert(str_contains($sources['fixture'], "'class_identity_schema_version' => 13"), 'restore fixture does not attest schema v13');
 $assert(str_contains($sources['fixture'], "'native_source_epoch' =>"), 'restore fixture omits the durable native source epoch');
 $assert(str_contains($sources['fixture'], "'policy' => 'REBUILD_FROM_BUSINESS_TRUTH'"), 'restore fixture does not separate projection cache from business truth');
 $assert(str_contains($sources['fixture'], "'projection' => 'ALL'") && str_contains($sources['fixture'], "'required_active' => ['PHOTO_CATALOG', 'TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT']"), 'restore fixture does not require all materialized projections');
 $assert(!str_contains($sources['fixture'], "'read_projection' =>") && !str_contains($sources['fixture'], "'read_photo' =>"), 'restore fixture must not fingerprint rebuildable projection rows');
 $assert(str_contains($sources['compose'], '"format":6'), 'backup manifest format was not advanced');
-$assert(str_contains($sources['compose'], '"rebuildable_projection_tables":["read_projection","read_photo"]'), 'backup manifest does not classify v12 projection tables as rebuildable cache');
+$assert(str_contains($sources['compose'], '"rebuildable_projection_tables":["read_projection","read_photo"]'), 'backup manifest does not classify v13 projection tables as rebuildable cache');
 $assert(str_contains($sources['compose'], '"projection_rebuild":"ALL"'), 'backup manifest does not require full projection rebuild');
 $assert(str_contains($sources['compose'], '"native_source_epoch"'), 'backup manifest omits the durable native source epoch business table');
-$backupSchemaCheck = $position($sources['compose'], 'ClassIdentity schema v12 is not current');
+$backupSchemaCheck = $position($sources['compose'], 'ClassIdentity schema v13 is not current');
 $projectionDataOmission = $position($sources['compose'], '--ignore-table-data="$${DB_NAME}.$${ci_base}read_projection"');
 $databaseDump = $position($sources['compose'], 'mariadb-dump --quick --lock-all-tables');
-$assert($backupSchemaCheck >= 0 && $databaseDump >= 0 && $backupSchemaCheck < $databaseDump, 'backup must prove schema v12 before the SQL snapshot');
+$assert($backupSchemaCheck >= 0 && $databaseDump >= 0 && $backupSchemaCheck < $databaseDump, 'backup must prove schema v13 before the SQL snapshot');
 $assert(str_contains($sources['compose'], "ENGINE='MyISAM'") && str_contains($sources['compose'], "source_key='PIWIGO_NATIVE'") && str_contains($sources['compose'], 'OCTET_LENGTH(generation)=16'), 'backup must prove the durable epoch is a valid MyISAM singleton before dumping');
 $assert(str_contains($sources['compose'], 'ci_source_epoch_images_bi') && str_contains($sources['compose'], 'ci_source_epoch_categories_bd') && str_contains($sources['compose'], 'test "$${ci_trigger_count}" = 18'), 'backup must prove all 18 native projection/source-epoch triggers');
 $assert(str_contains($sources['schema'], "public const LOCKED_PIWIGO_VERSION = '16.4.0'"), 'native trigger integration must remain locked to Piwigo 16.4.0');
@@ -106,9 +125,9 @@ $assert($phase0StateTransition >= 0 && $phase0ProjectionRecovery > $phase0StateT
 $assert($projectionDataOmission > $databaseDump, 'backup must preserve projection DDL while omitting cache rows');
 $assert(str_contains($sources['compose'], '--ignore-table-data="$${DB_NAME}.$${ci_base}read_photo"'), 'backup does not omit read_photo cache rows');
 $assert(str_contains($sources['compose'], 'rebuildable projection cache leaked into the SQL snapshot'), 'backup does not verify that projection cache rows were omitted');
-$assert(str_contains($sources['backup_evidence'], 'public const VERSION = 4'), 'old restore evidence was not invalidated');
-$assert(str_contains($sources['backup_evidence'], 'public const FIXTURE_VERSION = 4'), 'restore evidence is not bound to fixture v4');
-$assert(str_contains($sources['backup_evidence'], 'public const CLASS_IDENTITY_SCHEMA_VERSION = 12'), 'restore evidence is not bound to schema v12');
+$assert(str_contains($sources['backup_evidence'], 'public const VERSION = 5'), 'old restore evidence was not invalidated');
+$assert(str_contains($sources['backup_evidence'], 'public const FIXTURE_VERSION = 5'), 'restore evidence is not bound to fixture v5');
+$assert(str_contains($sources['backup_evidence'], 'public const CLASS_IDENTITY_SCHEMA_VERSION = 13'), 'restore evidence is not bound to schema v13');
 $assert(str_contains($sources['backup_evidence'], 'public const BACKUP_MANIFEST_FORMAT = 6'), 'restore evidence is not bound to manifest format 6');
 $assert(str_contains($sources['backup_evidence'], '/workspace/infra/scripts/capture-restore-fixture.php'), 'restore evidence digest omits the fixture implementation');
 $assert(str_contains($sources['backup_evidence'], '/workspace/infra/scripts/audit-backup.sh'), 'restore evidence digest omits the backup auditor');
@@ -125,7 +144,7 @@ $volumeRestore = $position($sources['restore'], 'restore_piwigo_data_failed');
 $restoredSchemaCheck = $position($sources['restore'], 'restore_class_identity_schema_ambiguous');
 $assert(
     $databaseRestore >= 0 && $restoredSchemaCheck > $databaseRestore && $volumeRestore > $restoredSchemaCheck,
-    'restored schema v12 must be verified before application volumes are repopulated',
+    'restored schema v13 must be verified before application volumes are repopulated',
 );
 $assert(str_contains($sources['restore'], 'restore_projection_cache_present'), 'restore does not fail closed when a backup contains projection cache rows');
 $projectionPrecheck = $position($sources['restore'], "grep -Eq '^INSERT INTO `[^`]+class_identity_(read_projection|read_photo)`'");
@@ -143,7 +162,7 @@ $epochPrecheck = $position($sources['restore'], 'restore_native_source_epoch_inv
 $assert($epochPrecheck >= 0 && $epochPrecheck < $clearTarget, 'native source epoch dump must be rejected before target deletion');
 $assert(str_contains($sources['restore'], 'epoch_engine') && str_contains($sources['restore'], 'MyISAM') && str_contains($sources['restore'], "source_key='PIWIGO_NATIVE'") && str_contains($sources['restore'], 'OCTET_LENGTH(generation)=16'), 'restore must verify the durable epoch engine and singleton row after import');
 $assert(str_contains($sources['restore'], '[ "$ci_trigger_count" = 18 ]'), 'restore must verify all 18 native projection/source-epoch triggers');
-$assert(str_contains($sources['audit'], '[ "$business_manifest" = 1 ]'), 'backup freshness does not require the v12 cache-free business manifest');
+$assert(str_contains($sources['audit'], '[ "$business_manifest" = 1 ]'), 'backup freshness does not require the v13 cache-free business manifest');
 $assert(str_contains($sources['audit'], '[ "$projection_cache_free" = 1 ]'), 'backup freshness does not verify projection cache omission');
 $assert(str_contains($sources['audit'], '[ "$durable_epoch_valid" = 1 ]'), 'backup freshness does not verify the durable epoch dump');
 $assert(str_contains($sources['audit'], '[ "$native_guard_count" = 18 ]'), 'backup freshness does not verify all 18 native guards');

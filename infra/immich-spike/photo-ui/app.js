@@ -2313,6 +2313,33 @@ function renderHybridResults(response, onQuery) {
   return root;
 }
 
+const SEARCH_SUGGESTION_KEYS = Object.freeze([
+  'search.suggestionGraduation',
+  'search.suggestionSportsMeet',
+  'search.suggestionClassroom',
+  'search.suggestionPlayground',
+  'search.suggestionGroupPhoto',
+  'search.suggestionBasketball',
+]);
+
+function searchDiscovery(onQuery) {
+  const discovery = element('section', 'search-discovery');
+  const suggestions = element('div', 'search-suggestions');
+  for (const key of SEARCH_SUGGESTION_KEYS) {
+    const suggestion = element('button', 'search-suggestion', t(key));
+    suggestion.type = 'button';
+    suggestion.addEventListener('click', () => onQuery(t(key)));
+    suggestions.append(suggestion);
+  }
+  append(
+    discovery,
+    element('p', 'search-discovery-label', t('search.suggestionsTitle')),
+    suggestions,
+    element('p', 'search-discovery-hint', t('search.discoveryHint')),
+  );
+  return discovery;
+}
+
 async function renderSearch() {
   if (runtime.activeSelection) runtime.activeSelection.destroy();
   const page = element('div');
@@ -2331,9 +2358,14 @@ async function renderSearch() {
   append(form, input, submit);
   const status = element('p', 'search-status');
   status.setAttribute('aria-live', 'polite');
+  status.hidden = true;
   const results = element('div');
-  results.append(emptyState('search.initialTitle', 'search.initialBody'));
-  append(page, form, status, results);
+  const runQuery = (value) => {
+    input.value = value;
+    form.requestSubmit();
+  };
+  const discovery = searchDiscovery(runQuery);
+  append(page, form, discovery, status);
   shell('search', page);
 
   form.addEventListener('submit', async (event) => {
@@ -2343,6 +2375,9 @@ async function renderSearch() {
       input.focus();
       return;
     }
+    discovery.hidden = true;
+    status.hidden = false;
+    if (!results.isConnected) page.append(results);
     submit.disabled = true;
     status.textContent = t('search.searching');
     results.replaceChildren(loadingState());
@@ -2352,10 +2387,6 @@ async function renderSearch() {
       status.textContent = response.partial
         ? t('search.partial')
         : `${t('search.results', { count: total })}${response.normalized ? ` · ${t('search.normalized')}` : ''}`;
-      const runQuery = (value) => {
-        input.value = value;
-        form.requestSubmit();
-      };
       results.replaceChildren(renderHybridResults(response, runQuery));
     } catch {
       status.textContent = '';
@@ -2373,25 +2404,78 @@ function normalizeAlbums(payload) {
     const id = album?.id ?? album?.albumId ?? album?.class_album_id;
     const total = album?.total ?? album?.assetCount ?? album?.photoCount ?? album?.photo_count;
     const coverPhotoId = album?.coverPhotoId ?? album?.cover_photo_id ?? album?.albumThumbnailAssetId ?? null;
-    if (!album || !validId(id) || !Number.isInteger(total) || total < 0 || (coverPhotoId !== null && !validId(coverPhotoId))) {
+    const parentAlbumId = album?.parentAlbumId ?? album?.parent_album_id ?? null;
+    const directTotal = album?.directTotal ?? album?.direct_total ?? null;
+    if (!album || !validId(id) || !Number.isInteger(total) || total < 0
+      || (coverPhotoId !== null && !validId(coverPhotoId))
+      || (parentAlbumId !== null && !validId(parentAlbumId))
+      || (directTotal !== null && (!Number.isInteger(directTotal) || directTotal < 0 || directTotal > total))) {
       throw new Error('safe_album_invalid');
     }
     return {
       id: id.toLowerCase(),
+      parentAlbumId: parentAlbumId ? parentAlbumId.toLowerCase() : null,
       name: safeText(album.name ?? album.albumName ?? album.album_name, t('albums.title')),
       type: (album.type ?? album.album_type) === 'COMMUNITY' ? 'COMMUNITY' : 'OFFICIAL',
       description: safeText(album.description, ''),
       eventLabel: safeText(album.eventLabel ?? album.event_label, ''),
       dateLabel: safeText(album.dateLabel ?? album.date_label, ''),
       count: total,
+      directCount: directTotal === null ? total : directTotal,
       coverPhotoId: coverPhotoId ? coverPhotoId.toLowerCase() : null,
+      sourceRoot: album.sourceRoot === true || album.source_root === true,
       owned: album.owned === true || album.owned_by_current === true,
       canSpotlight: album.canSpotlight === true || album.can_spotlight === true,
     };
   });
 }
 
-function albumCard(album) {
+function albumHierarchy(albums) {
+  const known = new Map(albums.map((album) => [album.id, album]));
+  const childrenByParent = new Map();
+  const roots = [];
+  for (const album of albums) {
+    const parent = album.parentAlbumId ? known.get(album.parentAlbumId) : null;
+    if (!parent || parent.id === album.id || parent.type !== album.type) {
+      roots.push(album);
+      continue;
+    }
+    if (!childrenByParent.has(parent.id)) childrenByParent.set(parent.id, []);
+    childrenByParent.get(parent.id).push(album);
+  }
+  const order = (left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN', { numeric: true });
+  roots.sort(order);
+  for (const children of childrenByParent.values()) children.sort(order);
+  return { roots, childrenByParent };
+}
+
+// Source collections are a private full-library presentation affordance, not
+// a replacement for the actual Piwigo/Class Archive hierarchy.  Promoting
+// their two root folders on the landing page preserves the source structure
+// while avoiding an extra generic archive wrapper before the owner can reach
+// either original collection.  No source path or provenance identifier is
+// ever sent to this UI.
+function sourceCollectionPresentation(albums, hierarchy) {
+  const sourceRoots = albums.filter((album) => album.sourceRoot === true);
+  const sourceRootIds = new Set(sourceRoots.map((album) => album.id));
+  const byId = new Map(albums.map((album) => [album.id, album]));
+  const sourceAncestorIds = new Set();
+  for (const source of sourceRoots) {
+    let parentId = source.parentAlbumId;
+    const seen = new Set([source.id]);
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      sourceAncestorIds.add(parentId);
+      parentId = byId.get(parentId)?.parentAlbumId ?? null;
+    }
+  }
+  return {
+    sourceRoots,
+    ordinaryRoots: hierarchy.roots.filter((album) => !sourceRootIds.has(album.id) && !sourceAncestorIds.has(album.id)),
+  };
+}
+
+function albumCard(album, childCount = 0) {
   const card = element('a', 'album-card');
   card.href = `/albums/${album.id}`;
   const cover = element('div', 'album-cover');
@@ -2401,12 +2485,13 @@ function albumCard(album) {
     element('h3', 'album-title', album.name),
     album.eventLabel || album.dateLabel ? element('p', 'album-meta', [album.eventLabel, album.dateLabel].filter(Boolean).join(' · ')) : null,
     element('p', 'album-count', t('common.photosCount', { count: album.count })),
+    childCount > 0 ? element('p', 'album-folder-count', t('albums.foldersCount', { count: childCount })) : null,
   );
   append(card, cover, copy);
   return card;
 }
 
-function albumSection(titleKey, leadKey, albums) {
+function albumSection(titleKey, leadKey, albums, childrenByParent) {
   const section = element('section', 'album-section');
   const heading = element('div', 'collection-heading');
   const copy = element('div');
@@ -2414,7 +2499,7 @@ function albumSection(titleKey, leadKey, albums) {
   heading.append(copy);
   section.append(heading);
   const grid = element('div', 'album-grid');
-  append(grid, albums.map(albumCard));
+  append(grid, albums.map((album) => albumCard(album, childrenByParent.get(album.id)?.length ?? 0)));
   section.append(grid);
   return section;
 }
@@ -2432,10 +2517,14 @@ async function renderAlbums() {
     append(page, pageHeader('albums.title', 'albums.lead'));
     if (albums.length === 0) page.append(emptyState('albums.emptyTitle', 'albums.emptyBody'));
     else {
-      const official = albums.filter((album) => album.type === 'OFFICIAL');
-      const community = albums.filter((album) => album.type === 'COMMUNITY');
-      if (official.length > 0) page.append(albumSection('albums.official', 'albums.officialLead', official));
-      if (community.length > 0) page.append(albumSection('albums.community', 'albums.communityLead', community));
+      const official = albumHierarchy(albums.filter((album) => album.type === 'OFFICIAL'));
+      const community = albumHierarchy(albums.filter((album) => album.type === 'COMMUNITY'));
+      const sourceCollections = sourceCollectionPresentation(albums.filter((album) => album.type === 'OFFICIAL'), official);
+      if (sourceCollections.sourceRoots.length > 0) {
+        page.append(albumSection('albums.sourceCollections', 'albums.sourceCollectionsLead', sourceCollections.sourceRoots, official.childrenByParent));
+      }
+      if (sourceCollections.ordinaryRoots.length > 0) page.append(albumSection('albums.official', 'albums.officialLead', sourceCollections.ordinaryRoots, official.childrenByParent));
+      if (community.roots.length > 0) page.append(albumSection('albums.community', 'albums.communityLead', community.roots, community.childrenByParent));
     }
     shell('albums', page);
   } catch {
@@ -2451,75 +2540,173 @@ function normalizeAlbumDetail(payload) {
   const rawItems = source?.items ?? source?.photos;
   if (!Array.isArray(rawItems)) throw new Error('safe_album_detail_invalid');
   const photos = rawItems.map(normalizeArchivePhoto);
-  if (album.count !== photos.length) throw new Error('safe_album_detail_count_invalid');
-  return { ...album, photos };
+  const pageCount = source?.count ?? photos.length;
+  const pageLimit = source?.limit ?? Math.max(1, photos.length);
+  const hasMore = source?.hasMore ?? source?.has_more ?? false;
+  const nextCursor = source?.nextCursor ?? source?.next_cursor ?? null;
+  if (!Number.isInteger(pageCount) || pageCount !== photos.length || pageCount < 0 || pageCount > album.count
+    || !Number.isInteger(pageLimit) || pageLimit < 1 || pageLimit > 240
+    || typeof hasMore !== 'boolean'
+    || (hasMore && (typeof nextCursor !== 'string' || !TIMELINE_CURSOR.test(nextCursor)))
+    || (!hasMore && nextCursor !== null)
+    || (album.count === 0 && (pageCount !== 0 || hasMore))
+    || (album.count > 0 && pageCount === 0)) {
+    throw new Error('safe_album_detail_count_invalid');
+  }
+  const ids = new Set();
+  for (const photo of photos) {
+    if (ids.has(photo.id)) throw new Error('safe_album_detail_duplicate');
+    ids.add(photo.id);
+  }
+  return { ...album, photos, pageCount, pageLimit, hasMore, nextCursor };
+}
+
+function mergeAlbumPages(current, next) {
+  if (!current || !next || current.id !== next.id || current.count !== next.count
+    || current.pageLimit !== next.pageLimit || current.hasMore !== true || current.nextCursor === null) {
+    throw new Error('safe_album_page_state_invalid');
+  }
+  const ids = new Set(current.photos.map((photo) => photo.id));
+  for (const photo of next.photos) {
+    if (ids.has(photo.id)) throw new Error('safe_album_page_duplicate');
+    ids.add(photo.id);
+  }
+  const pageCount = current.pageCount + next.pageCount;
+  if (pageCount !== ids.size || pageCount > current.count
+    || (!next.hasMore && pageCount !== current.count)
+    || (next.hasMore && pageCount >= current.count)) {
+    throw new Error('safe_album_page_total_invalid');
+  }
+  return {
+    ...current,
+    photos: [...current.photos, ...next.photos],
+    pageCount,
+    hasMore: next.hasMore,
+    nextCursor: next.nextCursor,
+  };
+}
+
+async function loadAlbumPage(id, cursor = null, limit = 120) {
+  if (!validId(id) || !Number.isInteger(limit) || limit < 1 || limit > 240
+    || (cursor !== null && (typeof cursor !== 'string' || !TIMELINE_CURSOR.test(cursor)))) {
+    throw new Error('safe_album_page_request_invalid');
+  }
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  return normalizeAlbumDetail(await apiJson(`/api/class-archive/albums/${id.toLowerCase()}?${params}`));
 }
 
 async function renderAlbum(id) {
   showLoading('albums', 'albums.title', 'albums.lead');
   try {
-    const [albumPayload, state, spotlightRead] = await Promise.all([
-      apiJson(`/api/class-archive/albums/${id}`),
+    const [initialAlbum, allAlbumPayload, state, spotlightRead] = await Promise.all([
+      loadAlbumPage(id),
+      loadAlbums(),
       productState(),
       presentationJson('/api/class-archive/spotlight'),
     ]);
     assertPresentationActive();
-    const album = normalizeAlbumDetail(albumPayload);
+    let album = initialAlbum;
+    const allAlbums = normalizeAlbums(allAlbumPayload);
+    const hierarchy = albumHierarchy(allAlbums);
+    const childAlbums = hierarchy.childrenByParent.get(album.id) ?? [];
     const spotlight = normalizeSpotlight(spotlightRead.value);
-    const page = element('div');
-    const back = element('a', 'back-link', t('albums.back'));
-    back.href = '/albums';
-    page.append(back);
-    const hero = element('section', 'album-detail-hero');
-    if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'preview'), '', true, { sizes: '100vw' }));
-    const shade = element('div', 'album-detail-shade');
-    append(shade,
-      element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
-      element('h1', '', album.name),
-      album.description ? element('p', 'album-description', album.description) : null,
-      element('p', 'album-detail-meta', [album.eventLabel, album.dateLabel, t('common.photosCount', { count: album.count })].filter(Boolean).join(' · ')),
-    );
-    const heroActions = element('div', 'album-hero-actions');
-    if (state.canSpotlight && album.owned && album.canSpotlight && spotlight?.albumId !== album.id) {
-      const create = element('button', 'light-button', t('spotlight.create'));
-      create.type = 'button';
-      create.addEventListener('click', () => openReasonMutation(
-        'spotlight.createTitle',
-        'spotlight.createLead',
-        '/api/class-archive/spotlight/create',
-        { albumId: album.id, durationHours: 24 },
-        reloadProjectionBackedRoute,
-      ));
-      heroActions.append(create);
-    }
-    if (spotlight?.albumId === album.id) heroActions.append(element('span', 'light-status', t('spotlight.active')));
-    shade.append(heroActions);
-    hero.append(shade);
-    page.append(hero);
-    if (album.photos.length === 0) {
-      page.append(element('p', 'manage-empty', t('albums.noPhotos')));
-    } else {
-      let manageButton = null;
-      if (state.canManage) {
-        const actions = element('div', 'page-actions');
-        manageButton = element('button', 'secondary-button', t('photos.organize'));
-        manageButton.type = 'button';
-        actions.append(manageButton);
-        page.append(actions);
+    let pageRequestActive = false;
+    const paint = () => {
+      if (runtime.activeSelection) runtime.activeSelection.destroy();
+      const page = element('div');
+      const back = element('a', 'back-link', t('albums.back'));
+      back.href = '/albums';
+      page.append(back);
+      const hero = element('section', 'album-detail-hero');
+      if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'preview'), '', true, { sizes: '100vw' }));
+      const shade = element('div', 'album-detail-shade');
+      append(shade,
+        element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
+        element('h1', '', album.name),
+        album.description ? element('p', 'album-description', album.description) : null,
+        element('p', 'album-detail-meta', [album.eventLabel, album.dateLabel, t('common.photosCount', { count: album.count })].filter(Boolean).join(' · ')),
+      );
+      const heroActions = element('div', 'album-hero-actions');
+      if (state.canSpotlight && album.owned && album.canSpotlight && spotlight?.albumId !== album.id) {
+        const create = element('button', 'light-button', t('spotlight.create'));
+        create.type = 'button';
+        create.addEventListener('click', () => openReasonMutation(
+          'spotlight.createTitle',
+          'spotlight.createLead',
+          '/api/class-archive/spotlight/create',
+          { albumId: album.id, durationHours: 24 },
+          reloadProjectionBackedRoute,
+        ));
+        heroActions.append(create);
       }
-      const controller = state.canManage ? selectionController(album.photos, {
-        onSetCover: (photoId) => openReasonMutation(
-          'albums.setCover',
-          '',
-          '/api/class-archive/manage/albums/cover',
-          { albumId: album.id, photoId },
-          () => location.reload(),
-        ),
-      }) : null;
-      if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
-      page.append(photoGrid(album.photos, 'album-photo-grid', controller));
-    }
-    shell('albums', page);
+      if (spotlight?.albumId === album.id) heroActions.append(element('span', 'light-status', t('spotlight.active')));
+      shade.append(heroActions);
+      hero.append(shade);
+      page.append(hero);
+      if (childAlbums.length > 0) {
+        const children = element('section', 'album-children');
+        const heading = element('div', 'collection-heading');
+        const headingCopy = element('div');
+        append(headingCopy, element('h2', '', t('albums.childAlbums')), element('p', '', t('albums.childAlbumsLead')));
+        heading.append(headingCopy);
+        const grid = element('div', 'album-grid');
+        append(grid, childAlbums.map((child) => albumCard(child, hierarchy.childrenByParent.get(child.id)?.length ?? 0)));
+        append(children, heading, grid);
+        page.append(children);
+      }
+      if (album.photos.length === 0) {
+        page.append(element('p', 'manage-empty', t('albums.noPhotos')));
+      } else {
+        let manageButton = null;
+        if (state.canManage) {
+          const actions = element('div', 'page-actions');
+          manageButton = element('button', 'secondary-button', t('photos.organize'));
+          manageButton.type = 'button';
+          actions.append(manageButton);
+          page.append(actions);
+        }
+        const controller = state.canManage ? selectionController(album.photos, {
+          onSetCover: (photoId) => openReasonMutation(
+            'albums.setCover',
+            '',
+            '/api/class-archive/manage/albums/cover',
+            { albumId: album.id, photoId },
+            () => location.reload(),
+          ),
+        }) : null;
+        if (manageButton && controller) manageButton.addEventListener('click', () => controller.enter());
+        page.append(photoGrid(album.photos, 'album-photo-grid', controller));
+      }
+      if (album.hasMore) {
+        const controls = element('div', 'timeline-page-controls');
+        const status = element('p', 'timeline-page-status', t('albums.loadedCount', { count: album.pageCount, total: album.count }));
+        const button = element('button', 'secondary-button', t('albums.loadMore'));
+        button.type = 'button';
+        button.addEventListener('click', async () => {
+          if (button.disabled || pageRequestActive || !album.nextCursor) return;
+          button.disabled = true;
+          button.textContent = t('albums.loadingMore');
+          pageRequestActive = true;
+          try {
+            const next = await loadAlbumPage(album.id, album.nextCursor, album.pageLimit);
+            if (runtime.presentationFailureActive || document.visibilityState !== 'visible') {
+              throw new Error('safe_album_page_session_changed');
+            }
+            album = mergeAlbumPages(album, next);
+            paint();
+          } catch (error) {
+            failClosedPresentation(error);
+          } finally {
+            pageRequestActive = false;
+          }
+        });
+        append(controls, status, button);
+        page.append(controls);
+      }
+      shell('albums', page);
+    };
+    paint();
   } catch {
     const page = element('div');
     append(page, pageHeader('albums.title', 'albums.lead'), errorState());
@@ -2659,6 +2846,11 @@ async function start() {
     my: () => renderMy(),
   };
   await handlers[current.name]();
+  // A full page-route transition can restore the previous document scroll
+  // position after its initial script has run.  Keep every top-level photo
+  // product destination anchored at its own header so a newly opened Search
+  // page never begins with its title clipped above the viewport.
+  window.scrollTo(0, 0);
 }
 
 async function revalidateVisibleSession() {

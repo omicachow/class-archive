@@ -266,13 +266,60 @@ final class AlbumService
         }
         global $prefixeTable;
         $rows = $this->repository->fetchAll(
-            "SELECT a.*,c.`name` AS `piwigo_name` FROM `" . DomainSupport::table($this->repository, 'album')
+            "SELECT a.*,c.`name` AS `piwigo_name`,c.`id_uppercat`,c.`uppercats` FROM `" . DomainSupport::table($this->repository, 'album')
                 . "` a JOIN `{$prefixeTable}categories` c ON c.`id`=a.`piwigo_category_id` WHERE a.`state`='ACTIVE' ORDER BY c.`global_rank`,c.`name`",
         );
+        // A private full-library source root is still just an OFFICIAL
+        // album for authorization.  This narrow presentation marker lets the
+        // photo product promote its approved source collections without
+        // serializing an absolute source path, filename, or provenance digest.
+        $sourceRootAlbumIds = $this->privateSourceRootAlbumIds();
+        // A photo is stored only in its direct Piwigo category.  Build the
+        // folder-display projection from that direct membership plus the
+        // native ancestor chain, rather than copying associations into every
+        // ancestor folder.  The category ids below are internal hand-off data
+        // for GatewayService and are never serialized to a browser.
+        $visibleCategories = $this->repository->fetchAll(
+            'SELECT `id`,`uppercats` FROM `' . $prefixeTable . 'categories` WHERE `id` IN ('
+                . implode(',', array_fill(0, count($categorySet), '?')) . ')',
+            array_map('intval', array_keys($categorySet)),
+        );
+        if (count($visibleCategories) !== count($categorySet)) {
+            throw new \RuntimeException('class_archive_album_visible_category_missing');
+        }
+        $visibleAncestorSets = [];
+        foreach ($visibleCategories as $category) {
+            $categoryId = (int) ($category['id'] ?? 0);
+            if ($categoryId <= 0 || !isset($categorySet[$categoryId])) {
+                throw new \RuntimeException('class_archive_album_visible_category_invalid');
+            }
+            $ancestors = [];
+            foreach (explode(',', trim((string) ($category['uppercats'] ?? ''), ',')) as $candidate) {
+                if ($candidate !== '' && ctype_digit($candidate)) {
+                    $ancestors[(int) $candidate] = true;
+                }
+            }
+            $ancestors[$categoryId] = true;
+            $visibleAncestorSets[$categoryId] = $ancestors;
+        }
+        $classAlbumIdByCategory = [];
+        foreach ($rows as $row) {
+            $categoryId = (int) ($row['piwigo_category_id'] ?? 0);
+            if ($categoryId <= 0) {
+                throw new \RuntimeException('class_archive_album_category_invalid');
+            }
+            $classAlbumIdByCategory[$categoryId] = DomainSupport::binaryToId((string) ($row['class_album_id'] ?? ''));
+        }
         $result = [];
         foreach ($rows as $row) {
             $categoryId = (int) $row['piwigo_category_id'];
-            if (!isset($categorySet[$categoryId])) {
+            $memberCategoryIds = [];
+            foreach ($visibleAncestorSets as $visibleCategoryId => $ancestors) {
+                if (isset($ancestors[$categoryId])) {
+                    $memberCategoryIds[] = $visibleCategoryId;
+                }
+            }
+            if ($memberCategoryIds === []) {
                 continue;
             }
             $mapped = $this->hydrate($row, false);
@@ -280,16 +327,55 @@ final class AlbumService
             if (!is_string($cover) || !isset($photoSet[strtolower($cover)])) {
                 $cover = null;
             }
+            $parentClassAlbumId = null;
+            foreach (array_reverse(explode(',', trim((string) ($row['uppercats'] ?? ''), ','))) as $candidate) {
+                if ($candidate === '' || !ctype_digit($candidate)) {
+                    continue;
+                }
+                $candidateId = (int) $candidate;
+                if ($candidateId === $categoryId) {
+                    continue;
+                }
+                if (isset($classAlbumIdByCategory[$candidateId])) {
+                    $parentClassAlbumId = $classAlbumIdByCategory[$candidateId];
+                    break;
+                }
+            }
             $result[] = [
                 'class_album_id' => $mapped['class_album_id'],
                 'piwigo_category_id' => $categoryId,
+                'parent_class_album_id' => $parentClassAlbumId,
+                'visible_category_ids' => $memberCategoryIds,
                 'name' => (string) $row['piwigo_name'],
                 'album_type' => $mapped['album_type'],
                 'era' => $mapped['era'],
                 'description' => $mapped['description'],
                 'event_label' => $mapped['event_label'],
                 'cover_class_photo_id' => $cover,
+                'source_root' => isset($sourceRootAlbumIds[strtolower((string) $mapped['class_album_id'])]),
             ];
+        }
+        return $result;
+    }
+
+    /**
+     * @return array<string,true> lower-case Class Archive album UUIDs
+     */
+    private function privateSourceRootAlbumIds(): array
+    {
+        $folder = DomainSupport::table($this->repository, 'private_library_folder');
+        $collection = DomainSupport::table($this->repository, 'private_library_collection');
+        $rows = $this->repository->fetchAll(
+            "SELECT f.`class_album_id` FROM `{$folder}` f "
+                . "JOIN `{$collection}` c ON c.`source_collection_id`=f.`source_collection_id` "
+                . "WHERE f.`parent_folder_id` IS NULL AND c.`state`='ACTIVE'",
+        );
+        $result = [];
+        foreach ($rows as $row) {
+            if (!is_string($row['class_album_id'] ?? null)) {
+                throw new \RuntimeException('class_archive_private_library_source_root_invalid');
+            }
+            $result[strtolower(DomainSupport::binaryToId((string) $row['class_album_id']))] = true;
         }
         return $result;
     }

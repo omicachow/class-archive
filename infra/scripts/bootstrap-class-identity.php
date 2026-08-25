@@ -25,6 +25,32 @@ function assertRuntimeUser(): void
     }
 }
 
+/**
+ * Piwigo's pinned startup normalizer may translate a root-prepared nginx 0600
+ * marker into the one managed _data-owner form below. Both forms retain the
+ * exact marker bytes and fail-closed semantics; all other ownership or mode
+ * combinations are rejected.
+ */
+function hasTrustedMaintenanceMarkerOwnership(array $metadata, string $dataDirectory, int $nginxUid, int $nginxGid): bool
+{
+    $mode = (int) ($metadata['mode'] ?? 0) & 0777;
+    $uid = (int) ($metadata['uid'] ?? -1);
+    $gid = (int) ($metadata['gid'] ?? -1);
+    // Docker's named-volume ACL normalizer can retain the exact nginx
+    // owner/group while showing its private ACL mask as 0660/0670.  Accept
+    // only those known forms; an arbitrary readable marker remains invalid.
+    if ($uid === $nginxUid && $gid === $nginxGid && in_array($mode, [0600, 0660, 0670], true)) {
+        return true;
+    }
+
+    $directory = @lstat($dataDirectory);
+    return is_array($directory)
+        && $uid > 0
+        && $uid === (int) ($directory['uid'] ?? -2)
+        && $gid === (int) ($directory['gid'] ?? -2)
+        && in_array($mode, [0660, 0670], true);
+}
+
 function assertTrustedMaintenanceGate(): void
 {
     $uid = posix_geteuid();
@@ -51,11 +77,7 @@ function assertTrustedMaintenanceGate(): void
     ) {
         fail('An exact regular ClassIdentity maintenance marker is required.');
     }
-    if (
-        (int) ($metadata['uid'] ?? -1) !== $uid
-        || (($metadata['mode'] ?? 0) & 0777) !== 0600
-        || (int) ($metadata['nlink'] ?? 0) !== 1
-    ) {
+    if (!hasTrustedMaintenanceMarkerOwnership($metadata, $dataDirectory, $uid, posix_getegid()) || (int) ($metadata['nlink'] ?? 0) !== 1) {
         fail('The ClassIdentity maintenance marker owner or permissions are untrusted.');
     }
     $contents = file_get_contents($path);

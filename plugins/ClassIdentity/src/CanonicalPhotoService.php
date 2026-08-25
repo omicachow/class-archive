@@ -32,7 +32,7 @@ final class CanonicalPhotoService
     ): int {
         $admin = DomainSupport::requireSystemAdmin($adminUserId);
         $sourceKind = strtoupper(trim($sourceKind));
-        if (!in_array($sourceKind, ['SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'MIGRATION', 'OTHER'], true)) {
+        if (!in_array($sourceKind, ['SUBMISSION', 'PIWIGO_IMPORT', 'PRIVATE_QA', 'PRIVATE_FULL', 'MIGRATION', 'OTHER'], true)) {
             throw new \InvalidArgumentException('class_archive_photo_source_kind_invalid');
         }
         $provenanceCode = strtoupper(trim($provenanceCode));

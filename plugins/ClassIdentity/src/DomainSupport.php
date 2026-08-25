@@ -13,6 +13,8 @@ final class DomainSupport
     private const TABLES = [
         'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source',
         'photo_duplicate', 'batch_operation', 'batch_operation_item',
+        'private_library_collection', 'private_library_folder',
+        'private_library_import', 'private_library_import_item',
     ];
 
     public static function table(Repository $repository, string $suffix): string

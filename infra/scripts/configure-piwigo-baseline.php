@@ -287,6 +287,11 @@ function main(array $argv): void
     }
 
     ensureConfig([
+        // Class Archive's Policy, Identity and Gateway hooks are the security
+        // boundary. A fresh Piwigo installation can leave plugins disabled
+        // even while their database rows say "active", which silently serves
+        // the Core HTML shell instead of the fail-closed Gateway API.
+        'enable_plugins' => true,
         'allow_user_registration' => false,
         'guest_access' => false,
         'comments_forall' => false,

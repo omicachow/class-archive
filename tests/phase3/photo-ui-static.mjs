@@ -86,7 +86,28 @@ check(app.includes("presentationJson('/api/people?size=500&withHidden=false')"),
 check(app.includes("apiJson('/api/search/metadata'"), 'hybrid search must use metadata search');
 check(app.includes("apiJson('/api/search/smart'"), 'hybrid search must use safe smart search');
 check(app.includes("apiJson(`/api/class-archive/search/hybrid?${params}`)"), 'search must prefer the structured Class Archive hybrid projection');
+const searchRenderStart = app.indexOf('async function renderSearch()');
+const searchSubmitStart = app.indexOf("form.addEventListener('submit'", searchRenderStart);
+const legacyInitialState = app.indexOf("emptyState('search.initialTitle', 'search.initialBody')", searchRenderStart);
+check(searchRenderStart >= 0 && searchSubmitStart > searchRenderStart, 'search route must own a bounded submit flow');
+check(legacyInitialState === -1, 'search must not render a large empty-state card before a query');
+check(app.includes('function searchDiscovery(onQuery)')
+  && app.includes("const discovery = searchDiscovery(runQuery)")
+  && app.includes('suggestion.addEventListener'), 'search must provide clickable lightweight query suggestions');
+check(app.includes('if (!results.isConnected) page.append(results);')
+  && app.indexOf('results.replaceChildren(loadingState())', searchSubmitStart) > searchSubmitStart,
+  'search results and skeletons must be attached only after a non-empty query');
+for (const key of [
+  'search.suggestionsTitle', 'search.suggestionGraduation', 'search.suggestionSportsMeet',
+  'search.suggestionClassroom', 'search.suggestionPlayground', 'search.suggestionGroupPhoto',
+  'search.suggestionBasketball', 'search.discoveryHint',
+]) check(i18n.includes(`'${key}'`), `search discovery copy must be centralized for ${key}`);
+check(css.includes('.search-discovery') && css.includes('.search-suggestion') && !css.includes('.search-discovery { min-height:'),
+  'search discovery must stay lightweight instead of becoming a large empty-state card');
 check(app.includes("presentationJson('/api/class-archive/albums')"), 'albums must use the cached BFF contract');
+check(app.includes('function sourceCollectionPresentation(albums, hierarchy)')
+  && app.includes("album.sourceRoot === true")
+  && i18n.includes("'albums.sourceCollections'"), 'safe source collections must be promoted without exposing source paths');
 check(app.includes("presentationJson('/api/class-archive/memories')"), 'memories must use the cached archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
 check(app.includes("['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)"), 'owned media helper must use only canonical responsive derivatives');

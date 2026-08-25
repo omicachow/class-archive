@@ -211,8 +211,22 @@ final class GatewayHttpController
         }
         if (count($segments) === 2 && ($segments[0] ?? null) === 'albums' && is_string($segments[1])) {
             \ClassIdentity\DomainSupport::idToBinary($segments[1]);
-            self::requireExactQuery([]);
-            $album = $gateway->album(strtolower($segments[1]));
+            $query = self::requireExactQuery(['cursor', 'limit'], ['cursor', 'limit']);
+            $cursor = $query['cursor'] ?? null;
+            if ($cursor !== null && preg_match('/\A[A-Za-z0-9_-]{48}\z/D', $cursor) !== 1) {
+                throw new \InvalidArgumentException('class_archive_gateway_album_cursor_invalid');
+            }
+            $limit = null;
+            if (isset($query['limit'])) {
+                if (preg_match('/\A[1-9][0-9]{0,2}\z/D', $query['limit']) !== 1) {
+                    throw new \InvalidArgumentException('class_archive_gateway_album_limit_invalid');
+                }
+                $limit = (int) $query['limit'];
+                if ($limit > 240) {
+                    throw new \InvalidArgumentException('class_archive_gateway_album_limit_invalid');
+                }
+            }
+            $album = $gateway->album(strtolower($segments[1]), $cursor, $limit);
             if ($album === null) {
                 throw new \RuntimeException('class_archive_gateway_album_not_found');
             }

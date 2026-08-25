@@ -122,6 +122,14 @@ $tables = [
     'photo_duplicate' => 'SELECT HEX(`duplicate_id`) AS `duplicate_id`,HEX(`left_class_photo_id`) AS `left_class_photo_id`,HEX(`right_class_photo_id`) AS `right_class_photo_id`,`relation_kind`,`similarity`,`state`,HEX(`canonical_class_photo_id`) AS `canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reviewed_at` FROM `' . $ci . 'photo_duplicate` ORDER BY `created_at`,`duplicate_id` ASC',
     'batch_operation' => 'SELECT HEX(`batch_id`) AS `batch_id`,`actor_principal_id`,`operation_type`,`state`,HEX(`payload_digest`) AS `payload_digest`,`item_count`,`applied_count`,`failed_count`,`high_risk_confirmed`,`error_code`,`created_at`,`updated_at`,`completed_at` FROM `' . $ci . 'batch_operation` ORDER BY `created_at`,`batch_id` ASC',
     'batch_operation_item' => 'SELECT `id`,HEX(`batch_id`) AS `batch_id`,HEX(`class_photo_id`) AS `class_photo_id`,`state`,SHA2(CAST(`before_value` AS CHAR),256) AS `before_sha256`,SHA2(CAST(`after_value` AS CHAR),256) AS `after_sha256`,`error_code`,`created_at`,`updated_at` FROM `' . $ci . 'batch_operation_item` ORDER BY `id` ASC',
+    // Full private-library state is business truth. Only opaque digests and
+    // business-visible collection/folder labels are fingerprinted: neither a
+    // source filesystem path nor an original filename can leave the private
+    // importer journal through this restore fixture.
+    'private_library_collection' => 'SELECT HEX(`source_collection_id`) AS `source_collection_id`,`source_code`,`display_name`,`state`,`created_by_principal_id`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_collection` ORDER BY `source_code` ASC',
+    'private_library_folder' => 'SELECT HEX(`folder_id`) AS `folder_id`,HEX(`source_collection_id`) AS `source_collection_id`,HEX(`relative_path_digest`) AS `relative_path_digest`,HEX(`parent_folder_id`) AS `parent_folder_id`,`piwigo_category_id`,HEX(`class_album_id`) AS `class_album_id`,`display_name`,`depth`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_folder` ORDER BY `source_collection_id`,`relative_path_digest` ASC',
+    'private_library_import' => 'SELECT HEX(`import_id`) AS `import_id`,HEX(`manifest_digest`) AS `manifest_digest`,`manifest_version`,`item_total`,`state`,`applied_count`,`deduplicated_count`,`failed_count`,`last_error_code`,`created_by_principal_id`,`started_at`,`completed_at`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_import` ORDER BY `created_at`,`import_id` ASC',
+    'private_library_import_item' => 'SELECT HEX(`import_id`) AS `import_id`,HEX(`item_digest`) AS `item_digest`,HEX(`source_collection_id`) AS `source_collection_id`,HEX(`folder_id`) AS `folder_id`,HEX(`source_reference_digest`) AS `source_reference_digest`,HEX(`original_filename_digest`) AS `original_filename_digest`,HEX(`source_checksum`) AS `source_checksum`,HEX(`staging_name_digest`) AS `staging_name_digest`,`byte_size`,`state`,HEX(`class_photo_id`) AS `class_photo_id`,`piwigo_image_id`,`attempt_count`,`last_error_code`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_import_item` ORDER BY `import_id`,`item_digest` ASC',
     'native_source_epoch' => 'SELECT `source_key`,HEX(`generation`) AS `generation`,`updated_at` FROM `' . $ci . 'native_source_epoch` ORDER BY `source_key` ASC',
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
     'migration' => 'SELECT `version`,`migration_name`,HEX(`checksum`) AS `checksum`,`plugin_version`,`applied_at` FROM `' . $ci . 'migration` ORDER BY `version` ASC',
@@ -138,8 +146,8 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
 }
 $summary['multi_album_images'] = (int) $row['count'];
 $payload = [
-    'fixture_version' => 4,
-    'class_identity_schema_version' => 12,
+    'fixture_version' => 5,
+    'class_identity_schema_version' => 13,
     'projection_recovery' => [
         'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
         'projection' => 'ALL',

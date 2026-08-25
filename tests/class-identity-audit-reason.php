@@ -126,6 +126,33 @@ try {
     assertSameValue('{"date_source":"ARCHIVE_CONFIRMED"}', $encoded, 'archive date source audit value');
     $album = $encoder->invoke($audit, ['era' => 'HERITAGE', 'name' => '毕业（私有 QA）', 'official' => 1], 'new_value');
     assertSameValue('{"era":"HERITAGE","name":"毕业（私有 QA）","official":1}', $album, 'archive album name audit value');
+
+    // The full-library import records bounded operational state, never source
+    // paths or original filenames. These fields must remain compatible with
+    // Audit before an import can mutate native Piwigo state.
+    $fullImport = $encoder->invoke($audit, [
+        'manifest_version' => 1,
+        'item_total' => 3,
+        'applied_count' => 1,
+        'deduplicated_count' => 1,
+        'failed_count' => 1,
+        'source_code' => 'PRIVATE_SOURCE_A',
+        'source_collection_id' => '123e4567-e89b-42d3-a456-426614174000',
+        'depth' => 2,
+        'error_code' => 'STAGING_MIME',
+        'state' => 'RUNNING',
+    ], 'new_value');
+    assertSameValue(
+        '{"manifest_version":1,"item_total":3,"applied_count":1,"deduplicated_count":1,"failed_count":1,"source_code":"PRIVATE_SOURCE_A","source_collection_id":"123e4567-e89b-42d3-a456-426614174000","depth":2,"error_code":"STAGING_MIME","state":"RUNNING"}',
+        $fullImport,
+        'private full import audit value',
+    );
+    try {
+        $encoder->invoke($audit, ['relative_source_path' => 'private/source.jpg'], 'new_value');
+        $failures[] = 'private full source path audit value: accepted';
+    } catch (InvalidArgumentException) {
+        $passed++;
+    }
 } catch (Throwable $error) {
     $failures[] = 'archive date source audit value: rejected';
 }

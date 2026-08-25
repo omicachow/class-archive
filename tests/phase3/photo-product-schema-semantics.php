@@ -170,6 +170,7 @@ final class ProductCanonicalImmichAdapter implements \ClassIdentity\Gateway\Immi
     }
 }
 
+$derive = in_array('--derive', array_slice($_SERVER['argv'], 1), true);
 $run = strtolower(bin2hex(random_bytes(6)));
 $basePrefix = 'ci_product_sem_' . $run . '_';
 $tablePrefix = $basePrefix . 'class_identity_';
@@ -225,12 +226,18 @@ SQL);
     if (!is_array($expected)) {
         productSchemaFail('photo_product_expected_digest_contract_invalid');
     }
+    $derivedDigests = [];
     foreach (PHOTO_PRODUCT_DIGEST_SUFFIXES as $suffix) {
         $actual = $digest->invoke($schema, $suffix);
-        if (!is_string($actual) || !hash_equals((string) ($expected[$suffix] ?? ''), $actual)) {
+        if (!is_string($actual) || (!$derive && !hash_equals((string) ($expected[$suffix] ?? ''), $actual))) {
             productSchemaFail('photo_product_digest_mismatch_' . $suffix);
         }
+        $derivedDigests[$suffix] = $actual;
         ++$assertions;
+    }
+    if ($derive) {
+        fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=DERIVED photo_source=' . ($derivedDigests['photo_source'] ?? '') . ' run=' . $run . "\n");
+        return;
     }
 
     productSchemaExecute($db, "INSERT INTO {$identity} (`id`) VALUES (1)");
@@ -262,7 +269,7 @@ SQL);
     // projection; the alias media UUID itself is deliberately unknown.
     productSchemaExecute($db, "INSERT INTO {$duplicate} (`duplicate_id`,`left_class_photo_id`,`right_class_photo_id`,`relation_kind`,`state`,`canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reason`,`reviewed_at`) VALUES (UNHEX('60000000000040008000000000000002'),UNHEX('10000000000040008000000000000001'),UNHEX('10000000000040008000000000000002'),'EXACT','CONSOLIDATED',UNHEX('10000000000040008000000000000001'),1,1,'synthetic canonical projection',UTC_TIMESTAMP(6))");
     $source = productSchemaIdentifier($tablePrefix . 'photo_source');
-    productSchemaExecute($db, "INSERT INTO {$source} (`class_photo_id`,`source_kind`,`provenance_code`,`source_checksum`,`byte_size`,`created_by_principal_id`) VALUES (UNHEX('10000000000040008000000000000001'),'MIGRATION','CANONICAL-SOURCE',UNHEX(SHA2('same-bytes',256)),101,1),(UNHEX('10000000000040008000000000000002'),'PIWIGO_IMPORT','ALIAS-SOURCE',UNHEX(SHA2('same-bytes',256)),101,1)");
+    productSchemaExecute($db, "INSERT INTO {$source} (`class_photo_id`,`source_kind`,`provenance_code`,`source_checksum`,`byte_size`,`created_by_principal_id`) VALUES (UNHEX('10000000000040008000000000000001'),'MIGRATION','CANONICAL-SOURCE',UNHEX(SHA2('same-bytes',256)),101,1),(UNHEX('10000000000040008000000000000001'),'PRIVATE_FULL','FULL-SOURCE',UNHEX(SHA2('same-bytes',256)),101,1),(UNHEX('10000000000040008000000000000002'),'PIWIGO_IMPORT','ALIAS-SOURCE',UNHEX(SHA2('same-bytes',256)),101,1)");
     $archiveImage = productSchemaIdentifier($tablePrefix . 'archive_image');
     productSchemaExecute($db, "CREATE TABLE {$archiveImage} (`piwigo_image_id` MEDIUMINT UNSIGNED NOT NULL,`archive_date` DATE NULL,`date_precision` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',`event_label` VARCHAR(190) NULL,PRIMARY KEY (`piwigo_image_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     productSchemaExecute($db, "INSERT INTO {$archiveImage} (`piwigo_image_id`,`archive_date`,`date_precision`,`event_label`) VALUES (900001,NULL,'UNKNOWN',NULL),(900002,'2012-06-01','MONTH','毕业活动')");
@@ -412,8 +419,8 @@ SQL);
         productSchemaFail('photo_product_alias_media_not_denied');
     }
     ++$assertions;
-    if (count($canonical->provenanceSummary($canonicalId)) !== 2
-        || count($canonical->provenanceSummary($aliasId)) !== 2
+    if (count($canonical->provenanceSummary($canonicalId)) !== 3
+        || count($canonical->provenanceSummary($aliasId)) !== 3
     ) {
         productSchemaFail('photo_product_canonical_provenance_projection_failed');
     }
@@ -528,7 +535,8 @@ SQL);
     }
     ++$assertions;
 
-    fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=PASS assertions=' . $assertions . ' run=' . $run . "\n");
+    fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=' . ($derive ? 'DERIVED' : 'PASS') . ' assertions=' . $assertions
+        . ' photo_source=' . ($derivedDigests['photo_source'] ?? '') . ' run=' . $run . "\n");
 } catch (Throwable $error) {
     fwrite(STDERR, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=FAIL run=' . $run . ' reason=' . $error->getMessage() . "\n");
     $exit = 1;

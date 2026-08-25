@@ -1,5 +1,12 @@
 Set-StrictMode -Version Latest
 
+# `Set-Acl` / `Get-Acl` live in Microsoft.PowerShell.Security.  Some
+# NoProfile hosts have not autoloaded it; do not re-import an already loaded
+# type-data module because Windows PowerShell can reject that duplicate load.
+if ($null -eq (Get-Command Set-Acl -ErrorAction SilentlyContinue) -or $null -eq (Get-Command Get-Acl -ErrorAction SilentlyContinue)) {
+    Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+}
+
 function Set-ClassArchiveOwnerOnlyFileAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
 
