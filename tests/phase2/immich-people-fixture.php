@@ -505,6 +505,13 @@ function ciPeoplePrepare(string $run): never
                 ciPeopleFail('piwigo_import_failed');
             }
             $imageId = (int) $imageId;
+            // Own the new Piwigo row before any later metadata, mapping or
+            // derivative operation can fail. Cleanup needs only this exact id,
+            // so a cache-warmup failure cannot leave an untracked synthetic
+            // original outside the canonical 72-image baseline.
+            $imageStateIndex = count($state['images']);
+            $state['images'][] = ['id' => $imageId];
+            ciPeopleReplaceState($statePath, $state);
             $projection = ciPeopleArchiveProjection($item['kind'], $ordinal);
             single_update(
                 IMAGES_TABLE,
@@ -547,10 +554,22 @@ function ciPeoplePrepare(string $run): never
             // same persisted Piwigo profiles used by approved submissions and
             // private QA imports before any browser read; request-time media
             // delivery stays cache-only and fail-closed.
-            if (!\ClassArchiveDerivativeWarmupQueue::enqueueBestEffort($classPhotoId, $imageId)
-                || !\ClassArchiveDerivativeCacheWarmer::warmBestEffort($classPhotoId, $imageId)
+            if (!\ClassArchiveDerivativeWarmupQueue::enqueueBestEffort($classPhotoId, $imageId)) {
+                ciPeopleFail('derivative_warmup_enqueue_failed');
+            }
+            try {
+                $warmup = \ClassArchiveDerivativeCacheWarmer::warm($classPhotoId, $imageId);
+            } catch (Throwable $error) {
+                $code = $error->getMessage();
+                $safe = is_string($code) && preg_match('/\A[a-z_]{1,80}\z/D', $code) === 1
+                    ? $code
+                    : 'unexpected';
+                ciPeopleFail('derivative_warmup_' . $safe);
+            }
+            if ((int) ($warmup['checked'] ?? 0) !== 6
+                || (int) ($warmup['cached'] ?? 0) + (int) ($warmup['generated'] ?? 0) !== 6
             ) {
-                ciPeopleFail('derivative_warmup_failed');
+                ciPeopleFail('derivative_warmup_result_invalid');
             }
             $repository->execute(
                 'INSERT INTO `' . $repository->table('archive_image') . '` '
@@ -558,7 +577,7 @@ function ciPeoplePrepare(string $run): never
                 . 'VALUES (?, ?, ?, ?, \'HIGH\', ?, ?, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))',
                 [$imageId, $item['era'], $projection['date'], $projection['precision'], $projection['source'], $projection['event']],
             );
-            $state['images'][] = [
+            $state['images'][$imageStateIndex] = [
                 'id' => $imageId,
                 'class_photo_id' => $classPhotoId,
                 'era' => $item['era'],

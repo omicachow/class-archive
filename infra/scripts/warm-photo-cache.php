@@ -734,6 +734,9 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
                 } else {
                     classArchivePhotoCacheGenerate($target['relative']);
                 }
+                // i.php runs in a child process, so this long-lived CLI must
+                // forget the negative stat result observed before generation.
+                clearstatcache(true, $target['absolute']);
                 if (!classArchivePhotoCacheIsFresh($target['absolute'], $source, $effectiveType)) {
                     throw new RuntimeException('photo_cache_derivative_generation_unverified');
                 }

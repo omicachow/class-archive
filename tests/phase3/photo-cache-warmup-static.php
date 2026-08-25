@@ -99,6 +99,8 @@ $assert(!str_contains($source, 'imagecreatefrom'), 'custom_resize_pipeline_detec
 $assert(str_contains($source, 'classArchivePhotoCacheGenerateIdentity'), 'tiny_source_maintenance_generation_missing');
 $assert(str_contains($source, "'square' => 'IMG_SQUARE'")
     && str_contains($source, 'classArchivePhotoCacheCompletesQueuedWarmup'), 'core_square_must_not_expand_product_queue_contract');
+$assert(str_contains($source, "clearstatcache(true, \$target['absolute']);")
+    && str_contains($immediate, "clearstatcache(true, \$target['absolute']);"), 'child_generator_negative_stat_cache_not_cleared');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::complete('), 'successful_queue_completion_missing');
 $assert(str_contains($queue, "'class_photo_id' => \$classPhotoId, 'piwigo_image_id' => \$imageId"), 'queue_contains_noncanonical_identity');
@@ -170,4 +172,4 @@ $assert($percentageLabel->invoke(null, 1, 2) === '50%', 'system_health_reuse_rat
 $assert($percentageLabel->invoke(null, 0, 0) === '尚无可计算数据', 'system_health_empty_rate_must_be_uncollected');
 $assert($percentageLabel->invoke(null, 3, 2) === '尚无可计算数据', 'system_health_invalid_rate_must_fail_closed');
 
-fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=82\n");
+fwrite(STDOUT, "PHOTO_CACHE_WARMUP_STATIC=PASS ASSERTIONS=83\n");

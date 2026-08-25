@@ -58,7 +58,7 @@ final class ClassArchiveDerivativeCacheWarmer
             $sourceImage = new SrcImage($row);
             $result = ['checked' => 0, 'cached' => 0, 'generated' => 0];
 
-            foreach (self::PROFILES as $constantName) {
+            foreach (self::PROFILES as $profileName => $constantName) {
                 if ((microtime(true) - $started) >= self::MAX_RUNTIME_SECONDS) {
                     throw new RuntimeException('derivative_immediate_warmup_timeout');
                 }
@@ -97,8 +97,15 @@ final class ClassArchiveDerivativeCacheWarmer
                 } else {
                     self::generate($target['relative'], $started);
                 }
+                // The generator is a separate PHP process. Discard this
+                // process's negative stat result before verifying the file it
+                // has just atomically published.
+                clearstatcache(true, $target['absolute']);
                 if (!self::fresh($target['absolute'], $source, $effectiveType)) {
-                    throw new RuntimeException('derivative_immediate_generation_unverified');
+                    throw new RuntimeException(
+                        'derivative_immediate_generation_unverified_'
+                        . $profileName . '_' . self::staleReason($target['absolute'], $source, $effectiveType),
+                    );
                 }
                 self::normalizeMode($target['absolute']);
                 ++$result['generated'];
@@ -355,6 +362,27 @@ final class ClassArchiveDerivativeCacheWarmer
             throw new RuntimeException('derivative_immediate_freshness_unavailable');
         }
         return $derivativeMtime >= max($sourceMtime, (int) $params->last_mod_time);
+    }
+
+    private static function staleReason(string $derivative, string $source, string $type): string
+    {
+        clearstatcache(true, $derivative);
+        if (!is_file($derivative) || is_link($derivative)) {
+            return 'missing';
+        }
+        $sourceMtime = @filemtime($source);
+        $derivativeMtime = @filemtime($derivative);
+        $params = ImageStdParams::get_by_type($type);
+        if ($sourceMtime === false || $derivativeMtime === false || $params === null) {
+            return 'metadata';
+        }
+        if ($derivativeMtime < $sourceMtime) {
+            return 'source_mtime';
+        }
+        if ($derivativeMtime < (int) $params->last_mod_time) {
+            return 'profile_mtime';
+        }
+        return 'unknown';
     }
 
     private static function normalizeMode(string $path): void

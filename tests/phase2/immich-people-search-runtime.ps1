@@ -272,6 +272,29 @@ function Invoke-PiwigoFixture([string]$action, [object]$payload = $null) {
     try { return $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'fixture_response_invalid' }
 }
 
+function Invoke-PiwigoProjectionRebuild {
+    $lastFailure = 'projection_rebuild_failed'
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $text = Invoke-PiwigoCompose @(
+                'exec', '-T', '--user', 'nginx', 'piwigo',
+                'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+            )
+            $record = $text | ConvertFrom-Json -ErrorAction Stop
+            $active = @($record.projections | Where-Object { $_.state -eq 'ACTIVE' })
+            if ($record.result -eq 'PASS' -and [int]$record.count -eq 72 -and $active.Count -eq 6) {
+                return $record
+            }
+            $lastFailure = 'projection_rebuild_result_invalid'
+        } catch {
+            $lastFailure = $_
+        }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 1 }
+    }
+    if ($lastFailure -is [System.Management.Automation.ErrorRecord]) { throw $lastFailure }
+    throw $lastFailure
+}
+
 function Get-ImmichRuntimeCounts {
     $query = 'SELECT (SELECT count(*) FROM asset) AS assets, (SELECT count(*) FROM asset_face WHERE "deletedAt" IS NULL) AS faces, (SELECT count(*) FROM face_search) AS embeddings, (SELECT count(*) FROM person) AS people, (SELECT count(*) FROM smart_search) AS smart;'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($query))
@@ -454,6 +477,12 @@ try {
             $script:stage = 'cleanup_piwigo_fixture'
             $cleanup = Invoke-PiwigoFixture 'cleanup'
             Assert-Exact ([bool]$cleanup.ok) 'piwigo_fixture_cleanup_invalid'
+            # Native Piwigo cleanup rotates the protected source epoch. The
+            # fixture process intentionally cannot publish with its stale
+            # bridge configuration, so restore all read models in this fresh
+            # process before declaring the canonical baseline recovered.
+            $projection = Invoke-PiwigoProjectionRebuild
+            Assert-Exact ($projection.result -eq 'PASS' -and [int]$projection.count -eq 72) 'piwigo_projection_cleanup_invalid'
         } catch {
             if ($null -eq $failure) { $failure = $_; $failureStage = $script:stage }
         }
