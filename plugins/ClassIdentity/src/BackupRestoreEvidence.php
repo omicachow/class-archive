@@ -12,10 +12,10 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class BackupRestoreEvidence
 {
-    public const VERSION = 5;
-    public const FIXTURE_VERSION = 5;
-    public const CLASS_IDENTITY_SCHEMA_VERSION = 13;
-    public const BACKUP_MANIFEST_FORMAT = 6;
+    public const VERSION = 6;
+    public const FIXTURE_VERSION = 6;
+    public const CLASS_IDENTITY_SCHEMA_VERSION = 14;
+    public const BACKUP_MANIFEST_FORMAT = 7;
     public const FRESHNESS_SECONDS = 90 * 86400;
 
     private const DATA_DIRECTORY = '_data/class-archive';

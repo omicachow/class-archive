@@ -39,12 +39,12 @@ for name in database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz s
 done
 (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null 2>&1) || fail restore_checksum_failed
 
-# Format 6 binds the backup contract to ClassIdentity v13 while explicitly
+# Format 7 binds the backup contract to ClassIdentity v14 while explicitly
 # separating business truth from all rebuildable read projections. An older
 # bundle may contain a valid SQL dump, but it cannot prove this recovery policy
 # and is therefore rejected before any target is cleared.
 schema_contract='"class_identity_schema":{"version":14,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
-grep -Eq '^\{"format":6,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
+grep -Eq '^\{"format":7,"created_at":"[0-9]{8}T[0-9]{6}Z",' "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
 grep -Fq "$schema_contract" "$bundle/MANIFEST.json" || fail restore_business_manifest_invalid
 
 assert_archive_safe() {
@@ -130,7 +130,7 @@ existing_tables=$(mariadb --batch --skip-column-names --host=db --user=root --pa
 [ "$existing_tables" = 0 ] || fail restore_database_not_empty
 gzip -dc "$bundle/database.sql.gz" | mariadb --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" || fail restore_database_failed
 
-# Re-check the manifest's v12 claim against the restored database before any
+# Re-check the manifest's v14 claim against the restored database before any
 # application volume is repopulated. Identifiers are accepted only from the
 # server's own alphanumeric table inventory and are never caller supplied.
 set -- $(mariadb --batch --skip-column-names --host=db --user=root --password="$DB_ROOT_PASSWORD" "$DB_NAME" \
@@ -160,7 +160,7 @@ ci_trigger_count=$(mariadb --batch --skip-column-names --host=db --user=root --p
   -e "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('${pwg_base}ci_projection_images_bi','${pwg_base}ci_projection_images_bu','${pwg_base}ci_projection_images_bd','${pwg_base}ci_projection_image_category_bi','${pwg_base}ci_projection_image_category_bu','${pwg_base}ci_projection_image_category_bd','${pwg_base}ci_projection_categories_bi','${pwg_base}ci_projection_categories_bu','${pwg_base}ci_projection_categories_bd','${pwg_base}ci_source_epoch_images_bi','${pwg_base}ci_source_epoch_images_bu','${pwg_base}ci_source_epoch_images_bd','${pwg_base}ci_source_epoch_image_category_bi','${pwg_base}ci_source_epoch_image_category_bu','${pwg_base}ci_source_epoch_image_category_bd','${pwg_base}ci_source_epoch_categories_bi','${pwg_base}ci_source_epoch_categories_bu','${pwg_base}ci_source_epoch_categories_bd') AND ACTION_TIMING='BEFORE'")
 [ "$ci_trigger_count" = 18 ] || fail restore_native_projection_guard_invalid
 
-# Projection rows are cache, not recovery truth. The v12 dump must retain their
+# Projection rows are cache, not recovery truth. The v14 dump must retain their
 # DDL but omit all data. Seed only the six schema-defined STALE control rows;
 # the running application must rebuild PHOTO_CATALOG plus all materialized
 # aggregate projections from Piwigo/Class Archive business tables after startup.

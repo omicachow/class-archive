@@ -377,7 +377,7 @@ durable MariaDB read projections. They also exercise stale/tampered projection
 failure, catalog/aggregate publication races, scoped write-side refresh,
 Spotlight expiry, canonical-merge and submission-review boundaries, the durable
 MyISAM source-epoch sentinel, and all 18 native Piwigo mutation guards. A
-separate read-only operations contract locks the current v12 backup
+separate read-only operations contract locks the current v14 backup
 manifest/fixture, cache-free projection recovery, restore preflight ordering,
 conservative reconciliation findings and System Health table coverage; it
 never runs the destructive restore drill.

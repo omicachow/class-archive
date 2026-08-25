@@ -146,8 +146,8 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
 }
 $summary['multi_album_images'] = (int) $row['count'];
 $payload = [
-    'fixture_version' => 5,
-    'class_identity_schema_version' => 13,
+    'fixture_version' => 6,
+    'class_identity_schema_version' => 14,
     'projection_recovery' => [
         'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
         'projection' => 'ALL',

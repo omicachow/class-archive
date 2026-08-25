@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * Locked MariaDB semantic gate for the private full-library import journal.
  *
- * It invokes only migration 13 beneath a disposable prefix. No source media,
+ * It invokes migrations 13 and 14 beneath a disposable prefix. No source media,
  * private manifests, or live ClassIdentity rows are read or changed.
  */
 
