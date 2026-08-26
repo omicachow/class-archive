@@ -419,7 +419,12 @@ function Assert-RestoreNetworkRangesFree {
 function Assert-HostCapabilities {
     $script:stage = 'host_capabilities'
     Assert-Restore (Test-Path -LiteralPath $wsl -PathType Leaf) 'wsl_unavailable'
-    [void](Invoke-Ubuntu @('sh','-eu','-c','test "$(id -u)" = 0; for tool in losetup mkfs.ext4 blkid mount findmnt gpg tar; do command -v "$tool" >/dev/null; done') 'host_tooling_unavailable')
+    $uid = @(Invoke-Ubuntu @('id','-u') 'wsl_user_check_failed')
+    Assert-Restore ($uid.Count -eq 1 -and $uid[0] -eq '0') 'wsl_root_required'
+    foreach ($tool in @('losetup','mkfs.ext4','blkid','mount','findmnt','gpg','tar')) {
+        $resolved = @(Invoke-Ubuntu @('sh','-eu','-c','command -v "$1"','sh',$tool) 'host_tooling_unavailable')
+        Assert-Restore ($resolved.Count -eq 1 -and $resolved[0] -match '\A/') 'host_tooling_path_invalid'
+    }
     $primaryRoot = @(Invoke-RestoreDocker @('info','--format','{{.DockerRootDir}}') 'primary_docker_unavailable')
     Assert-Restore ($primaryRoot.Count -eq 1 -and $primaryRoot[0].Trim() -eq '/var/lib/docker') 'primary_docker_root_changed'
     $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='M:'" -ErrorAction Stop
