@@ -118,7 +118,15 @@ async function waitForQueue(token, name, timeoutMs) {
     // endpoint has already returned at this point, so five consecutive idle
     // observations are a bounded, fail-closed completion signal; later
     // People/Search result checks still have to succeed.
-    if (!queueActive(statistics, `queue_${name}`) && (observed || statistics.completed > 0 || idleObservations >= 5)) return statistics.completed;
+    if (!queueActive(statistics, `queue_${name}`) && (observed || statistics.completed > 0 || idleObservations >= 5)) {
+      return {
+        active: statistics.active,
+        waiting: statistics.waiting,
+        delayed: statistics.delayed,
+        failed: statistics.failed,
+        completed: statistics.completed,
+      };
+    }
     await delay(1_000);
   }
   fail(`queue_${name}_timeout`);
@@ -147,6 +155,27 @@ async function startQueueIfIdle(token, name) {
   fail(`run_${name}_http_${response.status}`);
 }
 
+async function disableOutOfScopeOcr(token) {
+  const config = await request('system_config', '/system-config', 'GET', undefined, token);
+  if (!config?.machineLearning?.ocr || typeof config.machineLearning.ocr.enabled !== 'boolean') fail('system_config_ocr_invalid');
+  if (config.machineLearning.ocr.enabled !== false) {
+    config.machineLearning.ocr.enabled = false;
+    await request('system_config_disable_ocr', '/system-config', 'PUT', config, token);
+  }
+  const verified = await request('system_config_verify_ocr', '/system-config', 'GET', undefined, token);
+  if (verified?.machineLearning?.ocr?.enabled !== false) fail('system_config_ocr_not_disabled');
+  // OCR is outside this phase and its model is deliberately absent from the
+  // verified read-only cache. Pause and empty only that queue so Immich never
+  // attempts a cache-miss download; Face/Search queues remain untouched.
+  await request('queue_ocr_pause', '/jobs/ocr', 'PUT', { command: 'pause' }, token);
+  await request('queue_ocr_empty', '/jobs/ocr', 'PUT', { command: 'empty' }, token);
+  await request('queue_ocr_clear_failed', '/jobs/ocr', 'PUT', { command: 'clear-failed' }, token);
+  const ocrQueue = await request('queue_ocr_verify', '/queues/ocr', 'GET', undefined, token);
+  const stats = ocrQueue?.statistics;
+  if (ocrQueue?.isPaused !== true || !stats || stats.active !== 0 || stats.waiting !== 0
+    || stats.delayed !== 0 || stats.failed !== 0) fail('queue_ocr_not_quiescent');
+}
+
 let input;
 try {
   if (process.argv.length !== 4 || process.argv[2] !== '--input-file' || process.argv[3] !== INPUT_PATH) fail('input_source_invalid');
@@ -159,15 +188,24 @@ try {
 }
 
 try {
-  if (!exactKeys(input, ['version', 'scope', 'mode', 'catalog_digest', 'email', 'password', 'name', 'library_name', 'photos'])
-    || input.version !== 1 || input.scope !== 'PRIVATE_REAL_DATA_QA') fail('input_shape_invalid');
+  if (!exactKeys(input, ['version', 'scope', 'mode', 'catalog_digest', 'email', 'password', 'name', 'library_name', 'models', 'photos'])
+    || input.version !== 1 || !['PRIVATE_REAL_DATA_QA', 'PRIVATE_REAL_FULL'].includes(input.scope)) fail('input_shape_invalid');
+  const runtimeScope = input.scope;
+  const maximumAssets = runtimeScope === 'PRIVATE_REAL_FULL' ? 5000 : 500;
   const mode = text(input.mode, 'mode_invalid', 6, 7, /^(INITIAL|RESUME)$/);
   const catalogDigest = text(input.catalog_digest, 'catalog_digest_invalid', 64, 64, /^[0-9a-f]{64}$/);
   const email = text(input.email, 'email_invalid', 8, 190, /^[A-Za-z0-9._+-]+@private\.invalid$/);
   const password = text(input.password, 'password_invalid', 32, 190, /^[A-Za-z0-9._~-]+$/);
   const name = text(input.name, 'name_invalid', 3, 190);
   const libraryName = text(input.library_name, 'library_name_invalid', 3, 190);
-  if (!Array.isArray(input.photos) || input.photos.length < 1 || input.photos.length > 500) fail('catalog_count_invalid');
+  if (!exactKeys(input.models, ['face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision'])) fail('model_contract_invalid');
+  const models = {
+    face_model_name: text(input.models.face_model_name, 'face_model_name_invalid', 1, 190, /^[A-Za-z0-9._:@\/-]+$/),
+    face_model_revision: text(input.models.face_model_revision, 'face_model_revision_invalid', 1, 190, /^[A-Za-z0-9._:@\/-]+$/),
+    search_model_name: text(input.models.search_model_name, 'search_model_name_invalid', 1, 190, /^[A-Za-z0-9._:@\/-]+$/),
+    search_model_revision: text(input.models.search_model_revision, 'search_model_revision_invalid', 1, 190, /^[A-Za-z0-9._:@\/-]+$/),
+  };
+  if (!Array.isArray(input.photos) || input.photos.length < 1 || input.photos.length > maximumAssets) fail('catalog_count_invalid');
 
   const photos = [];
   const canonicalIds = new Set();
@@ -203,6 +241,7 @@ try {
   const loginAdminId = uuid(login?.userId, 'login_user_id_invalid');
   if (login?.isAdmin !== true || (adminId !== undefined && loginAdminId !== adminId)) fail('technical_identity_invalid');
   adminId = loginAdminId;
+  await disableOutOfScopeOcr(accessToken);
 
   let library;
   let scanMs = 0;
@@ -246,22 +285,34 @@ try {
     || !Number.isSafeInteger(libraryStats?.photos) || !Number.isSafeInteger(libraryStats?.videos)
     || libraryStats.photos + libraryStats.videos !== photos.length) fail('library_statistics_mismatch');
 
-  // Immich v3.1.0's legacy `originalPath` metadata filter is a substring
-  // predicate, not an exact lookup.  Enumerate the one expected library via
-  // the official stable large-assets API (bounded to 1000).  Polling this
-  // metadata-backed endpoint is also a stronger completion proof than Redis
-  // queue counters, whose completed values may be pruned to zero after a
-  // previous interrupted run.
+  // Enumerate the one expected library through Immich v3.1.0's official
+  // paginated metadata search. The previous large-assets endpoint is capped
+  // at 1000 and cannot safely prove the 2k+ private-full catalog is complete.
   let items = [];
   for (let attempt = 0; attempt < 900; attempt += 1) {
-    items = await request(
-      'library_asset_inventory',
-      `/search/large-assets?libraryId=${encodeURIComponent(libraryId)}&minFileSize=0&size=1000`,
-      'POST',
-      undefined,
-      accessToken,
-    );
-    if (!Array.isArray(items) || items.length > photos.length) fail('asset_inventory_count_invalid');
+    const collected = [];
+    let page = 1;
+    while (collected.length < photos.length) {
+      const result = await request(
+        'library_asset_inventory',
+        '/search/metadata',
+        'POST',
+        { libraryId, page, size: 1000 },
+        accessToken,
+      );
+      const pageItems = result?.assets?.items;
+      if (!Array.isArray(pageItems) || pageItems.length > 1000) fail('asset_inventory_count_invalid');
+      collected.push(...pageItems);
+      if (collected.length > photos.length) fail('asset_inventory_count_invalid');
+      const nextPage = result?.assets?.nextPage;
+      if (nextPage === null || nextPage === undefined || pageItems.length === 0) break;
+      const parsed = Number.parseInt(String(nextPage), 10);
+      if (!Number.isSafeInteger(parsed) || parsed <= page || parsed > Math.ceil(maximumAssets / 1000) + 1) {
+        fail('asset_inventory_page_invalid');
+      }
+      page = parsed;
+    }
+    items = collected;
     if (items.length === photos.length) break;
     await delay(1_000);
   }
@@ -297,21 +348,34 @@ try {
   let faceMs = 0;
   let recognitionMs = 0;
   let searchIndexMs = 0;
+  let faceQueue;
+  let recognitionQueue;
+  let smartQueue;
   if (mode === 'INITIAL') {
     const faceStarted = Date.now();
     await request('refresh_faces', '/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }, accessToken, 60_000);
-    faceJobs = await waitForQueue(accessToken, 'faceDetection', 1_800_000);
+    faceQueue = await waitForQueue(accessToken, 'faceDetection', 1_800_000);
+    faceJobs = faceQueue.completed;
     faceMs = Date.now() - faceStarted;
 
     const recognitionStarted = Date.now();
     await startQueueIfIdle(accessToken, 'facialRecognition');
-    recognitionJobs = await waitForQueue(accessToken, 'facialRecognition', 1_800_000);
+    recognitionQueue = await waitForQueue(accessToken, 'facialRecognition', 1_800_000);
+    recognitionJobs = recognitionQueue.completed;
     recognitionMs = Date.now() - recognitionStarted;
 
     const searchIndexStarted = Date.now();
     await startQueueIfIdle(accessToken, 'smartSearch');
-    smartJobs = await waitForQueue(accessToken, 'smartSearch', 1_800_000);
+    smartQueue = await waitForQueue(accessToken, 'smartSearch', 1_800_000);
+    smartJobs = smartQueue.completed;
     searchIndexMs = Date.now() - searchIndexStarted;
+  } else {
+    // RESUME is a verification path, not a read-path retry. Require all
+    // three durable queues to reach a stable idle/no-failure state before
+    // accepting the persisted People/Search indexes as completion evidence.
+    faceQueue = await waitForQueue(accessToken, 'faceDetection', 300_000);
+    recognitionQueue = await waitForQueue(accessToken, 'facialRecognition', 300_000);
+    smartQueue = await waitForQueue(accessToken, 'smartSearch', 300_000);
   }
 
   const people = await request('people', '/people?size=500&withHidden=false', 'GET', undefined, accessToken);
@@ -339,10 +403,19 @@ try {
 
   const output = {
     version: 1,
-    scope: 'PRIVATE_REAL_DATA_QA',
+    scope: runtimeScope,
     catalog_digest: catalogDigest,
     access_token: accessToken,
     assets: bindings,
+    index_evidence: {
+      runtime_mode: mode,
+      models,
+      queue_idle: {
+        face_detection: faceQueue.active === 0 && faceQueue.waiting === 0 && faceQueue.delayed === 0 && faceQueue.failed === 0,
+        facial_recognition: recognitionQueue.active === 0 && recognitionQueue.waiting === 0 && recognitionQueue.delayed === 0 && recognitionQueue.failed === 0,
+        smart_search: smartQueue.active === 0 && smartQueue.waiting === 0 && smartQueue.delayed === 0 && smartQueue.failed === 0,
+      },
+    },
     metrics: {
       asset_count: photos.length,
       people_count: people.people.length,

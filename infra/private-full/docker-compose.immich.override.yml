@@ -2,6 +2,17 @@ services:
   immich-server:
     labels:
       com.classarchive.scope: private-real-full
+    # The base spike loads its synthetic `.env` for the server process.  The
+    # private-full database already receives the selected owner/staging env
+    # through Compose interpolation, so explicitly override the three DB
+    # values here as well. Environment entries have higher precedence than
+    # env_file and prevent the private server from ever using synthetic DB
+    # credentials against the isolated private Postgres volume.
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored private-full env file}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME:-immich}
+      TZ: ${TZ:-Asia/Shanghai}
     logging:
       driver: local
       options:

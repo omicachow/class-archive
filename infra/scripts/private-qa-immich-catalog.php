@@ -18,6 +18,7 @@ use ClassIdentity\Gateway\PiwigoGatewayAdapter;
 
 const PRIVATE_QA_CATALOG_OUTPUT = '/tmp/class-archive-private-qa-immich-catalog.json';
 const PRIVATE_QA_BIND_INPUT = '/tmp/class-archive-private-qa-immich-bindings.json';
+const PRIVATE_QA_INDEX_INPUT = '/tmp/class-archive-private-qa-immich-index-evidence.json';
 const PRIVATE_QA_ENABLE_INPUT = '/tmp/class-archive-private-qa-immich-enable.json';
 const PRIVATE_QA_BRIDGE_SECRET = '_data/.class-archive-immich-bridge.json';
 const PRIVATE_QA_BRIDGE_FLAG = 'class_identity_immich_bridge_enabled';
@@ -32,12 +33,18 @@ function privateQaImmichFail(string $reason): never
 if (PHP_SAPI !== 'cli' || (function_exists('posix_geteuid') && posix_geteuid() === 0)) {
     privateQaImmichFail('runtime_forbidden');
 }
-if (getenv('CLASS_ARCHIVE_PRIVATE_REAL_QA') !== '1'
-    || getenv('CLASS_ARCHIVE_RUNTIME_SCOPE') !== 'PRIVATE_REAL_DATA_QA') {
+$runtimeScope = (string) getenv('CLASS_ARCHIVE_RUNTIME_SCOPE');
+$privateQaRuntime = $runtimeScope === 'PRIVATE_REAL_DATA_QA'
+    && getenv('CLASS_ARCHIVE_PRIVATE_REAL_QA') === '1';
+$privateFullRuntime = $runtimeScope === 'PRIVATE_REAL_FULL'
+    && getenv('CLASS_ARCHIVE_PRIVATE_REAL_FULL') === '1';
+if (!$privateQaRuntime && !$privateFullRuntime) {
     privateQaImmichFail('private_runtime_required');
 }
+define('PRIVATE_IMMICH_SCOPE', $runtimeScope);
+define('PRIVATE_IMMICH_MAX_ASSETS', $privateFullRuntime ? 5000 : 500);
 $action = (string) ($_SERVER['argv'][1] ?? '');
-if (!in_array($action, ['export', 'export-bound', 'bind', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
+if (!in_array($action, ['export', 'export-bound', 'bind', 'complete-indexes', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
     privateQaImmichFail('action_invalid');
 }
 
@@ -162,7 +169,7 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
     );
     $imageRow = $repository->fetchOne('SELECT COUNT(*) AS `count` FROM `' . $prefixeTable . 'images`');
     $imageCount = (int) ($imageRow['count'] ?? -1);
-    if ($imageCount < 1 || $imageCount > 500 || count($rows) !== $imageCount || count($eras) !== $imageCount) {
+    if ($imageCount < 1 || $imageCount > PRIVATE_IMMICH_MAX_ASSETS || count($rows) !== $imageCount || count($eras) !== $imageCount) {
         throw new RuntimeException('catalog_count_invalid');
     }
     $photos = [];
@@ -201,7 +208,7 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
     $encodedPhotos = json_encode($photos, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
     return [
         'version' => 1,
-        'scope' => 'PRIVATE_REAL_DATA_QA',
+        'scope' => PRIVATE_IMMICH_SCOPE,
         'count' => count($photos),
         'catalog_digest' => hash('sha256', $encodedPhotos),
         'photos' => $photos,
@@ -238,7 +245,9 @@ try {
     }
 
     if ($action === 'export-bound') {
-        privateQaImmichAssertBridgeDisabled($repository);
+        // A bound export is also used by the explicit post-provision index
+        // verifier. The bridge may already be enabled there; the catalog is
+        // still rebuilt from authoritative Class Archive rows and originals.
         $catalog = privateQaImmichCatalog($repository, false);
         privateQaImmichWriteExclusive(PRIVATE_QA_CATALOG_OUTPUT, $catalog);
         fwrite(STDOUT, 'PRIVATE_QA_IMMICH_CATALOG=PASS action=export-bound count=' . $catalog['count'] . "\n");
@@ -250,7 +259,7 @@ try {
         $catalog = privateQaImmichCatalog($repository, true);
         $input = privateQaImmichReadJson(PRIVATE_QA_BIND_INPUT, 512 * 1024);
         if (!privateQaImmichExactKeys($input, ['version', 'scope', 'catalog_digest', 'assets'])
-            || ($input['version'] ?? null) !== 1 || ($input['scope'] ?? null) !== 'PRIVATE_REAL_DATA_QA'
+            || ($input['version'] ?? null) !== 1 || ($input['scope'] ?? null) !== PRIVATE_IMMICH_SCOPE
             || !is_string($input['catalog_digest'] ?? null) || !hash_equals($catalog['catalog_digest'], $input['catalog_digest'])
             || !is_array($input['assets'] ?? null) || count($input['assets']) !== $catalog['count']) {
             throw new RuntimeException('binding_input_invalid');
@@ -308,12 +317,164 @@ try {
         exit(0);
     }
 
+    if ($action === 'complete-indexes') {
+        // This is an explicit operator-only completion boundary. It is called
+        // only after the internal Immich runtime has returned queue-idle,
+        // non-empty People and non-empty Smart Search evidence. Ordinary GET
+        // paths never enqueue, claim or complete model work.
+        if (PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'
+            || !hash_equals('1', (string) getenv('CLASS_ARCHIVE_PRIVATE_AI_INDEX_WORKER'))
+            || !class_exists(ClassIdentity\AiIndexService::class)) {
+            throw new RuntimeException('index_runtime_forbidden');
+        }
+        $catalog = privateQaImmichCatalog($repository, false);
+        $input = privateQaImmichReadJson(PRIVATE_QA_INDEX_INPUT, 1024 * 1024);
+        $keys = [
+            'version', 'scope', 'catalog_digest', 'runtime_mode', 'asset_count', 'people_count',
+            'face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision',
+            'face_queue_idle', 'recognition_queue_idle', 'search_queue_idle', 'assets',
+        ];
+        if (!privateQaImmichExactKeys($input, $keys)
+            || ($input['version'] ?? null) !== 1
+            || ($input['scope'] ?? null) !== PRIVATE_IMMICH_SCOPE
+            || !is_string($input['catalog_digest'] ?? null)
+            || !hash_equals($catalog['catalog_digest'], (string) $input['catalog_digest'])
+            || !in_array($input['runtime_mode'] ?? null, ['INITIAL', 'RESUME'], true)
+            || ($input['asset_count'] ?? null) !== $catalog['count']
+            || !is_int($input['people_count'] ?? null) || $input['people_count'] < 1
+            || ($input['face_queue_idle'] ?? null) !== true
+            || ($input['recognition_queue_idle'] ?? null) !== true
+            || ($input['search_queue_idle'] ?? null) !== true
+            || !is_array($input['assets'] ?? null) || count($input['assets']) !== $catalog['count']) {
+            throw new RuntimeException('index_evidence_invalid');
+        }
+        foreach (['face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision'] as $field) {
+            if (!is_string($input[$field] ?? null)
+                || preg_match('/\A[A-Za-z0-9._:@\/-]{1,190}\z/D', (string) $input[$field]) !== 1) {
+                throw new RuntimeException('index_evidence_invalid');
+            }
+        }
+
+        $expected = [];
+        foreach ($catalog['photos'] as $photo) {
+            $expected[$photo['class_photo_id']] = $photo;
+        }
+        $bindings = [];
+        foreach ($input['assets'] as $asset) {
+            if (!is_array($asset) || !privateQaImmichExactKeys($asset, ['class_photo_id', 'immich_asset_id'])) {
+                throw new RuntimeException('index_evidence_invalid');
+            }
+            $classPhotoId = (string) ($asset['class_photo_id'] ?? '');
+            $immichAssetId = ClassArchivePhoto::normalizeImmichAssetId((string) ($asset['immich_asset_id'] ?? ''));
+            if ($immichAssetId === null || !isset($expected[$classPhotoId]) || isset($bindings[$classPhotoId])) {
+                throw new RuntimeException('index_evidence_invalid');
+            }
+            $bindings[$classPhotoId] = $immichAssetId;
+        }
+        if (count($bindings) !== $catalog['count']
+            || count(array_unique(array_values($bindings), SORT_STRING)) !== $catalog['count']) {
+            throw new RuntimeException('index_evidence_invalid');
+        }
+        $boundRows = $repository->fetchAll(
+            'SELECT `class_photo_id`,`immich_asset_id`,`media_checksum`,`state` FROM `'
+                . $repository->table('photo') . '` ORDER BY `class_photo_id` ASC',
+        );
+        if (count($boundRows) !== $catalog['count']) {
+            throw new RuntimeException('index_binding_invalid');
+        }
+        foreach ($boundRows as $row) {
+            $binaryId = $row['class_photo_id'] ?? null;
+            $binaryChecksum = $row['media_checksum'] ?? null;
+            $assetId = ClassArchivePhoto::normalizeImmichAssetId(
+                is_string($row['immich_asset_id'] ?? null) ? (string) $row['immich_asset_id'] : null,
+            );
+            if (!is_string($binaryId) || strlen($binaryId) !== 16
+                || !is_string($binaryChecksum) || strlen($binaryChecksum) !== 32
+                || ($row['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE) {
+                throw new RuntimeException('index_binding_invalid');
+            }
+            $classPhotoId = ClassArchivePhoto::binaryToId($binaryId);
+            if ($assetId === null || !isset($expected[$classPhotoId], $bindings[$classPhotoId])
+                || !hash_equals($bindings[$classPhotoId], $assetId)
+                || !hash_equals($expected[$classPhotoId]['sha256'], bin2hex($binaryChecksum))) {
+                throw new RuntimeException('index_binding_invalid');
+            }
+        }
+
+        $ai = ClassIdentity\AiIndexService::fromPiwigo();
+        $enqueue = $ai->enqueueImportedActivePhotos();
+        if (($enqueue['scanned'] ?? null) !== $catalog['count']) {
+            throw new RuntimeException('index_job_invalid');
+        }
+        $jobRows = $repository->fetchAll(
+            'SELECT `class_photo_id`,`job_kind`,`expected_checksum`,`state` FROM `'
+                . $repository->table('ai_index_job') . '` WHERE `state` IN (?,?) ORDER BY `job_id` ASC',
+            [ClassIdentity\AiIndexService::JOB_PENDING, ClassIdentity\AiIndexService::JOB_RUNNING],
+        );
+        if (count($jobRows) > $catalog['count']) {
+            throw new RuntimeException('index_job_invalid');
+        }
+        foreach ($jobRows as $row) {
+            $binaryId = $row['class_photo_id'] ?? null;
+            $checksum = $row['expected_checksum'] ?? null;
+            if (!is_string($binaryId) || strlen($binaryId) !== 16
+                || !is_string($checksum) || strlen($checksum) !== 32
+                || ($row['job_kind'] ?? null) !== ClassIdentity\AiIndexService::JOB_INDEX_ASSET
+                || ($row['state'] ?? null) !== ClassIdentity\AiIndexService::JOB_PENDING) {
+                throw new RuntimeException('index_job_invalid');
+            }
+            $classPhotoId = ClassArchivePhoto::binaryToId($binaryId);
+            if (!isset($expected[$classPhotoId])
+                || !hash_equals($expected[$classPhotoId]['sha256'], bin2hex($checksum))) {
+                throw new RuntimeException('index_job_invalid');
+            }
+        }
+
+        $completed = 0;
+        while (($job = $ai->claimNextJob()) !== null) {
+            $classPhotoId = (string) ($job['class_photo_id'] ?? '');
+            if (($job['job_kind'] ?? null) !== ClassIdentity\AiIndexService::JOB_INDEX_ASSET
+                || ($job['state'] ?? null) !== ClassIdentity\AiIndexService::JOB_RUNNING
+                || !isset($expected[$classPhotoId], $bindings[$classPhotoId])
+                || !hash_equals($expected[$classPhotoId]['sha256'], (string) ($job['expected_checksum'] ?? ''))) {
+                throw new RuntimeException('index_job_invalid');
+            }
+            $ai->completeIndexJob(
+                (string) $job['job_id'],
+                $bindings[$classPhotoId],
+                (string) $input['face_model_name'],
+                (string) $input['face_model_revision'],
+                (string) $input['search_model_name'],
+                (string) $input['search_model_revision'],
+            );
+            ++$completed;
+        }
+        $status = $ai->status();
+        $maintenance = $ai->maintenanceReport();
+        if (($status['state'] ?? null) !== 'READY'
+            || ($status['worker_configured'] ?? null) !== true
+            || ($status['open_jobs'] ?? null) !== 0
+            || ($status['review_required'] ?? null) !== false
+            || (($status['assets']['INDEXED:INDEXED'] ?? null) !== $catalog['count'])
+            || ($maintenance['result'] ?? null) !== 'PASS'
+            || ($maintenance['missing_index_rows'] ?? null) !== 0
+            || ($maintenance['checksum_drift'] ?? null) !== 0) {
+            throw new RuntimeException('index_completion_invalid');
+        }
+        fwrite(
+            STDOUT,
+            'PRIVATE_QA_IMMICH_CATALOG=PASS action=complete-indexes count=' . $catalog['count']
+                . ' completed=' . $completed . ' state=READY' . "\n",
+        );
+        exit(0);
+    }
+
     if ($action === 'enable') {
         $catalog = privateQaImmichCatalog($repository, false);
         $input = privateQaImmichReadJson(PRIVATE_QA_ENABLE_INPUT, 2048);
         $token = $input['token'] ?? null;
         if (!privateQaImmichExactKeys($input, ['version', 'scope', 'catalog_digest', 'token'])
-            || ($input['version'] ?? null) !== 1 || ($input['scope'] ?? null) !== 'PRIVATE_REAL_DATA_QA'
+            || ($input['version'] ?? null) !== 1 || ($input['scope'] ?? null) !== PRIVATE_IMMICH_SCOPE
             || !is_string($input['catalog_digest'] ?? null) || !hash_equals($catalog['catalog_digest'], $input['catalog_digest'])
             || !is_string($token) || preg_match('/\A[A-Za-z0-9_-]{32,128}\z/D', $token) !== 1) {
             throw new RuntimeException('enable_input_invalid');
@@ -350,6 +511,8 @@ try {
         'input_file_invalid', 'input_json_invalid', 'original_untrusted', 'original_mode_invalid', 'original_hash_invalid',
         'catalog_count_invalid', 'catalog_mapping_invalid', 'catalog_integrity_invalid', 'output_not_clean', 'output_create_failed',
         'output_write_failed', 'binding_input_invalid', 'binding_asset_duplicate', 'binding_race', 'enable_input_invalid',
+        'index_runtime_forbidden', 'index_evidence_invalid', 'index_binding_invalid', 'index_job_invalid',
+        'index_completion_invalid',
         'bridge_secret_not_clean', 'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',
         'bridge_config_invalid', 'bridge_not_pristine',
         'class_archive_immich_bridge_enablement_invalid', 'class_archive_immich_bridge_response_invalid',
