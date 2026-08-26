@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'prepare-storage', 'restore', 'verify', 'cold-restart', 'status')]
+    [ValidateSet('validate', 'prepare-storage', 'restore', 'resume', 'verify', 'cold-restart', 'status')]
     [string]$Action = 'validate',
 
     [Parameter(Mandatory = $true)]
@@ -653,6 +653,16 @@ function Invoke-StreamHelper([string]$Mode, [string]$Bundle, [string]$Passphrase
     Assert-Restore ($lines.Count -eq 1 -and $lines[0] -eq ('OWNER_RESTORE_STREAM=PASS action=' + $Mode)) 'restore_stream_output_invalid'
 }
 
+function Assert-TargetModelCache([object]$BundleInfo) {
+    $targetVolume = 'class_archive_owner_restore_v1_immich_model_cache'
+    $mlImage = 'ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05'
+    $expectedManifestHash = (Get-FileHash -LiteralPath (Join-Path $BundleInfo.bundle 'business-state\ml-artifact-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $targetManifestLines = @(Invoke-RestoreDocker @('run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($targetVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))
+    Assert-Restore ($targetManifestLines.Count -eq 1) 'target_model_manifest_output_invalid'
+    $targetManifest = [string]$targetManifestLines[0]
+    Assert-Restore ($targetManifest -match '\A([0-9a-f]{64})  /cache/class-archive-model-manifest\.json\z' -and (Test-FixedAsciiEqual $Matches[1] $expectedManifestHash)) 'target_model_manifest_mismatch'
+}
+
 function Copy-VerifiedModelCache([object]$BundleInfo) {
     $sourceVolume = 'class_archive_private_full_v3_immich_model_cache'
     $targetVolume = 'class_archive_owner_restore_v1_immich_model_cache'
@@ -671,10 +681,7 @@ docker --host "$2" run --rm --log-driver none --network none --read-only --cap-d
 docker --host "$2" run --rm -i --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true --entrypoint sh -v "$4:/target" "$3" -eu -c 'test -z "$(find /target -mindepth 1 -print -quit)"; exec tar --numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include="*" -C /target -xf -'
 '@
     [void](Invoke-Ubuntu @('bash','-o','pipefail','-c',$copyScript,'bash',$sourceVolume,$dockerHost,$mlImage,$targetVolume) 'model_cache_copy_failed')
-    $targetManifestLines = @(Invoke-RestoreDocker @('run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($targetVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))
-    Assert-Restore ($targetManifestLines.Count -eq 1) 'target_model_manifest_output_invalid'
-    $targetManifest = [string]$targetManifestLines[0]
-    Assert-Restore ($targetManifest -match '\A([0-9a-f]{64})  /cache/class-archive-model-manifest\.json\z' -and (Test-FixedAsciiEqual $Matches[1] $expectedManifestHash)) 'target_model_manifest_mismatch'
+    Assert-TargetModelCache $BundleInfo
 }
 
 function Wait-RestoreContainer([string]$Name, [int]$Seconds = 300) {
@@ -768,6 +775,87 @@ printf 'ai_asset_index=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_asset_index;")
         elseif (-not [string]::IsNullOrWhiteSpace($line)) { Stop-Restore 'restore_count_output_invalid' }
     }
     return $result
+}
+
+function Assert-PartialRestoreRuntime([object]$BundleInfo) {
+    $script:stage = 'resume_boundary'
+
+    # A resume is deliberately narrower than a second restore attempt.  It is
+    # accepted only at the one known safe checkpoint: all eleven isolated
+    # volumes exist, the restored databases are healthy, Piwigo was created but
+    # never started, and no later Immich/Gateway/Web containers or networks
+    # exist yet.  Nothing in this function creates, imports, copies or repairs.
+    Assert-Restore (-not (Test-Path -LiteralPath $statePath)) 'resume_restore_state_present'
+    foreach ($path in @($piwigoEnvPath,$immichEnvPath,$restoreNginxPath)) {
+        Assert-PlainFile $path 'resume_private_runtime_file_missing'
+        Assert-ClassArchiveOwnerOnlyFileAcl -Path $path
+    }
+    $piwigoEnvironment = [IO.File]::ReadAllText($piwigoEnvPath, [Text.Encoding]::UTF8)
+    $immichEnvironment = [IO.File]::ReadAllText($immichEnvPath, [Text.Encoding]::UTF8)
+    Assert-Restore ($piwigoEnvironment.Contains("COMPOSE_PROJECT_NAME=$piwigoProject`n") -and
+        $piwigoEnvironment.Contains("CLASS_ARCHIVE_HTTP_PORT=8290`n") -and
+        $piwigoEnvironment.Contains("CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291`n")) 'resume_piwigo_environment_identity_invalid'
+    Assert-Restore ($immichEnvironment.Contains("IMMICH_COMPOSE_PROJECT_NAME=$immichProject`n") -and
+        $immichEnvironment.Contains("CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291`n") -and
+        $immichEnvironment.Contains("CLASS_ARCHIVE_CORE_PUBLIC_PORT=8290`n")) 'resume_immich_environment_identity_invalid'
+    $nginxText = [IO.File]::ReadAllText($restoreNginxPath, [Text.Encoding]::UTF8)
+    Assert-Restore (([regex]::Matches($nginxText, 'set_real_ip_from 10\.245\.0\.10/32;')).Count -eq 1) 'resume_nginx_identity_invalid'
+
+    $passphrasePath = Join-Path (Join-Path $privateRuntimeRoot ([string]$BundleInfo.manifest.backup_id)) 'gpg-passphrase.txt'
+    Assert-Restore (-not (Test-Path -LiteralPath $passphrasePath)) 'resume_passphrase_present'
+    Assert-PortsFree
+
+    $expectedVolumes = @(Get-RestoreVolumeSpecs | ForEach-Object { [string]$_[0] } | Sort-Object)
+    Assert-Restore ($expectedVolumes.Count -eq 11) 'resume_expected_volume_contract_invalid'
+    $prefixedVolumes = @(Invoke-RestoreDocker @('volume','ls','--quiet') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
+    $scopedVolumes = @(Invoke-RestoreDocker @('volume','ls','--quiet','--filter','label=com.classarchive.scope=owner-restore-drill') | Sort-Object)
+    Assert-Restore (@(Compare-Object $expectedVolumes $prefixedVolumes).Count -eq 0 -and
+        @(Compare-Object $expectedVolumes $scopedVolumes).Count -eq 0) 'resume_volume_topology_invalid'
+    Assert-AllRestoreVolumeIdentities
+
+    $expectedContainers = @(
+        ($piwigoProject + '-db-1'), ($piwigoProject + '-piwigo-1'),
+        ($immichProject + '-database-1'), ($immichProject + '-redis-1')
+    ) | Sort-Object
+    $prefixedContainers = @(Invoke-RestoreDocker @('ps','-a','--format','{{.Names}}') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
+    $scopedContainers = @(Invoke-RestoreDocker @('ps','-a','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Names}}') | Sort-Object)
+    Assert-Restore (@(Compare-Object $expectedContainers $prefixedContainers).Count -eq 0 -and
+        @(Compare-Object $expectedContainers $scopedContainers).Count -eq 0) 'resume_container_topology_invalid'
+    foreach ($container in @(($piwigoProject + '-db-1'),($immichProject + '-database-1'),($immichProject + '-redis-1'))) {
+        $state = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',$container))
+        Assert-Restore ($state.Count -eq 1 -and $state[0] -eq 'true|healthy|running') 'resume_database_container_unhealthy'
+    }
+    $piwigoState = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',($piwigoProject + '-piwigo-1')))
+    Assert-Restore ($piwigoState.Count -eq 1 -and $piwigoState[0] -eq 'false|none|created') 'resume_piwigo_container_state_invalid'
+
+    $expectedNetworks = @($gatewayNetwork,($piwigoProject + '_app'),($immichProject + '_immich_internal')) | Sort-Object
+    $prefixedNetworks = @(Invoke-RestoreDocker @('network','ls','--format','{{.Name}}') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
+    $scopedNetworks = @(Invoke-RestoreDocker @('network','ls','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Name}}') | Sort-Object)
+    Assert-Restore (@(Compare-Object $expectedNetworks $prefixedNetworks).Count -eq 0 -and
+        @(Compare-Object $expectedNetworks $scopedNetworks).Count -eq 0) 'resume_network_topology_invalid'
+    Assert-RestoreGatewayNetwork
+    foreach ($networkIdentity in @(
+        @(($piwigoProject + '_app'),$piwigoProject,'app','false','10.245.1.0/24'),
+        @(($immichProject + '_immich_internal'),$immichProject,'immich_internal','true','10.245.2.0/24')
+    )) {
+        $identity = @(Invoke-RestoreDocker @('network','inspect','--format','{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}|{{index .Labels "com.classarchive.scope"}}|{{.Internal}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}',$networkIdentity[0]))
+        $wanted = $networkIdentity[1] + '|' + $networkIdentity[2] + '|owner-restore-drill|' + $networkIdentity[3] + '|' + $networkIdentity[4]
+        Assert-Restore ($identity.Count -eq 1 -and $identity[0] -eq $wanted) 'resume_network_identity_invalid'
+    }
+    foreach ($network in $expectedNetworks) {
+        $members = @(Invoke-RestoreDocker @('network','inspect','--format','{{range $id,$container := .Containers}}{{println $container.Name}}{{end}}',$network) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-Restore (@($members | Where-Object { $_ -notin $expectedContainers }).Count -eq 0) 'resume_network_foreign_member'
+    }
+    foreach ($container in $expectedContainers) {
+        $attached = @(Invoke-RestoreDocker @('inspect','--format','{{range $name,$network := .NetworkSettings.Networks}}{{println $name}}{{end}}',$container) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-Restore (@($attached | Where-Object { $_ -notin $expectedNetworks }).Count -eq 0) 'resume_container_foreign_network'
+    }
+
+    $counts = Get-RestoreCounts
+    foreach ($property in $BundleInfo.manifest.counts.PSObject.Properties) {
+        Assert-Restore ($counts.ContainsKey($property.Name) -and [uint64]$counts[$property.Name] -eq [uint64]$property.Value) 'resume_restored_count_mismatch'
+    }
+    Assert-TargetModelCache $BundleInfo
 }
 
 function Assert-AiRestoreEvidence {
@@ -899,6 +987,27 @@ try {
             $secrets = $null
             if (Test-Path -LiteralPath $passphrasePath -PathType Leaf) { Remove-Item -LiteralPath $passphrasePath -Force }
         }
+        Invoke-AggregateVerify $bundleInfo
+        exit 0
+    }
+
+    if ($Action -eq 'resume') {
+        Assert-Restore $ConfirmIsolatedRestore.IsPresent 'resume_confirmation_required'
+        Assert-PrimaryOwnerHttp
+        $ownerBefore = Get-PrimaryOwnerFingerprint
+        Assert-PartialRestoreRuntime $bundleInfo
+        [void](Invoke-RestoreCompose piwigo @('up','-d','piwigo'))
+        Wait-RestoreContainer ($piwigoProject + '-piwigo-1')
+        [void](Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server'))
+        Wait-RestoreContainer ($immichProject + '-immich-machine-learning-1') 600
+        Wait-RestoreContainer ($immichProject + '-immich-server-1') 600
+        Invoke-PrivateImmichFinish
+        [void](Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat'))
+        Wait-RestoreContainer ($immichProject + '-immich-web-compat-1') 300
+        Write-RestoreState $bundleInfo
+        $ownerAfter = Get-PrimaryOwnerFingerprint
+        Assert-Restore ([string]::Equals($ownerBefore,$ownerAfter,[StringComparison]::Ordinal)) 'primary_owner_changed_during_resume'
+        Assert-PrimaryOwnerHttp
         Invoke-AggregateVerify $bundleInfo
         exit 0
     }

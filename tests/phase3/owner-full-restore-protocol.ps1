@@ -37,7 +37,7 @@ $familyBrowser = [IO.File]::ReadAllText($familyBrowserPath)
 $familyBrowserNode = [IO.File]::ReadAllText($familyBrowserNodePath)
 
 foreach ($needle in @(
-    "[ValidateSet('validate', 'prepare-storage', 'restore', 'verify', 'cold-restart', 'status')]",
+    "[ValidateSet('validate', 'prepare-storage', 'restore', 'resume', 'verify', 'cold-restart', 'status')]",
     '[switch]$ConfirmCreateRestoreStorage', '[switch]$ConfirmIsolatedRestore', '[switch]$ConfirmColdRestart',
     "`$targetRoot = '<temporary-recovery-target>'", 'CLASS_ARCHIVE_BACKUP_TARGET',
     "`$PSVersionTable.PSEdition -ne 'Core'", 'powershell_7_required',
@@ -71,8 +71,15 @@ foreach ($needle in @(
     'New-RestoreNginxConfiguration', 'set_real_ip_from 10.245.0.10/32;', 'restore_nginx_sha256',
     "storage_kind='M_EXT4_BIND'", 'Assert-PrimaryOwnerHttp', 'primary_owner_http_unhealthy',
     'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', "Invoke-RestoreDocker @('image','inspect',`$ref)",
-    'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Copy-VerifiedModelCache $bundleInfo',
-    'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore',
+    'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Assert-TargetModelCache', 'Copy-VerifiedModelCache $bundleInfo',
+    'Assert-PartialRestoreRuntime', "`$expectedVolumes.Count -eq 11", 'resume_volume_topology_invalid',
+    "(`$piwigoProject + '-db-1'), (`$piwigoProject + '-piwigo-1')", "@((`$piwigoProject + '-db-1'),(`$immichProject + '-database-1'),(`$immichProject + '-redis-1'))",
+    "@((`$piwigoProject + '_app'),`$piwigoProject,'app','false','10.245.1.0/24')",
+    'resume_container_topology_invalid', "'true|healthy|running'", "'false|none|created'", 'resume_piwigo_container_state_invalid',
+    'resume_network_topology_invalid', 'resume_network_identity_invalid', 'resume_network_foreign_member', 'resume_container_foreign_network',
+    'resume_private_runtime_file_missing', 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $path', 'resume_passphrase_present',
+    'resume_restored_count_mismatch', 'Assert-TargetModelCache $BundleInfo',
+    'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore', 'pwsh.exe -NoProfile -File',
     'Assert-AiRestoreEvidence', 'reused_existing_indexes -eq $true', 'restore_ai_reindex_detected',
     'metrics.face_jobs -eq 0', 'metrics.recognition_jobs -eq 0', 'metrics.smart_jobs -eq 0',
     'PRIVATE_FULL_OWNER_MEDIA_HTTP=PASS', 'direct_guest_requests=6',
@@ -107,6 +114,19 @@ foreach ($needle in @('`$line = @(Invoke-RestoreDocker', '`$loopLines = @(Invoke
 Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
 Assert-True ($runner.Contains('docker --host "$2" run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
+
+$resumeBlock = [regex]::Match($runner, '(?ms)^\s*if \(\$Action -eq ''resume''\) \{.*?^\s*\}').Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($resumeBlock)) 'restore_resume_action_missing'
+foreach ($needle in @(
+    'resume_confirmation_required', 'Assert-PrimaryOwnerHttp', 'Get-PrimaryOwnerFingerprint',
+    'Assert-PartialRestoreRuntime $bundleInfo', "Invoke-RestoreCompose piwigo @('up','-d','piwigo')",
+    "Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server')",
+    'Invoke-PrivateImmichFinish', "Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat')",
+    'Write-RestoreState $bundleInfo', 'primary_owner_changed_during_resume', 'Invoke-AggregateVerify $bundleInfo'
+)) { Assert-True ($resumeBlock.Contains($needle)) ('restore_resume_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+foreach ($forbidden in @('Assert-FreshRestoreRuntime','New-RestoreVolume','Invoke-StreamHelper','Copy-VerifiedModelCache','Read-RecoverySecrets','Initialize-RestoreEnvironments','Remove-Item')) {
+    Assert-True (-not $resumeBlock.Contains($forbidden)) ('restore_resume_destructive_or_reimport_action_detected_' + $forbidden.ToLowerInvariant())
+}
 
 # Execute the real environment renderer with synthetic in-memory secrets. This
 # catches PowerShell's surprising `string + value, next-item` precedence, which
