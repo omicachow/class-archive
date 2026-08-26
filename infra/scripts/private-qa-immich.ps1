@@ -80,7 +80,7 @@ $passwordResetScriptHost = 'infra/scripts/private-qa-immich-reset-admin.mjs'
 $passwordResetScriptContainer = '/tmp/class-archive-private-qa-immich-reset-admin.mjs'
 $runtimeInputContainer = '/tmp/class-archive-private-qa-immich-runtime-input.json'
 $runtimeOutputContainer = '/tmp/class-archive-private-qa-immich-runtime-output.json'
-$runtimeSummaryContainer = '/tmp/class-archive-private-qa-immich-runtime-summary.json'
+$runtimeSummaryContainer = '/tmp/class-archive-private-qa-immich-runtime-summary.txt'
 $runtimeBindingsContainer = '/tmp/class-archive-private-qa-immich-runtime-bindings.json'
 $runtimeIndexEvidenceContainer = '/tmp/class-archive-private-qa-immich-runtime-index-evidence.json'
 $passwordResetInputContainer = '/tmp/class-archive-private-qa-immich-password-reset-input.txt'
@@ -368,7 +368,7 @@ try {
     [void][IO.Directory]::CreateDirectory($work)
     $catalogHost = Join-Path $work 'catalog.json'
     $nodeInputHost = Join-Path $work 'runtime-input.json'
-    $nodeOutputHost = Join-Path $work 'runtime-summary.json'
+    $nodeOutputHost = Join-Path $work 'runtime-summary.txt'
     $bindingHost = Join-Path $work 'bindings.json'
     $indexEvidenceHost = Join-Path $work 'index-evidence.json'
     $enableHost = Join-Path $work 'enable.json'
@@ -432,7 +432,7 @@ try {
         $script:stage = 'ml_runtime_marker'
         Assert-Exact ($runtimeResult -match '^PRIVATE_QA_IMMICH_RUNTIME=PASS assets=([0-9]+) people=([0-9]+) face_jobs=([0-9]+) recognition_jobs=([0-9]+) smart_jobs=([0-9]+)$') 'runtime_failed'
         $script:stage = 'ml_runtime_output_copy'
-        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeSummaryContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-summary.json')))
+        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeSummaryContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-summary.txt')))
         [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeBindingsContainer), ($privateRelative + '/runtime/immich/' + $run + '/bindings.json')))
         [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeIndexEvidenceContainer), ($privateRelative + '/runtime/immich/' + $run + '/index-evidence.json')))
         $script:stage = 'ml_runtime_output_acl'
@@ -444,28 +444,128 @@ try {
         $runtimeReadStep = 'bytes'
         try {
             $runtimeBytes = [IO.File]::ReadAllBytes($nodeOutputHost)
-            if ($runtimeBytes.Length -lt 16 -or $runtimeBytes.Length -gt 4MB) { Fail 'runtime_output_size_invalid' }
+            if ($runtimeBytes.Length -lt 16 -or $runtimeBytes.Length -gt 128KB) { Fail 'runtime_output_size_invalid' }
             $runtimeReadStep = 'utf8'
-            $runtimeJson = [Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)
-            # Windows PowerShell 5.1 ConvertFrom-Json is not reliable for this
-            # bounded 2,351-item evidence document. Use the in-box .NET JSON
-            # parser with explicit size and recursion limits instead; the
-            # document remains private and no field is emitted to stdout.
-            $runtimeReadStep = 'parser_load'
-            Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop | Out-Null
-            $runtimeReadStep = 'parser_create'
-            $runtimeSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-            $runtimeSerializer.MaxJsonLength = 4MB
-            $runtimeSerializer.RecursionLimit = 32
-            $runtimeReadStep = 'deserialize'
-            $runtime = $runtimeSerializer.DeserializeObject($runtimeJson)
+            $runtimeText = [Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)
+            $runtimeReadStep = 'line_endings'
+            if (-not $runtimeText.EndsWith("`n") -or $runtimeText.Contains("`r") -or $runtimeText.Contains([char]0)) {
+                Fail 'runtime_output_line_endings_invalid'
+            }
+            $runtimeReadStep = 'keys'
+            $allowedRuntimeKeys = @(
+                'VERSION', 'SCOPE', 'CATALOG_DIGEST', 'ACCESS_TOKEN', 'ASSET_COUNT', 'PEOPLE_COUNT',
+                'RUNTIME_MODE', 'FACE_MODEL_NAME', 'FACE_MODEL_REVISION', 'SEARCH_MODEL_NAME', 'SEARCH_MODEL_REVISION',
+                'FACE_QUEUE_IDLE', 'RECOGNITION_QUEUE_IDLE', 'SEARCH_QUEUE_IDLE',
+                'FACE_JOBS', 'RECOGNITION_JOBS', 'SMART_JOBS', 'REUSED_EXISTING_INDEXES',
+                'SEARCH_ZH_CLASSROOM', 'SEARCH_ZH_PLAYGROUND', 'SEARCH_ZH_GRADUATION', 'SEARCH_ZH_NIGHT',
+                'SEARCH_EN_CLASSROOM', 'SEARCH_EN_PLAYGROUND', 'SEARCH_EN_GRADUATION', 'SEARCH_EN_NIGHT',
+                'TIMING_MOUNTED_SHA256', 'TIMING_LIBRARY_SCAN', 'TIMING_FACE_DETECTION',
+                'TIMING_FACE_RECOGNITION', 'TIMING_SMART_INDEX', 'TIMING_SMART_QUERIES', 'TIMING_TOTAL'
+            )
+            $runtimeFields = @{}
+            $runtimeLines = $runtimeText.Substring(0, $runtimeText.Length - 1).Split("`n")
+            if ($runtimeLines.Count -ne $allowedRuntimeKeys.Count) { Fail 'runtime_output_key_count_invalid' }
+            foreach ($runtimeLine in $runtimeLines) {
+                $match = [regex]::Match($runtimeLine, '^([A-Z][A-Z0-9_]*)=(.*)$')
+                if (-not $match.Success) { Fail 'runtime_output_line_invalid' }
+                $key = $match.Groups[1].Value
+                if ($allowedRuntimeKeys -notcontains $key -or $runtimeFields.ContainsKey($key)) {
+                    Fail 'runtime_output_key_invalid'
+                }
+                $runtimeFields[$key] = $match.Groups[2].Value
+            }
+            foreach ($key in $allowedRuntimeKeys) {
+                if (-not $runtimeFields.ContainsKey($key)) { Fail 'runtime_output_key_missing' }
+            }
+
+            $runtimeReadStep = 'values'
+            if ($runtimeFields.VERSION -ne '1' `
+                -or $runtimeFields.SCOPE -ne $runtimeScope `
+                -or $runtimeFields.CATALOG_DIGEST -notmatch '^[0-9a-f]{64}$' `
+                -or $runtimeFields.ACCESS_TOKEN -notmatch '^[A-Za-z0-9._~-]{32,8192}$' `
+                -or $runtimeFields.RUNTIME_MODE -notin @('INITIAL', 'RESUME')) {
+                Fail 'runtime_output_value_invalid'
+            }
+            foreach ($key in @('FACE_MODEL_NAME', 'FACE_MODEL_REVISION', 'SEARCH_MODEL_NAME', 'SEARCH_MODEL_REVISION')) {
+                if ($runtimeFields[$key] -notmatch '^[A-Za-z0-9._:@/-]{1,190}$') { Fail 'runtime_output_model_invalid' }
+            }
+            foreach ($key in @('FACE_QUEUE_IDLE', 'RECOGNITION_QUEUE_IDLE', 'SEARCH_QUEUE_IDLE', 'REUSED_EXISTING_INDEXES')) {
+                if ($runtimeFields[$key] -notmatch '^[01]$') { Fail 'runtime_output_boolean_invalid' }
+            }
+            $numericRuntimeKeys = @(
+                'ASSET_COUNT', 'PEOPLE_COUNT', 'FACE_JOBS', 'RECOGNITION_JOBS', 'SMART_JOBS',
+                'SEARCH_ZH_CLASSROOM', 'SEARCH_ZH_PLAYGROUND', 'SEARCH_ZH_GRADUATION', 'SEARCH_ZH_NIGHT',
+                'SEARCH_EN_CLASSROOM', 'SEARCH_EN_PLAYGROUND', 'SEARCH_EN_GRADUATION', 'SEARCH_EN_NIGHT',
+                'TIMING_MOUNTED_SHA256', 'TIMING_LIBRARY_SCAN', 'TIMING_FACE_DETECTION',
+                'TIMING_FACE_RECOGNITION', 'TIMING_SMART_INDEX', 'TIMING_SMART_QUERIES', 'TIMING_TOTAL'
+            )
+            foreach ($key in $numericRuntimeKeys) {
+                if ($runtimeFields[$key] -notmatch '^(?:0|[1-9][0-9]{0,11})$') { Fail 'runtime_output_number_invalid' }
+            }
+
+            $runtimeReadStep = 'projection'
+            $runtime = [pscustomobject][ordered]@{
+                version = 1
+                scope = $runtimeFields.SCOPE
+                catalog_digest = $runtimeFields.CATALOG_DIGEST
+                access_token = $runtimeFields.ACCESS_TOKEN
+                asset_count = [long]$runtimeFields.ASSET_COUNT
+                people_count = [long]$runtimeFields.PEOPLE_COUNT
+                index_evidence = [pscustomobject][ordered]@{
+                    runtime_mode = $runtimeFields.RUNTIME_MODE
+                    models = [pscustomobject][ordered]@{
+                        face_model_name = $runtimeFields.FACE_MODEL_NAME
+                        face_model_revision = $runtimeFields.FACE_MODEL_REVISION
+                        search_model_name = $runtimeFields.SEARCH_MODEL_NAME
+                        search_model_revision = $runtimeFields.SEARCH_MODEL_REVISION
+                    }
+                    queue_idle = [pscustomobject][ordered]@{
+                        face_detection = $runtimeFields.FACE_QUEUE_IDLE -eq '1'
+                        facial_recognition = $runtimeFields.RECOGNITION_QUEUE_IDLE -eq '1'
+                        smart_search = $runtimeFields.SEARCH_QUEUE_IDLE -eq '1'
+                    }
+                }
+                metrics = [pscustomobject][ordered]@{
+                    asset_count = [long]$runtimeFields.ASSET_COUNT
+                    people_count = [long]$runtimeFields.PEOPLE_COUNT
+                    face_jobs = [long]$runtimeFields.FACE_JOBS
+                    recognition_jobs = [long]$runtimeFields.RECOGNITION_JOBS
+                    smart_jobs = [long]$runtimeFields.SMART_JOBS
+                    reused_existing_indexes = $runtimeFields.REUSED_EXISTING_INDEXES -eq '1'
+                    search_counts = [pscustomobject][ordered]@{
+                        zh_classroom = [long]$runtimeFields.SEARCH_ZH_CLASSROOM
+                        zh_playground = [long]$runtimeFields.SEARCH_ZH_PLAYGROUND
+                        zh_graduation = [long]$runtimeFields.SEARCH_ZH_GRADUATION
+                        zh_night = [long]$runtimeFields.SEARCH_ZH_NIGHT
+                        en_classroom = [long]$runtimeFields.SEARCH_EN_CLASSROOM
+                        en_playground = [long]$runtimeFields.SEARCH_EN_PLAYGROUND
+                        en_graduation = [long]$runtimeFields.SEARCH_EN_GRADUATION
+                        en_night = [long]$runtimeFields.SEARCH_EN_NIGHT
+                    }
+                    timings_ms = [pscustomobject][ordered]@{
+                        mounted_sha256 = [long]$runtimeFields.TIMING_MOUNTED_SHA256
+                        library_scan = [long]$runtimeFields.TIMING_LIBRARY_SCAN
+                        face_detection = [long]$runtimeFields.TIMING_FACE_DETECTION
+                        face_recognition = [long]$runtimeFields.TIMING_FACE_RECOGNITION
+                        smart_index = [long]$runtimeFields.TIMING_SMART_INDEX
+                        smart_queries = [long]$runtimeFields.TIMING_SMART_QUERIES
+                        total = [long]$runtimeFields.TIMING_TOTAL
+                    }
+                }
+            }
         } catch {
             if ([string]$_.Exception.Message -match '^PRIVATE_QA_IMMICH=FAIL ') { throw }
             Fail ('runtime_output_' + $runtimeReadStep + '_invalid')
         } finally {
             $runtimeBytes = $null
-            $runtimeJson = $null
-            $runtimeSerializer = $null
+            $runtimeText = $null
+            $runtimeLines = $null
+            $runtimeLine = $null
+            $allowedRuntimeKeys = $null
+            $numericRuntimeKeys = $null
+            $runtimeFields = $null
+            $match = $null
+            $key = $null
             $runtimeReadStep = $null
         }
         $script:stage = 'ml_runtime_output_contract'

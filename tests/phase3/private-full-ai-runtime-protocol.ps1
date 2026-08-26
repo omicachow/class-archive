@@ -43,9 +43,11 @@ Assert-Protocol ($runtime.Contains('`unexpected_${safeStage}`') `
     -and $runtime.Contains("runtimeStage = 'output'")) 'runtime_failure_stage_must_be_sanitized'
 Assert-Protocol (@([regex]::Matches($runtime, 'console\.log\(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=\$\{code\}`\);')).Count -eq 2 `
     -and -not $runtime.Contains('console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL')) 'runtime_failure_marker_must_use_stdout'
-foreach ($artifact in @('SUMMARY_PATH','BINDINGS_PATH','INDEX_EVIDENCE_PATH')) {
+foreach ($artifact in @('BINDINGS_PATH','INDEX_EVIDENCE_PATH')) {
     Assert-Protocol ($runtime.Contains("writePrivateJson($artifact")) ('runtime_private_artifact_missing_' + $artifact)
 }
+Assert-Protocol ($runtime.Contains("writePrivateText(SUMMARY_PATH") `
+    -and $runtime.Contains("const SUMMARY_PATH = '/tmp/class-archive-private-qa-immich-runtime-summary.txt'")) 'runtime_summary_must_use_text_protocol'
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'
@@ -63,12 +65,17 @@ foreach ($stage in @('ml_runtime_execute','ml_runtime_marker','ml_runtime_output
 }
 Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
     -and $runner.Contains('[Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)') `
-    -and $runner.Contains('System.Web.Script.Serialization.JavaScriptSerializer') `
-    -and $runner.Contains('$runtimeSerializer.MaxJsonLength = 4MB') `
-    -and $runner.Contains('$runtimeSerializer.RecursionLimit = 32') `
-    -and $runner.Contains("`$runtimeReadStep = 'deserialize'") `
+    -and $runner.Contains('$runtimeBytes.Length -gt 128KB') `
+    -and $runner.Contains("`$runtimeReadStep = 'line_endings'") `
+    -and $runner.Contains("`$runtimeReadStep = 'keys'") `
+    -and $runner.Contains("`$runtimeReadStep = 'values'") `
+    -and $runner.Contains("`$runtimeReadStep = 'projection'") `
+    -and $runner.Contains("'^([A-Z][A-Z0-9_]*)=(.*)$'") `
+    -and $runner.Contains("'ACCESS_TOKEN'") `
+    -and $runner.Contains("'TIMING_TOTAL'") `
+    -and -not $runner.Contains('System.Web.Script.Serialization.JavaScriptSerializer') `
     -and $runner.Contains("Fail ('runtime_output_' + `$runtimeReadStep + '_invalid')")) 'runtime_output_must_use_strict_utf8'
-Assert-Protocol ($runner.Contains("'runtime-summary.json'") `
+Assert-Protocol ($runner.Contains("'runtime-summary.txt'") `
     -and $runner.Contains("'bindings.json'") `
     -and $runner.Contains("'index-evidence.json'") `
     -and $runner.Contains('[int]$runtime.asset_count -eq [int]$catalog.count') `

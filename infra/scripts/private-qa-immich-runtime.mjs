@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 // private-qa-immich.ps1.  It is never mounted into or run by public CI.
 const INPUT_PATH = '/tmp/class-archive-private-qa-immich-runtime-input.json';
 const OUTPUT_PATH = '/tmp/class-archive-private-qa-immich-runtime-output.json';
-const SUMMARY_PATH = '/tmp/class-archive-private-qa-immich-runtime-summary.json';
+const SUMMARY_PATH = '/tmp/class-archive-private-qa-immich-runtime-summary.txt';
 const BINDINGS_PATH = '/tmp/class-archive-private-qa-immich-runtime-bindings.json';
 const INDEX_EVIDENCE_PATH = '/tmp/class-archive-private-qa-immich-runtime-index-evidence.json';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -45,6 +45,14 @@ function writePrivateJson(path, value, code, max = 2 * 1024 * 1024) {
   const raw = JSON.stringify(value);
   if (Buffer.byteLength(raw, 'utf8') < 16 || Buffer.byteLength(raw, 'utf8') > max) fail(code);
   writeFileSync(path, raw, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  chmodSync(path, 0o600);
+  assertPrivateFile(path, code, max);
+}
+
+function writePrivateText(path, value, code, max = 128 * 1024) {
+  const size = Buffer.byteLength(value, 'utf8');
+  if (size < 16 || size > max) fail(code);
+  writeFileSync(path, value, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   chmodSync(path, 0o600);
   assertPrivateFile(path, code, max);
 }
@@ -476,16 +484,46 @@ try {
     },
     metrics,
   };
-  const summary = {
-    version: 1,
-    scope: runtimeScope,
-    catalog_digest: catalogDigest,
-    access_token: accessToken,
-    asset_count: photos.length,
-    people_count: people.people.length,
-    index_evidence: { runtime_mode: mode, models, queue_idle: queueIdle },
-    metrics,
-  };
+  // Windows PowerShell 5.1 cannot reliably deserialize even a small JSON
+  // summary after the full private runtime run. Keep the large, authoritative
+  // binding/index evidence as JSON for the PHP verifier, but hand the runner a
+  // fixed, newline-delimited scalar protocol that it can validate field by
+  // field without a general-purpose deserializer.
+  const summary = [
+    'VERSION=1',
+    `SCOPE=${runtimeScope}`,
+    `CATALOG_DIGEST=${catalogDigest}`,
+    `ACCESS_TOKEN=${accessToken}`,
+    `ASSET_COUNT=${photos.length}`,
+    `PEOPLE_COUNT=${people.people.length}`,
+    `RUNTIME_MODE=${mode}`,
+    `FACE_MODEL_NAME=${models.face_model_name}`,
+    `FACE_MODEL_REVISION=${models.face_model_revision}`,
+    `SEARCH_MODEL_NAME=${models.search_model_name}`,
+    `SEARCH_MODEL_REVISION=${models.search_model_revision}`,
+    `FACE_QUEUE_IDLE=${queueIdle.face_detection ? 1 : 0}`,
+    `RECOGNITION_QUEUE_IDLE=${queueIdle.facial_recognition ? 1 : 0}`,
+    `SEARCH_QUEUE_IDLE=${queueIdle.smart_search ? 1 : 0}`,
+    `FACE_JOBS=${faceJobs}`,
+    `RECOGNITION_JOBS=${recognitionJobs}`,
+    `SMART_JOBS=${smartJobs}`,
+    `REUSED_EXISTING_INDEXES=${mode === 'RESUME' ? 1 : 0}`,
+    `SEARCH_ZH_CLASSROOM=${searchCounts.zh_classroom}`,
+    `SEARCH_ZH_PLAYGROUND=${searchCounts.zh_playground}`,
+    `SEARCH_ZH_GRADUATION=${searchCounts.zh_graduation}`,
+    `SEARCH_ZH_NIGHT=${searchCounts.zh_night}`,
+    `SEARCH_EN_CLASSROOM=${searchCounts.en_classroom}`,
+    `SEARCH_EN_PLAYGROUND=${searchCounts.en_playground}`,
+    `SEARCH_EN_GRADUATION=${searchCounts.en_graduation}`,
+    `SEARCH_EN_NIGHT=${searchCounts.en_night}`,
+    `TIMING_MOUNTED_SHA256=${verifyMs}`,
+    `TIMING_LIBRARY_SCAN=${scanMs}`,
+    `TIMING_FACE_DETECTION=${faceMs}`,
+    `TIMING_FACE_RECOGNITION=${recognitionMs}`,
+    `TIMING_SMART_INDEX=${searchIndexMs}`,
+    `TIMING_SMART_QUERIES=${searchMs}`,
+    `TIMING_TOTAL=${Date.now() - started}`,
+  ].join('\n') + '\n';
   const bindingArtifact = { version: 1, scope: runtimeScope, catalog_digest: catalogDigest, assets: bindings };
   const indexEvidenceArtifact = {
     version: 1,
@@ -504,7 +542,7 @@ try {
     assets: bindings,
   };
   writePrivateJson(OUTPUT_PATH, output, 'output_file_invalid');
-  writePrivateJson(SUMMARY_PATH, summary, 'summary_file_invalid', 128 * 1024);
+  writePrivateText(SUMMARY_PATH, summary, 'summary_file_invalid');
   writePrivateJson(BINDINGS_PATH, bindingArtifact, 'bindings_file_invalid', 512 * 1024);
   writePrivateJson(INDEX_EVIDENCE_PATH, indexEvidenceArtifact, 'index_evidence_file_invalid', 1024 * 1024);
   console.log(`PRIVATE_QA_IMMICH_RUNTIME=PASS assets=${photos.length} people=${people.people.length} face_jobs=${faceJobs} recognition_jobs=${recognitionJobs} smart_jobs=${smartJobs}`);
