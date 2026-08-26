@@ -135,6 +135,51 @@ function Get-PayloadSpecs {
     )
 }
 
+function Get-RestoreToolCommitAllowlist {
+    # A restore drill may use a narrowly reviewed follow-up commit without
+    # pretending that the backup was created from that later commit.  Keep the
+    # list exact: application, schema, base Compose and shared runtime changes
+    # are deliberately outside this recovery-tool boundary.
+    return @(
+        'infra/owner-restore/README.md',
+        'infra/owner-restore/docker-compose.immich.override.yml',
+        'infra/owner-restore/docker-compose.piwigo.override.yml',
+        'infra/scripts/owner-full-restore-drill.ps1',
+        'infra/scripts/restore-owner-temporary-backup.sh',
+        'tests/phase3/full-real-browser-qa.mjs',
+        'tests/phase3/full-real-browser-qa.ps1',
+        'tests/phase3/full-real-family-browser-qa.mjs',
+        'tests/phase3/full-real-family-browser-qa.ps1',
+        'tests/phase3/owner-full-restore-protocol.ps1'
+    )
+}
+
+function Assert-RestoreCheckout([string]$SourceHead) {
+    $checkoutHead = @(& git -C $projectRoot rev-parse --verify HEAD 2>$null)
+    Assert-Restore ($LASTEXITCODE -eq 0 -and $checkoutHead.Count -eq 1 -and [string]$checkoutHead[0] -match '\A[0-9a-f]{40}\z') 'restore_checkout_head_invalid'
+    $restoreToolHead = [string]$checkoutHead[0]
+    $checkoutStatus = @(& git -C $projectRoot status --porcelain=v1 --untracked-files=all 2>$null)
+    Assert-Restore ($LASTEXITCODE -eq 0 -and $checkoutStatus.Count -eq 0) 'restore_checkout_dirty'
+
+    if (-not [string]::Equals($restoreToolHead, $SourceHead, [StringComparison]::Ordinal)) {
+        & git -C $projectRoot merge-base --is-ancestor $SourceHead $restoreToolHead 2>$null
+        Assert-Restore ($LASTEXITCODE -eq 0) 'restore_tool_head_not_source_descendant'
+        $commitRange = $SourceHead + '..' + $restoreToolHead
+        $mergeCommits = @(& git -C $projectRoot rev-list --merges $commitRange 2>$null)
+        Assert-Restore ($LASTEXITCODE -eq 0 -and $mergeCommits.Count -eq 0) 'restore_tool_history_merge_forbidden'
+        # Inspect every commit rather than only the final tree diff: touching a
+        # forbidden business file and reverting it later must still fail.
+        $changedPaths = @(& git -C $projectRoot log --format= --name-only --no-renames $commitRange -- 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        Assert-Restore ($LASTEXITCODE -eq 0 -and $changedPaths.Count -gt 0) 'restore_tool_diff_invalid'
+        $allowed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($path in Get-RestoreToolCommitAllowlist) { [void]$allowed.Add([string]$path) }
+        foreach ($path in $changedPaths) {
+            Assert-Restore (-not [string]::IsNullOrWhiteSpace([string]$path) -and $allowed.Contains([string]$path)) 'restore_tool_diff_outside_allowlist'
+        }
+    }
+    return $restoreToolHead
+}
+
 function Read-VerifiedBundle {
     $script:stage = 'bundle_boundary'
     $bundle = [IO.Path]::GetFullPath($BackupBundlePath).TrimEnd('\')
@@ -165,10 +210,7 @@ function Read-VerifiedBundle {
     Assert-Restore ([string]$manifest.source_head -match '\A[0-9a-f]{40}\z' -and
         [int]$manifest.schema_versions.class_identity -eq 15 -and [string]$manifest.schema_versions.piwigo -eq '16.4.0' -and
         [string]$manifest.schema_versions.immich -eq '3.1.0') 'manifest_schema_invalid'
-    $checkoutHead = @(& git -C $projectRoot rev-parse HEAD 2>$null)
-    $checkoutStatus = @(& git -C $projectRoot status --porcelain=v1 --untracked-files=all 2>$null)
-    Assert-Restore ($LASTEXITCODE -eq 0 -and $checkoutHead.Count -eq 1 -and [string]$checkoutHead[0] -eq [string]$manifest.source_head -and
-        $checkoutStatus.Count -eq 0) 'restore_checkout_mismatch'
+    $restoreToolHead = Assert-RestoreCheckout ([string]$manifest.source_head)
     Assert-Restore ($manifest.encryption.archive -eq 'GPG_SYMMETRIC_AES256' -and
         $manifest.encryption.key_protection -eq 'WINDOWS_DPAPI_CURRENT_USER' -and
         $manifest.encryption.plaintext_archive_on_exfat -eq $false) 'manifest_encryption_invalid'
@@ -229,7 +271,7 @@ function Read-VerifiedBundle {
     foreach ($key in $countKeys) {
         Assert-Restore ($null -ne $manifest.counts.$key -and [string]$manifest.counts.$key -match '\A(?:0|[1-9][0-9]{0,11})\z') 'manifest_count_invalid'
     }
-    return [ordered]@{ bundle=$bundle; manifest=$manifest; specs=$specs }
+    return [ordered]@{ bundle=$bundle; manifest=$manifest; specs=$specs; restore_tool_head=$restoreToolHead }
 }
 
 function Unprotect-DpapiValue([string]$Ciphertext) {
@@ -403,6 +445,19 @@ function New-RestoreVolume([string]$Name, [string]$Project, [string]$Logical) {
     [void](Invoke-RestoreDocker @('volume','create','--label',('com.docker.compose.project=' + $Project),'--label',('com.docker.compose.volume=' + $Logical),'--label','com.classarchive.scope=owner-restore-drill',$Name))
 }
 
+function Assert-RestoreGatewayNetwork {
+    # The Piwigo Compose project owns this network and therefore must create
+    # its Compose identity labels. Immich consumes the same name as an external
+    # network; a hand-made network would be rejected by Compose (or could bind
+    # the restore services to an untrusted bridge with the same name).
+    $identity = @(Invoke-RestoreDocker @(
+        'network','inspect','--format',
+        '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}|{{index .Labels "com.classarchive.scope"}}|{{.Internal}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}',
+        $gatewayNetwork
+    ) 'restore_gateway_network_missing')
+    Assert-Restore ($identity.Count -eq 1 -and $identity[0] -eq ($piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/16')) 'restore_gateway_network_identity_invalid'
+}
+
 function Invoke-StreamHelper([string]$Mode, [string]$Bundle, [string]$PassphrasePath, [switch]$NeedsPiwigoEnv) {
     $arguments = @((Get-WslPath $streamHelper),$Mode,'--bundle',(Get-WslPath $Bundle),'--passphrase-file',(Get-WslPath $PassphrasePath))
     if ($NeedsPiwigoEnv) { $arguments += @('--piwigo-env',(Get-WslPath $piwigoEnvPath)) }
@@ -420,7 +475,7 @@ function Copy-VerifiedModelCache([object]$BundleInfo) {
     $sourceManifest = (Invoke-Ubuntu @('docker','run','--rm','--network','none','--read-only','--cap-drop','ALL','--cap-add','DAC_READ_SEARCH','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($sourceVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))[-1]
     Assert-Restore ($sourceManifest -match '\A([0-9a-f]{64})  /cache/class-archive-model-manifest\.json\z' -and (Test-FixedAsciiEqual $Matches[1] $expectedManifestHash)) 'source_model_manifest_mismatch'
     $copyScript = @'
-docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges:true --entrypoint tar -v "$1:/source:ro" "$3" --numeric-owner --acls --xattrs --xattrs-include="*" -C /source -cf - . |
+docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges:true --entrypoint tar -v "$1:/source:ro" "$3" --numeric-owner --acls --xattrs --xattrs-include="*" -C /source -cf - . |
 docker --host "$2" run --rm -i --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true --entrypoint sh -v "$4:/target" "$3" -eu -c 'test -z "$(find /target -mindepth 1 -print -quit)"; exec tar --numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include="*" -C /target -xf -'
 '@
     [void](Invoke-Ubuntu @('bash','-o','pipefail','-c',$copyScript,'bash',$sourceVolume,$dockerHost,$mlImage,$targetVolume) 'model_cache_copy_failed')
@@ -456,6 +511,7 @@ function Write-RestoreState([object]$BundleInfo) {
     if (-not (Test-Path -LiteralPath $privateRuntimeRoot -PathType Container)) { [void][IO.Directory]::CreateDirectory($privateRuntimeRoot) }
     $state = [ordered]@{
         version=1; backup_id=[string]$BundleInfo.manifest.backup_id; source_head=[string]$BundleInfo.manifest.source_head
+        restore_tool_head=[string]$BundleInfo.restore_tool_head
         restored_at=(Get-Date).ToUniversalTime().ToString('o'); docker_root=$dockerRoot; ports=@(8290,8291)
         counts=$BundleInfo.manifest.counts; browser_e2e='NOT_RUN_BY_RESTORE_TOOL'
     }
@@ -468,7 +524,9 @@ function Read-RestoreState([object]$BundleInfo) {
     try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-Restore 'restore_state_invalid' }
     Assert-Restore ([int]$state.version -eq 1 -and [string]$state.backup_id -eq [string]$BundleInfo.manifest.backup_id -and
-        [string]$state.source_head -eq [string]$BundleInfo.manifest.source_head -and [string]$state.docker_root -eq $dockerRoot) 'restore_state_identity_invalid'
+        [string]$state.source_head -eq [string]$BundleInfo.manifest.source_head -and
+        [string]$state.restore_tool_head -eq [string]$BundleInfo.restore_tool_head -and
+        [string]$state.docker_root -eq $dockerRoot) 'restore_state_identity_invalid'
     return $state
 }
 
@@ -528,7 +586,8 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
     foreach ($name in @(
         'class_archive_owner_restore_v1_piwigo-piwigo-1','class_archive_owner_restore_v1_piwigo-db-1',
         'class_archive_owner_restore_v1_immich-immich-server-1','class_archive_owner_restore_v1_immich-immich-machine-learning-1',
-        'class_archive_owner_restore_v1_immich-database-1','class_archive_owner_restore_v1_immich-immich-gateway-1'
+        'class_archive_owner_restore_v1_immich-database-1','class_archive_owner_restore_v1_immich-immich-gateway-1',
+        'class_archive_owner_restore_v1_immich-immich-web-compat-1'
     )) { Wait-RestoreContainer $name 60 }
     $counts = Get-RestoreCounts
     foreach ($property in $BundleInfo.manifest.counts.PSObject.Properties) {
@@ -546,7 +605,8 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
     $health0 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
     $health1 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8291/healthz' -ErrorAction Stop
     Assert-Restore ($null -ne $health0 -and $health0.StatusCode -in @(200,301,302,303) -and $health1.StatusCode -eq 200) 'restore_http_health_failed'
-    Write-Output ('OWNER_RESTORE_VERIFY=PASS backup_id=' + $BundleInfo.manifest.backup_id + ' counts=' + $counts.Count +
+    Write-Output ('OWNER_RESTORE_VERIFY=PASS backup_id=' + $BundleInfo.manifest.backup_id + ' source_head=' + $BundleInfo.manifest.source_head +
+        ' restore_tool_head=' + $BundleInfo.restore_tool_head + ' counts=' + $counts.Count +
         ' mediaguard=PASS ai_results=IMMEDIATE browser_e2e=NOT_RUN assertions=' + $script:assertions)
 }
 
@@ -555,7 +615,8 @@ try {
     Assert-HostCapabilities
     if ($Action -eq 'validate') {
         Assert-Restore (Test-Path -LiteralPath $streamHelper -PathType Leaf) 'stream_helper_missing'
-        Write-Output ('OWNER_RESTORE_VALIDATE=PASS backup_id=' + $bundleInfo.manifest.backup_id + ' sha256=PASS manifest=PASS temporary_target=YES independent_disaster_backup=NO assertions=' + $script:assertions)
+        Write-Output ('OWNER_RESTORE_VALIDATE=PASS backup_id=' + $bundleInfo.manifest.backup_id + ' source_head=' + $bundleInfo.manifest.source_head +
+            ' restore_tool_head=' + $bundleInfo.restore_tool_head + ' sha256=PASS manifest=PASS temporary_target=YES independent_disaster_backup=NO assertions=' + $script:assertions)
         exit 0
     }
 
@@ -587,7 +648,6 @@ try {
             Write-OwnerOnlyText $passphrasePath ([string]$secrets.gpg_passphrase + "`n")
             Copy-PinnedImages $bundleInfo.manifest
             Assert-Restore (@(Invoke-RestoreDocker @('network','ls','--quiet','--filter',('name=^' + $gatewayNetwork + '$'))).Count -eq 0) 'restore_network_not_fresh'
-            [void](Invoke-RestoreDocker @('network','create','--driver','bridge','--internal','--subnet','10.245.0.0/16','--label','com.classarchive.scope=owner-restore-drill',$gatewayNetwork))
             foreach ($spec in @(
                 @('class_archive_owner_restore_v1_piwigo_data',$piwigoProject,'piwigo_data'), @('class_archive_owner_restore_v1_piwigo_uploads',$piwigoProject,'piwigo_uploads'),
                 @('class_archive_owner_restore_v1_piwigo_galleries',$piwigoProject,'piwigo_galleries'), @('class_archive_owner_restore_v1_piwigo_derivatives',$piwigoProject,'piwigo_derivatives'),
@@ -597,6 +657,7 @@ try {
                 @('class_archive_owner_restore_v1_immich_gateway_secret',$immichProject,'immich_gateway_secret')
             )) { New-RestoreVolume $spec[0] $spec[1] $spec[2] }
             [void](Invoke-RestoreCompose piwigo @('up','-d','db'))
+            Assert-RestoreGatewayNetwork
             Wait-RestoreContainer ($piwigoProject + '-db-1')
             [void](Invoke-RestoreCompose immich @('--profile','immich-spike','up','-d','database','redis'))
             Wait-RestoreContainer ($immichProject + '-database-1')
@@ -611,6 +672,8 @@ try {
             Wait-RestoreContainer ($immichProject + '-immich-machine-learning-1') 600
             Wait-RestoreContainer ($immichProject + '-immich-server-1') 600
             Invoke-PrivateImmichFinish
+            [void](Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat'))
+            Wait-RestoreContainer ($immichProject + '-immich-web-compat-1') 300
             Write-RestoreState $bundleInfo
             $ownerAfter = Get-PrimaryOwnerFingerprint
             Assert-Restore ([string]::Equals($ownerBefore,$ownerAfter,[StringComparison]::Ordinal)) 'primary_owner_changed_during_restore'

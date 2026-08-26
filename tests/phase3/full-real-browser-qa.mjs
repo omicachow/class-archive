@@ -29,8 +29,8 @@ const setting = (name, minimum = 1, maximum = 2048) => {
 };
 
 const mode = setting('CLASS_ARCHIVE_FULL_QA_MODE', 5, 7);
-assert(mode === 'staging' || mode === 'owner', 'mode_invalid');
-const expected = mode === 'staging' ? { core: 8290, photo: 8291 } : { core: 8190, photo: 8191 };
+assert(mode === 'staging' || mode === 'owner' || mode === 'restore', 'mode_invalid');
+const expected = mode === 'owner' ? { core: 8190, photo: 8191 } : { core: 8290, photo: 8291 };
 function origin(name, port) {
   let url;
   try { url = new URL(setting(name, 12, 190)); } catch { throw new GateError(`setting_${name.toLowerCase()}_invalid`); }
@@ -45,12 +45,16 @@ const screenshotDir = path.resolve(setting('CLASS_ARCHIVE_FULL_QA_SCREENSHOT_DIR
 const profileDir = path.resolve(setting('CLASS_ARCHIVE_FULL_QA_PROFILE_DIR', 8));
 const chromePath = setting('CLASS_ARCHIVE_FULL_QA_CHROME', 8);
 const credentialPath = path.resolve(setting('CLASS_ARCHIVE_FULL_QA_CREDENTIAL_FILE', 8));
-assert(screenshotDir.replaceAll('\\', '/').toLowerCase().includes('/.codex-work/private-real-qa/screenshots/full-real/'), 'screenshot_boundary_invalid');
+const screenshotBoundary = mode === 'restore'
+  ? '/.codex-work/owner-restore/screenshots/owner/'
+  : '/.codex-work/private-real-qa/screenshots/full-real/';
+assert(screenshotDir.replaceAll('\\', '/').toLowerCase().includes(screenshotBoundary), 'screenshot_boundary_invalid');
 
 let credential;
 try { credential = JSON.parse(await fs.readFile(credentialPath, 'utf8')); } catch { throw new GateError('credential_document_invalid'); }
 assert(Object.keys(credential ?? {}).sort().join(',') === 'admin,cookie,environment,leaseHandle,version', 'credential_document_shape');
-assert(credential.version === 1 && credential.environment === 'PRIVATE_REAL_FULL', 'credential_document_version');
+const credentialEnvironment = mode === 'restore' ? 'OWNER_RESTORE_DRILL' : 'PRIVATE_REAL_FULL';
+assert(credential.version === 1 && credential.environment === credentialEnvironment, 'credential_document_version');
 assert(typeof credential.admin === 'string' && /^[^\u0000-\u001f\u007f]{1,190}$/.test(credential.admin), 'credential_admin_invalid');
 assert(typeof credential.cookie === 'string' && /^[A-Za-z0-9,-]{16,128}$/.test(credential.cookie), 'credential_cookie_invalid');
 assert(typeof credential.leaseHandle === 'string' && /^[a-f0-9]{24}$/.test(credential.leaseHandle), 'credential_lease_invalid');

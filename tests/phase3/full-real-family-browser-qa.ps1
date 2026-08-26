@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('staging', 'owner')]
+    [ValidateSet('staging', 'owner', 'restore')]
     [string]$Mode = 'staging'
 )
 
@@ -13,12 +13,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$envRelative = if ($Mode -eq 'staging') { 'infra/private-full/.env.piwigo.staging' } else { 'infra/private-full/.env.piwigo.owner' }
-$corePort = if ($Mode -eq 'staging') { 8290 } else { 8190 }
-$photoPort = if ($Mode -eq 'staging') { 8291 } else { 8191 }
-$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-full\runtime\family-browser'))
-$screenshotRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\screenshots\full-real'))
+$isRestore = $Mode -eq 'restore'
+$envRelative = if ($isRestore) { 'infra/owner-restore/.env.piwigo' } elseif ($Mode -eq 'staging') { 'infra/private-full/.env.piwigo.staging' } else { 'infra/private-full/.env.piwigo.owner' }
+$corePort = if ($Mode -eq 'owner') { 8190 } else { 8290 }
+$photoPort = if ($Mode -eq 'owner') { 8191 } else { 8291 }
+$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $(if ($isRestore) { '.codex-work\owner-restore\runtime\family-browser' } else { '.codex-work\private-real-full\runtime\family-browser' })))
+$screenshotRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $(if ($isRestore) { '.codex-work\owner-restore\screenshots\family' } else { '.codex-work\private-real-qa\screenshots\full-real' })))
 $profileRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\browser-profiles'))
+$credentialEnvironment = if ($isRestore) { 'OWNER_RESTORE_DRILL' } else { 'PRIVATE_REAL_FULL' }
+$composeProject = if ($isRestore) { 'class_archive_owner_restore_v1_piwigo' } else { 'class_archive_private_full_v3_piwigo' }
+$composeFiles = if ($isRestore) {
+    @('infra/docker-compose.yml','infra/owner-restore/docker-compose.piwigo.override.yml','infra/private-full/docker-compose.ai-worker.override.yml')
+} else {
+    @('infra/docker-compose.yml','infra/private-full/docker-compose.override.yml')
+}
+$restoreDockerHost = 'unix:///run/classarchive-owner-restore-v1/docker.sock'
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
 . (Join-Path $projectRoot 'tests\support\system-admin-session.ps1')
@@ -50,6 +59,19 @@ function Get-EnvSetting([string]$Name) {
     $value = $lines[0].Substring(($Name + '=').Length)
     if ($value -notmatch '^[A-Za-z0-9_.@+-]{1,100}$') { Stop-FullFamilyBrowser 'admin_username_invalid' }
     return $value
+}
+
+function Get-RestoreSystemAdminUsername([string[]]$ComposeBase) {
+    $sql = "SELECT u.username FROM piwigo_class_identity_principal p JOIN piwigo_users u ON u.id=p.piwigo_user_id JOIN piwigo_user_infos ui ON ui.user_id=u.id WHERE p.principal_type='SYSTEM_ACCOUNT' AND p.system_role='SYSTEM_ADMIN' AND p.state='ACTIVE' AND ui.status IN ('admin','webmaster') ORDER BY p.id;"
+    $shell = 'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="$1"'
+    $arguments = [Collections.Generic.List[string]]::new()
+    foreach ($argument in $ComposeBase) { $arguments.Add($argument) }
+    foreach ($argument in @('exec','-T','db','sh','-eu','-c',$shell,'sh',$sql)) { $arguments.Add($argument) }
+    $native = Invoke-ClassArchiveNativeWithInput -FileName 'wsl.exe' -Arguments $arguments.ToArray()
+    if ([int]$native.ExitCode -ne 0) { Stop-FullFamilyBrowser 'restore_admin_discovery_failed' }
+    $rows = @(($native.Output -join '') -split "`r?`n" | Where-Object { $_ -ne '' })
+    if ($rows.Count -ne 1 -or $rows[0] -notmatch '^[A-Za-z0-9_.@+-]{1,100}$') { Stop-FullFamilyBrowser 'restore_admin_discovery_ambiguous' }
+    return [string]$rows[0]
 }
 
 function Get-ChromePath {
@@ -93,7 +115,7 @@ $screenshotDirectory = Join-Path $screenshotRoot ('family-' + $runId)
 $profileDirectory = Join-Path $profileRoot ('full-real-family-' + $Mode + '-' + $runId)
 $lease = $null
 $oldNodePath = $env:NODE_PATH
-$names = @('CLASS_ARCHIVE_FULL_FAMILY_QA_CORE_ORIGIN','CLASS_ARCHIVE_FULL_FAMILY_QA_PHOTO_ORIGIN','CLASS_ARCHIVE_FULL_FAMILY_QA_SCREENSHOT_DIR','CLASS_ARCHIVE_FULL_FAMILY_QA_PROFILE_DIR','CLASS_ARCHIVE_FULL_FAMILY_QA_CREDENTIAL_FILE','CLASS_ARCHIVE_FULL_FAMILY_QA_CHROME')
+$names = @('CLASS_ARCHIVE_FULL_FAMILY_QA_MODE','CLASS_ARCHIVE_FULL_FAMILY_QA_CORE_ORIGIN','CLASS_ARCHIVE_FULL_FAMILY_QA_PHOTO_ORIGIN','CLASS_ARCHIVE_FULL_FAMILY_QA_SCREENSHOT_DIR','CLASS_ARCHIVE_FULL_FAMILY_QA_PROFILE_DIR','CLASS_ARCHIVE_FULL_FAMILY_QA_CREDENTIAL_FILE','CLASS_ARCHIVE_FULL_FAMILY_QA_CHROME')
 $oldValues = @{}
 $exitCode = 0
 foreach ($name in $names) {
@@ -112,17 +134,23 @@ try {
     Assert-IgnoredPrivatePath -Path $screenshotDirectory -Root $screenshotRoot -Code 'screenshot' | Out-Null
     Assert-IgnoredPrivatePath -Path $profileDirectory -Root $profileRoot -Code 'profile' | Out-Null
 
-    $adminUsername = Get-EnvSetting 'PIWIGO_ADMIN_USERNAME'
-    $compose = @('-d','Ubuntu','--cd',$projectRoot,'--exec','docker','compose','--env-file',$envRelative,'-f','infra/docker-compose.yml','-f','infra/private-full/docker-compose.override.yml','-p','class_archive_private_full_v3_piwigo')
+    $compose = [Collections.Generic.List[string]]::new()
+    foreach ($argument in @('-d','Ubuntu','--cd',$projectRoot,'--exec')) { $compose.Add($argument) }
+    if ($isRestore) { foreach ($argument in @('env',('DOCKER_HOST=' + $restoreDockerHost))) { $compose.Add($argument) } }
+    foreach ($argument in @('docker','compose','--env-file',$envRelative)) { $compose.Add($argument) }
+    foreach ($file in $composeFiles) { $compose.Add('-f'); $compose.Add($file) }
+    $compose.Add('-p'); $compose.Add($composeProject)
+    $adminUsername = if ($isRestore) { Get-RestoreSystemAdminUsername -ComposeBase $compose.ToArray() } else { Get-EnvSetting 'PIWIGO_ADMIN_USERNAME' }
     $lease = New-ClassArchiveSystemAdminSession -BaseUri ([Uri]("http://127.0.0.1:$corePort/")) -ComposeBase ([string[]]$compose) -AdminUsername $adminUsername
     $cookies = @($lease.Session.Cookies.GetCookies([Uri]("http://127.0.0.1:$corePort/")) | Where-Object { $_.Name -eq 'pwg_id' -and $_.Value -match '^[A-Za-z0-9,-]{16,128}$' })
     if ($cookies.Count -ne 1) { Stop-FullFamilyBrowser 'admin_cookie_invalid' }
-    $document = [ordered]@{ version = 1; environment = 'PRIVATE_REAL_FULL'; admin = $adminUsername; cookie = [string]$cookies[0].Value; leaseHandle = [string]$lease.Handle }
+    $document = [ordered]@{ version = 1; environment = $credentialEnvironment; admin = $adminUsername; cookie = [string]$cookies[0].Value; leaseHandle = [string]$lease.Handle }
     [IO.File]::WriteAllText($credentialPath, ($document | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
     Set-ClassArchiveOwnerOnlyFileAcl -Path $credentialPath
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $credentialPath
 
     $env:NODE_PATH = Get-NodeModulesPath
+    $env:CLASS_ARCHIVE_FULL_FAMILY_QA_MODE = $Mode
     $env:CLASS_ARCHIVE_FULL_FAMILY_QA_CORE_ORIGIN = "http://127.0.0.1:$corePort/"
     $env:CLASS_ARCHIVE_FULL_FAMILY_QA_PHOTO_ORIGIN = "http://127.0.0.1:$photoPort/"
     $env:CLASS_ARCHIVE_FULL_FAMILY_QA_SCREENSHOT_DIR = $screenshotDirectory

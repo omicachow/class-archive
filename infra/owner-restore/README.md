@@ -34,12 +34,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-fu
 
 # Explicit cold restart: indexes must be immediately reusable, with zero jobs.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 cold-restart -BackupBundlePath <verified-bundle> -ConfirmColdRestart
+
+# Repeat the exact aggregate check after the cold restart, before browser QA.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
+
+# Real Chromium acceptance against the second daemon and only 8290/8291.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-browser-qa.ps1 -Mode restore
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-family-browser-qa.ps1 -Mode restore
 ```
 
 Encrypted archives are never expanded onto exFAT. The DPAPI recovery payload
 is unprotected only by the same Windows user into ignored, owner-only NTFS
 temporary files. GPG decrypts directly to the target database or ext4-backed
 volume and every temporary plaintext secret is deleted in `finally`.
+
+The bundle keeps its immutable `source_head`. A reviewed recovery-only follow-up
+commit is recorded separately as `restore_tool_head`; it must descend from the
+source commit through a linear, merge-free history and may change only the exact
+recovery-tool allowlist enforced by the runner. Every commit is inspected, so a
+forbidden change cannot be hidden by reverting it later. The worktree must
+remain clean. Application, plugin, schema, base Compose and shared runtime
+changes fail closed instead of being mislabeled as the source snapshot.
 
 The bundle contains the verified ML manifest, not restricted model binaries.
 For this local drill, the runner verifies that manifest against the current
@@ -51,6 +66,9 @@ search probes.
 
 `verify` is aggregate runtime evidence only. It intentionally reports browser
 E2E as not run; Chromium Owner/Family acceptance is a separate required gate.
+Run both exact-count `verify` calls before the Family browser suite: that suite
+intentionally exercises real claim, invitation, comment and freeze workflows,
+so it appends local-only audit/test state after restore equality is proven.
 
 The M: package and runtime remain a **temporary recovery target**, not an
 independent disaster backup: the authorized original sources and this drill

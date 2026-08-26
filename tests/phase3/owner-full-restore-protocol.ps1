@@ -12,6 +12,10 @@ $helperPath = Join-Path $projectRoot 'infra\scripts\restore-owner-temporary-back
 $immichRunnerPath = Join-Path $projectRoot 'infra\scripts\private-qa-immich.ps1'
 $piwigoOverlayPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.piwigo.override.yml'
 $immichOverlayPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.immich.override.yml'
+$ownerBrowserPath = Join-Path $projectRoot 'tests\phase3\full-real-browser-qa.ps1'
+$ownerBrowserNodePath = Join-Path $projectRoot 'tests\phase3\full-real-browser-qa.mjs'
+$familyBrowserPath = Join-Path $projectRoot 'tests\phase3\full-real-family-browser-qa.ps1'
+$familyBrowserNodePath = Join-Path $projectRoot 'tests\phase3\full-real-family-browser-qa.mjs'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -19,7 +23,7 @@ function Assert-True([bool]$Condition, [string]$Code) {
     $script:assertions++
 }
 
-foreach ($path in @($runnerPath,$helperPath,$immichRunnerPath,$piwigoOverlayPath,$immichOverlayPath)) {
+foreach ($path in @($runnerPath,$helperPath,$immichRunnerPath,$piwigoOverlayPath,$immichOverlayPath,$ownerBrowserPath,$ownerBrowserNodePath,$familyBrowserPath,$familyBrowserNodePath)) {
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'restore_protocol_file_missing'
 }
 $runner = [IO.File]::ReadAllText($runnerPath)
@@ -27,6 +31,10 @@ $helper = [IO.File]::ReadAllText($helperPath)
 $immichRunner = [IO.File]::ReadAllText($immichRunnerPath)
 $piwigoOverlay = [IO.File]::ReadAllText($piwigoOverlayPath)
 $immichOverlay = [IO.File]::ReadAllText($immichOverlayPath)
+$ownerBrowser = [IO.File]::ReadAllText($ownerBrowserPath)
+$ownerBrowserNode = [IO.File]::ReadAllText($ownerBrowserNodePath)
+$familyBrowser = [IO.File]::ReadAllText($familyBrowserPath)
+$familyBrowserNode = [IO.File]::ReadAllText($familyBrowserNodePath)
 
 foreach ($needle in @(
     "[ValidateSet('validate', 'prepare-storage', 'restore', 'verify', 'cold-restart', 'status')]",
@@ -44,11 +52,16 @@ foreach ($needle in @(
     "archive -eq 'GPG_SYMMETRIC_AES256'", "key_protection -eq 'WINDOWS_DPAPI_CURRENT_USER'",
     'plaintext_archive_on_exfat -eq $false', 'must_use_fresh_volumes -eq $true',
     'current_owner_runtime_must_not_be_destroyed -eq $true', 'Get-FileHash -LiteralPath $path -Algorithm SHA256',
-    'Test-FixedAsciiEqual', 'restore_checkout_mismatch', 'manifest_container_image_invalid', 'bundle_supply_chain_contract_mismatch',
+    'Test-FixedAsciiEqual', 'restore_checkout_head_invalid', 'restore_checkout_dirty', 'manifest_container_image_invalid', 'bundle_supply_chain_contract_mismatch',
     "protection -eq 'WINDOWS_DPAPI_CURRENT_USER'", "dpapi_scope -eq 'CurrentUser'",
     "'anonymous_pseudonym_secret','claim_code_pepper','gpg_passphrase','piwigo_db_password'",
     'Set-ClassArchiveOwnerOnlyFileAcl', 'git -C $projectRoot check-ignore',
+    'Get-RestoreToolCommitAllowlist', 'Assert-RestoreCheckout', 'restore_checkout_dirty',
+    'merge-base --is-ancestor', 'restore_tool_head_not_source_descendant', 'rev-list --merges', 'restore_tool_history_merge_forbidden',
+    'log --format= --name-only --no-renames', 'restore_tool_diff_outside_allowlist',
+    'restore_tool_head=', "`$BundleInfo.restore_tool_head", "`$state.restore_tool_head -eq [string]`$BundleInfo.restore_tool_head",
     'class_archive_owner_restore_v1_piwigo', 'class_archive_owner_restore_v1_immich',
+    'Assert-RestoreGatewayNetwork', "`$piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/16'",
     'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', 'docker image save',
     'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Copy-VerifiedModelCache $bundleInfo',
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore',
@@ -56,8 +69,23 @@ foreach ($needle in @(
     'metrics.face_jobs -eq 0', 'metrics.recognition_jobs -eq 0', 'metrics.smart_jobs -eq 0',
     'PRIVATE_FULL_OWNER_MEDIA_HTTP=PASS', 'direct_guest_requests=6',
     'find /var/www/html/piwigo/upload /var/www/html/piwigo/galleries -type f ! -perm 0660', 'restored_original_mode_invalid',
-    'browser_e2e=NOT_RUN', 'ai_results=IMMEDIATE', 'primary_owner_changed_during_restore'
+    "'--profile','immich-web-compat','up','-d','immich-web-compat'",
+    "`$immichProject + '-immich-web-compat-1'", 'browser_e2e=NOT_RUN', 'ai_results=IMMEDIATE', 'primary_owner_changed_during_restore'
 )) { Assert-True ($runner.Contains($needle)) ('restore_runner_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
+Assert-True ($runner.Contains('docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
+Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
+
+$allowlistBlock = [regex]::Match($runner, '(?s)function Get-RestoreToolCommitAllowlist \{.*?\n\}').Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($allowlistBlock)) 'restore_tool_allowlist_block_missing'
+$expectedToolAllowlist = @(
+    'infra/owner-restore/README.md','infra/owner-restore/docker-compose.immich.override.yml','infra/owner-restore/docker-compose.piwigo.override.yml',
+    'infra/scripts/owner-full-restore-drill.ps1','infra/scripts/restore-owner-temporary-backup.sh',
+    'tests/phase3/full-real-browser-qa.mjs','tests/phase3/full-real-browser-qa.ps1',
+    'tests/phase3/full-real-family-browser-qa.mjs','tests/phase3/full-real-family-browser-qa.ps1','tests/phase3/owner-full-restore-protocol.ps1'
+)
+$actualToolAllowlist = @([regex]::Matches($allowlistBlock, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+Assert-True (@(Compare-Object ($expectedToolAllowlist | Sort-Object) ($actualToolAllowlist | Sort-Object)).Count -eq 0) 'restore_tool_allowlist_not_exact'
 
 foreach ($needle in @(
     'owner-temporary-recovery-v1', 'business-state/runtime-counts.json', 'business-state/immich-upstream.lock.json',
@@ -107,8 +135,27 @@ foreach ($needle in @(
     'core_port = 8290', 'compat_port = 8291', "`$Runtime -in @('full', 'restore')"
 )) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_adapter_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
+foreach ($browser in @($ownerBrowser,$familyBrowser)) {
+    foreach ($needle in @(
+        "[ValidateSet('staging', 'owner', 'restore')]", "`$isRestore = `$Mode -eq 'restore'",
+        "'infra/owner-restore/.env.piwigo'", "'infra/owner-restore/docker-compose.piwigo.override.yml'",
+        "'infra/private-full/docker-compose.ai-worker.override.yml'", "'class_archive_owner_restore_v1_piwigo'",
+        "'unix:///run/classarchive-owner-restore-v1/docker.sock'", "'DOCKER_HOST=' + `$restoreDockerHost",
+        "'OWNER_RESTORE_DRILL'", 'Get-RestoreSystemAdminUsername', "p.system_role='SYSTEM_ADMIN'",
+        "'.codex-work\owner-restore\runtime", "'.codex-work\owner-restore\screenshots"
+    )) { Assert-True ($browser.Contains($needle)) ('restore_browser_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+    Assert-True (-not $browser.Contains("if (`$isRestore) { 'infra/private-full/.env.piwigo.staging'")) 'restore_browser_staging_env_alias_detected'
+}
+foreach ($browserNode in @($ownerBrowserNode,$familyBrowserNode)) {
+    foreach ($needle in @("mode === 'restore'", "'OWNER_RESTORE_DRILL'", '/.codex-work/owner-restore/screenshots/')) {
+        Assert-True ($browserNode.Contains($needle)) ('restore_browser_node_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+    }
+}
+
 [void][ScriptBlock]::Create($runner)
 [void][ScriptBlock]::Create($immichRunner)
+[void][ScriptBlock]::Create($ownerBrowser)
+[void][ScriptBlock]::Create($familyBrowser)
 $helperWsl = '/mnt/' + $helperPath.Substring(0,1).ToLowerInvariant() + '/' + $helperPath.Substring(3).Replace('\','/')
 & "$env:SystemRoot\System32\wsl.exe" -d Ubuntu --exec bash -n $helperWsl
 Assert-True ($LASTEXITCODE -eq 0) 'restore_helper_shell_parse_failed'

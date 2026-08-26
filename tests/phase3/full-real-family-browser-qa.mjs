@@ -35,14 +35,19 @@ function setting(name, pattern) {
   return value;
 }
 
-const coreOrigin = new URL(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_CORE_ORIGIN', /^http:\/\/127\.0\.0\.1:(?:8190|8290)\/$/));
-const photoOrigin = new URL(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_PHOTO_ORIGIN', /^http:\/\/127\.0\.0\.1:(?:8191|8291)\/$/));
+const mode = setting('CLASS_ARCHIVE_FULL_FAMILY_QA_MODE', /^(?:staging|owner|restore)$/);
+const expected = mode === 'owner' ? { core: 8190, photo: 8191 } : { core: 8290, photo: 8291 };
+const coreOrigin = new URL(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_CORE_ORIGIN', new RegExp(`^http:\\/\\/127\\.0\\.0\\.1:${expected.core}\\/$`)));
+const photoOrigin = new URL(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_PHOTO_ORIGIN', new RegExp(`^http:\\/\\/127\\.0\\.0\\.1:${expected.photo}\\/$`)));
 const screenshotDir = path.resolve(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_SCREENSHOT_DIR', /^[^\u0000]+$/));
 const profileDir = path.resolve(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_PROFILE_DIR', /^[^\u0000]+$/));
 const credentialPath = path.resolve(setting('CLASS_ARCHIVE_FULL_FAMILY_QA_CREDENTIAL_FILE', /^[^\u0000]+$/));
 const chromePath = setting('CLASS_ARCHIVE_FULL_FAMILY_QA_CHROME', /^[^\u0000]+$/);
 
-assert(screenshotDir.replaceAll('\\', '/').toLowerCase().includes('/.codex-work/private-real-qa/screenshots/full-real/'), 'screenshot_boundary_invalid');
+const screenshotBoundary = mode === 'restore'
+  ? '/.codex-work/owner-restore/screenshots/family/'
+  : '/.codex-work/private-real-qa/screenshots/full-real/';
+assert(screenshotDir.replaceAll('\\', '/').toLowerCase().includes(screenshotBoundary), 'screenshot_boundary_invalid');
 assert(profileDir.replaceAll('\\', '/').toLowerCase().includes('/.codex-work/browser-profiles/'), 'profile_boundary_invalid');
 
 let credential;
@@ -52,7 +57,8 @@ try {
   throw new GateError('credential_document_invalid');
 }
 assert(Object.keys(credential ?? {}).sort().join(',') === 'admin,cookie,environment,leaseHandle,version', 'credential_document_shape');
-assert(credential.version === 1 && credential.environment === 'PRIVATE_REAL_FULL', 'credential_document_version');
+const credentialEnvironment = mode === 'restore' ? 'OWNER_RESTORE_DRILL' : 'PRIVATE_REAL_FULL';
+assert(credential.version === 1 && credential.environment === credentialEnvironment, 'credential_document_version');
 assert(typeof credential.admin === 'string' && /^[^\u0000-\u001f\u007f]{1,190}$/.test(credential.admin), 'credential_admin_invalid');
 assert(typeof credential.cookie === 'string' && /^[A-Za-z0-9,-]{16,128}$/.test(credential.cookie), 'credential_cookie_invalid');
 
