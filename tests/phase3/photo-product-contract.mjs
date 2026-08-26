@@ -25,7 +25,7 @@ function check(condition, message) {
   assertions += 1;
 }
 
-check(schema.includes('public const CURRENT_VERSION = 15;'), 'ClassIdentity schema must include the v15 Collections-first domain while preserving v14 native checkpoint recovery, v13 private-library journal, v12 durable native source epoch and v8 productization');
+check(schema.includes('public const CURRENT_VERSION = 16;'), 'ClassIdentity schema must include the v16 source-presentation domain while preserving v15 Collections-first, v14 native checkpoint recovery, v13 private-library journal, v12 durable native source epoch and v8 productization');
 check(schema.includes("'name' => '0008_photo_productization_domain'"), 'v8 migration must have a stable ledger name');
 check(schema.includes("'name' => '0012_durable_native_source_epoch'"), 'v12 migration must have a stable ledger name');
 check(schema.includes("CREATE TABLE IF NOT EXISTS {$epoch}") && schema.includes(') ENGINE=MyISAM'), 'v12 source epoch sentinel must remain durable in the native MyISAM domain');
@@ -35,6 +35,10 @@ check(schema.includes("'name' => '0014_private_full_native_checkpoint_recovery'"
   && schema.includes('migrationPrivateFullNativeCheckpointRecovery'), 'v14 must permit a verified native checkpoint before canonical publication');
 check(schema.includes("'name' => '0015_collections_first_comments_ai_index'")
   && schema.includes('migrationCollectionsFirstCommentsAndAiIndex'), 'v15 must have a stable Collections-first migration ledger');
+check(schema.includes("'name' => '0016_private_source_presentation_surrogate'")
+  && schema.includes('migrationPrivateSourcePresentationSurrogate'), 'v16 must have a stable source-presentation migration ledger');
+check(schema.includes("$this->quotedTable('photo_source_presentation')")
+  && schema.includes("'photo_source_presentation' => '"), 'v16 must create and fingerprint the source-presentation table');
 check(schema.includes("'PRIVATE_FULL'"), 'full private-library provenance must remain distinct from disposable PRIVATE_QA');
 for (const table of [
   'private_library_collection', 'private_library_folder', 'private_library_import', 'private_library_import_item',

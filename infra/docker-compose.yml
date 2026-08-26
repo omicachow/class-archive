@@ -134,9 +134,9 @@ services:
           exit 1
         }
         mkdir "$${partial_bundle}"
-        # Do not publish a v15 manifest by assertion alone. Resolve the one
+        # Do not publish a v16 manifest by assertion alone. Resolve the one
         # installed ClassIdentity prefix and prove every declared business and
-        # rebuildable projection table plus migration 15 exists before taking
+        # rebuildable projection table plus migration 16 exists before taking
         # the database snapshot.
         set -- $$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
           -e "SELECT COUNT(*),COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$$'")
@@ -149,15 +149,15 @@ services:
         ci_base="$${ci_migration%migration}"
         ci_version=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
           -e "SELECT COALESCE(MAX(version),0) FROM $${ci_migration}")
-        test "$${ci_version}" = 15 || {
-          echo "Refusing backup: ClassIdentity schema v15 is not current." >&2
+        test "$${ci_version}" = 16 || {
+          echo "Refusing backup: ClassIdentity schema v16 is not current." >&2
           exit 1
         }
-        for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_duplicate batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item photo_comment auto_collection auto_collection_photo ai_asset_index ai_index_job native_source_epoch read_projection read_photo; do
+        for suffix in migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_source_presentation photo_duplicate batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item photo_comment auto_collection auto_collection_photo ai_asset_index ai_index_job native_source_epoch read_projection read_photo; do
           ci_table_count=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
             -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$${ci_base}$${suffix}'")
           test "$${ci_table_count}" = 1 || {
-            echo "Refusing backup: required ClassIdentity v15 table is missing." >&2
+            echo "Refusing backup: required ClassIdentity v16 table is missing." >&2
             exit 1
           }
         done
@@ -219,7 +219,7 @@ services:
         # omitted. The manifest separates business truth from rebuildable read
         # cache so recovery never depends on a stale authorization-neutral
         # catalog or role-scoped aggregate snapshot.
-        printf '{"format":8,"created_at":"%s","class_identity_schema":{"version":15,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","photo_comment","auto_collection","auto_collection_photo","ai_asset_index","ai_index_job","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"},"files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
+        printf '{"format":8,"created_at":"%s","class_identity_schema":{"version":16,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_source_presentation","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","photo_comment","auto_collection","auto_collection_photo","ai_asset_index","ai_index_job","native_source_epoch"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"},"files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' "$${stamp}" > "$${partial_bundle}/MANIFEST.json"
         cd "$${partial_bundle}"
         sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json > SHA256SUMS
         sha256sum -c SHA256SUMS

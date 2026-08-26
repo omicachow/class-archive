@@ -126,9 +126,9 @@ foreach (['photo_comment', 'auto_collection', 'auto_collection_photo', 'ai_asset
     $assert(str_contains($source['audit'], '"' . $table . '"'), "backup audit omits {$table}");
     $assert(str_contains($source['drill'], "'{$table}'"), "restore drill omits {$table}");
 }
-$assert(str_contains($source['fixture'], "'fixture_version' => 7"), 'restore fixture does not bind v7');
-$assert(str_contains($source['fixture'], "'class_identity_schema_version' => 15"), 'restore fixture does not bind schema v15');
-$assert(str_contains($source['backup_evidence'], 'public const VERSION = 7'), 'backup evidence does not invalidate old proof');
+$assert(str_contains($source['fixture'], "'fixture_version' => 8"), 'restore fixture does not bind v8');
+$assert(str_contains($source['fixture'], "'class_identity_schema_version' => 16"), 'restore fixture does not bind schema v16');
+$assert(str_contains($source['backup_evidence'], 'public const VERSION = 8'), 'backup evidence does not invalidate old proof');
 $assert(str_contains($source['backup_evidence'], 'public const BACKUP_MANIFEST_FORMAT = 8'), 'backup evidence does not bind manifest v8');
 $assert(str_contains($source['backup_evidence'], '/workspace/plugins/ClassIdentity/src/AiIndexService.php'), 'backup evidence digest omits AI control plane');
 $assert(str_contains($source['fixture'], 'body_sha256') && !str_contains($source['fixture'], '`body` FROM'), 'restore fixture must not export comment plaintext');

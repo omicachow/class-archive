@@ -224,8 +224,9 @@ function Read-VerifiedBundle {
         $manifest.independent_disaster_backup -eq $false -and $manifest.filesystem -eq 'exFAT') 'manifest_identity_invalid'
     Assert-Restore ([string]$manifest.backup_id -eq [IO.Path]::GetFileName($bundle) -and
         [string]::Equals([IO.File]::ReadAllText($completePath), ([string]$manifest.backup_id + "`n"), [StringComparison]::Ordinal)) 'manifest_complete_invalid'
+    $manifestSchemaVersion = [int]$manifest.schema_versions.class_identity
     Assert-Restore ([string]$manifest.source_head -match '\A[0-9a-f]{40}\z' -and
-        [int]$manifest.schema_versions.class_identity -eq 15 -and [string]$manifest.schema_versions.piwigo -eq '16.4.0' -and
+        $manifestSchemaVersion -in @(15,16) -and [string]$manifest.schema_versions.piwigo -eq '16.4.0' -and
         [string]$manifest.schema_versions.immich -eq '3.1.0') 'manifest_schema_invalid'
     $restoreToolHead = Assert-RestoreCheckout ([string]$manifest.source_head)
     Assert-Restore ($manifest.encryption.archive -eq 'GPG_SYMMETRIC_AES256' -and
@@ -285,10 +286,21 @@ function Read-VerifiedBundle {
         Assert-Restore (Test-FixedAsciiEqual $bundleDigest $trackedDigest) 'bundle_supply_chain_contract_mismatch'
     }
     $countKeys = @('source_records','canonical_photos','piwigo_images','album_relationships','leaf_albums','comments','replies','visible_people','person_merges','person_rules','spotlights','memories','audit_events','ai_asset_index','immich_assets','immich_face_records','immich_raw_persons','immich_search_index')
+    if ($manifestSchemaVersion -eq 16) { $countKeys += 'source_presentations' }
     foreach ($key in $countKeys) {
         Assert-Restore ($null -ne $manifest.counts.$key -and [string]$manifest.counts.$key -match '\A(?:0|[1-9][0-9]{0,11})\z') 'manifest_count_invalid'
     }
-    return [ordered]@{ bundle=$bundle; manifest=$manifest; specs=$specs; restore_tool_head=$restoreToolHead }
+    $legacyPresentationCount = $manifest.counts.PSObject.Properties['source_presentations']
+    if ($manifestSchemaVersion -eq 15 -and $null -ne $legacyPresentationCount) {
+        Assert-Restore ([string]$legacyPresentationCount.Value -eq '0') 'manifest_legacy_presentation_count_invalid'
+    }
+    return [ordered]@{
+        bundle=$bundle
+        manifest=$manifest
+        manifest_schema_version=$manifestSchemaVersion
+        specs=$specs
+        restore_tool_head=$restoreToolHead
+    }
 }
 
 function Unprotect-DpapiValue([string]$Ciphertext) {
@@ -724,7 +736,15 @@ q() { mariadb --batch --skip-column-names --protocol=socket --user=root --passwo
 ci=$(q "SELECT COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$';")
 case "$ci" in ''|*[!A-Za-z0-9_]*) exit 91 ;; esac
 base=${ci%migration}; pwg=${base%class_identity_}; [ "$pwg" != "$base" ]
+schema_version=$(q "SELECT COALESCE(MAX(version),0) FROM ${base}migration;")
+case "$schema_version" in
+  15) source_presentations=0 ;;
+  16) source_presentations=$(q "SELECT COUNT(*) FROM ${base}photo_source_presentation;") ;;
+  *) exit 92 ;;
+esac
+printf 'class_identity_schema_version=%s\n' "$schema_version"
 printf 'source_records=%s\n' "$(q "SELECT COUNT(*) FROM ${base}photo_source;")"
+printf 'source_presentations=%s\n' "$source_presentations"
 printf 'canonical_photos=%s\n' "$(q "SELECT COUNT(*) FROM ${base}photo;")"
 printf 'piwigo_images=%s\n' "$(q "SELECT COUNT(*) FROM ${pwg}images;")"
 printf 'album_relationships=%s\n' "$(q "SELECT COUNT(*) FROM ${pwg}image_category;")"
@@ -778,6 +798,8 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
         'class_archive_owner_restore_v1_immich-immich-web-compat-1'
     )) { Wait-RestoreContainer $name 60 }
     $counts = Get-RestoreCounts
+    Assert-Restore ($counts.ContainsKey('class_identity_schema_version') -and
+        [uint64]$counts.class_identity_schema_version -eq [uint64]$BundleInfo.manifest_schema_version) 'restored_schema_version_mismatch'
     foreach ($property in $BundleInfo.manifest.counts.PSObject.Properties) {
         Assert-Restore ($counts.ContainsKey($property.Name) -and [uint64]$counts[$property.Name] -eq [uint64]$property.Value) 'restored_count_mismatch'
     }

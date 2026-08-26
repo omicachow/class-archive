@@ -19,26 +19,83 @@ fail() {
 
 mode=${1:-}
 shift || true
-case "$mode" in preflight|backup|verify) ;; *) fail action_invalid ;; esac
+case "$mode" in preflight|backup|verify|verify-pending) ;; *) fail action_invalid ;; esac
 
 bundle=
 passphrase_file=
+expected_backup_id=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bundle) [ "$#" -ge 2 ] || fail argument_missing; bundle=$2; shift 2 ;;
     --passphrase-file) [ "$#" -ge 2 ] || fail argument_missing; passphrase_file=$2; shift 2 ;;
+    --expected-backup-id) [ "$#" -ge 2 ] || fail argument_missing; expected_backup_id=$2; shift 2 ;;
     *) fail argument_invalid ;;
   esac
 done
+
+assert_backup_id() {
+  case "$1" in owner-full-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) fail bundle_path_invalid ;; esac
+}
+
+validate_bundle_passphrase_identity() {
+  identity_mode=$1
+  bundle_parent=${bundle%/*}
+  bundle_name=${bundle##*/}
+  [ "$bundle_parent" != "$bundle" ] && [ "${bundle_parent##*/}" = bundles ] || fail bundle_path_invalid
+  target_path=${bundle_parent%/*}
+  target_name=${target_path##*/}
+  target_parent=${target_path%/*}
+  case "$target_parent" in /mnt/[a-z]) ;; *) fail bundle_path_invalid ;; esac
+  case "$target_name" in
+    ClassArchive-Temporary-Recovery) ;;
+    ClassArchive-Temporary-Recovery-*)
+      target_suffix=${target_name#ClassArchive-Temporary-Recovery-}
+      [ -n "$target_suffix" ] && [ "${#target_suffix}" -le 40 ] || fail bundle_path_invalid
+      case "$target_suffix" in *[!A-Za-z0-9_-]*) fail bundle_path_invalid ;; esac
+      ;;
+    *) fail bundle_path_invalid ;;
+  esac
+
+  case "$identity_mode" in
+    verify)
+      backup_id=$bundle_name
+      assert_backup_id "$backup_id"
+      [ -z "$expected_backup_id" ] || fail unexpected_backup_id_argument
+      expected_passphrase_parent=${backup_id}-verify
+      ;;
+    verify-pending|backup)
+      case "$bundle_name" in .partial-owner-full-*) ;; *) fail pending_bundle_path_invalid ;; esac
+      backup_id=${bundle_name#.partial-}
+      assert_backup_id "$backup_id"
+      assert_backup_id "$expected_backup_id"
+      [ "$backup_id" = "$expected_backup_id" ] || fail pending_backup_id_mismatch
+      expected_passphrase_parent=$backup_id
+      ;;
+    *) fail bundle_identity_mode_invalid ;;
+  esac
+
+  [ "${passphrase_file##*/}" = gpg-passphrase.txt ] || fail passphrase_path_invalid
+  passphrase_parent=${passphrase_file%/*}
+  [ "$passphrase_parent" != "$passphrase_file" ] || fail passphrase_path_invalid
+  [ "${passphrase_parent##*/}" = "$expected_passphrase_parent" ] || fail passphrase_bundle_identity_mismatch
+  passphrase_runtime_parent=${passphrase_parent%/*}
+  [ "${passphrase_runtime_parent##*/}" = owner-temporary-backup ] || fail passphrase_path_invalid
+  passphrase_runtime_root=${passphrase_runtime_parent%/*}
+  [ "${passphrase_runtime_root##*/}" = runtime ] || fail passphrase_path_invalid
+  passphrase_scope_root=${passphrase_runtime_root%/*}
+  [ "${passphrase_scope_root##*/}" = private-real-full ] || fail passphrase_path_invalid
+  passphrase_work_root=${passphrase_scope_root%/*}
+  [ "${passphrase_work_root##*/}" = .codex-work ] || fail passphrase_path_invalid
+  case "${passphrase_work_root%/*}" in /mnt/c/*) ;; *) fail passphrase_path_invalid ;; esac
+}
 
 # Verification is deliberately independent of the source 8191 runtime. It
 # needs only the published bundle, the same Windows-user recovery key and
 # standard local GNU/GPG tooling; semantic restore validation is repeated in
 # the fresh restore runtime before import.
-if [ "$mode" = verify ]; then
-  case "$bundle" in /mnt/[a-z]/ClassArchive-Temporary-Recovery*/bundles/owner-full-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) fail bundle_path_invalid ;; esac
+if [ "$mode" = verify ] || [ "$mode" = verify-pending ]; then
+  validate_bundle_passphrase_identity "$mode"
   [ -d "$bundle" ] && [ ! -L "$bundle" ] || fail bundle_untrusted
-  case "$passphrase_file" in /mnt/c/*/.codex-work/private-real-full/runtime/owner-temporary-backup/*/gpg-passphrase.txt) ;; *) fail passphrase_path_invalid ;; esac
   [ -f "$passphrase_file" ] && [ ! -L "$passphrase_file" ] || fail passphrase_file_untrusted
   [ "$(wc -l < "$passphrase_file" | tr -d '[:space:]')" = 1 ] || fail passphrase_file_invalid
   [ "$(wc -c < "$passphrase_file" | tr -d '[:space:]')" -ge 80 ] || fail passphrase_file_invalid
@@ -80,7 +137,7 @@ if [ "$mode" = verify ]; then
       END { exit bad ? 1 : 0 }
     ' >/dev/null || fail encrypted_tar_invalid
   done
-  printf '%s\n' 'OWNER_TEMP_BACKUP_HELPER=PASS action=verify'
+  printf '%s\n' "OWNER_TEMP_BACKUP_HELPER=PASS action=$mode"
   exit 0
 fi
 
@@ -174,9 +231,8 @@ if [ "$mode" = preflight ]; then
   exit 0
 fi
 
-case "$bundle" in /mnt/[a-z]/ClassArchive-Temporary-Recovery*/bundles/*) ;; *) fail bundle_path_invalid ;; esac
+validate_bundle_passphrase_identity backup
 [ -d "$bundle" ] && [ ! -L "$bundle" ] || fail bundle_untrusted
-case "$passphrase_file" in /mnt/c/*/.codex-work/private-real-full/runtime/owner-temporary-backup/*/gpg-passphrase.txt) ;; *) fail passphrase_path_invalid ;; esac
 [ -f "$passphrase_file" ] && [ ! -L "$passphrase_file" ] || fail passphrase_file_untrusted
 [ "$(wc -l < "$passphrase_file" | tr -d '[:space:]')" = 1 ] || fail passphrase_file_invalid
 [ "$(wc -c < "$passphrase_file" | tr -d '[:space:]')" -ge 80 ] || fail passphrase_file_invalid
@@ -352,8 +408,13 @@ ci_base=${ci_migration%migration}
 pwg_base=${ci_base%class_identity_}
 [ "$pwg_base" != "$ci_base" ] || fail piwigo_prefix_invalid
 schema_version=$(mariadb_query "SELECT COALESCE(MAX(version),0) FROM ${ci_base}migration;" | tr -d '[:space:]')
-[ "$schema_version" = 15 ] || fail class_identity_schema_invalid
+case "$schema_version" in 15|16) ;; *) fail class_identity_schema_invalid ;; esac
 source_records=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source;" | tr -d '[:space:]')
+if [ "$schema_version" = 16 ]; then
+  source_presentations=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source_presentation;" | tr -d '[:space:]')
+else
+  source_presentations=0
+fi
 canonical_photos=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo;" | tr -d '[:space:]')
 piwigo_images=$(mariadb_query "SELECT COUNT(*) FROM ${pwg_base}images;" | tr -d '[:space:]')
 album_relationships=$(mariadb_query "SELECT COUNT(*) FROM ${pwg_base}image_category;" | tr -d '[:space:]')
@@ -367,7 +428,7 @@ spotlights=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}spotlight;" | tr -d '
 memories=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}auto_collection;" | tr -d '[:space:]')
 audit_events=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}audit_event;" | tr -d '[:space:]')
 ai_assets=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_asset_index;" | tr -d '[:space:]')
-for value in "$source_records" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets"; do
+for value in "$source_records" "$source_presentations" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets"; do
   case "$value" in ''|*[!0-9]*) fail mariadb_count_invalid ;; esac
 done
 
@@ -406,6 +467,7 @@ printf '%s\n' "CLASS_IDENTITY_SCHEMA_VERSION=$schema_version"
 printf '%s\n' 'PIWIGO_VERSION=16.4.0'
 printf '%s\n' 'IMMICH_VERSION=3.1.0'
 printf '%s\n' "SOURCE_RECORDS=$source_records"
+printf '%s\n' "SOURCE_PRESENTATIONS=$source_presentations"
 printf '%s\n' "CANONICAL_PHOTOS=$canonical_photos"
 printf '%s\n' "PIWIGO_IMAGES=$piwigo_images"
 printf '%s\n' "ALBUM_RELATIONSHIPS=$album_relationships"

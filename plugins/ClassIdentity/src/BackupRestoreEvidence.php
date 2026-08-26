@@ -12,9 +12,9 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class BackupRestoreEvidence
 {
-    public const VERSION = 7;
-    public const FIXTURE_VERSION = 7;
-    public const CLASS_IDENTITY_SCHEMA_VERSION = 15;
+    public const VERSION = 8;
+    public const FIXTURE_VERSION = 8;
+    public const CLASS_IDENTITY_SCHEMA_VERSION = 16;
     public const BACKUP_MANIFEST_FORMAT = 8;
     public const FRESHNESS_SECONDS = 90 * 86400;
 

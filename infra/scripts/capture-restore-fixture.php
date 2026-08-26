@@ -119,6 +119,7 @@ $tables = [
     'album' => 'SELECT HEX(`class_album_id`) AS `class_album_id`,`piwigo_category_id`,SHA2(CAST(COALESCE(`display_alias`,\'\') AS CHAR),256) AS `display_alias_sha256`,`album_type`,`owner_principal_id`,`era`,`event_label`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`state` FROM `' . $ci . 'album` ORDER BY `created_at`,`class_album_id` ASC',
     'spotlight' => 'SELECT HEX(`spotlight_id`) AS `spotlight_id`,`owner_principal_id`,HEX(`class_album_id`) AS `class_album_id`,`state`,`starts_at`,`expires_at`,`cancelled_at`,`cancelled_by_principal_id` FROM `' . $ci . 'spotlight` ORDER BY `created_at`,`spotlight_id` ASC',
     'photo_source' => 'SELECT `id`,HEX(`class_photo_id`) AS `class_photo_id`,`source_kind`,`provenance_code`,HEX(`source_reference_digest`) AS `source_reference_digest`,HEX(`original_filename_digest`) AS `original_filename_digest`,HEX(`source_checksum`) AS `source_checksum`,`byte_size`,`observed_at`,`created_by_principal_id` FROM `' . $ci . 'photo_source` ORDER BY `id` ASC',
+    'photo_source_presentation' => 'SELECT `photo_source_id`,HEX(`source_identity_digest`) AS `source_identity_digest`,HEX(`presentation_checksum`) AS `presentation_checksum`,`presentation_byte_size`,`source_format`,`presentation_format`,`transform_kind`,`transform_tool`,`transform_version`,HEX(`transform_recipe_digest`) AS `transform_recipe_digest` FROM `' . $ci . 'photo_source_presentation` ORDER BY `photo_source_id` ASC',
     'photo_duplicate' => 'SELECT HEX(`duplicate_id`) AS `duplicate_id`,HEX(`left_class_photo_id`) AS `left_class_photo_id`,HEX(`right_class_photo_id`) AS `right_class_photo_id`,`relation_kind`,`similarity`,`state`,HEX(`canonical_class_photo_id`) AS `canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reviewed_at` FROM `' . $ci . 'photo_duplicate` ORDER BY `created_at`,`duplicate_id` ASC',
     'batch_operation' => 'SELECT HEX(`batch_id`) AS `batch_id`,`actor_principal_id`,`operation_type`,`state`,HEX(`payload_digest`) AS `payload_digest`,`item_count`,`applied_count`,`failed_count`,`high_risk_confirmed`,`error_code`,`created_at`,`updated_at`,`completed_at` FROM `' . $ci . 'batch_operation` ORDER BY `created_at`,`batch_id` ASC',
     'batch_operation_item' => 'SELECT `id`,HEX(`batch_id`) AS `batch_id`,HEX(`class_photo_id`) AS `class_photo_id`,`state`,SHA2(CAST(`before_value` AS CHAR),256) AS `before_sha256`,SHA2(CAST(`after_value` AS CHAR),256) AS `after_sha256`,`error_code`,`created_at`,`updated_at` FROM `' . $ci . 'batch_operation_item` ORDER BY `id` ASC',
@@ -159,8 +160,8 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
 }
 $summary['multi_album_images'] = (int) $row['count'];
 $payload = [
-    'fixture_version' => 7,
-    'class_identity_schema_version' => 15,
+    'fixture_version' => 8,
+    'class_identity_schema_version' => 16,
     'projection_recovery' => [
         'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
         'projection' => 'ALL',

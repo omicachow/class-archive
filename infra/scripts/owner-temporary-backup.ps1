@@ -396,7 +396,7 @@ function Parse-SafeEvidence([string[]]$Lines) {
             if ($values.ContainsKey($Matches[1])) { Stop-OwnerBackup 'helper_evidence_duplicate' }
             $values[[string]$Matches[1]] = [string]$Matches[2]
         }
-        elseif ($line -notmatch '\AOWNER_TEMP_BACKUP_HELPER=PASS action=(?:preflight|backup|verify)\z') {
+        elseif ($line -notmatch '\AOWNER_TEMP_BACKUP_HELPER=PASS action=(?:preflight|backup|verify|verify-pending)\z') {
             Stop-OwnerBackup 'helper_output_unsafe'
         }
     }
@@ -587,6 +587,30 @@ function Verify-ChecksumFile([string]$Bundle) {
     }
 }
 
+function Assert-BundleIdentity([string]$Bundle, [string]$ExpectedBackupId, [switch]$Pending) {
+    if ($ExpectedBackupId -notmatch '\Aowner-full-[0-9]{8}T[0-9]{6}Z\z') {
+        Stop-OwnerBackup 'backup_id_invalid'
+    }
+    $expectedBundleName = if ($Pending.IsPresent) { '.partial-' + $ExpectedBackupId } else { $ExpectedBackupId }
+    if (-not [string]::Equals([IO.Path]::GetFileName($Bundle), $expectedBundleName, [StringComparison]::Ordinal)) {
+        Stop-OwnerBackup 'backup_bundle_identity_invalid'
+    }
+    $completePath = Join-Path $Bundle 'COMPLETE'
+    $completeItem = Get-Item -LiteralPath $completePath -Force -ErrorAction Stop
+    if ($completeItem.PSIsContainer -or ($completeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        -not [string]::Equals([IO.File]::ReadAllText($completePath), $ExpectedBackupId + "`n", [StringComparison]::Ordinal)) {
+        Stop-OwnerBackup 'backup_complete_marker_invalid'
+    }
+    try {
+        $identityManifest = Get-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { Stop-OwnerBackup 'backup_manifest_invalid' }
+    if (-not [string]::Equals([string]$identityManifest.backup_id, $ExpectedBackupId, [StringComparison]::Ordinal)) {
+        Stop-OwnerBackup 'backup_manifest_identity_invalid'
+    }
+}
+
 function New-PlainPassphraseFile([string]$Directory, [string]$Passphrase) {
     if (-not (Test-Path -LiteralPath $Directory)) { New-Item -ItemType Directory -Path $Directory -Force | Out-Null }
     $path = Join-Path $Directory 'gpg-passphrase.txt'
@@ -602,7 +626,9 @@ function New-PlainPassphraseFile([string]$Directory, [string]$Passphrase) {
 }
 
 function Invoke-VerifyBundle([hashtable]$Boundary, [string]$Bundle) {
+    $publishedBackupId = [IO.Path]::GetFileName($Bundle)
     Verify-ChecksumFile $Bundle
+    Assert-BundleIdentity $Bundle $publishedBackupId
     $manifestPath = Join-Path $Bundle 'manifest.json'
     try { $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-OwnerBackup 'backup_manifest_invalid' }
@@ -753,11 +779,12 @@ try {
 
         $script:stage = 'archive_create'
         $helperLines = Invoke-Helper @(
-            'backup', '--bundle', (Get-WslPath $partial), '--passphrase-file', (Get-WslPath $passphrasePath)
+            'backup', '--bundle', (Get-WslPath $partial), '--passphrase-file', (Get-WslPath $passphrasePath),
+            '--expected-backup-id', $newBackupId
         )
         $evidence = Parse-SafeEvidence $helperLines
         $requiredEvidence = @(
-            'CLASS_IDENTITY_SCHEMA_VERSION','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','CANONICAL_PHOTOS',
+            'CLASS_IDENTITY_SCHEMA_VERSION','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS',
             'PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES','VISIBLE_PEOPLE',
             'PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX',
@@ -765,12 +792,12 @@ try {
             'MARIADB_IMAGE','PIWIGO_IMAGE','IMMICH_SERVER_IMAGE','IMMICH_ML_IMAGE','POSTGRES_IMAGE'
         )
         foreach ($name in $requiredEvidence) { if (-not $evidence.ContainsKey($name)) { Stop-OwnerBackup 'backup_evidence_missing' } }
-        if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -ne 15 -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
+        if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(15,16) -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
             [string]$evidence.IMMICH_VERSION -ne '3.1.0') { Stop-OwnerBackup 'backup_schema_version_invalid' }
 
         $counts = [ordered]@{}
         foreach ($name in @(
-            'SOURCE_RECORDS','CANONICAL_PHOTOS','PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES',
+            'SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS','PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES',
             'VISIBLE_PEOPLE','PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX'
         )) { $counts[$name.ToLowerInvariant()] = [uint64]$evidence[$name] }
@@ -837,7 +864,11 @@ try {
                 immich_upload_guard = 'DETERMINISTIC_TAR_DIGEST_BEFORE_ARCHIVE_AFTER'
                 state_changed_during_capture = $false
             }
-            schema_versions = [ordered]@{ class_identity = 15; piwigo = '16.4.0'; immich = '3.1.0' }
+            schema_versions = [ordered]@{
+                class_identity = [uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION
+                piwigo = '16.4.0'
+                immich = '3.1.0'
+            }
             container_images = [ordered]@{
                 piwigo = [string]$evidence.PIWIGO_IMAGE
                 mariadb = [string]$evidence.MARIADB_IMAGE
@@ -888,7 +919,11 @@ try {
 
         $script:stage = 'payload_verify'
         Verify-ChecksumFile $partial
-        $verifyLines = Invoke-Helper @('verify', '--bundle', (Get-WslPath $partial), '--passphrase-file', (Get-WslPath $passphrasePath))
+        Assert-BundleIdentity $partial $newBackupId -Pending
+        $verifyLines = Invoke-Helper @(
+            'verify-pending', '--bundle', (Get-WslPath $partial), '--passphrase-file', (Get-WslPath $passphrasePath),
+            '--expected-backup-id', $newBackupId
+        )
         [void](Parse-SafeEvidence $verifyLines)
         if (@(& git -C $projectRoot status --porcelain=v1 --untracked-files=all 2>$null).Count -ne 0 -or
             [string](@(& git -C $projectRoot rev-parse HEAD 2>$null)[0]) -ne $sourceHead) {

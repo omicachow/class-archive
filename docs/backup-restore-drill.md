@@ -1,6 +1,6 @@
 # 合成环境备份与恢复演练
 
-状态：ClassIdentity v15、fixture v7、manifest v8 的合成环境破坏恢复演练已于 2026-08-26 通过。确定性基线 `72/72/8`、504 项衍生图重建、Phase 0/1 回归和恢复后全投影复核均通过；本结果不代表 NAS、异地或公网恢复能力。
+状态：最近一次完成的合成环境破坏恢复演练是 2026-08-26 的 ClassIdentity v15、fixture v7、manifest v8。当前恢复合同已提升到 ClassIdentity v16、fixture v8，并新增 source-presentation 业务状态；因此旧证明会按摘要失配自动变为“需要演练”，不能作为 v16 的绿色证据。历史演练的确定性基线 `72/72/8`、504 项衍生图重建、Phase 0/1 回归和恢复后全投影复核均曾通过；本结果不代表 NAS、异地或公网恢复能力。
 
 ## 目标与边界
 
@@ -16,11 +16,11 @@
 - Piwigo 持久数据与上传原图；
 - galleries 与 Class Archive 私有状态；
 - 持久化 `user.sh` 安全启动脚本；
-- 格式 8 备份 manifest、ClassIdentity schema v15 的业务表清单（包括评论、自动回忆和 AI 索引控制面）、可重建投影表清单、18 个原生 Piwigo 投影/持久 source-epoch 保护触发器与每一项的校验摘要。
+- 格式 8 备份 manifest、ClassIdentity schema v16 的业务表清单（包括 source-presentation、评论、自动回忆和 AI 索引控制面）、可重建投影表清单、18 个原生 Piwigo 投影/持久 source-epoch 保护触发器与每一项的校验摘要。
 
 因此它覆盖图片、`image_category` 多相册关系、ClassIdentity Principal/Seat/Account/Claim/Invite 状态、班级档案元数据、投稿记录、匿名状态、Audit 和 MediaGuard 运行配置，也明确覆盖人物整理、人物修正规则、稳定相册、精选、来源证明、重复关系、批量操作日志，以及 MyISAM `native_source_epoch` 的唯一 `PIWIGO_NATIVE` 持久哨兵行。备份不包含衍生图缓存、Gateway `PHOTO_CATALOG`、时间轴、相册、人物、回忆、精选投影 payload、浏览器缓存、Docker 镜像、Git 工作树、真实 NAS 数据或任何生产 TLS/反向代理配置。
 
-`read_projection` 和 `read_photo` 是授权中立的可丢弃读模型，不是业务真相。备份保留其 v15 DDL 以验证 schema，但通过 `mariadb-dump --ignore-table-data` 排除所有缓存行，包括 FULL/HERITAGE 角色范围的 aggregate payload。恢复器先确认两表均为空，再种入六条带独立 16-byte generation 的 `STALE` 控制记录；此时 `PHOTO_CATALOG.native_source_generation` 必须仍为 `NULL`，只能由后续重建绑定已恢复的 source-epoch 哨兵。Piwigo 健康后再由受限 CLI 以 `--scope=all` 根据 Piwigo/Class Archive 业务表确定性重建 `PHOTO_CATALOG`、时间轴、相册、人物、回忆和精选投影。验收要求 `PHOTO_CATALOG=ACTIVE/72`，且 `TIMELINE`、`ALBUMS`、`PEOPLE`、`MEMORIES`、`SPOTLIGHT` 五种 scope-aware aggregate 全部为 `ACTIVE`。浏览器缓存从不进入备份。
+`read_projection` 和 `read_photo` 是授权中立的可丢弃读模型，不是业务真相。备份保留其 v16 DDL 以验证 schema，但通过 `mariadb-dump --ignore-table-data` 排除所有缓存行，包括 FULL/HERITAGE 角色范围的 aggregate payload。恢复器先确认两表均为空，再种入六条带独立 16-byte generation 的 `STALE` 控制记录；此时 `PHOTO_CATALOG.native_source_generation` 必须仍为 `NULL`，只能由后续重建绑定已恢复的 source-epoch 哨兵。Piwigo 健康后再由受限 CLI 以 `--scope=all` 根据 Piwigo/Class Archive 业务表确定性重建 `PHOTO_CATALOG`、时间轴、相册、人物、回忆和精选投影。验收要求 `PHOTO_CATALOG=ACTIVE/72`，且 `TIMELINE`、`ALBUMS`、`PEOPLE`、`MEMORIES`、`SPOTLIGHT` 五种 scope-aware aggregate 全部为 `ACTIVE`。浏览器缓存从不进入备份。
 
 Piwigo 衍生图同样是可重建缓存：恢复先得到空的 derivatives 卷，再由既有 Piwigo derivative 管线显式预热。恢复门禁覆盖 72 张图的 `square`、`thumbnail`、`xsmall`、`small`、`medium`、`large`、`preview` 七种固定规格，共 504 项；`square` 仅服务 Piwigo Core 照片页胶片栏，不扩张 Class Archive 的六种产品媒体 API。任何生成、文件模式、队列或可信路径校验失败都会中止恢复，不会让成员 HTTP 请求临时生成文件。原图、媒体映射与权限策略才属于必须恢复的业务/媒体真相。
 
@@ -34,7 +34,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 
 脚本先拒绝非 `72/72/8` 的运行态，然后：
 
-1. 记录确定性业务恢复指纹（fixture v7），纳入 schema v15、持久 source epoch、评论/自动回忆/AI 控制面与“全部读投影从业务真相重建”契约，但不把投影行写入指纹；
+1. 记录确定性业务恢复指纹（fixture v8），纳入 schema v16、source-presentation、持久 source epoch、评论/自动回忆/AI 控制面与“全部读投影从业务真相重建”契约，但不把投影行写入指纹；
 2. 创建并独立审核完整备份；
 3. 若 isolated Immich server 正在只读挂载 Piwigo 原图，先验证其 compose 标签、目标路径和 `:ro` 挂载后，仅移除该可丢弃 server container；随后停止 Piwigo/MariaDB，且只删除本 Compose 带标签的合成卷；
 4. 从指定备份恢复，等待 HTTP 与 Docker healthcheck；
@@ -104,11 +104,13 @@ RTO 仅是本机一次合成演练的观测值，不是生产承诺。
 
 失败时演练证据仍会保留在忽略目录中，便于定位；不会把失败写成成功状态。
 
-恢复器在清空任何合成目标卷之前，必须先验证 `MANIFEST.json` 的格式 8、schema version 15、业务表清单、可重建投影表清单与 `projection_rebuild=ALL`；格式 7 及更早的旧包不能作为当前恢复证明。恢复前后指纹逐个比较业务表；投影缓存不进入指纹，而是以恢复后全量重建的状态、数量和独立 JSON 证据验收。
+恢复器在清空任何合成目标卷之前，必须先验证 `MANIFEST.json` 的格式 8、schema version 16、业务表清单、可重建投影表清单与 `projection_rebuild=ALL`；旧 schema 包不能作为当前通用合成环境的恢复证明。恢复前后指纹逐个比较业务表；投影缓存不进入指纹，而是以恢复后全量重建的状态、数量和独立 JSON 证据验收。
 
-备份器不会仅靠固定 JSON 声称 schema v15：在 `mariadb-dump` 前，它会解析唯一的 ClassIdentity migration 表，核对 migration 15、全部声明表、MyISAM/唯一行持久 source-epoch 哨兵和 18 个原生 Piwigo 投影/source-epoch 保护触发器；恢复 SQL 后、解包应用卷前，恢复器会再次核对同一组数据库对象，并拒绝任何夹带 catalog 或 aggregate 投影缓存数据的 v8 包。
+备份器不会仅靠固定 JSON 声称 schema v16：在 `mariadb-dump` 前，它会解析唯一的 ClassIdentity migration 表，核对 migration 16、全部声明表（包括 `photo_source_presentation`）、MyISAM/唯一行持久 source-epoch 哨兵和 18 个原生 Piwigo 投影/source-epoch 保护触发器；恢复 SQL 后、解包应用卷前，恢复器会再次核对同一组数据库对象，并拒绝任何夹带 catalog 或 aggregate 投影缓存数据的 v8 包。
 
-System Health 的恢复证明版本同步提升为 v7，并绑定 Compose 备份定义、fixture、恢复器、全投影重建器、AI 索引控制面与演练脚本摘要；其中任一实现变化，旧证明会自动变为“需要演练”，不会沿用一个只覆盖旧 schema 或部分投影的绿色状态。
+System Health 的恢复证明版本同步提升为 v8，并绑定 Compose 备份定义、fixture、恢复器、全投影重建器、AI 索引控制面与演练脚本摘要；其中任一实现变化，旧证明会自动变为“需要演练”，不会沿用一个只覆盖旧 schema 或部分投影的绿色状态。
+
+Owner 临时恢复包与上述通用合成包分开管理。Owner manifest 明确记录其 ClassIdentity schema；恢复器只接受 v15 或 v16，并按版本核对业务计数：v15 可以没有 `source_presentations`（若存在则必须为 0），v16 必须包含该计数并恢复对应表。v15 Owner 包仍需使用其固定 source checkout 或受限恢复工具后继版本，不能绕过 source-head/工具变更白名单后在任意未来应用版本上直接启动。
 
 ## 运行限制
 

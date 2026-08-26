@@ -66,7 +66,7 @@ function Get-Snapshot {
     $jsonLine = @($lines | Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1)
     Assert-True ($jsonLine.Count -eq 1) 'read_projection_runtime_snapshot_missing'
     $snapshot = $jsonLine[0] | ConvertFrom-Json
-    Assert-True ($snapshot.result -eq 'PASS' -and [int]$snapshot.schema_version -eq 14 -and [int]$snapshot.incremental_contract -eq 1) 'read_projection_runtime_snapshot_invalid'
+    Assert-True ($snapshot.result -eq 'PASS' -and [int]$snapshot.schema_version -eq 16 -and [int]$snapshot.incremental_contract -eq 1) 'read_projection_runtime_snapshot_invalid'
     return $snapshot
 }
 

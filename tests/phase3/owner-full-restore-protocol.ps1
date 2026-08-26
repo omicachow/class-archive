@@ -49,6 +49,9 @@ foreach ($needle in @(
     'com.classarchive.storage=m-ext4-bind', 'restore_volume_backing_identity_invalid',
     "`$script:controlPlaneId = [string]`$Matches[1]", '127.0.0.1:8290', '127.0.0.1:8291',
     "format -eq 'owner-temporary-recovery-v1'", "scope -eq 'OWNER_PRIVATE_FULL'",
+    '$manifestSchemaVersion -in @(15,16)', 'manifest_schema_version=$manifestSchemaVersion',
+    "if (`$manifestSchemaVersion -eq 16) { `$countKeys += 'source_presentations' }",
+    "`$manifest.counts.PSObject.Properties['source_presentations']", 'manifest_legacy_presentation_count_invalid',
     'temporary_recovery_target -eq $true', 'independent_disaster_backup -eq $false',
     "archive -eq 'GPG_SYMMETRIC_AES256'", "key_protection -eq 'WINDOWS_DPAPI_CURRENT_USER'",
     'plaintext_archive_on_exfat -eq $false', 'must_use_fresh_volumes -eq $true',
@@ -77,6 +80,16 @@ foreach ($needle in @(
     "'--profile','immich-web-compat','up','-d','immich-web-compat'",
     "`$immichProject + '-immich-web-compat-1'", 'browser_e2e=NOT_RUN', 'ai_results=IMMEDIATE', 'primary_owner_changed_during_restore'
 )) { Assert-True ($runner.Contains($needle)) ('restore_runner_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+foreach ($needle in @(
+    'schema_version=$(q "SELECT COALESCE(MAX(version),0) FROM ${base}migration;")',
+    '15) source_presentations=0',
+    '16) source_presentations=$(q "SELECT COUNT(*) FROM ${base}photo_source_presentation;")',
+    "printf 'class_identity_schema_version=%s\n'",
+    "printf 'source_presentations=%s\n'",
+    "`$counts.ContainsKey('class_identity_schema_version')",
+    'restored_schema_version_mismatch'
+)) { Assert-True ($runner.Contains($needle)) ('restore_schema_compatibility_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+Assert-True (-not $runner.Contains('[int]$manifest.schema_versions.class_identity -eq 15')) 'restore_manifest_schema_must_not_be_v15_only'
 foreach ($needle in @("'.codex-work\owner-restore\reports'", "'last-error.json'", 'Write-OwnerOnlyText', 'exception_type', 'script_stack')) {
     Assert-True ($runner.Contains($needle)) ('restore_local_diagnostic_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
