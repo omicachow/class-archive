@@ -505,7 +505,7 @@ function Mount-RestoreStorage([bool]$AllowCreate) {
     else {
         Assert-Restore ([string]$imageType[0] -eq 'ext4') 'restore_image_filesystem_invalid'
     }
-    $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed' |
+    $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed' |
         ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     Assert-Restore ($loopLines.Count -ne 0) 'loop_device_missing'
     Assert-Restore ($loopLines.Count -eq 1) 'loop_device_ambiguous'
