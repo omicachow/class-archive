@@ -391,6 +391,8 @@ final class Audit
             }
             if (in_array($field, [
                 'class_photo_id',
+                'comment_id',
+                'parent_comment_id',
                 'class_person_id',
                 'class_album_id',
                 'source_collection_id',
