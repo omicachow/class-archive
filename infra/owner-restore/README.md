@@ -1,29 +1,31 @@
 # Owner full-library isolated restore runtime
 
-This is a recovery-drill control plane, not another owner instance. It restores
-one verified `owner-temporary-recovery-v1` bundle into a second Docker daemon
-whose complete data root lives inside an ext4 image stored on the temporary M:
-target. The ext4 layer is mandatory because exFAT cannot preserve the 0660,
-owner/group and link metadata required by MediaGuard.
+This is a recovery-drill runtime, not another owner instance. It restores one
+verified `owner-temporary-recovery-v1` bundle into fresh Compose projects,
+networks and named volumes. The local Docker daemon is only a shared control
+plane; every restore volume is bind-backed inside an ext4 image stored on the
+temporary M: target. The ext4 layer is mandatory because exFAT cannot preserve
+the 0660, owner/group and link metadata required by MediaGuard.
 
-The second daemon has its own Unix socket, data root, exec root, PID file,
-bridge and address pool. It never reads, writes or removes an 8091/8191 volume.
+The restore projects and M-backed volume names are all separate from 8091/8191.
 Only `127.0.0.1:8290` and `127.0.0.1:8291` are published. The tool deliberately
 has no volume/image cleanup action; recovery evidence is retained for review.
 
 The runtime image is
-`<temporary-recovery-target>\runtime\classarchive-owner-restore-v1.ext4`.
-Its ext4 filesystem is mounted at `/mnt/classarchive-owner-restore-v1`; the
-second daemon listens only on
-`unix:///run/classarchive-owner-restore-v1/docker.sock`. The normal daemon must
-remain `/var/lib/docker`, and the runner checks that invariant before and after
-the drill.
+`<temporary-recovery-target>/runtime/classarchive-owner-restore-v1.ext4`.
+Its ext4 filesystem is mounted at `/mnt/classarchive-owner-restore-v1`; restore
+volume backing directories live below
+`/mnt/classarchive-owner-restore-v1/volumes`. The normal daemon must remain
+`/var/lib/docker`, and the runner checks both the volume backing paths and the
+unchanged 8191 container fingerprints. A second dockerd in the same WSL network
+namespace is explicitly rejected because it can rewrite global iptables and
+interrupt the owner runtime.
 
 ```powershell
 # Read-only bundle and host-capability checks.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 validate -BackupBundlePath <verified-bundle>
 
-# One-time M-backed ext4 image and isolated daemon creation.
+# One-time M-backed ext4 image mount and control-plane preflight.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 prepare-storage -BackupBundlePath <verified-bundle> -ConfirmCreateRestoreStorage
 
 # Stream-decrypt into fresh databases/volumes, then build a new bridge secret.
@@ -38,7 +40,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-fu
 # Repeat the exact aggregate check after the cold restart, before browser QA.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
 
-# Real Chromium acceptance against the second daemon and only 8290/8291.
+# Real Chromium acceptance against the isolated restore projects on 8290/8291.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-browser-qa.ps1 -Mode restore
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-family-browser-qa.ps1 -Mode restore
 ```
@@ -59,7 +61,7 @@ changes fail closed instead of being mislabeled as the source snapshot.
 The bundle contains the verified ML manifest, not restricted model binaries.
 For this local drill, the runner verifies that manifest against the current
 private-full model cache, then copies the cache through two `--network none`
-containers into the isolated restore volume. Immich ML remains offline. A
+containers into the isolated M-backed restore volume. Immich ML remains offline. A
 successful aggregate check requires the cold-start runtime to report reused
 People/Search indexes, zero Face/Search indexing jobs, and non-empty persisted
 search probes.

@@ -27,7 +27,6 @@ $composeFiles = if ($isRestore) {
 } else {
     @('infra/docker-compose.yml','infra/private-full/docker-compose.override.yml')
 }
-$restoreDockerHost = 'unix:///run/classarchive-owner-restore-v1/docker.sock'
 $separator = [IO.Path]::DirectorySeparatorChar
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
@@ -144,7 +143,6 @@ try {
 
     $compose = [Collections.Generic.List[string]]::new()
     foreach ($argument in @('-d','Ubuntu','--cd',$projectRoot,'--exec')) { $compose.Add($argument) }
-    if ($isRestore) { foreach ($argument in @('env',('DOCKER_HOST=' + $restoreDockerHost))) { $compose.Add($argument) } }
     foreach ($argument in @('docker','compose','--env-file',$envRelative)) { $compose.Add($argument) }
     foreach ($file in $composeFiles) { $compose.Add('-f'); $compose.Add($file) }
     $compose.Add('-p'); $compose.Add($composeProject)

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stream-only restore helper.  It is intentionally hard-bound to the second
-# owner-restore daemon and to the v1 encrypted bundle contract.  It never
-# talks to the primary Docker socket and never writes decrypted payloads to M:.
+# Stream-only restore helper. It uses the local Docker control plane only for
+# containers carrying the exact owner-restore labels. Every target volume is a
+# fresh named volume bind-backed by the M:-resident ext4 restore filesystem.
+# It never writes decrypted payloads directly onto exFAT.
 
 umask 077
 export LC_ALL=C
@@ -43,11 +44,11 @@ passphrase_bytes=$(wc -c < "$passphrase_file" | tr -d '[:space:]')
 case "$passphrase_bytes" in ''|*[!0-9]*) fail passphrase_shape_invalid ;; esac
 [ "$passphrase_bytes" -ge 64 ] && [ "$passphrase_bytes" -le 256 ] || fail passphrase_shape_invalid
 
-socket=/run/classarchive-owner-restore-v1/docker.sock
+socket=/var/run/docker.sock
 [ -S "$socket" ] || fail restore_socket_missing
 docker_host=(docker --host "unix://$socket")
 root_dir=$("${docker_host[@]}" info --format '{{.DockerRootDir}}' 2>/dev/null) || fail restore_daemon_unavailable
-[ "$root_dir" = /mnt/classarchive-owner-restore-v1/docker-data ] || fail restore_daemon_root_invalid
+[ "$root_dir" = /var/lib/docker ] || fail restore_control_plane_root_invalid
 
 gpg_home=$(mktemp -d /tmp/class-archive-owner-restore-gpg.XXXXXXXX) || fail gpg_temp_failed
 chmod 0700 "$gpg_home"
@@ -87,8 +88,10 @@ assert_container() {
 
 assert_volume() {
   expected=$1 project=$2 logical=$3
-  identity=$("${docker_host[@]}" volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}' "$expected" 2>/dev/null) || fail restore_volume_missing
-  [ "$identity" = "$project|$logical|owner-restore-drill" ] || fail restore_volume_identity_invalid
+  expected_device=/mnt/classarchive-owner-restore-v1/volumes/$expected
+  identity=$("${docker_host[@]}" volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.storage"}}|{{index .Options "device"}}' "$expected" 2>/dev/null) || fail restore_volume_missing
+  [ "$identity" = "$project|$logical|owner-restore-drill|m-ext4-bind|$expected_device" ] || fail restore_volume_identity_invalid
+  [ -d "$expected_device" ] && [ ! -L "$expected_device" ] || fail restore_volume_backing_untrusted
 }
 
 helper_image() {

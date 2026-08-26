@@ -1,7 +1,7 @@
 services:
-  # This overlay is consumed only by owner-full-restore-drill.ps1 through the
-  # second, M-backed Docker daemon.  Project, network and volume identities are
-  # all distinct from both 8091 and 8191.
+  # This overlay is consumed only by owner-full-restore-drill.ps1. Projects,
+  # network identities and M-backed bind volumes are all distinct from 8091
+  # and 8191 even though the local Docker control plane is shared.
   db:
     restart: "no"
     labels:
@@ -53,8 +53,8 @@ services:
 
 networks:
   app:
-    # This bridge exists only inside the second daemon.  Its only published
-    # ports are the two explicit 127.0.0.1 listeners in the base compose file.
+    # This bridge belongs only to the restore project. Its only published ports
+    # are the two explicit 127.0.0.1 listeners in the base compose file.
     internal: false
     labels:
       com.classarchive.scope: owner-restore-drill

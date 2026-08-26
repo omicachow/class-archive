@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param()
 
-# Static/protocol-only gate. It does not read M:, create an ext4 image, start a
-# daemon, create a volume, decrypt a payload, or contact either runtime.
+# Static/protocol-only gate. It does not read M:, create an ext4 image, create a
+# volume, decrypt a payload, or contact either runtime.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -40,13 +40,13 @@ foreach ($needle in @(
     "[ValidateSet('validate', 'prepare-storage', 'restore', 'verify', 'cold-restart', 'status')]",
     '[switch]$ConfirmCreateRestoreStorage', '[switch]$ConfirmIsolatedRestore', '[switch]$ConfirmColdRestart',
     "`$targetRoot = '<temporary-recovery-target>'", 'CLASS_ARCHIVE_BACKUP_TARGET',
-    "`$mountPoint = '/mnt/classarchive-owner-restore-v1'", "`$dockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'",
-    "`$dockerRoot = `$mountPoint + '/docker-data'", 'fallocate', 'mkfs.ext4', 'command -v blkid', 'CLASSARCHIVE_OWN',
-    'mount -t ext4 -o nodev,nosuid', '--host=unix:///run/classarchive-owner-restore-v1/docker.sock',
-    '--data-root=/mnt/classarchive-owner-restore-v1/docker-data', '--exec-root=/run/classarchive-owner-restore-v1/exec',
-    '--pidfile=/run/classarchive-owner-restore-v1/dockerd.pid', '--bridge=none',
-    '--default-address-pool=base=10.247.0.0/16,size=24', '--userland-proxy=false',
-    "`$primaryRoot -eq '/var/lib/docker'", '127.0.0.1:8290', '127.0.0.1:8291',
+    "`$mountPoint = '/mnt/classarchive-owner-restore-v1'", "`$restoreVolumeRoot = `$mountPoint + '/volumes'",
+    "`$legacyDockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'", "`$dockerHost = 'unix:///var/run/docker.sock'",
+    "`$dockerRoot = '/var/lib/docker'", 'fallocate', 'mkfs.ext4', 'command -v blkid', 'CLASSARCHIVE_OWN',
+    'mount -t ext4 -o nodev,nosuid', 'legacy_restore_daemon_active',
+    "'--driver','local','--opt','type=none','--opt','o=bind','--opt',('device=' + `$device)",
+    'com.classarchive.storage=m-ext4-bind', 'restore_volume_backing_identity_invalid',
+    "`$root -eq `$dockerRoot", '127.0.0.1:8290', '127.0.0.1:8291',
     "format -eq 'owner-temporary-recovery-v1'", "scope -eq 'OWNER_PRIVATE_FULL'",
     'temporary_recovery_target -eq $true', 'independent_disaster_backup -eq $false',
     "archive -eq 'GPG_SYMMETRIC_AES256'", "key_protection -eq 'WINDOWS_DPAPI_CURRENT_USER'",
@@ -62,7 +62,7 @@ foreach ($needle in @(
     'restore_tool_head=', "`$BundleInfo.restore_tool_head", "`$state.restore_tool_head -eq [string]`$BundleInfo.restore_tool_head",
     'class_archive_owner_restore_v1_piwigo', 'class_archive_owner_restore_v1_immich',
     'Assert-RestoreGatewayNetwork', "`$piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/16'",
-    'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', 'docker image save',
+    'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', "Invoke-RestoreDocker @('image','inspect',`$ref)",
     'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Copy-VerifiedModelCache $bundleInfo',
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore',
     'Assert-AiRestoreEvidence', 'reused_existing_indexes -eq $true', 'restore_ai_reindex_detected',
@@ -81,12 +81,55 @@ Assert-True ($runner.Contains('restore_unformatted_image_requires_confirmation')
 Assert-True ($runner.Contains('restore_unformatted_image_size_invalid')) 'restore_unformatted_retry_size_guard_missing'
 Assert-True ($runner.Contains("[string]`$imageType[0] -eq 'ext4'")) 'restore_existing_image_type_guard_missing'
 Assert-True (-not $runner.Contains('--bip=')) 'restore_daemon_bip_must_be_absent'
+Assert-True (-not $runner.Contains('nohup dockerd')) 'restore_second_daemon_forbidden'
+Assert-True (-not $runner.Contains('--data-root=/mnt/classarchive-owner-restore-v1')) 'restore_second_data_root_forbidden'
 foreach ($needle in @('`$line = @(Invoke-Ubuntu', '`$loopLines = @(Invoke-Ubuntu', '`$lines = @(Invoke-Ubuntu', '`$rootLines = @(Invoke-RestoreDocker', '`$sourceManifestLines = @(Invoke-Ubuntu', '`$targetManifestLines = @(Invoke-RestoreDocker')) {
     Assert-True ($runner.Contains($needle.Replace('`$','$'))) ('restore_native_array_normalization_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
 Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
 Assert-True ($runner.Contains('docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
+
+# Execute the real environment renderer with synthetic in-memory secrets. This
+# catches PowerShell's surprising `string + value, next-item` precedence, which
+# otherwise stringifies the remaining array with spaces and produces a one-line
+# Compose env file. No file, runtime, backup target or network is touched here.
+$initializeEnvironmentBlock = [regex]::Match(
+    $runner,
+    '(?ms)^function Initialize-RestoreEnvironments\(\[hashtable\]\$Secrets\) \{.*?^\}'
+).Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($initializeEnvironmentBlock)) 'restore_environment_renderer_missing'
+$capturedEnvironment = & {
+    $piwigoProject = 'test_piwigo'
+    $immichProject = 'test_immich'
+    $gatewayNetwork = 'test_gateway'
+    $piwigoEnvPath = 'piwigo.env'
+    $immichEnvPath = 'immich.env'
+    $captured = @{}
+    function New-RandomSecret { return ('R' * 48) }
+    function Write-OwnerOnlyText([string]$Path, [string]$Text) { $captured[$Path] = $Text }
+    . ([ScriptBlock]::Create($initializeEnvironmentBlock))
+    Initialize-RestoreEnvironments @{
+        piwigo_db_password = ('D' * 48)
+        claim_code_pepper = ('C' * 48)
+        anonymous_pseudonym_secret = ('A' * 48)
+    }
+    return $captured
+}
+Assert-True ($capturedEnvironment.Count -eq 2) 'restore_environment_output_count_invalid'
+$expectedEnvironmentLineCounts = @{ 'piwigo.env' = 30; 'immich.env' = 14 }
+foreach ($environmentPath in $expectedEnvironmentLineCounts.Keys) {
+    $environmentText = [string]$capturedEnvironment[$environmentPath]
+    Assert-True ($environmentText.EndsWith("`n", [StringComparison]::Ordinal)) ('restore_environment_final_lf_missing_' + $environmentPath)
+    Assert-True (-not $environmentText.Contains("`r")) ('restore_environment_cr_detected_' + $environmentPath)
+    $environmentLines = @($environmentText.TrimEnd("`n").Split([char]10))
+    Assert-True ($environmentLines.Count -eq $expectedEnvironmentLineCounts[$environmentPath]) ('restore_environment_line_count_invalid_' + $environmentPath)
+    Assert-True (@($environmentLines | Where-Object { $_ -notmatch '\A[A-Z][A-Z0-9_]*=.*\z' }).Count -eq 0) ('restore_environment_line_shape_invalid_' + $environmentPath)
+    $environmentKeys = @($environmentLines | ForEach-Object { $_.Substring(0, $_.IndexOf('=')) })
+    Assert-True (($environmentKeys | Select-Object -Unique).Count -eq $environmentKeys.Count) ('restore_environment_duplicate_key_' + $environmentPath)
+}
+Assert-True ($capturedEnvironment['piwigo.env'].Contains("COMPOSE_PROJECT_NAME=test_piwigo`nCLASS_ARCHIVE_HTTP_PORT=8290`n")) 'restore_piwigo_environment_newline_serialization_failed'
+Assert-True ($capturedEnvironment['immich.env'].Contains("IMMICH_COMPOSE_PROJECT_NAME=test_immich`nCLASS_ARCHIVE_COMPAT_HTTP_PORT=8291`n")) 'restore_immich_environment_newline_serialization_failed'
 
 $allowlistBlock = [regex]::Match($runner, '(?s)function Get-RestoreToolCommitAllowlist \{.*?\n\}').Value
 Assert-True (-not [string]::IsNullOrWhiteSpace($allowlistBlock)) 'restore_tool_allowlist_block_missing'
@@ -117,8 +160,8 @@ Assert-True (($runner | Select-String -Pattern 'Remove-Item -LiteralPath' -AllMa
     $runner.Contains('Remove-Item -LiteralPath $passphrasePath -Force')) 'restore_runner_cleanup_not_secret_only'
 
 foreach ($needle in @(
-    'set -euo pipefail', 'OWNER_RESTORE_STREAM=FAIL', '/run/classarchive-owner-restore-v1/docker.sock',
-    '/mnt/classarchive-owner-restore-v1/docker-data', '/mnt/m/ClassArchive-Temporary-Recovery/bundles/owner-full-',
+    'set -euo pipefail', 'OWNER_RESTORE_STREAM=FAIL', '/var/run/docker.sock', '/var/lib/docker',
+    '/mnt/classarchive-owner-restore-v1/volumes/', 'm-ext4-bind', '/mnt/m/ClassArchive-Temporary-Recovery/bundles/owner-full-',
     '.codex-work/owner-restore/runtime/owner-full-', 'DrvFs projects Windows ACL-protected files as mode 0777',
     'passphrase_bytes=$(wc -c < "$passphrase_file"',
     '--pinentry-mode loopback', '--passphrase-file "$passphrase_file"', '--decrypt "$1"',
@@ -128,7 +171,7 @@ foreach ($needle in @(
     'local/config/database.inc.php', 'chmod 0660', 'OWNER_RESTORE_STREAM=PASS action=$action'
 )) { Assert-True ($helper.Contains($needle)) ('restore_helper_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 Assert-True (-not ($helper -match '(?i)(?:printf|echo).*(?:PASSWORD|PASSPHRASE|TOKEN|PEPPER|PSEUDONYM)=')) 'restore_helper_secret_output_detected'
-foreach ($forbidden in @('docker volume rm','docker compose down','docker system prune','curl ','wget ','/var/run/docker.sock','0.0.0.0')) {
+foreach ($forbidden in @('docker volume rm','docker compose down','docker system prune','curl ','wget ','/run/classarchive-owner-restore-v1/docker.sock','0.0.0.0')) {
     Assert-True (-not $helper.Contains($forbidden)) ('restore_helper_forbidden_' + ($forbidden -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
 
@@ -152,11 +195,11 @@ foreach ($browser in @($ownerBrowser,$familyBrowser)) {
         "[ValidateSet('staging', 'owner', 'restore')]", "`$isRestore = `$Mode -eq 'restore'",
         "'infra/owner-restore/.env.piwigo'", "'infra/owner-restore/docker-compose.piwigo.override.yml'",
         "'infra/private-full/docker-compose.ai-worker.override.yml'", "'class_archive_owner_restore_v1_piwigo'",
-        "'unix:///run/classarchive-owner-restore-v1/docker.sock'", "'DOCKER_HOST=' + `$restoreDockerHost",
         "'OWNER_RESTORE_DRILL'", 'Get-RestoreSystemAdminUsername', "p.system_role='SYSTEM_ADMIN'",
         "'.codex-work\owner-restore\runtime", "'.codex-work\owner-restore\screenshots"
     )) { Assert-True ($browser.Contains($needle)) ('restore_browser_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
     Assert-True (-not $browser.Contains("if (`$isRestore) { 'infra/private-full/.env.piwigo.staging'")) 'restore_browser_staging_env_alias_detected'
+    Assert-True (-not $browser.Contains('restoreDockerHost')) 'restore_browser_second_daemon_reference_detected'
 }
 foreach ($browserNode in @($ownerBrowserNode,$familyBrowserNode)) {
     foreach ($needle in @("mode === 'restore'", "'OWNER_RESTORE_DRILL'", '/.codex-work/owner-restore/screenshots/')) {

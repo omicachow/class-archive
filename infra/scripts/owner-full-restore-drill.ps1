@@ -15,10 +15,13 @@ param(
     [switch]$ConfirmColdRestart
 )
 
-# The restore runtime deliberately uses a second Unix-socket-only Docker daemon
-# whose complete data-root lives in an ext4 image on the temporary M: target.
-# There is no reset, prune, volume removal, image removal or target deletion
-# action in this tool. A failed drill remains intact for inspection.
+# The restore runtime shares only the already-running local Docker control
+# plane. Its projects, networks and named volumes are separate from 8091/8191,
+# and every restore volume is bind-backed by an ext4 image on the temporary M:
+# target. A second dockerd in the same WSL network namespace is forbidden: even
+# with --bridge=none it can rewrite global iptables and interrupt the owner
+# runtime. There is no reset, prune, volume removal, image removal or target
+# deletion action in this tool. A failed drill remains intact for inspection.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -30,9 +33,10 @@ $targetRoot = '<temporary-recovery-target>'
 $markerText = "CLASS_ARCHIVE_BACKUP_TARGET`nversion=1`nscope=OWNER_PRIVATE_FULL`n"
 $runtimeImage = Join-Path $targetRoot 'runtime\classarchive-owner-restore-v1.ext4'
 $mountPoint = '/mnt/classarchive-owner-restore-v1'
-$dockerRoot = $mountPoint + '/docker-data'
-$dockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'
-$dockerHost = 'unix://' + $dockerSocket
+$restoreVolumeRoot = $mountPoint + '/volumes'
+$legacyDockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'
+$dockerRoot = '/var/lib/docker'
+$dockerHost = 'unix:///var/run/docker.sock'
 $piwigoProject = 'class_archive_owner_restore_v1_piwigo'
 $immichProject = 'class_archive_owner_restore_v1_immich'
 $gatewayNetwork = 'class_archive_owner_restore_v1_gateway'
@@ -332,8 +336,8 @@ function Initialize-RestoreEnvironments([hashtable]$Secrets) {
     $immichPassword = New-RandomSecret
     try {
         $piwigo = @(
-            'COMPOSE_PROJECT_NAME=' + $piwigoProject, 'CLASS_ARCHIVE_HTTP_PORT=8290', 'CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291',
-            'CLASS_ARCHIVE_GATEWAY_NETWORK=' + $gatewayNetwork, 'CLASS_ARCHIVE_BASE_URL=http://127.0.0.1:8290',
+            ('COMPOSE_PROJECT_NAME=' + $piwigoProject), 'CLASS_ARCHIVE_HTTP_PORT=8290', 'CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291',
+            ('CLASS_ARCHIVE_GATEWAY_NETWORK=' + $gatewayNetwork), 'CLASS_ARCHIVE_BASE_URL=http://127.0.0.1:8290',
             'CLASS_ARCHIVE_TIMEZONE=Asia/Shanghai', 'PIWIGO_UID=1000', 'PIWIGO_GID=1000',
             'PIWIGO_DATA_VOLUME=class_archive_owner_restore_v1_piwigo_data', 'PIWIGO_UPLOADS_VOLUME=class_archive_owner_restore_v1_piwigo_uploads',
             'PIWIGO_GALLERIES_VOLUME=class_archive_owner_restore_v1_piwigo_galleries', 'PIWIGO_DERIVATIVES_VOLUME=class_archive_owner_restore_v1_piwigo_derivatives',
@@ -341,19 +345,19 @@ function Initialize-RestoreEnvironments([hashtable]$Secrets) {
             'PIWIGO_BACKUPS_VOLUME=class_archive_owner_restore_v1_piwigo_backups',
             'PIWIGO_IMAGE=piwigo/piwigo:16.4.0a@sha256:0ec6f159a3f972338b64e299d56ac37c442dd26cbeec39320d76ea826b5e0b84',
             'MARIADB_IMAGE=mariadb:11.8.8@sha256:d9f7eb2637296652f24b484afd5d246f759f49f5babcadc6a9e344c9acb75fbf',
-            'DB_NAME=piwigo', 'DB_USER=piwigo', 'DB_PASSWORD=' + $Secrets.piwigo_db_password, 'DB_ROOT_PASSWORD=' + $rootPassword,
+            'DB_NAME=piwigo', 'DB_USER=piwigo', ('DB_PASSWORD=' + $Secrets.piwigo_db_password), ('DB_ROOT_PASSWORD=' + $rootPassword),
             'PIWIGO_ADMIN_USERNAME=owner-restore-admin', 'PIWIGO_ADMIN_EMAIL=admin@owner-restore.invalid',
-            'CLASS_ARCHIVE_CLAIM_CODE_PEPPER=' + $Secrets.claim_code_pepper,
-            'CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET=' + $Secrets.anonymous_pseudonym_secret,
+            ('CLASS_ARCHIVE_CLAIM_CODE_PEPPER=' + $Secrets.claim_code_pepper),
+            ('CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET=' + $Secrets.anonymous_pseudonym_secret),
             'SMTP_HOST=', 'SMTP_PORT=', 'SMTP_USERNAME=', 'SMTP_PASSWORD=', 'SMTP_ENCRYPTION='
         ) -join "`n"
         $immich = @(
-            'IMMICH_COMPOSE_PROJECT_NAME=' + $immichProject, 'CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291', 'CLASS_ARCHIVE_CORE_PUBLIC_PORT=8290',
-            'CLASS_ARCHIVE_GATEWAY_NETWORK=' + $gatewayNetwork, 'IMMICH_UPLOAD_VOLUME=class_archive_owner_restore_v1_immich_upload',
+            ('IMMICH_COMPOSE_PROJECT_NAME=' + $immichProject), 'CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291', 'CLASS_ARCHIVE_CORE_PUBLIC_PORT=8290',
+            ('CLASS_ARCHIVE_GATEWAY_NETWORK=' + $gatewayNetwork), 'IMMICH_UPLOAD_VOLUME=class_archive_owner_restore_v1_immich_upload',
             'IMMICH_MODEL_CACHE_VOLUME=class_archive_owner_restore_v1_immich_model_cache', 'IMMICH_DB_VOLUME=class_archive_owner_restore_v1_immich_db',
             'IMMICH_GATEWAY_SECRET_VOLUME=class_archive_owner_restore_v1_immich_gateway_secret',
             'PIWIGO_UPLOADS_VOLUME=class_archive_owner_restore_v1_piwigo_uploads', 'PIWIGO_GALLERIES_VOLUME=class_archive_owner_restore_v1_piwigo_galleries',
-            'DB_PASSWORD=' + $immichPassword, 'DB_USERNAME=postgres', 'DB_DATABASE_NAME=immich', 'TZ=Asia/Shanghai'
+            ('DB_PASSWORD=' + $immichPassword), 'DB_USERNAME=postgres', 'DB_DATABASE_NAME=immich', 'TZ=Asia/Shanghai'
         ) -join "`n"
         Write-OwnerOnlyText $piwigoEnvPath ($piwigo + "`n")
         Write-OwnerOnlyText $immichEnvPath ($immich + "`n")
@@ -390,7 +394,7 @@ function Get-PrimaryOwnerFingerprint {
     return ($parts -join ';')
 }
 
-function Start-RestoreDaemon([bool]$AllowCreate) {
+function Mount-RestoreStorage([bool]$AllowCreate) {
     $script:stage = 'restore_storage'
     $imageWsl = Get-WslPath $runtimeImage
     if (-not (Test-Path -LiteralPath $runtimeImage -PathType Leaf)) {
@@ -429,27 +433,13 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
     $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed')
     Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0] -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
     $loop = $loopLines[0]
-    [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; mkdir -p "$1/docker-data" "$1/daemon"','sh',$mountPoint,$loop) 'restore_mount_failed')
-    $socketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf READY || true','sh',$dockerSocket))
-    if ($socketState -notcontains 'READY') {
-        # Disable the daemon's implicit bridge entirely. Compose creates only
-        # the explicit restore networks from the isolated address pool, and no
-        # second docker0-style bridge can collide with the primary daemon.
-        [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p /run/classarchive-owner-restore-v1; nohup dockerd --host=unix:///run/classarchive-owner-restore-v1/docker.sock --data-root=/mnt/classarchive-owner-restore-v1/docker-data --exec-root=/run/classarchive-owner-restore-v1/exec --pidfile=/run/classarchive-owner-restore-v1/dockerd.pid --bridge=none --default-address-pool=base=10.247.0.0/16,size=24 --storage-driver=overlay2 --userland-proxy=false --log-level=error > /mnt/classarchive-owner-restore-v1/daemon/dockerd.log 2>&1 &','sh') 'restore_daemon_start_failed')
-        for ($attempt = 0; $attempt -lt 60; $attempt++) {
-            Start-Sleep -Milliseconds 500
-            $ready = @(Invoke-Ubuntu @('sh','-c','DOCKER_HOST="$1" docker info --format "{{.DockerRootDir}}" 2>/dev/null || true','sh',$dockerHost))
-            if ($ready -contains $dockerRoot) { break }
-        }
-    }
+    [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; install -d -m 0755 "$1/volumes"','sh',$mountPoint,$loop) 'restore_mount_failed')
+    $legacySocketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf PRESENT || true','sh',$legacyDockerSocket))
+    Assert-Restore ($legacySocketState -notcontains 'PRESENT') 'legacy_restore_daemon_active'
     $rootLines = @(Invoke-RestoreDocker @('info','--format','{{.DockerRootDir}}'))
-    Assert-Restore ($rootLines.Count -eq 1) 'restore_daemon_root_output_invalid'
+    Assert-Restore ($rootLines.Count -eq 1) 'restore_control_plane_root_output_invalid'
     $root = [string]$rootLines[0].Trim()
-    Assert-Restore ($root -eq $dockerRoot) 'restore_daemon_root_invalid'
-    $primaryRootLines = @(Invoke-Ubuntu @('docker','info','--format','{{.DockerRootDir}}'))
-    Assert-Restore ($primaryRootLines.Count -eq 1) 'primary_docker_root_output_invalid'
-    $primaryRoot = [string]$primaryRootLines[0].Trim()
-    Assert-Restore ($primaryRoot -eq '/var/lib/docker') 'primary_docker_root_changed'
+    Assert-Restore ($root -eq $dockerRoot) 'restore_control_plane_root_invalid'
 }
 
 function Copy-PinnedImages([object]$Manifest) {
@@ -461,14 +451,22 @@ function Copy-PinnedImages([object]$Manifest) {
     ) | Sort-Object -Unique
     foreach ($ref in $refs) {
         Assert-Restore ($ref -match '\A[A-Za-z0-9._/-]+(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}\z') 'container_image_ref_invalid'
-        [void](Invoke-Ubuntu @('bash','-o','pipefail','-c','docker image inspect "$1" >/dev/null; docker image save "$1" | docker --host "$2" image load >/dev/null','bash',$ref,$dockerHost) 'offline_image_copy_failed')
+        [void](Invoke-RestoreDocker @('image','inspect',$ref) 'pinned_restore_image_missing')
     }
 }
 
 function New-RestoreVolume([string]$Name, [string]$Project, [string]$Logical) {
     $existing = @(Invoke-RestoreDocker @('volume','ls','--quiet','--filter',('name=^' + $Name + '$')))
     Assert-Restore ($existing.Count -eq 0) 'restore_volume_not_fresh'
-    [void](Invoke-RestoreDocker @('volume','create','--label',('com.docker.compose.project=' + $Project),'--label',('com.docker.compose.volume=' + $Logical),'--label','com.classarchive.scope=owner-restore-drill',$Name))
+    $device = $restoreVolumeRoot + '/' + $Name
+    [void](Invoke-Ubuntu @('sh','-eu','-c','case "$1" in /mnt/classarchive-owner-restore-v1/volumes/class_archive_owner_restore_v1_*) ;; *) exit 71;; esac; install -d -m 0755 "$1"; test -z "$(find "$1" -mindepth 1 -print -quit)"','sh',$device) 'restore_volume_backing_directory_invalid')
+    [void](Invoke-RestoreDocker @(
+        'volume','create','--driver','local','--opt','type=none','--opt','o=bind','--opt',('device=' + $device),
+        '--label',('com.docker.compose.project=' + $Project),'--label',('com.docker.compose.volume=' + $Logical),
+        '--label','com.classarchive.scope=owner-restore-drill','--label','com.classarchive.storage=m-ext4-bind',$Name
+    ))
+    $identity = @(Invoke-RestoreDocker @('volume','inspect','--format','{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.storage"}}|{{index .Options "device"}}',$Name))
+    Assert-Restore ($identity.Count -eq 1 -and $identity[0] -eq ('owner-restore-drill|m-ext4-bind|' + $device)) 'restore_volume_backing_identity_invalid'
 }
 
 function Assert-RestoreGatewayNetwork {
@@ -653,17 +651,17 @@ try {
     }
 
     if ($Action -eq 'prepare-storage') {
-        Start-RestoreDaemon $true
+        Mount-RestoreStorage $true
         Copy-PinnedImages $bundleInfo.manifest
-        Write-Output ('OWNER_RESTORE_STORAGE=PASS data_root=' + $dockerRoot + ' daemon=SECOND_UNIX_SOCKET_ONLY ports=NONE assertions=' + $script:assertions)
+        Write-Output ('OWNER_RESTORE_STORAGE=PASS volume_root=' + $restoreVolumeRoot + ' control_plane=PRIMARY_SHARED volumes=FRESH_M_EXT4_BIND ports=NONE assertions=' + $script:assertions)
         exit 0
     }
 
-    Start-RestoreDaemon $false
+    Mount-RestoreStorage $false
     if ($Action -eq 'status') {
         $primary = Get-PrimaryOwnerFingerprint
         Assert-Restore (-not [string]::IsNullOrWhiteSpace($primary)) 'owner_fingerprint_invalid'
-        Write-Output ('OWNER_RESTORE_STATUS=PASS daemon=ISOLATED data_root=' + $dockerRoot + ' primary_owner=UNCHANGED assertions=' + $script:assertions)
+        Write-Output ('OWNER_RESTORE_STATUS=PASS runtime=ISOLATED_PROJECTS volume_root=' + $restoreVolumeRoot + ' control_plane=PRIMARY_SHARED primary_owner=UNCHANGED assertions=' + $script:assertions)
         exit 0
     }
 
