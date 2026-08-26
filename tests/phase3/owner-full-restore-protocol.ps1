@@ -41,7 +41,7 @@ foreach ($needle in @(
     '[switch]$ConfirmCreateRestoreStorage', '[switch]$ConfirmIsolatedRestore', '[switch]$ConfirmColdRestart',
     "`$targetRoot = '<temporary-recovery-target>'", 'CLASS_ARCHIVE_BACKUP_TARGET',
     "`$mountPoint = '/mnt/classarchive-owner-restore-v1'", "`$dockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'",
-    "`$dockerRoot = `$mountPoint + '/docker-data'", 'fallocate', 'mkfs.ext4', "'-L','CLASSARCHIVE_OWNER_RESTORE_V1'",
+    "`$dockerRoot = `$mountPoint + '/docker-data'", 'fallocate', 'mkfs.ext4', 'CLASSARCHIVE_OWNER_RESTORE_V1',
     'mount -t ext4 -o nodev,nosuid', '--host=unix:///run/classarchive-owner-restore-v1/docker.sock',
     '--data-root=/mnt/classarchive-owner-restore-v1/docker-data', '--exec-root=/run/classarchive-owner-restore-v1/exec',
     '--pidfile=/run/classarchive-owner-restore-v1/dockerd.pid', '--bridge=ca_restore0', '--bip=10.246.0.1/24',
