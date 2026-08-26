@@ -72,6 +72,9 @@ foreach ($needle in @(
     "'--profile','immich-web-compat','up','-d','immich-web-compat'",
     "`$immichProject + '-immich-web-compat-1'", 'browser_e2e=NOT_RUN', 'ai_results=IMMEDIATE', 'primary_owner_changed_during_restore'
 )) { Assert-True ($runner.Contains($needle)) ('restore_runner_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+foreach ($needle in @("'.codex-work\owner-restore\reports'", "'last-error.json'", 'Write-OwnerOnlyText', 'exception_type', 'script_stack')) {
+    Assert-True ($runner.Contains($needle)) ('restore_local_diagnostic_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+}
 Assert-True ($runner.Contains('tool=$(command -v mkfs.ext4)')) 'restore_mkfs_shell_resolution_missing'
 Assert-True (-not $runner.Contains("Invoke-Ubuntu @('mkfs.ext4'")) 'restore_mkfs_direct_wsl_exec_detected'
 Assert-True ($runner.Contains('restore_unformatted_image_requires_confirmation')) 'restore_unformatted_retry_confirmation_missing'

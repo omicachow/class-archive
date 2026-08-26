@@ -727,6 +727,25 @@ try {
 }
 catch {
     $code = if ($_.Exception.Message -match '\AOWNER_RESTORE_STOP:([a-z0-9_]{1,128})\z') { [string]$Matches[1] } else { 'unexpected_failure' }
+    if ($code -eq 'unexpected_failure') {
+        # Keep detailed native/runtime diagnostics local and owner-only. The
+        # console remains a stable machine-readable gate and never emits
+        # recovery material or raw command output.
+        try {
+            $reportRoot = Join-Path $projectRoot '.codex-work\owner-restore\reports'
+            if (-not (Test-Path -LiteralPath $reportRoot -PathType Container)) { [void][IO.Directory]::CreateDirectory($reportRoot) }
+            $report = [ordered]@{
+                version = 1
+                created_at = (Get-Date).ToUniversalTime().ToString('o')
+                stage = [string]$script:stage
+                exception_type = [string]$_.Exception.GetType().FullName
+                message = [string]$_.Exception.Message
+                script_stack = [string]$_.ScriptStackTrace
+            }
+            Write-OwnerOnlyText (Join-Path $reportRoot 'last-error.json') (($report | ConvertTo-Json -Depth 4) + "`n")
+        }
+        catch { }
+    }
     Write-Error ('OWNER_RESTORE=FAIL stage=' + $script:stage + ' code=' + $code + ' assertions=' + $script:assertions)
     exit 2
 }
