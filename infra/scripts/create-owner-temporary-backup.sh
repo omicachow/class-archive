@@ -154,7 +154,7 @@ mariadb_bytes=$(volume_bytes "$piwigo_db")
 postgres_bytes=$(volume_bytes "$immich_db")
 config_bytes=$(( $(volume_bytes "$piwigo_data") + $(volume_bytes "$piwigo_scripts") ))
 immich_upload_bytes=$(volume_bytes "$immich_upload")
-ai_index_bytes=$(postgres_query "SELECT COALESCE(SUM(pg_total_relation_size(format('%I.%I',schemaname,tablename))),0)::bigint FROM pg_tables WHERE schemaname='public' AND tablename IN ('asset_face','person','smart_search');" | tr -d '[:space:]')
+ai_index_bytes=$(postgres_query "SELECT COALESCE(SUM(pg_total_relation_size(format('%I.%I',schemaname,tablename))),0)::bigint FROM pg_tables WHERE schemaname='public' AND tablename IN ('asset_face','face_search','person','smart_search');" | tr -d '[:space:]')
 case "$ai_index_bytes" in ''|*[!0-9]*) fail ai_index_size_invalid ;; esac
 raw_total=$(( original_bytes + mariadb_bytes + postgres_bytes + config_bytes + immich_upload_bytes ))
 est_backup=$(( raw_total + (raw_total / 10) + 104857600 ))

@@ -82,6 +82,7 @@ foreach ($needle in @(
     '--passphrase-file "$passphrase_file"',
     'mariadb-dump --quick --lock-all-tables',
     'pg_dump --format=custom',
+    "tablename IN ('asset_face','face_search','person','smart_search')",
     'trap cleanup EXIT HUP INT TERM',
     'capture-restore-fixture.php',
     'pg_snapshot_xmax(pg_current_snapshot())',
