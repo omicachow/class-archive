@@ -45,10 +45,18 @@ final class AutoCollectionService
      */
     public function syncMemoryProjection(array $projection): array
     {
-        $desired = self::normalizeMemoryProjection($projection);
-
         return $this->repository->transaction(
-            fn(Repository $repository): array => $this->syncNormalizedInCurrentTransaction($repository, $desired),
+            function (Repository $repository) use ($projection): array {
+                if (self::isUnavailableProjection($projection)) {
+                    // A temporarily unavailable optional source is not an
+                    // instruction to retire previously curated memories.
+                    return ['inserted' => 0, 'updated' => 0, 'unchanged' => 0, 'retired' => 0, 'total' => 0];
+                }
+                return $this->syncNormalizedInCurrentTransaction(
+                    $repository,
+                    self::normalizeMemoryProjection($projection),
+                );
+            },
         );
     }
 
@@ -64,6 +72,9 @@ final class AutoCollectionService
     {
         if (!$this->repository->inTransaction()) {
             throw new \LogicException('class_archive_auto_collection_transaction_required');
+        }
+        if (self::isUnavailableProjection($projection)) {
+            return ['inserted' => 0, 'updated' => 0, 'unchanged' => 0, 'retired' => 0, 'total' => 0];
         }
         return $this->syncNormalizedInCurrentTransaction(
             $this->repository,
@@ -235,7 +246,9 @@ final class AutoCollectionService
                 if (!is_array($payload) || !is_array($payload['FULL'] ?? null)) {
                     throw new \RuntimeException('class_archive_auto_collection_full_projection_missing');
                 }
-                $expected = self::normalizeMemoryProjection($payload['FULL']);
+                $expected = self::isUnavailableProjection($payload['FULL'])
+                    ? null
+                    : self::normalizeMemoryProjection($payload['FULL']);
             } catch (\Throwable) {
                 $issues[] = self::reconciliationIssue('AUTO_COLLECTION_MEMORY_PROJECTION_INVALID', 'memory-projection');
             }
@@ -464,6 +477,15 @@ final class AutoCollectionService
         }
         unset($item);
         return ['items' => $result, 'revision' => $revision];
+    }
+
+    /** An exact, bounded unavailable payload preserves durable memories. */
+    private static function isUnavailableProjection(array $projection): bool
+    {
+        return ($projection['available'] ?? null) === false
+            && ($projection['total'] ?? null) === 0
+            && ($projection['items'] ?? null) === []
+            && array_keys($projection) === ['available', 'total', 'items'];
     }
 
     /** @param list<array<string,mixed>> $desired */

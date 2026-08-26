@@ -222,6 +222,11 @@ try {
     $count = autoCollectionRuntimeOne($db, 'SELECT COUNT(*) AS `count` FROM ' . $collection);
     $assert((int) ($count['count'] ?? -1) === 1, 'reactivation_created_duplicate_collection');
 
+    $unavailable = $service->syncMemoryProjection(['available' => false, 'total' => 0, 'items' => []]);
+    $assert($unavailable === ['inserted' => 0, 'updated' => 0, 'unchanged' => 0, 'retired' => 0, 'total' => 0], 'unavailable_source_not_preserved');
+    $preserved = autoCollectionRuntimeOne($db, 'SELECT COUNT(*) AS `count` FROM ' . $collection . " WHERE `state`='ACTIVE'");
+    $assert((int) ($preserved['count'] ?? -1) === 1, 'unavailable_source_retired_memory');
+
     // A class-term context is valid without fabricating a day-level archive
     // date. The shared FULL revision changes and is written to every ACTIVE
     // row when another Memory is added.
