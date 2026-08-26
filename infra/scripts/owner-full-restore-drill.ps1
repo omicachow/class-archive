@@ -419,7 +419,9 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
         # `wsl.exe --exec` does not consistently inherit /usr/sbin in PATH even
         # though an interactive shell can resolve mkfs.ext4. Resolve it inside
         # the already-validated shell boundary before formatting this exact file.
-        [void](Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v mkfs.ext4); test -n "$tool"; exec "$tool" -F -L CLASSARCHIVE_OWNER_RESTORE_V1 "$1"','sh',$imageWsl) 'restore_image_format_failed')
+        # ext4 labels are limited to 16 bytes; keep this exact marker within
+        # that boundary so it is not silently truncated by mkfs.ext4.
+        [void](Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v mkfs.ext4); test -n "$tool"; exec "$tool" -F -L CLASSARCHIVE_OWN "$1"','sh',$imageWsl) 'restore_image_format_failed')
     }
     else {
         Assert-Restore ([string]$imageType[0] -eq 'ext4') 'restore_image_filesystem_invalid'
@@ -427,7 +429,7 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
     $loopLines = Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed'
     Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0] -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
     $loop = $loopLines[0]
-    [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWNER_RESTORE_V1; mkdir -p "$1/docker-data" "$1/daemon"','sh',$mountPoint,$loop) 'restore_mount_failed')
+    [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; mkdir -p "$1/docker-data" "$1/daemon"','sh',$mountPoint,$loop) 'restore_mount_failed')
     $socketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf READY || true','sh',$dockerSocket))
     if ($socketState -notcontains 'READY') {
         [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p /run/classarchive-owner-restore-v1; nohup dockerd --host=unix:///run/classarchive-owner-restore-v1/docker.sock --data-root=/mnt/classarchive-owner-restore-v1/docker-data --exec-root=/run/classarchive-owner-restore-v1/exec --pidfile=/run/classarchive-owner-restore-v1/dockerd.pid --bridge=ca_restore0 --bip=10.246.0.1/24 --default-address-pool=base=10.247.0.0/16,size=24 --storage-driver=overlay2 --userland-proxy=false --log-level=error > /mnt/classarchive-owner-restore-v1/daemon/dockerd.log 2>&1 &','sh') 'restore_daemon_start_failed')
