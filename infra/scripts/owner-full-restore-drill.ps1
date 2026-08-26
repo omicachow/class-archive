@@ -432,7 +432,10 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
     [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; mkdir -p "$1/docker-data" "$1/daemon"','sh',$mountPoint,$loop) 'restore_mount_failed')
     $socketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf READY || true','sh',$dockerSocket))
     if ($socketState -notcontains 'READY') {
-        [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p /run/classarchive-owner-restore-v1; nohup dockerd --host=unix:///run/classarchive-owner-restore-v1/docker.sock --data-root=/mnt/classarchive-owner-restore-v1/docker-data --exec-root=/run/classarchive-owner-restore-v1/exec --pidfile=/run/classarchive-owner-restore-v1/dockerd.pid --bridge=ca_restore0 --bip=10.246.0.1/24 --default-address-pool=base=10.247.0.0/16,size=24 --storage-driver=overlay2 --userland-proxy=false --log-level=error > /mnt/classarchive-owner-restore-v1/daemon/dockerd.log 2>&1 &','sh') 'restore_daemon_start_failed')
+        # Disable the daemon's implicit bridge entirely. Compose creates only
+        # the explicit restore networks from the isolated address pool, and no
+        # second docker0-style bridge can collide with the primary daemon.
+        [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p /run/classarchive-owner-restore-v1; nohup dockerd --host=unix:///run/classarchive-owner-restore-v1/docker.sock --data-root=/mnt/classarchive-owner-restore-v1/docker-data --exec-root=/run/classarchive-owner-restore-v1/exec --pidfile=/run/classarchive-owner-restore-v1/dockerd.pid --bridge=none --default-address-pool=base=10.247.0.0/16,size=24 --storage-driver=overlay2 --userland-proxy=false --log-level=error > /mnt/classarchive-owner-restore-v1/daemon/dockerd.log 2>&1 &','sh') 'restore_daemon_start_failed')
         for ($attempt = 0; $attempt -lt 60; $attempt++) {
             Start-Sleep -Milliseconds 500
             $ready = @(Invoke-Ubuntu @('sh','-c','DOCKER_HOST="$1" docker info --format "{{.DockerRootDir}}" 2>/dev/null || true','sh',$dockerHost))
