@@ -41,6 +41,8 @@ Assert-Protocol ($runtime.Contains('`unexpected_${safeStage}`') `
     -and $runtime.Contains("runtimeStage = 'mounted_hash'") `
     -and $runtime.Contains("runtimeStage = 'queues'") `
     -and $runtime.Contains("runtimeStage = 'output'")) 'runtime_failure_stage_must_be_sanitized'
+Assert-Protocol (@([regex]::Matches($runtime, 'console\.log\(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=\$\{code\}`\);')).Count -eq 2 `
+    -and -not $runtime.Contains('console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL')) 'runtime_failure_marker_must_use_stdout'
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'

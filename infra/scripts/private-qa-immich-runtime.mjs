@@ -193,7 +193,11 @@ try {
   input = JSON.parse(readFileSync(INPUT_PATH, 'utf8'));
 } catch (error) {
   const code = error instanceof RuntimeError ? error.code : 'input_invalid';
-  console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=${code}`);
+  // This is a machine-readable, allowlisted failure marker rather than an
+  // arbitrary diagnostic. Emit it on stdout so Windows PowerShell 5.1 does
+  // not wrap the protocol record in a NativeCommandError before the outer
+  // fail-closed runner can map the safe reason code.
+  console.log(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=${code}`);
   process.exit(1);
 }
 
@@ -466,6 +470,6 @@ try {
 } catch (error) {
   const safeStage = /^[a-z_]{1,48}$/.test(runtimeStage) ? runtimeStage : 'unknown';
   const code = error instanceof RuntimeError ? error.code : `unexpected_${safeStage}`;
-  console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=${code}`);
+  console.log(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=${code}`);
   process.exit(1);
 }
