@@ -1,6 +1,6 @@
 # 合成环境备份与恢复演练
 
-状态：备份恢复合同已升级为 ClassIdentity v15、fixture v7、manifest v8。此前 v14/v6/v7 的合成演练证据已按版本失效，必须在 synthetic baseline 上重新执行破坏恢复演练后才可重新标记为通过。本结果不代表 NAS、异地或公网恢复能力。
+状态：ClassIdentity v15、fixture v7、manifest v8 的合成环境破坏恢复演练已于 2026-08-26 通过。确定性基线 `72/72/8`、504 项衍生图重建、Phase 0/1 回归和恢复后全投影复核均通过；本结果不代表 NAS、异地或公网恢复能力。
 
 ## 目标与边界
 
@@ -44,6 +44,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\backup-r
 8. 比较恢复前后业务指纹（投影 generation/built_at 不参与比较）；
 9. 跑完整 Phase 0 与 Phase 1 回归；
 10. 在 HTTP 回归后再次重建投影，确认最终运行态仍为 `ACTIVE`；将运行证据、两次 projection rebuild 和 `derivative-warmup.json` 写入被 Git 忽略的 `.codex-work/backup-restore-drill/<timestamp>/`。
+
+2026-08-26（本机，UTC 备份时间同日）的 v15/v7/v8 当前演练结果为：
+
+| 项目 | 结果 |
+|---|---|
+| 备份包 | `class-archive-20260826T105252Z`；manifest 7/7 文件 SHA-256 通过 |
+| 确定性恢复指纹 | `756c4ddefce2b224c26c6e472c808ec107cafe3d7c612c9cbad8aacafbad039e`；恢复前后业务状态一致 |
+| 基线 | `72/72/8` 恢复前后一致 |
+| 读取投影 | `PHOTO_CATALOG=ACTIVE/72`；`TIMELINE`、`ALBUMS`、`PEOPLE`、`MEMORIES`、`SPOTLIGHT` 全部 `ACTIVE`；Phase 0/1 回归后再次重建并复核 |
+| 衍生图恢复 | 空卷重建 `504/504`；72 张图片 × 7 种固定规格；0 个待处理或隔离队列项 |
+| Phase 0 | PASS |
+| Phase 1 | PASS |
+| 从删除卷开始到服务、投影、衍生图和 Immich 只读挂载恢复的粗略 RTO | 139 秒 |
+
+当前运行证据保存在被 Git 忽略的 `.codex-work/backup-restore-drill/20260826-185240/`。该目录中的 `result.json`、恢复前后指纹、两次投影重建结果、衍生图预热结果和 Phase 0/1 日志共同构成此次通过证据；真实媒体或私有路径不进入本文档。后续若绑定的恢复实现或合同版本变化，System Health 仍会按摘要失配将此证明标记为需要重新演练。
 
 2026-08-26（本机，UTC 备份时间 2026-08-25）的 v14/v6/v7 历史演练结果为：
 
