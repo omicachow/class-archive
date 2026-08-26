@@ -505,9 +505,10 @@ function Mount-RestoreStorage([bool]$AllowCreate) {
     else {
         Assert-Restore ([string]$imageType[0] -eq 'ext4') 'restore_image_filesystem_invalid'
     }
-    $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed')
-    Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0] -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
-    $loop = $loopLines[0]
+    $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed' |
+        ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0].Trim() -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
+    $loop = $loopLines[0].Trim()
     [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; install -d -m 0755 "$1/volumes"','sh',$mountPoint,$loop) 'restore_mount_failed')
     $legacySocketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf PRESENT || true','sh',$legacyDockerSocket))
     Assert-Restore ($legacySocketState -notcontains 'PRESENT') 'legacy_restore_daemon_active'
