@@ -70,15 +70,20 @@ const testFamily = {
   email: `fqa-${run}-family@class-archive.invalid`,
   password: `FqF-${crypto.randomBytes(32).toString('hex')}`,
 };
+const commentMarker = `本地评论验收-${crypto.randomUUID()}`;
+const replyMarker = `本地回复验收-${crypto.randomUUID()}`;
+const anonymousCommentMarker = `匿名评论验收-${crypto.randomUUID()}`;
 
 const transientIdentityPrefix = 'FQA-';
 let browser;
 let adminContext;
 let classmateContext;
 let familyContext;
+let anonymousContext;
 let createdIdentityId = 0;
 let frozenIdentities = 0;
 let screenshots = 0;
+const commentFixture = { photoId: null, rootId: null, replyId: null, anonymousId: null };
 const unexpectedNetwork = new Set();
 
 function core(relative) { return new URL(relative, coreOrigin).href; }
@@ -126,7 +131,7 @@ async function submit(page, form, code) {
   await page.waitForTimeout(180);
 }
 
-async function login(page, username, password, code) {
+async function login(page, username, password, code, presentedUsername = username) {
   await go(page, coreOrigin, 'identification.php', `${code}_login_page`);
   const form = page.locator('form[name="login_form"]');
   assert(await form.count() === 1, `${code}_login_form_missing`);
@@ -138,7 +143,7 @@ async function login(page, username, password, code) {
     const response = await fetch('ws.php?format=json', { method: 'POST', body, credentials: 'same-origin', cache: 'no-store' });
     try { return { status: response.status, json: await response.json() }; } catch { return { status: response.status, json: null }; }
   });
-  assert(status.status === 200 && status.json?.stat === 'ok' && status.json?.result?.username === username, `${code}_session_invalid`);
+  assert(status.status === 200 && status.json?.stat === 'ok' && status.json?.result?.username === presentedUsername, `${code}_session_invalid`);
 }
 
 async function codeValues(page, count, code) {
@@ -223,7 +228,18 @@ async function createClassmateAndClaim(adminPage) {
   assert(await invitation.count() === 1, 'family_invitation_form_missing');
   await submit(page, invitation, 'issue_family_invitation');
   const [invitationCode] = await codeValues(page, 3, 'family_invitation');
-  return invitationCode;
+  await go(page, coreOrigin, 'index.php?/class-identity/my', 'classmate_my_after_invitation');
+  const anonymous = page.locator('form:has(input[name="action"][value="activate_anonymous"])');
+  assert(await anonymous.count() === 1, 'anonymous_activation_form_missing');
+  await submit(page, anonymous, 'anonymous_activation');
+  const anonymousSecrets = (await page.locator('code.ca-public__secret').allTextContents()).map((value) => value.trim());
+  assert(anonymousSecrets.length === 2, 'anonymous_credentials_count');
+  assert(/^anon_[a-f0-9]{20}$/.test(anonymousSecrets[0] ?? ''), 'anonymous_username_shape');
+  assert(/^[A-Za-z0-9_-]{24,128}$/.test(anonymousSecrets[1] ?? ''), 'anonymous_password_shape');
+  return {
+    invitationCode,
+    anonymous: { username: anonymousSecrets[0], password: anonymousSecrets[1] },
+  };
 }
 
 async function acceptFamily(invitationCode) {
@@ -262,6 +278,138 @@ async function mediaResponse(page, target, method, headers = {}) {
   }, { target, method, headers });
 }
 
+async function waitForPhotoMutation(page, expectedPath, code, action) {
+  const responsePromise = page.waitForResponse((response) => {
+    if (response.request().method() !== 'POST') return false;
+    try {
+      const target = new URL(response.url());
+      return target.origin === photoOrigin.origin && target.pathname === expectedPath;
+    } catch { return false; }
+  }, { timeout: 30_000 }).catch(() => null);
+  await action();
+  const response = await responsePromise;
+  assert(response !== null && response.status() >= 200 && response.status() < 300, code);
+}
+
+async function openCommentViewer(page, photoId, code) {
+  if (photoId === null) {
+    await go(page, photoOrigin, '/photos', `${code}_photos`);
+    await page.waitForFunction(() => document.querySelectorAll('.photo-card').length >= 1, null, { timeout: 90_000 });
+    const href = await page.locator('.photo-card').first().getAttribute('href');
+    assert(typeof href === 'string' && /^\/photos\/[0-9a-f-]{36}$/i.test(href), `${code}_photo_href`);
+    photoId = href.split('/').pop().toLowerCase();
+  }
+  await go(page, photoOrigin, `/photos/${photoId}`, `${code}_viewer`);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('.viewer-image[src^="/api/assets/"]');
+    return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
+  }, null, { timeout: 90_000 });
+  const comments = page.getByRole('button', { name: '打开评论', exact: true });
+  assert(await comments.count() === 1, `${code}_comments_button`);
+  await comments.click();
+  assert(await comments.getAttribute('aria-expanded') === 'true', `${code}_comments_open`);
+  return photoId;
+}
+
+async function createClassmateComments(page) {
+  commentFixture.photoId = await openCommentViewer(page, null, 'classmate_comment');
+  const composer = page.locator('.viewer-comments > .comment-composer').first();
+  assert(await composer.count() === 1, 'classmate_comment_composer');
+  await composer.locator('textarea[name="body"]').fill(commentMarker);
+  await waitForPhotoMutation(page, '/api/class-archive/comments/create', 'classmate_comment_create', async () => {
+    await composer.getByRole('button', { name: '发布', exact: true }).click();
+  });
+  const root = page.locator('.comment-item').filter({ hasText: commentMarker }).last();
+  await root.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await root.count() === 1, 'classmate_comment_visible');
+  commentFixture.rootId = (await root.getAttribute('data-comment-id') ?? '').toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(commentFixture.rootId), 'classmate_comment_id');
+
+  const reply = root.getByRole('button', { name: '回复', exact: true });
+  assert(await reply.count() === 1, 'classmate_reply_control');
+  await reply.click();
+  const replyForm = root.locator('.comment-reply-form');
+  await replyForm.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
+  assert(await replyForm.count() === 1, 'classmate_reply_form');
+  await replyForm.locator('textarea[name="body"]').fill(replyMarker);
+  await waitForPhotoMutation(page, '/api/class-archive/comments/reply', 'classmate_reply_create', async () => {
+    await replyForm.getByRole('button', { name: '回复', exact: true }).click();
+  });
+  const replyCard = page.locator('.comment-item[data-reply="true"]').filter({ hasText: replyMarker }).last();
+  await replyCard.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await replyCard.count() === 1, 'classmate_reply_visible');
+  commentFixture.replyId = (await replyCard.getAttribute('data-comment-id') ?? '').toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(commentFixture.replyId), 'classmate_reply_id');
+}
+
+async function createAnonymousComment(credentials) {
+  anonymousContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
+  const page = await anonymousContext.newPage();
+  observeLocalOnly(page);
+  await login(page, credentials.username, credentials.password, 'anonymous', '匿名账号');
+  await openCommentViewer(page, commentFixture.photoId, 'anonymous_comment');
+  const composer = page.locator('.viewer-comments > .comment-composer').first();
+  assert(await composer.count() === 1, 'anonymous_comment_composer');
+  await composer.locator('textarea[name="body"]').fill(anonymousCommentMarker);
+  await waitForPhotoMutation(page, '/api/class-archive/comments/create', 'anonymous_comment_create', async () => {
+    await composer.getByRole('button', { name: '发布', exact: true }).click();
+  });
+  const card = page.locator('.comment-item').filter({ hasText: anonymousCommentMarker }).last();
+  await card.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await card.count() === 1, 'anonymous_comment_visible');
+  commentFixture.anonymousId = (await card.getAttribute('data-comment-id') ?? '').toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(commentFixture.anonymousId), 'anonymous_comment_id');
+  const author = (await card.locator('.comment-author').innerText()).trim();
+  assert(/^匿名\s+[A-Z0-9]{2,12}$/.test(author), 'anonymous_comment_pseudonym');
+  const markup = await card.evaluate((node) => node.outerHTML);
+  assert(!/(?:identity_id|seat_id|account_id|user_id|requested_username|classmate)/i.test(markup), 'anonymous_comment_identity_leak');
+}
+
+async function assertFamilyCommentsReadOnly(page) {
+  await openCommentViewer(page, commentFixture.photoId, 'family_comment');
+  assert(await page.locator('.comment-item').filter({ hasText: commentMarker }).count() === 1, 'family_classmate_comment_missing');
+  assert(await page.locator('.comment-item').filter({ hasText: anonymousCommentMarker }).count() === 1, 'family_anonymous_comment_missing');
+  assert(await page.locator('.viewer-comments > .comment-composer').count() === 0, 'family_comment_composer_visible');
+  assert(await page.locator('.comment-readonly').count() === 1, 'family_comment_readonly_copy');
+  const result = await page.evaluate(async ({ photoId, marker }) => {
+    const stateResponse = await fetch('/api/class-archive/product-state', { credentials: 'same-origin', cache: 'no-store' });
+    const state = await stateResponse.json().catch(() => null);
+    if (stateResponse.status !== 200 || !state || typeof state.csrfToken !== 'string') return { state: stateResponse.status, status: 0 };
+    const response = await fetch('/api/class-archive/comments/create', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csrfToken: state.csrfToken, photoUuid: photoId, parentId: null, body: marker }),
+    });
+    return { state: stateResponse.status, status: response.status };
+  }, { photoId: commentFixture.photoId, marker: 'local-family-readonly-probe' });
+  assert(result.state === 200 && result.status === 403, 'family_comment_direct_post_not_denied');
+}
+
+async function deleteFixtureComments(adminPage, recovery = false) {
+  if (!commentFixture.photoId) return;
+  await openCommentViewer(adminPage, commentFixture.photoId, 'admin_comment_cleanup');
+  for (const key of ['replyId', 'anonymousId', 'rootId']) {
+    const id = commentFixture[key];
+    if (!id) continue;
+    const card = adminPage.locator(`.comment-item[data-comment-id="${id}"]`);
+    await card.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+    if (recovery && await card.count() === 0) { commentFixture[key] = null; continue; }
+    assert(await card.count() === 1, `admin_${key}_visible`);
+    const remove = card.getByRole('button', { name: '删除', exact: true });
+    assert(await remove.count() === 1, `admin_${key}_delete_control`);
+    await remove.click();
+    const dialog = adminPage.locator('dialog[open]').last();
+    await dialog.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
+    assert(await dialog.count() === 1, `admin_${key}_delete_dialog`);
+    await dialog.getByLabel('操作理由', { exact: true }).fill('本地受控评论验收清理');
+    await waitForPhotoMutation(adminPage, '/api/class-archive/manage/comments/delete', `admin_${key}_delete`, async () => {
+      await dialog.getByRole('button', { name: '确认', exact: true }).click();
+    });
+    await card.waitFor({ state: 'detached', timeout: 30_000 }).catch(() => null);
+    assert(await card.count() === 0, `admin_${key}_removed`);
+    commentFixture[key] = null;
+  }
+}
+
 async function assertDenied(result, code) {
   // A malformed or unknown canonical ID is allowed to fail with a bounded
   // 400 as well as an authorization/not-found response.  In every case the
@@ -297,12 +445,7 @@ async function browseFamily(page) {
     await assertDenied(await mediaResponse(page, target, method, headers), code);
   }
 
-  await page.locator('.photo-card').first().click();
-  await page.waitForURL((value) => value.origin === photoOrigin.origin && /^\/photos\/[0-9a-f-]{36}$/.test(value.pathname), { timeout: 30_000 });
-  await page.waitForFunction(() => {
-    const image = document.querySelector('.viewer-image[src^="/api/assets/"]');
-    return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
-  }, null, { timeout: 90_000 });
+  await assertFamilyCommentsReadOnly(page);
   const viewer = await page.locator('.viewer-image').getAttribute('src');
   assert(typeof viewer === 'string' && /^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=preview/.test(viewer), 'family_viewer_not_mediaguard');
   await noTechnicalIdentifiers(page, 'family_viewer');
@@ -347,9 +490,13 @@ try {
   acceptLocalBusinessConfirmations(adminPage);
   observeLocalOnly(adminPage);
   await cleanPriorTransientIdentities(adminPage);
-  const invitationCode = await createClassmateAndClaim(adminPage);
-  const familyPage = await acceptFamily(invitationCode);
+  const registration = await createClassmateAndClaim(adminPage);
+  const classmatePage = classmateContext.pages()[0];
+  await createClassmateComments(classmatePage);
+  await createAnonymousComment(registration.anonymous);
+  const familyPage = await acceptFamily(registration.invitationCode);
   await browseFamily(familyPage);
+  await deleteFixtureComments(adminPage);
   await freezeIdentity(adminPage, createdIdentityId, 'new_cleanup');
   const sessionAfterFreeze = await mediaResponse(familyPage, '/api/timeline?limit=1', 'GET');
   assert([401, 403].includes(sessionAfterFreeze.status), 'family_session_not_revoked_after_freeze');
@@ -360,14 +507,17 @@ try {
   process.exitCode = 1;
 } finally {
   try {
-    if (createdIdentityId > 0 && adminContext) {
+    if (adminContext) {
       const pages = adminContext.pages();
-      if (pages.length > 0) await freezeIdentity(pages[0], createdIdentityId, 'finally_cleanup');
+      if (pages.length > 0) {
+        await deleteFixtureComments(pages[0], true);
+        if (createdIdentityId > 0) await freezeIdentity(pages[0], createdIdentityId, 'finally_cleanup');
+      }
     }
   } catch {
     process.exitCode = 1;
   }
-  for (const context of [familyContext, classmateContext, adminContext]) {
+  for (const context of [anonymousContext, familyContext, classmateContext, adminContext]) {
     if (context) await context.close().catch(() => {});
   }
   if (browser) await browser.close().catch(() => {});

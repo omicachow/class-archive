@@ -103,7 +103,7 @@ async function assertMobileLayout(page, code) {
     return { overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1, visible: nav ? getComputedStyle(nav).display !== 'none' : false, links: links.length, minTarget };
   });
   assert(!layout.overflow, `${code}_horizontal_overflow`);
-  assert(layout.visible && layout.links === 5 && layout.minTarget >= 44, `${code}_mobile_navigation`);
+  assert(layout.visible && layout.links === 6 && layout.minTarget >= 44, `${code}_mobile_navigation`);
 }
 
 async function assertDesktopLayout(page, code) {
