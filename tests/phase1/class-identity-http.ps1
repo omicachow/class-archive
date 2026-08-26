@@ -113,6 +113,22 @@ function Invoke-Fixture {
     catch { Stop-Setup "Fixture action '$Action' returned invalid JSON." }
 }
 
+function Invoke-ReadProjectionRebuild {
+    $arguments = @($script:composeBase + @(
+        'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+    ))
+    $output = @(& wsl.exe @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Setup 'Post-cleanup read projection rebuild failed.'
+    }
+    try { $result = (($output -join '').Trim() | ConvertFrom-Json -ErrorAction Stop) }
+    catch { Stop-Setup 'Post-cleanup read projection rebuild returned invalid JSON.' }
+    if ([string]$result.result -ne 'PASS' -or [int]$result.count -lt 1) {
+        Stop-Setup 'Post-cleanup read projection rebuild did not restore the synthetic baseline.'
+    }
+}
+
 function ConvertTo-FormBody {
     param([Parameter(Mandatory = $true)][hashtable]$Form)
     $pairs = foreach ($key in ($Form.Keys | Sort-Object)) {
@@ -1159,6 +1175,7 @@ try {
                 $cleanupEnvironment['CI_TEST_BASELINE_IMAGE_COUNT'] = [string]$script:baselineImageCount
             }
             [void](Invoke-Fixture -Action cleanup -RunId $script:runId -Environment $cleanupEnvironment)
+            Invoke-ReadProjectionRebuild
         } catch {
             Add-Failure 'cleanup' 'namespace-bounded fixture cleanup failed; run the documented cleanup command before retrying'
         }

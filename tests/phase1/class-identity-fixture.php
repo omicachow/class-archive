@@ -647,7 +647,7 @@ function ciTestDeleteCoreUsers(array $ids, string $prefix, array $boundFixtureId
 }
 
 /** @param list<int> $identityIds */
-function ciTestCleanupSubmissionMedia(array $identityIds, string $submission, string $archiveImage): void
+function ciTestCleanupSubmissionMedia(array $identityIds, string $submission, string $archiveImage, string $photo): void
 {
     if ($identityIds === []) {
         return;
@@ -684,12 +684,38 @@ function ciTestCleanupSubmissionMedia(array $identityIds, string $submission, st
         if (count($archiveRows) !== 1 || (int) $archiveRows[0]['piwigo_image_id'] !== $approvedImageId) {
             ciTestFail('Cleanup refused an ambiguous approved submission link.');
         }
+        $canonicalRows = query2array(
+            'SELECT piwigo_image_id, media_reference FROM `' . $photo . '` '
+            . 'WHERE source_submission_id = ' . $submissionId,
+        );
+        if (count($canonicalRows) !== 1 || (int) $canonicalRows[0]['piwigo_image_id'] !== $approvedImageId) {
+            ciTestFail('Cleanup refused an ambiguous canonical submission link.');
+        }
+        $canonicalRelative = preg_replace('#^\./#', '', (string) $canonicalRows[0]['media_reference']);
+        if (!is_string($canonicalRelative)
+            || preg_match('#\A(?:upload|galleries)/[A-Za-z0-9_. /-]+\z#D', $canonicalRelative) !== 1
+            || str_contains($canonicalRelative, '..')
+        ) {
+            ciTestFail('Approved submission canonical path is unsafe.');
+        }
         $imageRows = query2array('SELECT id, path FROM ' . IMAGES_TABLE . ' WHERE id = ' . $approvedImageId);
-        if (count($imageRows) !== 1) {
+        if (count($imageRows) > 1) {
             ciTestFail('Approved submission image is missing or ambiguous.');
         }
+        if ($imageRows === []) {
+            // delete_elements() runs before the ClassIdentity transaction. A
+            // prior interrupted cleanup may therefore have already removed
+            // both the Core row and file while the namespaced business rows
+            // remain. Permit only that exact, fully verified retry state.
+            $alreadyRemovedPath = CI_TEST_PIWIGO_ROOT . '/' . $canonicalRelative;
+            if (is_file($alreadyRemovedPath) || is_link($alreadyRemovedPath)) {
+                ciTestFail('Approved submission image row is missing while its file remains.');
+            }
+            continue;
+        }
         $relative = preg_replace('#^\./#', '', (string) $imageRows[0]['path']);
-        if (!is_string($relative) || preg_match('#\A(?:upload|galleries)/[A-Za-z0-9_. /-]+\z#D', $relative) !== 1 || str_contains($relative, '..')) {
+        if (!is_string($relative) || !hash_equals($canonicalRelative, $relative)
+            || preg_match('#\A(?:upload|galleries)/[A-Za-z0-9_. /-]+\z#D', $relative) !== 1 || str_contains($relative, '..')) {
             ciTestFail('Approved submission image path is unsafe.');
         }
         $sourcePath = CI_TEST_PIWIGO_ROOT . '/' . $relative;
@@ -718,6 +744,11 @@ function ciTestCleanup(string $runId): never
     $submission = $repository->table('submission');
     $archiveImage = $repository->table('archive_image');
     $photo = $repository->table('photo');
+    $photoComment = $repository->table('photo_comment');
+    $autoCollection = $repository->table('auto_collection');
+    $autoCollectionPhoto = $repository->table('auto_collection_photo');
+    $aiAssetIndex = $repository->table('ai_asset_index');
+    $aiIndexJob = $repository->table('ai_index_job');
 
     $identityRows = query2array(
         'SELECT id, roster_code FROM `' . $identity . '` WHERE roster_code IN ('
@@ -775,12 +806,33 @@ function ciTestCleanup(string $runId): never
         $coreUserIds[] = (int) $row['id'];
     }
 
-    ciTestCleanupSubmissionMedia($identityIds, $submission, $archiveImage);
+    ciTestCleanupSubmissionMedia($identityIds, $submission, $archiveImage, $photo);
 
     $repository->transaction(static function (\ClassIdentity\Repository $tx) use (
         $identity, $seat, $account, $principal, $operation, $token, $audit, $submission, $archiveImage, $photo,
+        $photoComment, $autoCollection, $autoCollectionPhoto, $aiAssetIndex, $aiIndexJob,
         $idList, $accountList, $principalList,
     ): void {
+        $fixturePhotoIds = 'SELECT `class_photo_id` FROM `' . $photo . '` WHERE `source_submission_id` IN '
+            . '(SELECT `id` FROM `' . $submission . '` WHERE `identity_id` IN (' . $idList . '))';
+        // Derived Memory/AI state is reproducible and the surrounding Core
+        // delete hook has already made all photo-backed projections STALE.
+        // Remove only rows tied to this run's canonical submission photos so
+        // v15 foreign keys cannot turn a cleanup retry into a partial fixture.
+        $tx->execute(
+            'DELETE child FROM `' . $photoComment . '` child INNER JOIN `' . $photoComment . '` parent '
+                . 'ON parent.`comment_id`=child.`parent_comment_id` WHERE parent.`class_photo_id` IN (' . $fixturePhotoIds . ')',
+        );
+        $tx->execute('DELETE FROM `' . $photoComment . '` WHERE `class_photo_id` IN (' . $fixturePhotoIds . ')');
+        $tx->execute('DELETE FROM `' . $aiIndexJob . '` WHERE `class_photo_id` IN (' . $fixturePhotoIds . ')');
+        $tx->execute('DELETE FROM `' . $aiAssetIndex . '` WHERE `class_photo_id` IN (' . $fixturePhotoIds . ')');
+        $tx->execute(
+            'DELETE member FROM `' . $autoCollectionPhoto . '` member INNER JOIN `' . $autoCollection . '` collection '
+                . 'ON collection.`auto_collection_id`=member.`auto_collection_id` '
+                . 'WHERE collection.`cover_class_photo_id` IN (' . $fixturePhotoIds . ')',
+        );
+        $tx->execute('DELETE FROM `' . $autoCollection . '` WHERE `cover_class_photo_id` IN (' . $fixturePhotoIds . ')');
+        $tx->execute('DELETE FROM `' . $autoCollectionPhoto . '` WHERE `class_photo_id` IN (' . $fixturePhotoIds . ')');
         $tx->execute('DELETE FROM `' . $photo . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $archiveImage . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $submission . '` WHERE identity_id IN (' . $idList . ')');
