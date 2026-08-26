@@ -37,6 +37,10 @@ foreach ($needle in @(
 }
 Assert-Protocol ($runtime.Contains("await startQueueIfIdle(accessToken, 'faceDetection')") `
     -and -not $runtime.Contains("'/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }")) 'face_jobs_must_not_be_double_enqueued'
+Assert-Protocol ($runtime.Contains('`unexpected_${safeStage}`') `
+    -and $runtime.Contains("runtimeStage = 'mounted_hash'") `
+    -and $runtime.Contains("runtimeStage = 'queues'") `
+    -and $runtime.Contains("runtimeStage = 'output'")) 'runtime_failure_stage_must_be_sanitized'
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'

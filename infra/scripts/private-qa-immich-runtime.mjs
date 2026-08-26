@@ -186,6 +186,7 @@ async function drainOutOfScopeOcr(token) {
 }
 
 let input;
+let runtimeStage = 'input';
 try {
   if (process.argv.length !== 4 || process.argv[2] !== '--input-file' || process.argv[3] !== INPUT_PATH) fail('input_source_invalid');
   assertPrivateFile(INPUT_PATH, 'input_file_invalid');
@@ -197,6 +198,7 @@ try {
 }
 
 try {
+  runtimeStage = 'input_contract';
   if (!exactKeys(input, ['version', 'scope', 'mode', 'catalog_digest', 'email', 'password', 'name', 'library_name', 'models', 'photos'])
     || input.version !== 1 || !['PRIVATE_REAL_DATA_QA', 'PRIVATE_REAL_FULL'].includes(input.scope)) fail('input_shape_invalid');
   const runtimeScope = input.scope;
@@ -233,6 +235,7 @@ try {
   }
 
   const started = Date.now();
+  runtimeStage = 'mounted_hash';
   const verifyStarted = Date.now();
   for (const photo of photos) {
     const actual = await fileSha256(photo.path);
@@ -241,6 +244,7 @@ try {
   const verifyMs = Date.now() - verifyStarted;
 
   let adminId;
+  runtimeStage = 'technical_login';
   if (mode === 'INITIAL') {
     const admin = await request('admin_signup', '/auth/admin-sign-up', 'POST', { email, password, name });
     adminId = uuid(admin?.id, 'admin_id_invalid');
@@ -250,8 +254,10 @@ try {
   const loginAdminId = uuid(login?.userId, 'login_user_id_invalid');
   if (login?.isAdmin !== true || (adminId !== undefined && loginAdminId !== adminId)) fail('technical_identity_invalid');
   adminId = loginAdminId;
+  runtimeStage = 'ocr_guard';
   await disableOutOfScopeOcr(accessToken);
 
+  runtimeStage = 'library';
   let library;
   let scanMs = 0;
   if (mode === 'INITIAL') {
@@ -297,6 +303,7 @@ try {
   // Enumerate the one expected library through Immich v3.1.0's official
   // paginated metadata search. The previous large-assets endpoint is capped
   // at 1000 and cannot safely prove the 2k+ private-full catalog is complete.
+  runtimeStage = 'inventory';
   let items = [];
   for (let attempt = 0; attempt < 900; attempt += 1) {
     const collected = [];
@@ -343,6 +350,7 @@ try {
   }
   if (assetsByPath.size !== paths.size || [...assetsByPath.keys()].some((path) => !paths.has(path))) fail('asset_inventory_unexpected_path');
 
+  runtimeStage = 'bindings';
   const bindings = photos.map((photo) => {
     const assetId = assetsByPath.get(photo.path);
     if (assetId === undefined) fail('asset_inventory_missing_path');
@@ -359,6 +367,7 @@ try {
   let faceQueue;
   let recognitionQueue;
   let smartQueue;
+  runtimeStage = 'queues';
   if (mode === 'INITIAL') {
     const faceStarted = Date.now();
     // Library discovery already schedules missing Face jobs. Starting the
@@ -389,6 +398,7 @@ try {
     smartQueue = await waitForQueue(accessToken, 'smartSearch', 300_000);
   }
 
+  runtimeStage = 'people';
   const people = await request('people', '/people?size=500&withHidden=false', 'GET', undefined, accessToken);
   if (!Array.isArray(people?.people) || people.people.length < 1) fail('people_response_invalid');
   const searchQueries = [
@@ -401,6 +411,7 @@ try {
     ['en_graduation', 'graduation photos'],
     ['en_night', 'group photo at night'],
   ];
+  runtimeStage = 'search';
   const searchCounts = {};
   const searchStarted = Date.now();
   for (const [key, query] of searchQueries) {
@@ -413,6 +424,7 @@ try {
   if (Object.values(searchCounts).some((count) => !Number.isSafeInteger(count) || count < 1)) fail('search_runtime_empty');
   await drainOutOfScopeOcr(accessToken);
 
+  runtimeStage = 'output';
   const output = {
     version: 1,
     scope: runtimeScope,
@@ -452,7 +464,8 @@ try {
   assertPrivateFile(OUTPUT_PATH, 'output_file_invalid');
   console.log(`PRIVATE_QA_IMMICH_RUNTIME=PASS assets=${photos.length} people=${people.people.length} face_jobs=${faceJobs} recognition_jobs=${recognitionJobs} smart_jobs=${smartJobs}`);
 } catch (error) {
-  const code = error instanceof RuntimeError ? error.code : 'unexpected';
+  const safeStage = /^[a-z_]{1,48}$/.test(runtimeStage) ? runtimeStage : 'unknown';
+  const code = error instanceof RuntimeError ? error.code : `unexpected_${safeStage}`;
   console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=${code}`);
   process.exit(1);
 }
