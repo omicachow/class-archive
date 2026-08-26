@@ -113,6 +113,8 @@ async function assertDesktopLayout(page, code) {
 
 async function browse(viewport, mobile) {
   const unexpectedNetwork = new Set();
+  let observeHomeRequests = false;
+  let homeTimelineRequests = 0;
   const context = await browser.newContext({ viewport, deviceScaleFactor: mobile ? 1 : 1.25 });
   try {
     await context.addCookies([{ name: 'pwg_id', value: credential.cookie, domain: '127.0.0.1', path: '/', httpOnly: true, secure: false, sameSite: 'Lax' }]);
@@ -121,8 +123,38 @@ async function browse(viewport, mobile) {
       try {
         const url = new URL(request.url());
         if (url.protocol === 'http:' && url.hostname !== '127.0.0.1') unexpectedNetwork.add(url.hostname);
+        if (observeHomeRequests && url.origin === photoOrigin.origin && url.pathname === '/api/class-archive/timeline') {
+          homeTimelineRequests += 1;
+        }
       } catch { unexpectedNetwork.add('invalid'); }
     });
+
+    observeHomeRequests = true;
+    await go(page, '/', `${mobile ? 'mobile' : 'desktop'}_home`);
+    await waitForCount(page, '.home-featured', 1, 'home_featured_missing');
+    observeHomeRequests = false;
+    assert(new URL(page.url()).pathname === '/home', 'home_root_redirect_invalid');
+    assert(await page.getByRole('heading', { name: '首页', exact: true }).count() >= 1, 'home_heading_missing');
+    for (const [selector, code] of [
+      ['.home-featured', 'home_featured_missing'],
+      ['.home-memory-row', 'home_memories_missing'],
+      ['.home-album-row', 'home_albums_missing'],
+      ['.home-people-row', 'home_people_missing'],
+      ['[data-home-all-photos]', 'home_all_photos_missing'],
+    ]) {
+      assert(await page.locator(selector).count() === 1, code);
+    }
+    for (const heading of ['精选', '回忆', '班级相册', '人物']) {
+      assert(await page.getByRole('heading', { name: heading, exact: true }).count() === 1, `home_${heading.length}_heading_missing`);
+    }
+    const allPhotos = page.getByRole('link', { name: /^查看全部 \d+ 张照片$/ });
+    assert(await allPhotos.count() === 1 && await allPhotos.getAttribute('href') === '/photos', 'home_all_photos_link_invalid');
+    const performanceTimelineRequest = await page.evaluate(() => performance.getEntriesByType('resource')
+      .some((entry) => new URL(entry.name).pathname === '/api/class-archive/timeline'));
+    assert(homeTimelineRequests === 0 && performanceTimelineRequest === false, 'home_requested_full_timeline');
+    if (mobile) await assertMobileLayout(page, 'home'); else await assertDesktopLayout(page, 'home');
+    await assertQuietBusinessSurface(page, 'home');
+    await capture(page, mobile ? '08-home-mobile.png' : '00-home-desktop.png');
 
     await go(page, '/photos', `${mobile ? 'mobile' : 'desktop'}_photos`);
     assert(await page.getByRole('heading', { name: '照片', exact: true }).count() >= 1, 'photos_heading_missing');
@@ -153,12 +185,64 @@ async function browse(viewport, mobile) {
     await waitForCount(page, '.album-card', 2, 'album_hierarchy_missing');
     const albums = await page.locator('.album-card').count();
     assert(albums >= 2, 'album_hierarchy_count_invalid');
+    const albumContract = await page.evaluate(async () => {
+      const response = await fetch('/api/class-archive/albums', { credentials: 'same-origin', cache: 'no-store' });
+      const payload = await response.json().catch(() => null);
+      return { status: response.status, payload };
+    });
+    assert(albumContract.status === 200 && albumContract.payload && Array.isArray(albumContract.payload.items), 'album_contract_unavailable');
+    assert(albumContract.payload.items.length === albums && albumContract.payload.items.length >= 2, 'leaf_album_card_count_mismatch');
+    assert(albumContract.payload.items.every((album) => Number.isInteger(album?.directTotal) && album.directTotal > 0), 'pure_container_album_visible');
+    const cardIds = await page.locator('.album-card').evaluateAll((cards) => cards.map((card) => {
+      const href = card.getAttribute('href') ?? '';
+      const match = /^\/albums\/([0-9a-f-]{36})$/i.exec(href);
+      return match ? match[1].toLowerCase() : null;
+    }));
+    const contractIds = albumContract.payload.items.map((album) => typeof album?.id === 'string' ? album.id.toLowerCase() : null);
+    assert(cardIds.every(Boolean) && contractIds.every(Boolean)
+      && new Set(cardIds).size === cardIds.length
+      && cardIds.slice().sort().join(',') === contractIds.slice().sort().join(','), 'leaf_album_projection_mismatch');
+    const sourceCounts = Object.create(null);
+    for (const album of albumContract.payload.items) {
+      sourceCounts[album.sourceKind] = (sourceCounts[album.sourceKind] ?? 0) + 1;
+    }
+    assert(Number.isInteger(sourceCounts.QQ) && sourceCounts.QQ > 0, 'qq_leaf_albums_missing');
+    assert(Number.isInteger(sourceCounts.GRADUATION) && sourceCounts.GRADUATION > 0, 'graduation_leaf_albums_missing');
+    const filters = page.locator('.album-filter-bar[aria-label="相册来源筛选"]');
+    assert(await filters.count() === 1, 'album_source_filters_missing');
+    await filters.getByRole('button', { name: 'QQ 相册', exact: true }).click();
+    assert(await page.locator('.album-card').count() === sourceCounts.QQ, 'qq_album_filter_count_invalid');
+    await filters.getByRole('button', { name: '毕业相册', exact: true }).click();
+    assert(await page.locator('.album-card').count() === sourceCounts.GRADUATION, 'graduation_album_filter_count_invalid');
+    await filters.getByRole('button', { name: '全部', exact: true }).click();
+    assert(await page.locator('.album-card').count() === albums, 'album_filter_restore_invalid');
     const covers = await page.locator('.album-cover img[src^="/api/assets/"]').count();
     assert(covers >= 2, 'album_covers_missing');
     await waitForDecoded(page, '.album-cover img[src^="/api/assets/"]', Math.min(3, covers), 'album_cover_decode_failed');
+    const albumSurfaceText = await page.locator('body').innerText();
+    assert(!albumSurfaceText.includes('高速下载 - cnzx') && !albumSurfaceText.includes('高速下载- cnzx'), 'cnzx_source_name_publicly_visible');
+    const detailCard = page.locator('.album-card').first();
+    const detailTitle = (await detailCard.locator('.album-title').innerText()).trim();
+    assert(detailTitle.length > 0, 'leaf_album_title_missing');
     if (mobile) await assertMobileLayout(page, 'albums'); else await assertDesktopLayout(page, 'albums');
     await assertQuietBusinessSurface(page, 'albums');
     if (!mobile) await capture(page, '03-albums-desktop.png');
+
+    await Promise.all([
+      page.waitForURL((value) => value.origin === photoOrigin.origin && /^\/albums\/[0-9a-f-]{36}$/i.test(value.pathname), { timeout: 30_000 }).catch(() => null),
+      detailCard.click(),
+    ]);
+    assert(/^\/albums\/[0-9a-f-]{36}$/i.test(new URL(page.url()).pathname), 'leaf_album_route_invalid');
+    await page.locator('.album-photo-grid').waitFor({ state: 'visible', timeout: 45_000 }).catch(() => null);
+    assert(await page.getByRole('heading', { name: detailTitle, exact: true }).count() === 1, 'leaf_album_detail_title_missing');
+    assert(await page.locator('.album-photo-grid').count() === 1, 'leaf_album_photo_grid_missing');
+    assert(await page.locator('.album-children').count() === 0, 'leaf_album_child_navigation_visible');
+    assert(!(await page.locator('body').innerText()).includes('下级相册'), 'leaf_album_child_copy_visible');
+    const withinAlbum = page.getByRole('link', { name: '在此相册中搜索', exact: true });
+    assert(await withinAlbum.count() === 1 && /^\/search\?album=[0-9a-f-]{36}$/i.test(await withinAlbum.getAttribute('href') ?? ''), 'leaf_album_search_link_invalid');
+    if (mobile) await assertMobileLayout(page, 'leaf_album'); else await assertDesktopLayout(page, 'leaf_album');
+    await assertQuietBusinessSurface(page, 'leaf_album');
+    await capture(page, mobile ? '09-leaf-album-mobile.png' : '07-leaf-album-desktop.png');
 
     await go(page, '/search', `${mobile ? 'mobile' : 'desktop'}_search`);
     assert(await page.getByRole('heading', { name: '搜索', exact: true }).count() >= 1, 'search_heading_missing');
