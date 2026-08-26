@@ -956,7 +956,7 @@ async function gatewayJson(request, path, clientAddress) {
 
 function mappedPublicGatewayStatus(status) {
   if (status >= 200 && status < 300) return status;
-  return new Set([400, 403, 404, 409, 503]).has(status) ? status : 503;
+  return new Set([400, 403, 404, 409, 429, 503]).has(status) ? status : 503;
 }
 
 async function boundedGatewayBody(result) {
@@ -1871,8 +1871,18 @@ async function handleApi(request, response, url, clientAddress) {
     }
     const commentsMatch = /^\/api\/class-archive\/comments\/([0-9a-f-]{36})$/i.exec(url.pathname);
     if (commentsMatch) {
-      exactQuery(url, new Set());
-      await relayPublicGatewayApi(request, response, `/api/comments/${assertUuid(commentsMatch[1])}`, clientAddress, { responseOptions: { metadata: true } });
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const params = new URLSearchParams();
+      if (query.has('cursor')) params.set('cursor', assertUuid(query.get('cursor')));
+      if (query.has('limit')) {
+        const limit = query.get('limit');
+        if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) {
+          throw new TypeError('class_archive_web_compat_comment_limit_invalid');
+        }
+        params.set('limit', limit);
+      }
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/comments/${assertUuid(commentsMatch[1])}${suffix}`, clientAddress, { responseOptions: { metadata: true } });
       return;
     }
     if (url.pathname === '/api/class-archive/search/suggestions') {

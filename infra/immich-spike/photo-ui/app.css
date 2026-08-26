@@ -468,6 +468,8 @@ img { display: block; max-width: 100%; }
 .comment-author { font-size: .82rem; }
 .comment-time { color: rgba(255,255,255,.48); font-size: .68rem; white-space: nowrap; }
 .comment-body { margin: 8px 0 0; color: rgba(255,255,255,.82); font-size: .84rem; line-height: 1.7; overflow-wrap: anywhere; }
+.comment-item[data-deleted="true"] .comment-body { color: rgba(255,255,255,.48); font-style: italic; }
+.comment-load-more { align-self: flex-start; margin-top: 14px; }
 .comment-actions { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
 .viewer-info .ghost-button { color: rgba(255,255,255,.64); }
 .viewer-info .ghost-button:hover { background: rgba(255,255,255,.08); color: #fff; }

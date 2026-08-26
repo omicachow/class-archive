@@ -61,7 +61,9 @@ final class PhotoAppRedirect
         if (preg_match('/\A[1-9][0-9]{0,4}\z/D', $port) !== 1 || (int) $port > 65535) {
             \ClassIdentityHttp::abort(503, '照片界面暂时不可用。');
         }
-        header('Location: http://127.0.0.1:' . $port . '/photos', true, 303);
+        // Collections-first Home is the member default.  The complete archive
+        // timeline remains a deliberate /photos destination from there.
+        header('Location: http://127.0.0.1:' . $port . '/home', true, 303);
         exit;
     }
 }

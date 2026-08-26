@@ -6,8 +6,10 @@ namespace ClassIdentity\Gateway;
 
 use ClassIdentity\Access;
 use ClassIdentity\AlbumService;
+use ClassIdentity\AutoCollectionService;
 use ClassIdentity\CanonicalPhotoService;
 use ClassIdentity\PersonCurationService;
+use ClassIdentity\Repository;
 use ClassIdentity\SpotlightService;
 
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
@@ -135,6 +137,17 @@ final class ReadProjectionBuilder
         if ($kinds === []) {
             return ['changed' => false, 'changed_kinds' => [], 'dry_run' => $dryRun];
         }
+        $publishesMemories = in_array(ReadProjectionStore::MEMORIES, $kinds, true);
+        if (!$dryRun && $publishesMemories) {
+            // Commit an explicit fail-closed barrier before source work. If
+            // AutoCollection synchronization or aggregate publication fails,
+            // MEMORIES stays STALE and no browser can read a split revision.
+            $store->invalidate(
+                [ReadProjectionStore::MEMORIES],
+                'AUTO_COLLECTION_REBUILD_STARTED',
+                false,
+            );
+        }
         $buildToken = $store->beginAggregateBuild($kinds);
         $piwigo = PiwigoGatewayAdapter::fromPiwigo();
         $immich = BridgeImmichAdapter::configuredOrNull();
@@ -169,6 +182,31 @@ final class ReadProjectionBuilder
                 $payloads[$scope][$kind] = $gateway->projectionPayload($kind);
             }
         }
-        return $store->rebuildAggregates($payloads, $kinds, $buildToken, $dryRun);
+        $beforePublish = null;
+        if (!$dryRun && $publishesMemories) {
+            $fullMemoryPayload = $payloads[ReadProjectionStore::SCOPE_FULL][ReadProjectionStore::MEMORIES] ?? null;
+            if (!is_array($fullMemoryPayload)) {
+                throw new \RuntimeException('class_archive_auto_collection_memory_payload_missing');
+            }
+            // ReadProjectionStore calls this while holding its publish locks
+            // in the same Repository transaction. The callback deliberately
+            // uses that Repository and never opens a nested transaction.
+            $beforePublish = static function (Repository $repository) use ($fullMemoryPayload): array {
+                return (new AutoCollectionService($repository))
+                    ->syncMemoryProjectionInCurrentTransaction($fullMemoryPayload);
+            };
+        }
+        $result = $store->rebuildAggregates(
+            $payloads,
+            $kinds,
+            $buildToken,
+            $dryRun,
+            $beforePublish,
+        );
+        if ($beforePublish !== null) {
+            $result['auto_collections'] = $result['pre_publish_result'] ?? null;
+            unset($result['pre_publish_result']);
+        }
+        return $result;
     }
 }

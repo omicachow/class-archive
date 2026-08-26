@@ -1050,6 +1050,11 @@ SQL);
             'private_library_folder',
             'private_library_import',
             'private_library_import_item',
+            'photo_comment',
+            'auto_collection',
+            'auto_collection_photo',
+            'ai_asset_index',
+            'ai_index_job',
             'read_projection',
             'read_photo',
         ];

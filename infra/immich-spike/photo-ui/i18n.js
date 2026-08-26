@@ -258,6 +258,8 @@ const zhCN = Object.freeze({
   'comments.deleteLead': '请填写删除原因，这项处理会进入操作审计。',
   'comments.saved': '评论已发布。',
   'comments.deleted': '评论已删除。',
+  'comments.deletedTombstone': '这条评论已删除。',
+  'comments.loadMore': '加载更多评论',
   'comments.failed': '评论暂时无法安全处理。',
   'comments.unavailable': '评论暂时无法显示。',
   'comments.familyReadonly': '家庭成员可以阅读评论，但不能发表评论。',

@@ -33,6 +33,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/MlArtifactAttestation.php',
             'src/ReconciliationService.php', 'src/MaintenanceStatus.php',
             'src/BackupRestoreEvidence.php',
+            'src/PhotoCommentService.php', 'src/AiIndexService.php',
             'src/DomainSupport.php', 'src/ProjectionMutationBoundary.php', 'src/PersonCurationService.php',
             'src/AlbumService.php', 'src/SpotlightService.php',
             'src/CanonicalPhotoService.php', 'src/BulkArchiveService.php',

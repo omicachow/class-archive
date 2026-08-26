@@ -447,21 +447,51 @@ final class AiIndexService
     {
         $indexTable = DomainSupport::table($this->repository, 'ai_asset_index');
         $jobsTable = DomainSupport::table($this->repository, 'ai_index_job');
+        $photoTable = $this->repository->table('photo');
         $assetRows = $this->repository->fetchAll(
-            'SELECT `face_state`,`search_state`,COUNT(*) AS `count` FROM `' . $indexTable . '` '
-                . 'GROUP BY `face_state`,`search_state` ORDER BY `face_state`,`search_state`',
+            'SELECT ai.`face_state`,ai.`search_state`,p.`state` AS `photo_state`,COUNT(*) AS `count` '
+                . 'FROM `' . $indexTable . '` ai LEFT JOIN `' . $photoTable . '` p '
+                . 'ON p.`class_photo_id`=ai.`class_photo_id` GROUP BY ai.`face_state`,ai.`search_state`,p.`state` '
+                . 'ORDER BY ai.`face_state`,ai.`search_state`,p.`state`',
         );
         $jobRows = $this->repository->fetchAll(
             'SELECT `state`,COUNT(*) AS `count` FROM `' . $jobsTable . '` GROUP BY `state` ORDER BY `state`',
         );
         $assets = [];
+        $failedAssets = 0;
+        $terminalAssetAnomalies = 0;
+        $unavailableAssets = 0;
+        $incompleteAssets = 0;
         foreach ($assetRows as $row) {
             $face = (string) ($row['face_state'] ?? '');
             $search = (string) ($row['search_state'] ?? '');
             if (!in_array($face, self::indexStates(), true) || !in_array($search, self::indexStates(), true)) {
                 throw new \RuntimeException('class_archive_ai_index_state_invalid');
             }
-            $assets[$face . ':' . $search] = (int) ($row['count'] ?? 0);
+            $count = (int) ($row['count'] ?? 0);
+            $assets[$face . ':' . $search] = (int) ($assets[$face . ':' . $search] ?? 0) + $count;
+            $photoState = (string) ($row['photo_state'] ?? '');
+            if ($face === self::FACE_FAILED || $search === self::SEARCH_FAILED) {
+                $failedAssets += $count;
+                continue;
+            }
+            $faceTerminal = in_array($face, [self::FACE_INDEXED, self::FACE_UNAVAILABLE, self::FACE_REMOVED], true);
+            $searchTerminal = in_array($search, [self::SEARCH_INDEXED, self::SEARCH_UNAVAILABLE, self::SEARCH_REMOVED], true);
+            if ($faceTerminal && $searchTerminal && $face !== $search) {
+                $terminalAssetAnomalies += $count;
+                continue;
+            }
+            if ($photoState === ClassArchivePhoto::STATE_ACTIVE) {
+                if ($face === self::FACE_UNAVAILABLE && $search === self::SEARCH_UNAVAILABLE) {
+                    $unavailableAssets += $count;
+                } elseif ($face === self::FACE_REMOVED || $search === self::SEARCH_REMOVED) {
+                    $terminalAssetAnomalies += $count;
+                } elseif ($face !== self::FACE_INDEXED || $search !== self::SEARCH_INDEXED) {
+                    $incompleteAssets += $count;
+                }
+            } elseif ($face !== self::FACE_REMOVED || $search !== self::SEARCH_REMOVED) {
+                $terminalAssetAnomalies += $count;
+            }
         }
         $jobs = array_fill_keys(self::jobStates(), 0);
         foreach ($jobRows as $row) {
@@ -475,12 +505,18 @@ final class AiIndexService
         $workerConfigured = self::privateWorkerConfigured();
         $queuedOrRunning = $jobs[self::JOB_PENDING] + $jobs[self::JOB_RUNNING];
         $open = $queuedOrRunning + $jobs[self::JOB_UNAVAILABLE];
+        $failedJobs = $jobs[self::JOB_FAILED];
+        $orphanIncompleteAssets = $queuedOrRunning === 0 ? $incompleteAssets : 0;
+        $reviewRequired = $failedAssets > 0 || $failedJobs > 0
+            || $terminalAssetAnomalies > 0 || $orphanIncompleteAssets > 0;
         // A configured worker that has only terminal-unavailable work is not
         // silently called "in progress". An operator must explicitly repair
         // the runtime/cache and requeue it; GET paths never do that work.
-        $state = (!$workerConfigured || ($jobs[self::JOB_UNAVAILABLE] > 0 && $queuedOrRunning === 0))
-            ? 'UNAVAILABLE'
-            : ($queuedOrRunning > 0 ? 'IN_PROGRESS' : 'READY');
+        $state = $reviewRequired
+            ? 'DEGRADED'
+            : ((!$workerConfigured || (($jobs[self::JOB_UNAVAILABLE] > 0 || $unavailableAssets > 0) && $queuedOrRunning === 0))
+                ? 'UNAVAILABLE'
+                : ($queuedOrRunning > 0 ? 'IN_PROGRESS' : 'READY'));
         return [
             'state' => $state,
             'runtime_scope' => self::runtimeScope(),
@@ -488,8 +524,16 @@ final class AiIndexService
             'assets' => $assets,
             'jobs' => $jobs,
             'open_jobs' => $open,
+            'failed_assets' => $failedAssets,
+            'failed_jobs' => $failedJobs,
+            'terminal_asset_anomalies' => $terminalAssetAnomalies,
+            'unavailable_assets' => $unavailableAssets,
+            'incomplete_assets' => $incompleteAssets,
+            'orphan_incomplete_assets' => $orphanIncompleteAssets,
+            'review_required' => $reviewRequired,
             'read_only' => true,
             'message' => match ($state) {
+                'DEGRADED' => '本地 AI 索引存在失败或异常终态，需要管理员复核。',
                 'UNAVAILABLE' => '私有本地 AI 索引服务尚未配置；照片浏览不受影响。',
                 'IN_PROGRESS' => '本地 AI 索引任务正在后台处理；普通浏览不会触发重新计算。',
                 default => '本地 AI 索引控制面已就绪。',
@@ -530,6 +574,7 @@ final class AiIndexService
         }
         $failedJobs = (int) (($status['jobs'][self::JOB_FAILED] ?? 0));
         $result = $missingCount === 0 && $driftCount === 0 && $failedAssets === 0 && $failedJobs === 0
+            && ($status['review_required'] ?? true) === false
             ? 'PASS'
             : 'REVIEW_REQUIRED';
         return [
@@ -538,6 +583,8 @@ final class AiIndexService
             'checksum_drift' => $driftCount,
             'failed_assets' => $failedAssets,
             'failed_jobs' => $failedJobs,
+            'terminal_asset_anomalies' => (int) ($status['terminal_asset_anomalies'] ?? 0),
+            'orphan_incomplete_assets' => (int) ($status['orphan_incomplete_assets'] ?? 0),
             'runtime_state' => $status['state'],
             'open_jobs' => $status['open_jobs'],
             'worker_configured' => $status['worker_configured'],

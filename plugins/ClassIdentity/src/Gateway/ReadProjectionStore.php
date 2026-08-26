@@ -793,6 +793,7 @@ final class ReadProjectionStore
     /**
      * @param array<string,array<string,array<string,mixed>>> $payloadsByScope
      * @param list<string> $kinds
+     * @param null|callable(Repository):array<string,mixed> $beforePublishInTransaction
      * @return array{changed:bool,changed_kinds:list<string>,dry_run:bool}
      */
     public function rebuildAggregates(
@@ -800,6 +801,7 @@ final class ReadProjectionStore
         array $kinds,
         array $buildToken,
         bool $dryRun = false,
+        ?callable $beforePublishInTransaction = null,
     ): array
     {
         if (array_keys($payloadsByScope) !== self::SCOPES) {
@@ -876,7 +878,14 @@ final class ReadProjectionStore
             $this->assertAggregateBuildTokenCurrent($buildToken, array_keys($normalizedKinds));
             return ['changed' => $changedKinds !== [], 'changed_kinds' => $changedKinds, 'dry_run' => $dryRun];
         }
-        $this->repository->transaction(function () use ($encoded, $changedKinds, $buildToken): void {
+        $prePublishResult = null;
+        $this->repository->transaction(function () use (
+            $encoded,
+            $changedKinds,
+            $buildToken,
+            $beforePublishInTransaction,
+            &$prePublishResult,
+        ): void {
             $meta = '`' . $this->repository->table('read_projection') . '`';
             $catalog = $this->repository->fetchOne(
                 "SELECT `state`,`source_revision`,`generation`,`native_source_generation` FROM {$meta} WHERE `projection_key`=? FOR UPDATE",
@@ -894,6 +903,13 @@ final class ReadProjectionStore
                 || !hash_equals($nativeEpoch, (string) $catalog['native_source_generation'])
             ) {
                 throw new \RuntimeException('class_archive_read_aggregate_catalog_publish_race');
+            }
+            // The callback participates in this exact Repository transaction;
+            // it must never open a nested transaction. ReadProjectionBuilder
+            // uses it to update durable AutoCollection rows before MEMORIES
+            // can cross from STALE to ACTIVE.
+            if ($beforePublishInTransaction !== null) {
+                $prePublishResult = $beforePublishInTransaction($this->repository);
             }
             foreach ($changedKinds as $kind) {
                 $item = $encoded[$kind];
@@ -929,7 +945,11 @@ final class ReadProjectionStore
                 }
             }
         });
-        return ['changed' => true, 'changed_kinds' => $changedKinds, 'dry_run' => false];
+        $result = ['changed' => true, 'changed_kinds' => $changedKinds, 'dry_run' => false];
+        if ($beforePublishInTransaction !== null) {
+            $result['pre_publish_result'] = $prePublishResult;
+        }
+        return $result;
     }
 
     /** @param list<string> $kinds */

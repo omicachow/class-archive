@@ -11,6 +11,7 @@ use ClassIdentity\ClassArchivePerson;
 use ClassIdentity\ClassArchivePhoto;
 use ClassIdentity\DomainSupport;
 use ClassIdentity\PersonCurationService;
+use ClassIdentity\PhotoCommentService;
 use ClassIdentity\Repository;
 use ClassIdentity\SpotlightService;
 
@@ -62,6 +63,9 @@ final class GatewayService
         // separate timeline key below; the presentation epoch is public and
         // must never be accepted as HMAC key material.
         private readonly ?string $timelineCursorRootSecret = null,
+        // Threaded product comments are deliberately optional for old
+        // contract fixtures.  The HTTP runtime always injects the domain.
+        private readonly ?PhotoCommentService $commentDomain = null,
     ) {
     }
 
@@ -82,6 +86,101 @@ final class GatewayService
             'role' => $principal->role(),
             'presentation_epoch' => $this->readProjection->presentationEpoch($this->projectionScope($principal)),
         ];
+    }
+
+    /**
+     * Compact, persistent Collections-first entry projection.  Home is not a
+     * disguised library request: it reads only existing role-scoped aggregate
+     * rows and bounded card subsets, never `visiblePhotos()` or a live
+     * Piwigo/Immich traversal.
+     *
+     * @return array<string,mixed>
+     */
+    public function home(): array
+    {
+        if ($this->readProjection === null) {
+            throw new \RuntimeException('class_archive_read_projection_unavailable');
+        }
+        $scope = $this->projectionScope();
+        $before = $this->readProjection->presentationEpoch($scope);
+        if (preg_match('/\A[a-f0-9]{64}\z/D', $before) !== 1) {
+            throw new \RuntimeException('class_archive_read_presentation_binding_unavailable');
+        }
+        $spotlight = $this->validatedSpotlightProjection(
+            $this->readProjection->aggregate(ReadProjectionStore::SPOTLIGHT, $scope),
+        );
+        $memories = $this->homeAggregateItems(ReadProjectionStore::MEMORIES, $scope, 8);
+        $albums = $this->homeAggregateItems(ReadProjectionStore::ALBUMS, $scope, 8);
+        $people = $this->homeAggregateItems(ReadProjectionStore::PEOPLE, $scope, 8);
+        $timeline = $this->readProjection->aggregate(ReadProjectionStore::TIMELINE, $scope);
+        $total = $timeline['total'] ?? null;
+        if (!is_int($total) || $total < 0) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        $after = $this->readProjection->presentationEpoch($scope);
+        if (!hash_equals($before, $after)) {
+            throw new \RuntimeException('class_archive_gateway_home_snapshot_changed');
+        }
+        $featured = $spotlight['active'] === true && is_array($spotlight['item'] ?? null)
+            ? [$spotlight['item']]
+            : [];
+        return [
+            'featured' => ['items' => $featured],
+            'memories' => ['items' => $memories],
+            'albums' => ['items' => $albums],
+            'people' => ['items' => $people],
+            'allPhotos' => ['total' => $total],
+        ];
+    }
+
+    /**
+     * @return array{total:int,items:list<array<string,mixed>>,hasMore:bool,nextCursor:?string}|null
+     */
+    public function comments(string $classPhotoId, ?string $cursor = null, ?int $limit = null): ?array
+    {
+        if ($this->commentDomain === null) {
+            throw new \RuntimeException('class_archive_comment_domain_unavailable');
+        }
+        $candidate = $this->mediaCandidate($classPhotoId);
+        if ($candidate === null) {
+            // Hidden and unknown canonical ids deliberately share one result.
+            return null;
+        }
+        return $this->commentDomain->listForVisiblePhoto(
+            $candidate->id(),
+            $candidate->piwigoImageIdForDelivery(),
+            $this->principal()->role(),
+            $cursor,
+            $limit,
+        );
+    }
+
+    /** @return array{comment_id:string} */
+    public function createComment(string $classPhotoId, ?string $parentCommentId, string $body): array
+    {
+        if ($this->commentDomain === null) {
+            throw new \RuntimeException('class_archive_comment_domain_unavailable');
+        }
+        $candidate = $this->mediaCandidate($classPhotoId);
+        if ($candidate === null) {
+            throw new \RuntimeException('class_archive_gateway_photo_not_found');
+        }
+        return $this->commentDomain->create(
+            $this->currentUserId(),
+            $candidate->id(),
+            $candidate->piwigoImageIdForDelivery(),
+            $parentCommentId,
+            $body,
+        );
+    }
+
+    /** @return array{deleted:bool} */
+    public function deleteComment(string $commentId, string $reason): array
+    {
+        if ($this->commentDomain === null) {
+            throw new \RuntimeException('class_archive_comment_domain_unavailable');
+        }
+        return $this->commentDomain->delete($this->currentUserId(), $commentId, $reason);
     }
 
     /** @return array{total:int,items:list<array<string,mixed>>} */
@@ -613,10 +712,21 @@ final class GatewayService
      *
      * @return array<string,mixed>
      */
-    public function hybridSearch(string $query): array
+    public function hybridSearch(string $query, ?string $albumId = null): array
     {
         $query = $this->normalizeQuery($query);
+        if ($albumId !== null) {
+            DomainSupport::idToBinary($albumId);
+            $albumId = strtolower($albumId);
+        }
+        $albumAllowed = $albumId === null ? null : $this->albumScopedPhotoIds($albumId);
         $visible = $this->visiblePhotos();
+        if ($albumAllowed !== null) {
+            $visible = array_values(array_filter(
+                $visible,
+                static fn(GatewayPhotoCandidate $photo): bool => isset($albumAllowed[$photo->id()]),
+            ));
+        }
         $matchingIds = $this->matchingCanonicalPhotoIds($query);
         $photos = [];
         $events = [];
@@ -643,6 +753,9 @@ final class GatewayService
         }
         $albumItems = [];
         foreach ($this->visibleAlbumItems() as $album) {
+            if ($albumId !== null && !hash_equals((string) ($album['id'] ?? ''), $albumId)) {
+                continue;
+            }
             $haystack = implode("\n", array_filter([
                 $album['name'] ?? null,
                 $album['description'] ?? null,
@@ -655,7 +768,10 @@ final class GatewayService
         }
         $peopleItems = [];
         try {
-            foreach (($this->people()['items'] ?? []) as $person) {
+            $peopleProjection = $albumAllowed === null
+                ? ($this->people()['items'] ?? [])
+                : $this->peopleForVisiblePhotoSet($albumAllowed);
+            foreach ($peopleProjection as $person) {
                 if (is_array($person) && self::contains((string) ($person['label'] ?? ''), $query)) {
                     $peopleItems[] = $person;
                 }
@@ -668,6 +784,18 @@ final class GatewayService
         $smart = ['available' => false, 'total' => 0, 'items' => []];
         try {
             $smart = $this->smartSearch(self::semanticQuery($query));
+            if ($albumAllowed !== null) {
+                $smartItems = [];
+                foreach (($smart['items'] ?? []) as $item) {
+                    if (!is_array($item) || !is_string($item['id'] ?? null)) {
+                        throw new \RuntimeException('class_archive_gateway_smart_search_response_invalid');
+                    }
+                    if (isset($albumAllowed[$item['id']])) {
+                        $smartItems[] = $item;
+                    }
+                }
+                $smart = ['available' => true, 'total' => count($smartItems), 'items' => $smartItems];
+            }
         } catch (\Throwable) {
             // Explicit partial degradation: no fallback to a whole library.
         }
@@ -684,6 +812,105 @@ final class GatewayService
             'archiveTime' => ['total' => count($timeBuckets), 'items' => array_values($timeBuckets)],
             'photos' => ['total' => count($photos), 'items' => $photos],
             'smart' => $smart,
+        ];
+    }
+
+    /**
+     * Lightweight structured suggestions for the Apple-like search entry
+     * state. This deliberately never invokes smart-search, face detection,
+     * clustering, or any write-side job. Counts are formed only after the
+     * same policy/optional-leaf-album filter used by hybrid search.
+     *
+     * @return array<string,mixed>
+     */
+    public function searchSuggestions(string $query = '', ?string $albumId = null): array
+    {
+        $query = trim($query);
+        if (strlen($query) > 190 || str_contains($query, "\0")) {
+            throw new \InvalidArgumentException('class_archive_gateway_search_invalid');
+        }
+        if ($albumId !== null) {
+            DomainSupport::idToBinary($albumId);
+            $albumId = strtolower($albumId);
+        }
+        $albumAllowed = $albumId === null ? null : $this->albumScopedPhotoIds($albumId);
+        $visible = $this->visiblePhotos();
+        if ($albumAllowed !== null) {
+            $visible = array_values(array_filter(
+                $visible,
+                static fn(GatewayPhotoCandidate $photo): bool => isset($albumAllowed[$photo->id()]),
+            ));
+        }
+
+        $events = [];
+        $archiveTime = [];
+        foreach ($visible as $photo) {
+            $projection = $photo->publicProjection();
+            $event = is_string($projection['event_label'] ?? null) ? trim((string) $projection['event_label']) : '';
+            if ($event !== '' && self::contains($event, $query)) {
+                $events[$event]['label'] = $event;
+                $events[$event]['photoCount'] = (int) ($events[$event]['photoCount'] ?? 0) + 1;
+            }
+            $bucket = $photo->timelineBucket();
+            $label = is_string($bucket['label'] ?? null) ? (string) $bucket['label'] : '';
+            $key = is_string($bucket['key'] ?? null) ? (string) $bucket['key'] : '';
+            if ($label !== '' && $key !== '' && self::contains($label, $query)) {
+                $archiveTime[$key]['label'] = $label;
+                $archiveTime[$key]['kind'] = is_string($bucket['kind'] ?? null) ? (string) $bucket['kind'] : 'UNKNOWN';
+                $archiveTime[$key]['photoCount'] = (int) ($archiveTime[$key]['photoCount'] ?? 0) + 1;
+            }
+        }
+
+        $albums = [];
+        foreach ($this->visibleAlbumItems() as $album) {
+            if ($albumId !== null && !hash_equals((string) ($album['id'] ?? ''), $albumId)) {
+                continue;
+            }
+            $label = trim((string) ($album['displayAlias'] ?? $album['name'] ?? ''));
+            if ($label !== '' && self::contains($label, $query)) {
+                $albums[] = [
+                    'id' => (string) $album['id'],
+                    'label' => $label,
+                    'subtitle' => is_string($album['sourceLabel'] ?? null) ? (string) $album['sourceLabel'] : null,
+                    'photoCount' => (int) ($album['total'] ?? 0),
+                ];
+            }
+        }
+
+        $people = [];
+        try {
+            $candidates = $albumAllowed === null
+                ? ($this->people()['items'] ?? [])
+                : $this->peopleForVisiblePhotoSet($albumAllowed);
+            foreach ($candidates as $person) {
+                if (!is_array($person)) {
+                    throw new \RuntimeException('class_archive_gateway_people_response_invalid');
+                }
+                $label = trim((string) ($person['label'] ?? ''));
+                if ($label === '' || !self::contains($label, $query)) {
+                    continue;
+                }
+                if (!is_string($person['id'] ?? null) || !is_int($person['photo_count'] ?? null)) {
+                    throw new \RuntimeException('class_archive_gateway_people_response_invalid');
+                }
+                $people[] = [
+                    'id' => strtolower((string) $person['id']),
+                    'label' => $label,
+                    'photoCount' => (int) $person['photo_count'],
+                ];
+            }
+        } catch (\RuntimeException) {
+            // People is optional enrichment. A failed projection must not turn
+            // safe archive suggestions into a wider library response.
+            $people = [];
+        }
+
+        return [
+            'query' => $query,
+            'people' => self::boundedSuggestions($people),
+            'albums' => self::boundedSuggestions($albums),
+            'events' => self::boundedSuggestions(array_values($events)),
+            'archiveTime' => self::boundedSuggestions(array_values($archiveTime)),
         ];
     }
 
@@ -1054,9 +1281,14 @@ final class GatewayService
     public function memories(): array
     {
         if ($this->readProjection !== null) {
-            return $this->readProjection->aggregate(ReadProjectionStore::MEMORIES, $this->projectionScope());
+            return self::publicMemoryPayload(
+                $this->readProjection->aggregate(ReadProjectionStore::MEMORIES, $this->projectionScope()),
+            );
         }
-        return $this->computeMemories();
+        // The production HTTP controller always injects ReadProjectionStore.
+        // This fallback remains solely for isolated, non-HTTP contract
+        // fixtures; it neither writes nor invokes a model/runtime service.
+        return self::publicMemoryPayload($this->computeMemories());
     }
 
     /** @return array{available:bool,total:int,items:list<array<string,mixed>>} */
@@ -1075,14 +1307,20 @@ final class GatewayService
             }
             $key = 'archive:' . (string) ($bucket['key'] ?? '');
             if (!isset($items[$key])) {
+                $metadata = self::memoryArchiveMetadata($bucket);
                 $items[$key] = [
                     'label' => (string) ($bucket['label'] ?? '班级回忆'),
                     'kind' => (string) ($bucket['kind'] ?? 'EVENT'),
                     'photo_count' => 0,
                     'cover_photo_id' => $photo->id(),
+                    'photo_ids' => [],
+                    'source_reason' => self::memorySourceReason('ARCHIVE_BUCKET', $key),
+                    'archive_date' => $metadata['archive_date'],
+                    'date_precision' => $metadata['date_precision'],
                 ];
             }
             ++$items[$key]['photo_count'];
+            $items[$key]['photo_ids'][] = $photo->id();
         }
         $immichAvailable = $this->immich->availability() === 'AVAILABLE';
         // Class Archive chronology is the business truth. When it can form a
@@ -1095,7 +1333,6 @@ final class GatewayService
             return ['available' => false, 'total' => 0, 'items' => []];
         }
         $items = [];
-        $ordinal = 0;
         foreach ($this->immich->memoriesForVisiblePhotos($resolution['raw_ids']) as $candidate) {
             if (!$candidate instanceof GatewayMemoryCandidate) {
                 throw new \RuntimeException('class_archive_gateway_memory_candidate_invalid');
@@ -1121,16 +1358,142 @@ final class GatewayService
             if ($coverPhotoId === null) {
                 throw new \RuntimeException('class_archive_gateway_memory_cover_invalid');
             }
-            ++$ordinal;
-            $items['immich:' . $ordinal] = [
+            $memberIds = array_keys($members);
+            $reasonMaterial = $candidate->label() . "\0" . implode("\0", $memberIds);
+            $items[self::memorySourceReason('IMMICH_COLLECTION', $reasonMaterial)] = [
                 'label' => $candidate->label(),
                 'kind' => 'COLLECTION',
                 'photo_count' => count($members),
                 'cover_photo_id' => $coverPhotoId,
+                'photo_ids' => $memberIds,
+                'source_reason' => self::memorySourceReason('IMMICH_COLLECTION', $reasonMaterial),
+                'archive_date' => null,
+                'date_precision' => 'UNKNOWN',
             ];
         }
 
         return ['available' => true, 'total' => count($items), 'items' => array_values($items)];
+    }
+
+    /**
+     * The stored aggregate includes opaque membership/source material needed
+     * by the build-side AutoCollection synchronizer. Browser responses are a
+     * narrower, validated presentation contract; the internal material is
+     * never an API field or an authorization credential.
+     *
+     * @return array{available:bool,total:int,items:list<array<string,mixed>>}
+     */
+    private static function publicMemoryPayload(array $payload): array
+    {
+        if (!is_bool($payload['available'] ?? null)
+            || !is_int($payload['total'] ?? null)
+            || !is_array($payload['items'] ?? null)
+            || !array_is_list($payload['items'])
+            || (int) $payload['total'] !== count($payload['items'])
+        ) {
+            throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+        }
+        $items = [];
+        foreach ($payload['items'] as $item) {
+            if (!is_array($item)
+                || !is_string($item['label'] ?? null) || trim((string) $item['label']) === '' || strlen((string) $item['label']) > 190
+                || !is_string($item['kind'] ?? null) || !in_array((string) $item['kind'], ['MONTH', 'YEAR', 'EVENT', 'COLLECTION'], true)
+                || !is_int($item['photo_count'] ?? null) || (int) $item['photo_count'] < 1
+                || !is_string($item['cover_photo_id'] ?? null)
+            ) {
+                throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+            }
+            try {
+                $cover = strtolower(ClassArchivePhoto::binaryToId(ClassArchivePhoto::idToBinary((string) $item['cover_photo_id'])));
+            } catch (\Throwable $error) {
+                throw new \RuntimeException('class_archive_gateway_memory_projection_invalid', 0, $error);
+            }
+            if (isset($item['photo_ids'])) {
+                if (!is_array($item['photo_ids']) || !array_is_list($item['photo_ids'])
+                    || count($item['photo_ids']) !== (int) $item['photo_count'] || count($item['photo_ids']) > 10000
+                ) {
+                    throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+                }
+                $seen = [];
+                foreach ($item['photo_ids'] as $photoId) {
+                    if (!is_string($photoId)) {
+                        throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+                    }
+                    try {
+                        $photoId = strtolower(ClassArchivePhoto::binaryToId(ClassArchivePhoto::idToBinary($photoId)));
+                    } catch (\Throwable $error) {
+                        throw new \RuntimeException('class_archive_gateway_memory_projection_invalid', 0, $error);
+                    }
+                    if (isset($seen[$photoId])) {
+                        throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+                    }
+                    $seen[$photoId] = true;
+                }
+                if (!isset($seen[$cover])) {
+                    throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+                }
+            }
+            // Delete build-only material before constructing a public card.
+            // The allow-list below is the actual response boundary; the unset
+            // makes that boundary robust against a future refactor which
+            // accidentally reuses $item later in this method.
+            unset(
+                $item['photo_ids'],
+                $item['source_reason'],
+                $item['projection_revision'],
+                $item['archive_date'],
+                $item['date_precision'],
+            );
+            $public = [
+                'label' => (string) $item['label'],
+                'kind' => (string) $item['kind'],
+                'photo_count' => (int) $item['photo_count'],
+                'cover_photo_id' => $cover,
+            ];
+            foreach (['album_id', 'albumId'] as $albumField) {
+                if (!isset($item[$albumField])) {
+                    continue;
+                }
+                if (!is_string($item[$albumField])) {
+                    throw new \RuntimeException('class_archive_gateway_memory_projection_invalid');
+                }
+                try {
+                    $public[$albumField] = strtolower(ClassArchivePhoto::binaryToId(ClassArchivePhoto::idToBinary($item[$albumField])));
+                } catch (\Throwable $error) {
+                    throw new \RuntimeException('class_archive_gateway_memory_projection_invalid', 0, $error);
+                }
+            }
+            // Explicitly do not carry build material or backend ids.
+            $items[] = $public;
+        }
+        return ['available' => (bool) $payload['available'], 'total' => count($items), 'items' => $items];
+    }
+
+    /** @param array{key?:string,label?:string,kind?:string} $bucket @return array{archive_date:?string,date_precision:string} */
+    private static function memoryArchiveMetadata(array $bucket): array
+    {
+        $key = is_string($bucket['key'] ?? null) ? (string) $bucket['key'] : '';
+        $kind = is_string($bucket['kind'] ?? null) ? (string) $bucket['kind'] : '';
+        if ($kind === 'MONTH' && preg_match('/\Amonth:(\d{4})-(\d{2})\z/D', $key, $matches) === 1) {
+            return ['archive_date' => $matches[1] . '-' . $matches[2] . '-01', 'date_precision' => 'MONTH'];
+        }
+        if ($kind === 'YEAR' && preg_match('/\Ayear:(\d{4})\z/D', $key, $matches) === 1) {
+            return ['archive_date' => $matches[1] . '-01-01', 'date_precision' => 'YEAR'];
+        }
+        if ($kind === 'EVENT' && str_starts_with($key, 'event:')) {
+            return ['archive_date' => null, 'date_precision' => 'EVENT_ONLY'];
+        }
+        throw new \RuntimeException('class_archive_gateway_memory_bucket_invalid');
+    }
+
+    private static function memorySourceReason(string $kind, string $material): string
+    {
+        if (!in_array($kind, ['ARCHIVE_BUCKET', 'IMMICH_COLLECTION'], true) || $material === '') {
+            throw new \RuntimeException('class_archive_gateway_memory_source_invalid');
+        }
+        // 56 hexadecimal chars keep the private reason within the v15
+        // VARCHAR(64) contract while leaving 224 bits of collision space.
+        return 'MEMORY:' . substr(hash('sha256', $kind . "\0" . $material), 0, 56);
     }
 
     /**
@@ -1596,18 +1959,23 @@ final class GatewayService
                     $directMembers[] = $photo;
                 }
             }
-            if ($members === []) {
+            // Piwigo hierarchy remains intact for source provenance and
+            // administrative navigation, but consumer album cards are leaf
+            // projections: a card represents only the photos directly held
+            // by that mapped category.  This prevents a parent folder from
+            // becoming a second copy of every descendant relationship.
+            if ($directMembers === []) {
                 continue;
             }
-            $memberSet = [];
-            foreach ($members as $member) {
-                $memberSet[$member->id()] = true;
+            $directMemberSet = [];
+            foreach ($directMembers as $member) {
+                $directMemberSet[$member->id()] = true;
             }
             $cover = is_string($mapping['cover_class_photo_id'] ?? null)
                 ? (string) $mapping['cover_class_photo_id']
                 : null;
-            if ($cover === null || !isset($memberSet[$cover])) {
-                $cover = $members[0]->id();
+            if ($cover === null || !isset($directMemberSet[$cover])) {
+                $cover = $directMembers[0]->id();
             }
             // Owner data remains internal and is used only for the boolean UI
             // capability. A principal/account/seat id never crosses the API.
@@ -1627,20 +1995,44 @@ final class GatewayService
                     'LIVING' => '毕业后动态',
                     default => '跨时期相册',
                 };
+            $sourceCollectionCode = $mapping['source_collection_code'] ?? null;
+            if ($sourceCollectionCode !== null && !is_string($sourceCollectionCode)) {
+                throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+            }
+            $sourceKind = match ($sourceCollectionCode) {
+                'PRIVATE_SOURCE_A' => 'QQ',
+                'PRIVATE_SOURCE_B' => 'GRADUATION',
+                null => (($mapping['album_type'] ?? null) === 'COMMUNITY' ? 'COMMUNITY' : 'ARCHIVE'),
+                default => throw new \RuntimeException('class_archive_gateway_album_projection_invalid'),
+            };
+            $sourceLabel = $mapping['source_label'] ?? null;
+            if ($sourceLabel !== null && !is_string($sourceLabel)) {
+                throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+            }
+            $displayAlias = $mapping['display_alias'] ?? null;
+            if ($displayAlias !== null && !is_string($displayAlias)) {
+                throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+            }
             $item = [
                 'id' => strtolower((string) $mapping['class_album_id']),
                 'name' => (string) $mapping['name'],
+                'displayAlias' => $displayAlias,
                 'type' => (string) $mapping['album_type'],
                 'description' => $mapping['description'] ?? null,
                 'eventLabel' => $mapping['event_label'] ?? null,
                 'dateLabel' => $dateLabel,
-                'total' => count($members),
+                'total' => count($directMembers),
                 'directTotal' => count($directMembers),
+                // Kept solely as a bounded internal/presentation aggregate.
+                // It is never used to synthesize ancestor membership.
+                'recursiveTotal' => count($members),
                 'coverPhotoId' => $cover,
                 // This is a harmless presentation hint for the local full
                 // library album landing page. It contains no source path or
                 // provenance identifier and never participates in ACL.
                 'sourceRoot' => ($mapping['source_root'] ?? false) === true,
+                'sourceLabel' => $sourceLabel,
+                'sourceKind' => $sourceKind,
                 'owned' => $owned,
                 'canSpotlight' => $canSpotlight,
             ];
@@ -1653,13 +2045,19 @@ final class GatewayService
                 $item['parentAlbumId'] = strtolower($parentId);
             }
             if ($includePhotos) {
-                $item['items'] = array_map(static fn(GatewayPhotoCandidate $photo): array => $photo->publicProjection(), $members);
+                $item['items'] = array_map(static fn(GatewayPhotoCandidate $photo): array => $photo->publicProjection(), $directMembers);
             }
             $items[] = $item;
         }
         usort($items, static function (array $left, array $right): int {
             $type = strcmp((string) $left['type'], (string) $right['type']);
-            return $type !== 0 ? $type : strnatcasecmp((string) $left['name'], (string) $right['name']);
+            if ($type !== 0) {
+                return $type;
+            }
+            return strnatcasecmp(
+                (string) ($left['displayAlias'] ?? $left['name']),
+                (string) ($right['displayAlias'] ?? $right['name']),
+            );
         });
         return $items;
     }
@@ -1694,6 +2092,140 @@ final class GatewayService
                 && in_array($role, [Access::ROLE_CLASSMATE, Access::ROLE_TEACHER], true);
         }
         unset($item);
+        return $items;
+    }
+
+    /**
+     * Bounded card slice from a durable aggregate.  Remove nested member
+     * lists even if an old payload contained them: Home cards must never turn
+     * an aggregate read into a hidden full-library metadata response.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function homeAggregateItems(string $kind, string $scope, int $limit): array
+    {
+        if ($this->readProjection === null || $limit < 1 || $limit > 24) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        $payload = $this->readProjection->aggregate($kind, $scope);
+        $items = $payload['items'] ?? null;
+        if (!is_array($items) || count($items) > 10000) {
+            throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+        }
+        $result = [];
+        foreach (array_slice($items, 0, $limit) as $item) {
+            if (!is_array($item)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            unset(
+                $item['items'],
+                $item['photo_ids'],
+                $item['direct_photo_ids'],
+                $item['source_reason'],
+                $item['projection_revision'],
+                $item['archive_date'],
+                $item['date_precision'],
+            );
+            $result[] = $item;
+        }
+        return $result;
+    }
+
+    /**
+     * Resolves one leaf album's already persisted direct membership.  A parent
+     * folder is never implicitly expanded here; that would reintroduce both
+     * duplicate result counts and a potential category-side channel.
+     *
+     * @return array<string,true> canonical photo id set
+     */
+    private function albumScopedPhotoIds(string $classAlbumId): array
+    {
+        DomainSupport::idToBinary($classAlbumId);
+        if ($this->readProjection !== null) {
+            $payload = $this->readProjection->aggregate(ReadProjectionStore::ALBUMS, $this->projectionScope());
+            $items = $payload['items'] ?? null;
+            if (!is_array($items)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            foreach ($items as $item) {
+                if (!is_array($item) || !is_string($item['id'] ?? null)) {
+                    throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+                }
+                if (!hash_equals(strtolower((string) $item['id']), strtolower($classAlbumId))) {
+                    continue;
+                }
+                $result = [];
+                foreach ($this->projectionPhotoIds($item) as $photoId) {
+                    $result[$photoId] = true;
+                }
+                return $result;
+            }
+            throw new \RuntimeException('class_archive_gateway_album_not_found');
+        }
+        foreach ($this->visibleAlbumItems(true, false) as $album) {
+            if (!hash_equals((string) ($album['id'] ?? ''), strtolower($classAlbumId))) {
+                continue;
+            }
+            $items = $album['items'] ?? null;
+            if (!is_array($items)) {
+                throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+            }
+            $result = [];
+            foreach ($items as $photo) {
+                if (!is_array($photo) || !is_string($photo['id'] ?? null)) {
+                    throw new \RuntimeException('class_archive_gateway_album_projection_invalid');
+                }
+                ClassArchivePhoto::idToBinary($photo['id']);
+                $result[strtolower($photo['id'])] = true;
+            }
+            return $result;
+        }
+        throw new \RuntimeException('class_archive_gateway_album_not_found');
+    }
+
+    /**
+     * @param array<string,true> $allowedPhotoIds
+     * @return list<array<string,mixed>>
+     */
+    private function peopleForVisiblePhotoSet(array $allowedPhotoIds): array
+    {
+        $projection = $this->peopleProjection();
+        $items = [];
+        foreach (($projection['items'] ?? []) as $item) {
+            if (!is_array($item)) {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            $memberIds = [];
+            if (isset($item['photo_ids'])) {
+                $memberIds = $this->projectionPhotoIds($item);
+            } elseif (is_array($item['items'] ?? null)) {
+                foreach ($item['items'] as $photo) {
+                    if (!is_array($photo) || !is_string($photo['id'] ?? null)) {
+                        throw new \RuntimeException('class_archive_gateway_people_response_invalid');
+                    }
+                    ClassArchivePhoto::idToBinary($photo['id']);
+                    $memberIds[] = strtolower($photo['id']);
+                }
+            } else {
+                throw new \RuntimeException('class_archive_read_aggregate_payload_invalid');
+            }
+            $visibleMembers = array_values(array_filter(
+                $memberIds,
+                static fn(string $photoId): bool => isset($allowedPhotoIds[$photoId]),
+            ));
+            if ($visibleMembers === []) {
+                continue;
+            }
+            $cover = is_string($item['cover_photo_id'] ?? null) ? strtolower((string) $item['cover_photo_id']) : null;
+            if ($cover === null || !isset($allowedPhotoIds[$cover])) {
+                $cover = $visibleMembers[0];
+            }
+            $copy = $item;
+            unset($copy['items'], $copy['photo_ids']);
+            $copy['photo_count'] = count($visibleMembers);
+            $copy['cover_photo_id'] = $cover;
+            $items[] = $copy;
+        }
         return $items;
     }
 
@@ -1872,6 +2404,19 @@ final class GatewayService
         return function_exists('mb_stripos')
             ? mb_stripos($haystack, $needle, 0, 'UTF-8') !== false
             : stripos($haystack, $needle) !== false;
+    }
+
+    /**
+     * @param list<array<string,mixed>> $items
+     * @return array{total:int,items:list<array<string,mixed>>}
+     */
+    private static function boundedSuggestions(array $items): array
+    {
+        usort($items, static function (array $left, array $right): int {
+            $count = (int) ($right['photoCount'] ?? 0) <=> (int) ($left['photoCount'] ?? 0);
+            return $count !== 0 ? $count : strnatcasecmp((string) ($left['label'] ?? ''), (string) ($right['label'] ?? ''));
+        });
+        return ['total' => count($items), 'items' => array_slice($items, 0, 8)];
     }
 
     /** Local-only bilingual hints; exact archive matches still rank first. */

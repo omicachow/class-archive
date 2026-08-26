@@ -15,6 +15,8 @@ final class DomainSupport
         'photo_duplicate', 'batch_operation', 'batch_operation_item',
         'private_library_collection', 'private_library_folder',
         'private_library_import', 'private_library_import_item',
+        'photo_comment', 'auto_collection', 'auto_collection_photo',
+        'ai_asset_index', 'ai_index_job',
     ];
 
     public static function table(Repository $repository, string $suffix): string

@@ -25,7 +25,7 @@ final class GatewayHttpController
     private const ROOT_TOKEN = 'class-archive-api';
 
     /** @var list<string> */
-    private const SIMPLE_ROUTES = ['photos', 'timeline', 'albums', 'people', 'memories', 'me'];
+    private const SIMPLE_ROUTES = ['photos', 'timeline', 'albums', 'people', 'memories', 'me', 'home'];
 
     public static function onSectionInit(): void
     {
@@ -84,7 +84,7 @@ final class GatewayHttpController
         try {
             $gateway = self::gateway();
             if ($method === 'POST') {
-                $response = self::handleMutation($segments);
+                $response = self::handleMutation($segments, $gateway);
                 self::respond(200, $response);
             }
             $product = self::handleProductRead($segments, $gateway);
@@ -132,9 +132,14 @@ final class GatewayHttpController
         } catch (\RuntimeException $error) {
             $code = $error->getMessage();
             self::setTrustedCompatibilityDiagnostic($code);
+            if ($code === 'class_archive_comment_rate_limited') {
+                header('Retry-After: 60');
+                self::respond(429, ['error' => '评论发送过于频繁，请稍后再试']);
+            }
             if ($code === 'class_archive_gateway_principal_unresolved'
                 || str_contains($code, '_system_admin_required')
                 || str_contains($code, '_member_role_required')
+                || str_contains($code, '_comment_write_forbidden')
             ) {
                 self::respond(403, ['error' => '禁止访问']);
             }
@@ -155,6 +160,7 @@ final class GatewayHttpController
                 || str_contains($code, '_confirmation_required')
                 || str_contains($code, '_old_era_album_removal_required')
                 || str_contains($code, '_era_membership_ambiguous')
+                || $code === 'class_archive_comment_capacity_reached'
             ) {
                 self::respond(409, ['error' => '状态已发生变化，请刷新后重试']);
             }
@@ -177,6 +183,8 @@ final class GatewayHttpController
             \ClassIdentity\SpotlightService::fromPiwigo(),
             \ClassIdentity\CanonicalPhotoService::fromPiwigo(),
             ReadProjectionStore::fromPiwigo(),
+            null,
+            \ClassIdentity\PhotoCommentService::fromPiwigo(),
         );
     }
 
@@ -203,11 +211,40 @@ final class GatewayHttpController
                 'canManage' => $role === \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
                 'canSpotlight' => in_array($role, [\ClassIdentity\Access::ROLE_CLASSMATE, \ClassIdentity\Access::ROLE_TEACHER], true),
                 'csrfToken' => in_array($role, [
-                    \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
-                    \ClassIdentity\Access::ROLE_CLASSMATE,
-                    \ClassIdentity\Access::ROLE_TEACHER,
-                ], true) ? (string) get_pwg_token() : '',
+                \ClassIdentity\Access::ROLE_SYSTEM_ADMIN,
+                \ClassIdentity\Access::ROLE_CLASSMATE,
+                \ClassIdentity\Access::ROLE_TEACHER,
+                \ClassIdentity\Access::ROLE_ANONYMOUS,
+            ], true) ? (string) get_pwg_token() : '',
             ];
+        }
+        if ($segments === ['home']) {
+            self::requireExactQuery([]);
+            return $gateway->home();
+        }
+        if (count($segments) === 2 && ($segments[0] ?? null) === 'comments' && is_string($segments[1])) {
+            \ClassIdentity\DomainSupport::idToBinary($segments[1]);
+            $query = self::requireExactQuery(['cursor', 'limit'], ['cursor', 'limit']);
+            $cursor = $query['cursor'] ?? null;
+            if ($cursor !== null) {
+                \ClassIdentity\DomainSupport::idToBinary($cursor);
+                $cursor = strtolower($cursor);
+            }
+            $limit = null;
+            if (isset($query['limit'])) {
+                if (preg_match('/\A[1-9][0-9]{0,2}\z/D', $query['limit']) !== 1) {
+                    throw new \InvalidArgumentException('class_archive_gateway_comment_limit_invalid');
+                }
+                $limit = (int) $query['limit'];
+                if ($limit > 200) {
+                    throw new \InvalidArgumentException('class_archive_gateway_comment_limit_invalid');
+                }
+            }
+            $comments = $gateway->comments(strtolower($segments[1]), $cursor, $limit);
+            if ($comments === null) {
+                throw new \RuntimeException('class_archive_gateway_photo_not_found');
+            }
+            return $comments;
         }
         if (count($segments) === 2 && ($segments[0] ?? null) === 'albums' && is_string($segments[1])) {
             \ClassIdentity\DomainSupport::idToBinary($segments[1]);
@@ -237,11 +274,21 @@ final class GatewayHttpController
             return $gateway->spotlight();
         }
         if ($segments === ['search', 'hybrid']) {
-            $query = self::requireExactQuery(['q'])['q'] ?? null;
+            $params = self::requireExactQuery(['q', 'albumId'], ['albumId']);
+            $query = $params['q'] ?? null;
             if (!is_string($query)) {
                 throw new \InvalidArgumentException('class_archive_gateway_search_missing');
             }
-            return $gateway->hybridSearch($query);
+            $albumId = isset($params['albumId']) ? self::uuid($params['albumId']) : null;
+            return $gateway->hybridSearch($query, $albumId);
+        }
+        if ($segments === ['search', 'suggestions']) {
+            // Suggestions are a bounded, policy-filtered read projection. An
+            // empty q presents safe starting points; it is never a request for
+            // the full photo library.
+            $params = self::requireExactQuery(['q', 'albumId'], ['q', 'albumId']);
+            $albumId = isset($params['albumId']) ? self::uuid($params['albumId']) : null;
+            return $gateway->searchSuggestions($params['q'] ?? '', $albumId);
         }
         if ($segments === ['manage', 'people']) {
             self::requireExactQuery([]);
@@ -259,7 +306,7 @@ final class GatewayHttpController
     }
 
     /** @return array<string,mixed> */
-    private static function handleMutation(array $segments): array
+    private static function handleMutation(array $segments, GatewayService $gateway): array
     {
         $route = implode('/', $segments);
         $contracts = [
@@ -310,6 +357,18 @@ final class GatewayHttpController
                 ['csrfToken', 'spotlightId', 'reason'],
                 ['csrfToken', 'spotlightId', 'reason'],
             ],
+            'comments/create' => [
+                ['csrfToken', 'photoUuid', 'parentId', 'body'],
+                ['csrfToken', 'photoUuid', 'parentId', 'body'],
+            ],
+            'comments/reply' => [
+                ['csrfToken', 'photoUuid', 'parentId', 'body'],
+                ['csrfToken', 'photoUuid', 'parentId', 'body'],
+            ],
+            'manage/comments/delete' => [
+                ['csrfToken', 'commentId', 'reason'],
+                ['csrfToken', 'commentId', 'reason'],
+            ],
         ];
         if (!isset($contracts[$route])) {
             header('Allow: GET, HEAD');
@@ -343,6 +402,9 @@ final class GatewayHttpController
             'manage/duplicates/consolidate' => self::mutateDuplicate($userId, $body),
             'spotlight/create' => self::mutateSpotlightCreate($userId, $body),
             'spotlight/cancel' => self::mutateSpotlightCancel($userId, $body),
+            'comments/create' => self::mutateCommentCreate($gateway, $body, false),
+            'comments/reply' => self::mutateCommentCreate($gateway, $body, true),
+            'manage/comments/delete' => self::mutateCommentDelete($gateway, $body),
             default => throw new \RuntimeException('class_archive_gateway_route_not_found'),
         };
     }
@@ -641,6 +703,33 @@ final class GatewayHttpController
         \ClassIdentity\SpotlightService::fromPiwigo()->cancel($userId, $id, self::reason($body));
         self::rebuildAggregateProjection([ReadProjectionStore::SPOTLIGHT]);
         return ['cancelled' => true, 'id' => $id];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateCommentCreate(GatewayService $gateway, array $body, bool $reply): array
+    {
+        $photoId = self::uuid($body['photoUuid'] ?? null);
+        $parentId = self::nullableUuid($body['parentId'] ?? null);
+        if ($reply && $parentId === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_comment_parent_required');
+        }
+        if (!$reply && $parentId !== null) {
+            throw new \InvalidArgumentException('class_archive_gateway_comment_parent_unexpected');
+        }
+        $bodyText = self::nullableText($body['body'] ?? null, 2000);
+        if ($bodyText === null) {
+            throw new \InvalidArgumentException('class_archive_gateway_comment_body_required');
+        }
+        $created = $gateway->createComment($photoId, $parentId, $bodyText);
+        return ['created' => true, 'id' => (string) ($created['comment_id'] ?? '')];
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
+    private static function mutateCommentDelete(GatewayService $gateway, array $body): array
+    {
+        $id = self::uuid($body['commentId'] ?? null);
+        $result = $gateway->deleteComment($id, self::reason($body));
+        return ['deleted' => $result['deleted'] === true, 'id' => $id];
     }
 
     /** @param list<string> $photoIds @param list<string> $kinds */

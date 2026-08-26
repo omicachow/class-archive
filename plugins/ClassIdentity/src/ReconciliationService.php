@@ -573,6 +573,20 @@ final class ReconciliationService
             }
         }
 
+        // AutoCollection and the published FULL MEMORIES payload are one
+        // logical revision. The domain report validates digest/revision,
+        // source uniqueness, contiguous ordinals, active members and cover
+        // membership without repairing any row.
+        $autoCollections = (new AutoCollectionService(new Repository($this->db, $this->prefix)))
+            ->reconciliationReport();
+        foreach ($autoCollections['issues'] as $finding) {
+            $issues[] = self::issue(
+                (string) ($finding['code'] ?? 'AUTO_COLLECTION_RECONCILIATION_INVALID'),
+                'MANUAL_REVIEW',
+                (string) ($finding['subject'] ?? 'auto-collection:unknown'),
+            );
+        }
+
         return [
             'issues' => $issues,
             'counts' => [
@@ -582,6 +596,9 @@ final class ReconciliationService
                 'active_person_merges' => count($mergeTargets),
                 'duplicates' => count($duplicateRows),
                 'batches' => count($batches),
+                'auto_collections' => (int) ($autoCollections['counts']['active'] ?? 0),
+                'auto_collection_members' => (int) ($autoCollections['counts']['members'] ?? 0),
+                'auto_collection_issues' => (int) ($autoCollections['counts']['issues'] ?? 0),
             ],
         ];
     }
@@ -876,7 +893,7 @@ final class ReconciliationService
         // scanner. A change in either invalidates a prior reconciliation
         // record, but neither file gives the reconciler permission to invoke
         // a model or repair rows itself.
-        $paths = [__FILE__, __DIR__ . '/AiIndexService.php'];
+        $paths = [__FILE__, __DIR__ . '/AiIndexService.php', __DIR__ . '/AutoCollectionService.php'];
         $context = hash_init('sha256');
         foreach ($paths as $path) {
             if (!is_file($path) || is_link($path)) {

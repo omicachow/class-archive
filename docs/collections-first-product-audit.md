@@ -90,17 +90,17 @@ archive / album / people / import 变更
 
 ### 现有能力
 
-本仓库已验证 Piwigo Core comments 加上 `CapabilityGuard`、`AnonymousPresenter` 的窄适配：Core 仍保存 comment body/lifecycle；AnonymousPresenter 在请求范围内替换匿名作者展示，并要求管理员的真实映射解析进入 Audit。现有审计已明确：Piwigo 生态的 `Reply To` 扩展不是实际 parent-reply 模型且维护陈旧，因此不能作为 V1 回复能力基础。见 [reuse-audit](reuse-audit.md) 与
+本仓库已经审计 Piwigo Core comments、`CapabilityGuard` 与 `AnonymousPresenter`：Core 的平面评论记录可以承载普通图库留言，但不能同时满足本产品所需的真实回复关系、ClassIdentity 角色写权限、Family 只读、匿名 context pseudonym 与统一审核审计。现有审计也已确认 Piwigo 生态的 `Reply To` 扩展不是可靠的 parent-reply 模型且维护陈旧，因此不能作为 V1 回复能力基础。见 [reuse-audit](reuse-audit.md) 与
 [ClassIdentity README](../plugins/ClassIdentity/README.md)。
 
-### 决策：复用 Core 记录，扩展薄 metadata adapter
+### 决策：保留 Core 技术能力，建立薄 ClassArchiveComment 业务域
 
 | 层 | 结论 |
 |---|---|
-| 评论正文、作者、现有删除/审核生命周期 | **REUSE** Piwigo Core comment record；不要复制第二套正文真相。 |
-| 回复树、photo discussion context、产品 moderation 状态、报告关联 | **ADAPT** `ClassArchiveComment` metadata adapter，以 `pwg_comment_id` 为稳定外键；只保存 `parent_comment_id`、context、状态/原因、审计关联等扩展字段。 |
+| Piwigo 图片、相册、媒体 ACL 与技术后台 | **REUSE**；评论目标始终先通过 Gateway / ClassArchivePolicy / MediaGuard 对应的照片可见性判断。 |
+| 评论正文、回复树、photo discussion context、产品 moderation 状态 | **ADAPT** 为薄 `ClassArchiveComment` 业务域；它只保存产品评论所需的正文、parent、状态与审计关联，不复制图片、相册、账号或匿名身份真相。Piwigo Core comments 继续保留给技术兼容场景，但不同时向成员开放，避免出现两套可写评论真相。 |
 | 匿名显示 | **REUSE** 当前 `AnonymousPresenter` 的 `PHOTO:<image_id>` context pseudonym；绝不把 underlying account/seat/classmate id 放入普通 DTO。 |
-| 回复插件、无身份 public comment URL、仅靠前端隐藏的 Family 限制 | **REJECT**。 |
+| Piwigo Core 与 ClassArchiveComment 同时对成员开放写入、陈旧回复插件、无身份 public comment URL、仅靠前端隐藏的 Family 限制 | **REJECT**。 |
 
 权限必须在服务器端执行：CLASSMATE/TEACHER 可读、评论、回复；ANONYMOUS 仅在 presenter-ready 时以 context pseudonym 评论/回复；FAMILY 只读且写入 API 直接拒绝；SYSTEM_ADMIN 可审核/删除/看举报，任何去匿名解析都有 Audit。普通 viewer 的主栏只显示克制的 album/source/event context；“照片信息”折叠显示 archive date、precision、来源集合、相册归属、规格。日期未知时只显示一次“时间待整理”或省略，不能连续展示多个 unknown 字段。
 
@@ -134,7 +134,7 @@ Immich 的索引应纳入私有运行环境的恢复策略（PostgreSQL/向量�
 
 1. 先建立 SourceCollection、Album display alias 与 leaf album projection；对 source provenance、重名副标题、direct/recursive count 做 synthetic contract test。
 2. 建立 Home/AutoCollection persistent projection，随后将首页与 `/photos` 分路由；断言首页请求不会加载完整 library。
-3. 以 Core comments + metadata adapter 交付回复、匿名、Family read-only、审核与 backup/restore 回归。
+3. 以薄 ClassArchiveComment 业务域交付回复、匿名、Family read-only、审核与 backup/restore 回归；Piwigo Core comment 写入口保持关闭，避免双写真相。
 4. 固化 AI index state、checksum/model-revision jobs 与 restart read-only test；任何 AI 查询继续经过 Gateway + MediaGuard。
 5. 最后做 private-real Chromium QA；真实截图和 source provenance 只能留在 ignored private-local 路径。
 
@@ -145,7 +145,7 @@ Immich 的索引应纳入私有运行环境的恢复策略（PostgreSQL/向量�
 | Collections-first | Apple 的 Library/Collections 分离 | Home + leaf album projection + Class Archive archive truth | 将源目录树当用户导航 |
 | Memories | Apple/PhotoPrism 的“主题集合”概念；Immich 后台 job 观念 | Class Archive persistent AutoCollection、policy-aware covers/counts | Immich technical-user memory 直出；不可靠 on-this-day |
 | Albums/Folders | PhotoPrism 的 Albums/Folders 区分 | SourceCollection + user-facing leaf Album | 改写源路径、ancestor membership 复制、文件管理器式层层导航 |
-| Comments | Piwigo Core record + existing anonymous presentation | `pwg_comment_id` metadata adapter 以支持真实 reply/moderation/audit | stale Reply To plugin、public URL 授权、Family 前端-only 禁止 |
+| Comments | Piwigo 的图片/相册目标与现有 anonymous presentation | 单一可写的 ClassArchiveComment 薄业务域，以支持真实 reply/moderation/audit | Core 与业务域双写、stale Reply To plugin、public URL 授权、Family 前端-only 禁止 |
 | AI | Immich People/Search/jobs/index 持久化能力 | Canonical mapping、ClassArchivePerson、Gateway policy filtering、备份策略 | Immich identity/ACL/media endpoint、页面读取现场 AI |
 | Search | Apple 的 suggestions + type grouping；Immich metadata/semantic search | structured-before-semantic、中文 “智能匹配 Beta” | 让当前英语模型压过明确档案结果或宣称中文质量已解决 |
 

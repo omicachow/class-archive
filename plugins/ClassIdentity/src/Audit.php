@@ -89,6 +89,8 @@ final class Audit
         'fields',
         'changes',
         'class_photo_id',
+        'comment_id',
+        'parent_comment_id',
         'class_person_id',
         'class_album_id',
         'canonical_class_photo_id',
@@ -98,6 +100,7 @@ final class Audit
         'spotlight_id',
         'batch_id',
         'display_name',
+        'display_alias',
         'classmate_identity_id',
         'owner_principal_id',
         'piwigo_category_id',
@@ -155,12 +158,14 @@ final class Audit
         'PERSON_PHOTO_MOVE',
         'ALBUM_MAPPING_CREATE',
         'ALBUM_MAPPING_UPDATE',
+        'ALBUM_DISPLAY_ALIAS_UPDATE',
         'SPOTLIGHT_CANCEL',
         'PHOTO_SOURCE_RECORD',
         'PHOTO_DUPLICATE_REVIEW',
         'PHOTO_DUPLICATE_CONSOLIDATE',
         'PHOTO_DUPLICATE_REVERT',
         'BULK_ARCHIVE_UPDATE',
+        'PHOTO_COMMENT_DELETE',
     ];
 
     private Repository $repository;

@@ -193,9 +193,72 @@ final class AlbumService
                 'era' => $era,
                 'description' => $description,
                 'event_label' => $eventLabel,
+                'display_alias' => $before['display_alias'] ?? null,
                 'manual_cover_class_photo_id' => $coverBinary,
                 'state' => $state,
             ], true);
+        });
+    }
+
+    /**
+     * A member-facing alias is intentionally separate from Piwigo's category
+     * name and from private importer/source path identity.  This makes a
+     * source folder readable in the product without changing its provenance
+     * or making a subsequent full-library import drift.
+     *
+     * @return array<string,mixed>
+     */
+    public function setDisplayAlias(
+        int $adminUserId,
+        string $classAlbumId,
+        ?string $displayAlias,
+        string $reason,
+    ): array {
+        $admin = DomainSupport::requireSystemAdmin($adminUserId);
+        $binary = DomainSupport::idToBinary($classAlbumId);
+        $displayAlias = DomainSupport::boundedText($displayAlias, 190);
+        $reason = Audit::validateReason($reason, true) ?? '';
+
+        return $this->repository->transaction(function (Repository $repository) use (
+            $admin, $binary, $classAlbumId, $displayAlias, $reason,
+        ): array {
+            $table = DomainSupport::table($repository, 'album');
+            $before = $repository->fetchOne(
+                'SELECT * FROM `' . $table . '` WHERE `class_album_id`=? FOR UPDATE',
+                [$binary],
+            );
+            if ($before === null) {
+                throw new \RuntimeException('class_archive_album_not_found');
+            }
+            $previous = $before['display_alias'] ?? null;
+            if ($previous !== null && !is_string($previous)) {
+                throw new \RuntimeException('class_archive_album_display_alias_invalid');
+            }
+            if ($previous !== $displayAlias) {
+                ProjectionMutationBoundary::invalidateAggregates(
+                    $repository,
+                    [
+                        \ClassIdentity\Gateway\ReadProjectionStore::ALBUMS,
+                        \ClassIdentity\Gateway\ReadProjectionStore::SPOTLIGHT,
+                    ],
+                    'ALBUM_DISPLAY_ALIAS',
+                );
+                $repository->execute(
+                    'UPDATE `' . $table . '` SET `display_alias`=?,`updated_at`=UTC_TIMESTAMP(6) WHERE `class_album_id`=?',
+                    [$displayAlias, $binary],
+                );
+                (new Audit($repository))->append(DomainSupport::auditActor($admin) + [
+                    'action' => 'ALBUM_DISPLAY_ALIAS_UPDATE',
+                    'target_type' => 'ALBUM',
+                    'target_id' => strtolower($classAlbumId),
+                    'old_value' => ['display_alias' => $previous],
+                    'new_value' => ['display_alias' => $displayAlias],
+                    'reason' => $reason,
+                    'result' => 'SUCCESS',
+                ]);
+                $before['display_alias'] = $displayAlias;
+            }
+            return $this->hydrate($before, true);
         });
     }
 
@@ -273,7 +336,7 @@ final class AlbumService
         // album for authorization.  This narrow presentation marker lets the
         // photo product promote its approved source collections without
         // serializing an absolute source path, filename, or provenance digest.
-        $sourceRootAlbumIds = $this->privateSourceRootAlbumIds();
+        $sourceContexts = $this->privateSourceContextsByAlbum();
         // A photo is stored only in its direct Piwigo category.  Build the
         // folder-display projection from that direct membership plus the
         // native ancestor chain, rather than copying associations into every
@@ -347,35 +410,53 @@ final class AlbumService
                 'parent_class_album_id' => $parentClassAlbumId,
                 'visible_category_ids' => $memberCategoryIds,
                 'name' => (string) $row['piwigo_name'],
+                'display_alias' => $mapped['display_alias'],
                 'album_type' => $mapped['album_type'],
                 'era' => $mapped['era'],
                 'description' => $mapped['description'],
                 'event_label' => $mapped['event_label'],
                 'cover_class_photo_id' => $cover,
-                'source_root' => isset($sourceRootAlbumIds[strtolower((string) $mapped['class_album_id'])]),
+                'source_root' => (bool) ($sourceContexts[strtolower((string) $mapped['class_album_id'])]['source_root'] ?? false),
+                'source_collection_code' => $sourceContexts[strtolower((string) $mapped['class_album_id'])]['source_code'] ?? null,
+                'source_label' => $sourceContexts[strtolower((string) $mapped['class_album_id'])]['source_label'] ?? null,
             ];
         }
         return $result;
     }
 
     /**
-     * @return array<string,true> lower-case Class Archive album UUIDs
+     * Public-safe source context for a mapped private-library album.  It never
+     * returns an absolute path, importer display name, file name, or source
+     * digest; source codes are translated into a deliberately small Chinese
+     * product vocabulary.
+     *
+     * @return array<string,array{source_root:bool,source_code:string,source_label:string}>
      */
-    private function privateSourceRootAlbumIds(): array
+    private function privateSourceContextsByAlbum(): array
     {
         $folder = DomainSupport::table($this->repository, 'private_library_folder');
         $collection = DomainSupport::table($this->repository, 'private_library_collection');
         $rows = $this->repository->fetchAll(
-            "SELECT f.`class_album_id` FROM `{$folder}` f "
+            "SELECT f.`class_album_id`,f.`parent_folder_id`,c.`source_code` FROM `{$folder}` f "
                 . "JOIN `{$collection}` c ON c.`source_collection_id`=f.`source_collection_id` "
-                . "WHERE f.`parent_folder_id` IS NULL AND c.`state`='ACTIVE'",
+                . "WHERE c.`state`='ACTIVE'",
         );
         $result = [];
         foreach ($rows as $row) {
-            if (!is_string($row['class_album_id'] ?? null)) {
+            if (!is_string($row['class_album_id'] ?? null) || !is_string($row['source_code'] ?? null)) {
                 throw new \RuntimeException('class_archive_private_library_source_root_invalid');
             }
-            $result[strtolower(DomainSupport::binaryToId((string) $row['class_album_id']))] = true;
+            $sourceCode = (string) $row['source_code'];
+            $sourceLabel = match ($sourceCode) {
+                'PRIVATE_SOURCE_A' => 'QQ 相册',
+                'PRIVATE_SOURCE_B' => '毕业相册',
+                default => throw new \RuntimeException('class_archive_private_library_source_code_invalid'),
+            };
+            $result[strtolower(DomainSupport::binaryToId((string) $row['class_album_id']))] = [
+                'source_root' => $row['parent_folder_id'] === null,
+                'source_code' => $sourceCode,
+                'source_label' => $sourceLabel,
+            ];
         }
         return $result;
     }
@@ -480,6 +561,7 @@ final class AlbumService
             'era' => (string) $row['era'],
             'description' => $row['description'] === null ? null : (string) $row['description'],
             'event_label' => $row['event_label'] === null ? null : (string) $row['event_label'],
+            'display_alias' => ($row['display_alias'] ?? null) === null ? null : (string) $row['display_alias'],
             'cover_class_photo_id' => $row['manual_cover_class_photo_id'] === null
                 ? null : DomainSupport::binaryToId((string) $row['manual_cover_class_photo_id']),
             'state' => (string) $row['state'],

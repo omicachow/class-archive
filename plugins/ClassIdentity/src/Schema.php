@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 14;
+    public const CURRENT_VERSION = 15;
     public const LOCKED_PIWIGO_VERSION = '16.4.0';
 
     private const COLLATION = 'utf8mb4_unicode_ci';
@@ -340,6 +340,11 @@ final class Schema
                 'name' => '0014_private_full_native_checkpoint_recovery',
                 'signature' => 'v1:processing-failed-native-image-checkpoint:photo-null-until-canonical-publish:resumable-cross-engine-saga:innodb:utf8mb4',
                 'method' => 'migrationPrivateFullNativeCheckpointRecovery',
+            ],
+            15 => [
+                'name' => '0015_collections_first_comments_ai_index',
+                'signature' => 'v2:source-collection-leaf-alias:threaded-photo-comment:context-pseudonym:durable-auto-collection:unique-source-reason:per-asset-ai-index:conservative-job-queue:innodb:utf8mb4',
+                'method' => 'migrationCollectionsFirstCommentsAndAiIndex',
             ],
         ];
     }
@@ -1546,6 +1551,189 @@ SQL);
     }
 
     /**
+     * Collections-first is intentionally an overlay on the immutable private
+     * source graph and Piwigo's category/media graph.  A display alias never
+     * replaces an importer path or source collection identity; comments are a
+     * small, threaded business interaction domain rather than an attempt to
+     * turn Piwigo's flat Core comment surface back on; and AI records retain
+     * only bounded control-plane state, never embeddings or model bytes.
+     */
+    private function migrationCollectionsFirstCommentsAndAiIndex(): void
+    {
+        $album = $this->quotedTable('album');
+        $photo = $this->quotedTable('photo');
+        $principal = $this->quotedTable('principal');
+        $comment = $this->quotedTable('photo_comment');
+        $autoCollection = $this->quotedTable('auto_collection');
+        $autoCollectionPhoto = $this->quotedTable('auto_collection_photo');
+        $aiIndex = $this->quotedTable('ai_asset_index');
+        $aiJob = $this->quotedTable('ai_index_job');
+        $fk = static fn(string $purpose, string $table): string => 'fk_ci_' . $purpose . '_'
+            . substr(hash('sha256', $table), 0, 12);
+
+        // Keep the source/importer identity untouched.  The alias is the
+        // only member-facing override and is deliberately nullable so an
+        // absent alias means "use the Piwigo category display name".
+        $this->ensureColumn(
+            'album',
+            'display_alias',
+            'ALTER TABLE ' . $album . ' ADD COLUMN `display_alias` VARCHAR(190) NULL AFTER `event_label`',
+        );
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$comment} (
+  `comment_id` BINARY(16) NOT NULL,
+  `class_photo_id` BINARY(16) NOT NULL,
+  `parent_comment_id` BINARY(16) NULL,
+  `author_principal_id` BIGINT UNSIGNED NOT NULL,
+  `author_role` VARCHAR(16) NOT NULL,
+  `body` TEXT NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `deleted_by_principal_id` BIGINT UNSIGNED NULL,
+  `delete_reason` VARCHAR(500) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `deleted_at` DATETIME(6) NULL,
+  PRIMARY KEY (`comment_id`),
+  KEY `idx_ci_photo_comment_photo_state_created` (`class_photo_id`,`state`,`created_at`,`comment_id`),
+  KEY `idx_ci_photo_comment_parent_created` (`parent_comment_id`,`created_at`,`comment_id`),
+  KEY `idx_ci_photo_comment_author_state` (`author_principal_id`,`state`,`created_at`),
+  CONSTRAINT `{$fk('photo_comment_photo', $this->table('photo_comment'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_comment_parent', $this->table('photo_comment'))}` FOREIGN KEY (`parent_comment_id`) REFERENCES {$comment} (`comment_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_comment_author', $this->table('photo_comment'))}` FOREIGN KEY (`author_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('photo_comment_deleted_by', $this->table('photo_comment'))}` FOREIGN KEY (`deleted_by_principal_id`) REFERENCES {$principal} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_photo_comment_author_role` CHECK (`author_role` IN ('CLASSMATE','TEACHER','ANONYMOUS','SYSTEM_ADMIN')),
+  CONSTRAINT `chk_ci_photo_comment_state` CHECK (`state` IN ('ACTIVE','DELETED')),
+  CONSTRAINT `chk_ci_photo_comment_parent_distinct` CHECK (`parent_comment_id` IS NULL OR `parent_comment_id` <> `comment_id`),
+  CONSTRAINT `chk_ci_photo_comment_delete` CHECK ((`state` = 'ACTIVE' AND `deleted_by_principal_id` IS NULL AND `delete_reason` IS NULL AND `deleted_at` IS NULL) OR (`state` = 'DELETED' AND `deleted_by_principal_id` IS NOT NULL AND `delete_reason` IS NOT NULL AND `deleted_at` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        // Auto collections deliberately persist their business description
+        // and exact candidate membership.  Gateway still filters both the
+        // cover and member count for the current role on every response.
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$autoCollection} (
+  `auto_collection_id` BINARY(16) NOT NULL,
+  `collection_kind` VARCHAR(16) NOT NULL,
+  `title` VARCHAR(190) NOT NULL,
+  `subtitle` VARCHAR(190) NULL,
+  `source_reason` VARCHAR(64) NOT NULL,
+  `archive_date` DATE NULL,
+  `date_precision` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+  `cover_class_photo_id` BINARY(16) NOT NULL,
+  `visibility_scope` VARCHAR(24) NOT NULL DEFAULT 'POLICY_FILTERED',
+  `projection_revision` BINARY(32) NOT NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  `generated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`auto_collection_id`),
+  UNIQUE KEY `uq_ci_auto_collection_source_reason` (`source_reason`),
+  KEY `idx_ci_auto_collection_state_kind_updated` (`state`,`collection_kind`,`updated_at`),
+  CONSTRAINT `{$fk('auto_collection_cover', $this->table('auto_collection'))}` FOREIGN KEY (`cover_class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_auto_collection_kind` CHECK (`collection_kind` IN ('MEMORY','RECENT','CURATED')),
+  CONSTRAINT `chk_ci_auto_collection_precision` CHECK (`date_precision` IN ('EXACT','DAY','MONTH','TERM','YEAR','EVENT_ONLY','UNKNOWN')),
+  CONSTRAINT `chk_ci_auto_collection_scope` CHECK (`visibility_scope` = 'POLICY_FILTERED'),
+  CONSTRAINT `chk_ci_auto_collection_state` CHECK (`state` IN ('ACTIVE','RETIRED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$autoCollectionPhoto} (
+  `auto_collection_id` BINARY(16) NOT NULL,
+  `class_photo_id` BINARY(16) NOT NULL,
+  `ordinal` INT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`auto_collection_id`,`class_photo_id`),
+  UNIQUE KEY `uq_ci_auto_collection_ordinal` (`auto_collection_id`,`ordinal`),
+  KEY `idx_ci_auto_collection_photo` (`class_photo_id`,`auto_collection_id`),
+  CONSTRAINT `{$fk('auto_collection_photo_collection', $this->table('auto_collection_photo'))}` FOREIGN KEY (`auto_collection_id`) REFERENCES {$autoCollection} (`auto_collection_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `{$fk('auto_collection_photo_photo', $this->table('auto_collection_photo'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        // Embeddings and face vectors stay inside the separately isolated
+        // Immich/Postgres runtime.  This table binds their version/checksum
+        // state to the canonical photo without copying a vector, original
+        // path, or an Immich authorization decision into Class Archive.
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$aiIndex} (
+  `class_photo_id` BINARY(16) NOT NULL,
+  `source_checksum` BINARY(32) NOT NULL,
+  `immich_asset_id` CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  `face_state` VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  `search_state` VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  `face_model_name` VARCHAR(190) NULL,
+  `face_model_revision` VARCHAR(190) NULL,
+  `search_model_name` VARCHAR(190) NULL,
+  `search_model_revision` VARCHAR(190) NULL,
+  `indexed_at` DATETIME(6) NULL,
+  `last_error_code` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`class_photo_id`),
+  KEY `idx_ci_ai_asset_index_state` (`face_state`,`search_state`,`updated_at`),
+  KEY `idx_ci_ai_asset_index_immich` (`immich_asset_id`),
+  CONSTRAINT `{$fk('ai_asset_index_photo', $this->table('ai_asset_index'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_ai_asset_face_state` CHECK (`face_state` IN ('PENDING','INDEXED','UNAVAILABLE','FAILED','STALE','REMOVED')),
+  CONSTRAINT `chk_ci_ai_asset_search_state` CHECK (`search_state` IN ('PENDING','INDEXED','UNAVAILABLE','FAILED','STALE','REMOVED')),
+  CONSTRAINT `chk_ci_ai_asset_indexed` CHECK ((`face_state` = 'INDEXED' OR `search_state` = 'INDEXED') = (`indexed_at` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$aiJob} (
+  `job_id` BINARY(16) NOT NULL,
+  `class_photo_id` BINARY(16) NULL,
+  `job_kind` VARCHAR(16) NOT NULL,
+  `trigger_kind` VARCHAR(24) NOT NULL,
+  `expected_checksum` BINARY(32) NULL,
+  `state` VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  `active_photo_id` BINARY(16) GENERATED ALWAYS AS (CASE WHEN `state` IN ('PENDING','RUNNING') THEN `class_photo_id` ELSE NULL END) PERSISTENT,
+  `attempt_count` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `not_before` DATETIME(6) NULL,
+  `last_error_code` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `completed_at` DATETIME(6) NULL,
+  PRIMARY KEY (`job_id`),
+  UNIQUE KEY `uq_ci_ai_index_job_active_photo_kind` (`active_photo_id`,`job_kind`),
+  KEY `idx_ci_ai_index_job_state_not_before` (`state`,`not_before`,`created_at`),
+  KEY `idx_ci_ai_index_job_photo_state` (`class_photo_id`,`state`,`updated_at`),
+  CONSTRAINT `{$fk('ai_index_job_photo', $this->table('ai_index_job'))}` FOREIGN KEY (`class_photo_id`) REFERENCES {$photo} (`class_photo_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_ai_index_job_kind` CHECK (`job_kind` IN ('INDEX_ASSET','DELETE_ASSET','REINDEX_MODEL')),
+  CONSTRAINT `chk_ci_ai_index_job_trigger` CHECK (`trigger_kind` IN ('NEW_PHOTO','PIXEL_CHANGED','PHOTO_DELETED','MODEL_CHANGED','ADMIN_REINDEX','RECONCILIATION')),
+  CONSTRAINT `chk_ci_ai_index_job_state` CHECK (`state` IN ('PENDING','RUNNING','UNAVAILABLE','FAILED','COMPLETE','CANCELLED')),
+  CONSTRAINT `chk_ci_ai_index_job_attempt` CHECK (`attempt_count` <= 100),
+  CONSTRAINT `chk_ci_ai_index_job_completion` CHECK ((`state` IN ('UNAVAILABLE','FAILED','COMPLETE','CANCELLED') AND `completed_at` IS NOT NULL) OR (`state` IN ('PENDING','RUNNING') AND `completed_at` IS NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('album', [
+            'class_album_id', 'piwigo_category_id', 'display_alias', 'album_type', 'era', 'state',
+        ]);
+        $this->assertTable('photo_comment', [
+            'comment_id', 'class_photo_id', 'parent_comment_id', 'author_principal_id', 'author_role',
+            'body', 'state', 'deleted_by_principal_id', 'delete_reason', 'created_at', 'deleted_at',
+        ]);
+        $this->assertTable('auto_collection', [
+            'auto_collection_id', 'collection_kind', 'title', 'subtitle', 'source_reason', 'archive_date',
+            'date_precision', 'cover_class_photo_id', 'visibility_scope', 'projection_revision', 'state',
+        ]);
+        $this->assertTable('auto_collection_photo', [
+            'auto_collection_id', 'class_photo_id', 'ordinal',
+        ]);
+        $this->assertTable('ai_asset_index', [
+            'class_photo_id', 'source_checksum', 'immich_asset_id', 'face_state', 'search_state',
+            'face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision', 'indexed_at', 'created_at',
+        ]);
+        $this->assertTable('ai_index_job', [
+            'job_id', 'class_photo_id', 'job_kind', 'trigger_kind', 'expected_checksum', 'state',
+            'active_photo_id', 'attempt_count', 'not_before', 'completed_at',
+        ]);
+    }
+
+    /**
      * @return list<array{name:string,table:string,event:string,statement:string}>
      */
     private function nativeProjectionTriggerDefinitions(): array
@@ -2116,7 +2304,9 @@ SQL);
             'person' => '057428d4584745f190db85426a2c40a797ef84468054949ac6e8e9c43413c02c',
             'person_merge' => '9593a0ab6aa938d5324a778b26ae605f68bff509103e32b2e3aea44a27d0578e',
             'person_photo_rule' => '1cfd7d1394a6ab6cc357ff8492fb2dbd1ab3a8c27c8c2d6b2fbdb461d6192011',
-            'album' => '5f3a5e5b67c9e6fd534faaf48f3d327cb5b090a5bce9aaaed6001a79021100b6',
+            // Derived by tests/phase3/collections-first-schema-semantics.php
+            // against the locked MariaDB 11.8.8 runtime.
+            'album' => 'f50882ab2963eab7f8daf2e1f52d7afa1bceb1a94a0c652fd6a2e702b8ad7eec',
             'spotlight' => 'a83686fe1cbfbaa193aafa90e3b0f208e02c5b0feaa0249bb8b7f62d7673e11b',
             'photo_source' => 'ce248992be43a980eea5988e661995e114c37a4cf27e396556c4a3e9cb5024d9',
             'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',
@@ -2133,6 +2323,11 @@ SQL);
             'native_source_epoch' => '38835ba61ef74fb5a7133a0ed32f50fad6bfda27fa97d932ae6a0f163d7c80cb',
             'read_projection' => '50cd33236df8d42d76ba44b7dd9b3fe2a62b5e5023c4600f67e596f9846c1983',
             'read_photo' => '017afaaaadbf02491813dab1b0ff6fb548af157e20f5ac4ec2f7fa3dbc0d83ec',
+            'photo_comment' => 'a704da76ee1999be5b9a60abf07b19996327e0b6b839584d804c8201a80db9a8',
+            'auto_collection' => '0f88b7ddb06b0bbee0084345958380fc658089cc78e0db1debe8ad9b726da0e9',
+            'auto_collection_photo' => '5f77bed777bcac6dc682a522aea34481616343f95ab2ab5c1bd0d52470d2bd28',
+            'ai_asset_index' => '01d9f1b78701101a0f8ec513d20ac95fb21d968989afba4fd0cd4b14feb60ce9',
+            'ai_index_job' => '50c1bbf3f0cce34f6ba693ac795df37bf90b28a57fec7323c46e82382bfde9a5',
         ];
     }
 
@@ -2452,6 +2647,11 @@ SQL);
             'private_library_folder',
             'private_library_import',
             'private_library_import_item',
+            'photo_comment',
+            'auto_collection',
+            'auto_collection_photo',
+            'ai_asset_index',
+            'ai_index_job',
             'native_source_epoch',
             'read_projection',
             'read_photo',

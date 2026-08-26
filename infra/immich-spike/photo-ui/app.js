@@ -1336,20 +1336,29 @@ function infoRow(labelKey, value) {
 
 function normalizeComments(payload) {
   if (!payload || !Number.isInteger(payload.total) || !Array.isArray(payload.items)
-    || payload.total !== payload.items.length || payload.total < 0) {
+    || payload.total < payload.items.length || payload.total < 0
+    || typeof payload.hasMore !== 'boolean'
+    || (payload.hasMore && !validId(payload.nextCursor))
+    || (!payload.hasMore && payload.nextCursor !== null)) {
     throw new Error('safe_comments_invalid');
   }
   return {
     total: payload.total,
+    hasMore: payload.hasMore,
+    nextCursor: payload.nextCursor ? payload.nextCursor.toLowerCase() : null,
     items: payload.items.map((item) => {
       const parentId = item?.parentId ?? item?.parent_id ?? null;
       const author = item?.author;
+      const deleted = item?.deleted === true;
       if (!item || !validId(item.id) || (parentId !== null && !validId(parentId))
-        || typeof item.body !== 'string' || item.body.length < 1 || item.body.length > 2_000
+        || (deleted ? item.body !== null : (typeof item.body !== 'string' || item.body.length < 1 || item.body.length > 2_000))
         || !author || typeof author !== 'object' || !safeText(author.label, '')
         || typeof author.kind !== 'string' || !/^[A-Z_]{1,32}$/.test(author.kind)
         || typeof item.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(item.createdAt)
-        || typeof item.canReply !== 'boolean' || typeof item.canDelete !== 'boolean') {
+        || typeof item.canReply !== 'boolean' || typeof item.canDelete !== 'boolean'
+        || typeof item.deleted !== 'boolean'
+        || (deleted && (author.kind !== 'DELETED' || item.canReply || item.canDelete))
+        || (!deleted && author.kind === 'DELETED')) {
         throw new Error('safe_comment_invalid');
       }
       return {
@@ -1360,14 +1369,18 @@ function normalizeComments(payload) {
         createdAt: item.createdAt,
         canReply: item.canReply,
         canDelete: item.canDelete,
+        deleted,
       };
     }),
   };
 }
 
-async function loadComments(photoId) {
+async function loadComments(photoId, cursor = null) {
   if (!validId(photoId)) throw new Error('safe_comment_photo_invalid');
-  return normalizeComments(await apiJson(`/api/class-archive/comments/${photoId.toLowerCase()}`, { cache: 'no-store' }));
+  if (cursor !== null && !validId(cursor)) throw new Error('safe_comment_cursor_invalid');
+  const query = new URLSearchParams({ limit: '100' });
+  if (cursor !== null) query.set('cursor', cursor.toLowerCase());
+  return normalizeComments(await apiJson(`/api/class-archive/comments/${photoId.toLowerCase()}?${query}`, { cache: 'no-store' }));
 }
 
 function formatCommentTime(value) {
@@ -1447,13 +1460,14 @@ function viewerPhotoInfo(photo, context) {
 function commentItem(item, role, photoId, onComplete) {
   const card = element('article', 'comment-item');
   card.dataset.commentId = item.id;
+  if (item.deleted) card.dataset.deleted = 'true';
   if (item.parentId) card.dataset.reply = 'true';
   const heading = element('header', 'comment-header');
   append(heading,
     element('strong', 'comment-author', item.author.label),
     element('time', 'comment-time', formatCommentTime(item.createdAt)),
   );
-  const body = element('p', 'comment-body', item.body);
+  const body = element('p', 'comment-body', item.deleted ? t('comments.deletedTombstone') : item.body);
   const actions = element('div', 'comment-actions');
   if (canCreateComment(role) && item.canReply) {
     const reply = element('button', 'ghost-button compact-button comment-reply', t('comments.reply'));
@@ -1491,7 +1505,7 @@ function commentItem(item, role, photoId, onComplete) {
   return card;
 }
 
-function viewerComments(photoId, role, comments, onRefresh) {
+function viewerComments(photoId, role, comments, onRefresh, onLoadMore) {
   const section = element('section', 'viewer-comments');
   const heading = element('div', 'viewer-comments-heading');
   append(heading, element('h2', '', t('comments.title')), element('span', '', t('comments.count', { count: comments?.total ?? 0 })));
@@ -1506,6 +1520,15 @@ function viewerComments(photoId, role, comments, onRefresh) {
     const list = element('div', 'comments-list');
     append(list, comments.items.map((item) => commentItem(item, role, photoId, onRefresh)));
     section.append(list);
+    if (comments.hasMore && typeof onLoadMore === 'function') {
+      const more = element('button', 'ghost-button compact-button comment-load-more', t('comments.loadMore'));
+      more.type = 'button';
+      more.addEventListener('click', async () => {
+        more.disabled = true;
+        try { await onLoadMore(); } catch { more.disabled = false; }
+      });
+      section.append(more);
+    }
   }
   if (canCreateComment(role)) section.append(commentComposer(photoId, null, onRefresh));
   else if (role === 'FAMILY') section.append(element('p', 'comment-readonly', t('comments.familyReadonly')));
@@ -1598,10 +1621,22 @@ async function renderViewer(id) {
     );
     const commentsRoot = element('div', 'viewer-comments-root');
     const paintComments = () => {
-      commentsRoot.replaceChildren(viewerComments(id, state.role, comments, refreshComments));
+      commentsRoot.replaceChildren(viewerComments(id, state.role, comments, refreshComments, loadMoreComments));
     };
     const refreshComments = async () => {
       try { comments = await loadComments(id); } catch { comments = null; }
+      paintComments();
+    };
+    const loadMoreComments = async () => {
+      if (!comments?.hasMore || !comments.nextCursor) return;
+      const next = await loadComments(id, comments.nextCursor);
+      const seen = new Set(comments.items.map((item) => item.id));
+      comments = {
+        total: Math.max(comments.total, next.total),
+        items: [...comments.items, ...next.items.filter((item) => !seen.has(item.id))],
+        hasMore: next.hasMore,
+        nextCursor: next.nextCursor,
+      };
       paintComments();
     };
     paintComments();
