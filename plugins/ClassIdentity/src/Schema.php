@@ -15,7 +15,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class Schema
 {
-    public const CURRENT_VERSION = 15;
+    public const CURRENT_VERSION = 16;
     public const LOCKED_PIWIGO_VERSION = '16.4.0';
 
     private const COLLATION = 'utf8mb4_unicode_ci';
@@ -345,6 +345,11 @@ final class Schema
                 'name' => '0015_collections_first_comments_ai_index',
                 'signature' => 'v2:source-collection-leaf-alias:threaded-photo-comment:context-pseudonym:durable-auto-collection:unique-source-reason:per-asset-ai-index:conservative-job-queue:innodb:utf8mb4',
                 'method' => 'migrationCollectionsFirstCommentsAndAiIndex',
+            ],
+            16 => [
+                'name' => '0016_private_source_presentation_surrogate',
+                'signature' => 'v1:source-bytes-preserved:presentation-checksum-bound:opaque-source-identity:fixed-transform-recipe:innodb:utf8mb4',
+                'method' => 'migrationPrivateSourcePresentationSurrogate',
             ],
         ];
     }
@@ -1734,6 +1739,52 @@ SQL);
     }
 
     /**
+     * A presentation surrogate never replaces source provenance.  The
+     * original source digest remains on photo_source while this one-to-one
+     * extension binds the exact bytes delivered by MediaGuard to a fixed,
+     * reproducible conversion recipe.  Raw paths and filenames are still
+     * deliberately absent.
+     */
+    private function migrationPrivateSourcePresentationSurrogate(): void
+    {
+        $source = $this->quotedTable('photo_source');
+        $presentation = $this->quotedTable('photo_source_presentation');
+        $fk = static fn(string $purpose, string $table): string => 'fk_ci_' . $purpose . '_'
+            . substr(hash('sha256', $table), 0, 12);
+
+        $this->executeRaw(<<<SQL
+CREATE TABLE IF NOT EXISTS {$presentation} (
+  `photo_source_id` BIGINT UNSIGNED NOT NULL,
+  `source_identity_digest` BINARY(32) NOT NULL,
+  `presentation_checksum` BINARY(32) NOT NULL,
+  `presentation_byte_size` BIGINT UNSIGNED NOT NULL,
+  `source_format` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `presentation_format` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `transform_kind` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `transform_tool` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `transform_version` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `transform_recipe_digest` BINARY(32) NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`photo_source_id`),
+  UNIQUE KEY `uq_ci_photo_source_presentation_identity` (`source_identity_digest`),
+  KEY `idx_ci_photo_source_presentation_checksum` (`presentation_checksum`,`photo_source_id`),
+  CONSTRAINT `{$fk('photo_source_presentation_source', $this->table('photo_source_presentation'))}` FOREIGN KEY (`photo_source_id`) REFERENCES {$source} (`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT `chk_ci_photo_source_presentation_size` CHECK (`presentation_byte_size` > 0),
+  CONSTRAINT `chk_ci_photo_source_presentation_source_format` CHECK (`source_format` = 'MPO'),
+  CONSTRAINT `chk_ci_photo_source_presentation_format` CHECK (`presentation_format` = 'JPEG'),
+  CONSTRAINT `chk_ci_photo_source_presentation_kind` CHECK (`transform_kind` = 'MPO_PRIMARY_FRAME_JPEG'),
+  CONSTRAINT `chk_ci_photo_source_presentation_tool` CHECK (`transform_tool` = 'PILLOW')
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL);
+
+        $this->assertTable('photo_source_presentation', [
+            'photo_source_id', 'source_identity_digest', 'presentation_checksum', 'presentation_byte_size',
+            'source_format', 'presentation_format', 'transform_kind', 'transform_tool', 'transform_version',
+            'transform_recipe_digest', 'created_at',
+        ]);
+    }
+
+    /**
      * @return list<array{name:string,table:string,event:string,statement:string}>
      */
     private function nativeProjectionTriggerDefinitions(): array
@@ -2309,6 +2360,9 @@ SQL);
             'album' => '8a0bf13f7091df3ea4a23e55f1d311c995c7601ada9ada001770b7f2fc6d494e',
             'spotlight' => 'a83686fe1cbfbaa193aafa90e3b0f208e02c5b0feaa0249bb8b7f62d7673e11b',
             'photo_source' => 'ce248992be43a980eea5988e661995e114c37a4cf27e396556c4a3e9cb5024d9',
+            // Derived by tests/phase3/private-full-library-schema-semantics.php
+            // against the locked MariaDB 11.8.8 runtime.
+            'photo_source_presentation' => '5db9013d6b8f9147ea1d56db43d94dc81403fd9c197d8779ec942b89555a435a',
             'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',
             'batch_operation' => '819f4bab9f845999655f333156b8a627589251e3c7221cde19e1132a8c0b39e7',
             'batch_operation_item' => '0cfec340df85bdbabc3ca5126511439b161a4dbfe0421e1cb37fb86a0af2487a',
@@ -2640,6 +2694,7 @@ SQL);
             'album',
             'spotlight',
             'photo_source',
+            'photo_source_presentation',
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',

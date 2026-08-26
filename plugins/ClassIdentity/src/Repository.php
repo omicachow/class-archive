@@ -405,6 +405,7 @@ SQL, [$piwigoUserId]);
             'album',
             'spotlight',
             'photo_source',
+            'photo_source_presentation',
             'photo_duplicate',
             'batch_operation',
             'batch_operation_item',

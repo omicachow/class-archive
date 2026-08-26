@@ -562,12 +562,34 @@ final class ReconciliationService
         }
 
         $sourceTable = '`' . $this->prefix . 'class_identity_photo_source`';
+        $presentationTable = '`' . $this->prefix . 'class_identity_photo_source_presentation`';
         foreach ($this->all(
-            'SELECT ps.`id`,ps.`source_checksum`,p.`media_checksum`,p.`state` AS `photo_state` FROM ' . $sourceTable . ' ps '
-            . 'LEFT JOIN ' . $photoTable . ' p ON p.`class_photo_id`=ps.`class_photo_id` ORDER BY ps.`id` ASC'
+            'SELECT ps.`id`,ps.`source_checksum`,p.`media_checksum`,p.`state` AS `photo_state`,'
+            . 'pp.`photo_source_id` AS `presentation_source_id`,pp.`source_identity_digest`,pp.`presentation_checksum`,'
+            . 'pp.`presentation_byte_size`,pp.`source_format`,pp.`presentation_format`,pp.`transform_kind`,'
+            . 'pp.`transform_tool`,pp.`transform_version`,pp.`transform_recipe_digest` FROM ' . $sourceTable . ' ps '
+            . 'LEFT JOIN ' . $photoTable . ' p ON p.`class_photo_id`=ps.`class_photo_id` '
+            . 'LEFT JOIN ' . $presentationTable . ' pp ON pp.`photo_source_id`=ps.`id` ORDER BY ps.`id` ASC'
         ) as $source) {
+            $presentation = $source['presentation_source_id'] ?? null;
+            $direct = $presentation === null;
+            $validPresentation = !$direct
+                && (int) $presentation === (int) ($source['id'] ?? 0)
+                && is_string($source['source_identity_digest'] ?? null)
+                && strlen((string) $source['source_identity_digest']) === 32
+                && is_string($source['presentation_checksum'] ?? null)
+                && hash_equals((string) $source['presentation_checksum'], (string) ($source['media_checksum'] ?? ''))
+                && (int) ($source['presentation_byte_size'] ?? 0) > 0
+                && ($source['source_format'] ?? null) === 'MPO'
+                && ($source['presentation_format'] ?? null) === 'JPEG'
+                && ($source['transform_kind'] ?? null) === 'MPO_PRIMARY_FRAME_JPEG'
+                && ($source['transform_tool'] ?? null) === 'PILLOW'
+                && preg_match('/\A[0-9A-Za-z][0-9A-Za-z._+\-]{0,31}\z/D', (string) ($source['transform_version'] ?? '')) === 1
+                && is_string($source['transform_recipe_digest'] ?? null)
+                && strlen((string) $source['transform_recipe_digest']) === 32;
             if (($source['photo_state'] ?? null) !== 'ACTIVE'
-                || !hash_equals((string) ($source['source_checksum'] ?? ''), (string) ($source['media_checksum'] ?? ''))
+                || ($direct && !hash_equals((string) ($source['source_checksum'] ?? ''), (string) ($source['media_checksum'] ?? '')))
+                || (!$direct && !$validPresentation)
             ) {
                 $issues[] = self::issue('PHOTO_SOURCE_REFERENCE_DRIFT', 'MANUAL_REVIEW', 'source:' . (int) ($source['id'] ?? 0));
             }

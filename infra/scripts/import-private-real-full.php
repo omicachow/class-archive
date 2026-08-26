@@ -20,8 +20,12 @@ use ClassIdentity\PrivateFullLibraryService;
 
 const PRIVATE_FULL_MANIFEST = '/private-real-full/manifests/full-real-import-manifest.json';
 const PRIVATE_FULL_STAGING = '/private-real-full/staging';
+const PRIVATE_SUPPLEMENTAL_MANIFEST = '/private-real-full/manifests/supplemental-import-manifest.json';
+const PRIVATE_SUPPLEMENTAL_STAGING = '/private-real-full/supplemental-staging';
 const PRIVATE_FULL_VERSION = 1;
 const PRIVATE_FULL_MAX_ITEMS = 200000;
+const PRIVATE_SUPPLEMENTAL_MAX_ITEMS = 10000;
+const PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS = 'PRESENTATION_SHA256';
 
 function privateFullFail(string $reason): never
 {
@@ -135,6 +139,91 @@ function privateFullNormalizeItem(mixed $item): array
     ];
 }
 
+/** @return array<string,mixed> */
+function privateFullNormalizeSupplementalItem(mixed $item): array
+{
+    if (!is_array($item) || array_key_exists('relative_source_path', $item)
+        || array_key_exists('original_filename', $item) || array_key_exists('source_root', $item)
+    ) {
+        throw new RuntimeException('manifest_item_invalid');
+    }
+    [$code, $label] = privateFullCollection($item['source_collection_code'] ?? null, $item['source_collection_label'] ?? null);
+    $itemDigest = privateFullHex($item['item_digest'] ?? null);
+    $folderDigest = privateFullHex($item['folder_path_digest'] ?? null);
+    $parentDigest = $item['parent_folder_path_digest'] ?? null;
+    if ($parentDigest !== null) {
+        $parentDigest = privateFullHex($parentDigest);
+    }
+    if (!is_array($item['folder_segments'] ?? null) || count($item['folder_segments']) > 255) {
+        throw new RuntimeException('manifest_folder_segments_invalid');
+    }
+    $folders = [];
+    foreach ($item['folder_segments'] as $segment) {
+        if (!is_string($segment) || $segment === '' || $segment === '.' || $segment === '..' || strlen($segment) > 190
+            || str_contains($segment, "\\") || str_contains($segment, '/') || str_contains($segment, "\0")
+            || preg_match('/[\x00-\x1F\x7F]/', $segment) === 1 || preg_match('//u', $segment) !== 1
+        ) {
+            throw new RuntimeException('manifest_folder_segments_invalid');
+        }
+        $folders[] = $segment;
+    }
+    $sourceReferenceDigest = privateFullHex($item['source_reference_digest'] ?? null);
+    $expectedItemDigest = privateFullHashText($code . "\0" . $sourceReferenceDigest);
+    $folderPath = implode('/', $folders);
+    $expectedFolderDigest = privateFullHashText($code . "\0" . $folderPath);
+    $expectedParentDigest = $folders === [] ? null : privateFullHashText($code . "\0" . implode('/', array_slice($folders, 0, -1)));
+    if (!hash_equals($expectedItemDigest, $itemDigest) || !hash_equals($expectedFolderDigest, $folderDigest)
+        || (($expectedParentDigest === null && $parentDigest !== null) || ($expectedParentDigest !== null && !hash_equals($expectedParentDigest, (string) $parentDigest)))
+    ) {
+        throw new RuntimeException('manifest_folder_digest_invalid');
+    }
+    $sourceChecksum = privateFullHex($item['source_sha256'] ?? null);
+    $presentationChecksum = privateFullHex($item['presentation_sha256'] ?? null);
+    $stagingName = $item['presentation_staging_name'] ?? null;
+    if (!is_string($stagingName) || !hash_equals('frs-' . $presentationChecksum . '.jpg', $stagingName)) {
+        throw new RuntimeException('manifest_staging_name_invalid');
+    }
+    $sourceSize = $item['source_byte_size'] ?? null;
+    $presentationSize = $item['presentation_byte_size'] ?? null;
+    if (!is_int($sourceSize) || $sourceSize <= 0 || !is_int($presentationSize) || $presentationSize <= 0
+        || ($item['source_format'] ?? null) !== 'MPO' || ($item['presentation_format'] ?? null) !== 'JPEG'
+        || hash_equals($sourceChecksum, $presentationChecksum)
+        || ($item['transform_kind'] ?? null) !== 'MPO_PRIMARY_FRAME_JPEG'
+        || ($item['transform_tool'] ?? null) !== 'PILLOW'
+        || ($item['canonical_identity_basis'] ?? null) !== PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS
+        || !is_string($item['transform_version'] ?? null)
+        || preg_match('/\A[0-9A-Za-z][0-9A-Za-z._+\-]{0,31}\z/D', (string) $item['transform_version']) !== 1
+    ) {
+        throw new RuntimeException('manifest_transform_contract_invalid');
+    }
+    return [
+        'profile' => 'SUPPLEMENTAL',
+        'item_digest' => $itemDigest,
+        'source_collection_code' => $code,
+        'source_collection_label' => $label,
+        'folder_path_digest' => $folderDigest,
+        'parent_folder_path_digest' => $parentDigest,
+        'folder_segments' => $folders,
+        'source_reference_digest' => $sourceReferenceDigest,
+        'original_filename_digest' => privateFullHex($item['original_filename_digest'] ?? null),
+        'source_sha256' => $sourceChecksum,
+        'source_byte_size' => $sourceSize,
+        'presentation_sha256' => $presentationChecksum,
+        'presentation_byte_size' => $presentationSize,
+        'staging_name' => $stagingName,
+        'staging_name_digest' => privateFullHashText($stagingName),
+        'file_size' => $sourceSize,
+        'extension' => 'jpg',
+        'source_format' => 'MPO',
+        'presentation_format' => 'JPEG',
+        'transform_kind' => 'MPO_PRIMARY_FRAME_JPEG',
+        'transform_tool' => 'PILLOW',
+        'transform_version' => (string) $item['transform_version'],
+        'transform_recipe_digest' => privateFullHex($item['transform_recipe_digest'] ?? null),
+        'canonical_identity_basis' => PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS,
+    ];
+}
+
 /** @param list<array<string,mixed>> $items */
 function privateFullManifestDigest(array $items): string
 {
@@ -152,12 +241,38 @@ function privateFullManifestDigest(array $items): string
     return privateFullHashText(implode("\n", $lines) . "\n");
 }
 
+/** @param list<array<string,mixed>> $items */
+function privateFullSupplementalManifestDigest(array $items): string
+{
+    usort($items, static fn(array $left, array $right): int => [$left['source_collection_code'], $left['item_digest']] <=> [$right['source_collection_code'], $right['item_digest']]);
+    $lines = [
+        'CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_LIBRARY',
+        'VERSION=' . PRIVATE_FULL_VERSION,
+        'CANONICAL_IDENTITY_BASIS=' . PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS,
+    ];
+    foreach ($items as $item) {
+        $lines[] = implode("\x1e", [
+            $item['item_digest'], $item['source_collection_code'], $item['source_collection_label'],
+            $item['folder_path_digest'], $item['parent_folder_path_digest'] ?? '',
+            implode("\x1f", $item['folder_segments']), $item['source_reference_digest'],
+            $item['original_filename_digest'], $item['source_sha256'], (string) $item['source_byte_size'],
+            $item['presentation_sha256'], (string) $item['presentation_byte_size'], $item['staging_name'],
+            $item['source_format'], $item['presentation_format'], $item['transform_kind'],
+            $item['transform_tool'], $item['transform_version'], $item['transform_recipe_digest'],
+            $item['canonical_identity_basis'],
+        ]);
+    }
+    return privateFullHashText(implode("\n", $lines) . "\n");
+}
+
 /** @return array<string,mixed> */
 function privateFullLoadManifest(): array
 {
     $manifestPath = (string) ($_SERVER['argv'][1] ?? '');
     $stagingRoot = (string) ($_SERVER['argv'][2] ?? '');
-    if ($manifestPath !== PRIVATE_FULL_MANIFEST || $stagingRoot !== PRIVATE_FULL_STAGING) {
+    $supplemental = $manifestPath === PRIVATE_SUPPLEMENTAL_MANIFEST && $stagingRoot === PRIVATE_SUPPLEMENTAL_STAGING;
+    $full = $manifestPath === PRIVATE_FULL_MANIFEST && $stagingRoot === PRIVATE_FULL_STAGING;
+    if ((!$full && !$supplemental) || ($supplemental && getenv('CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL') !== '1')) {
         throw new RuntimeException('fixed_private_mount_required');
     }
     $manifestReal = realpath($manifestPath);
@@ -176,9 +291,12 @@ function privateFullLoadManifest(): array
     } catch (Throwable) {
         throw new RuntimeException('manifest_json_invalid');
     }
+    $expectedKind = $supplemental ? 'class_archive_private_supplemental_library' : 'class_archive_private_full_library';
+    $maxItems = $supplemental ? PRIVATE_SUPPLEMENTAL_MAX_ITEMS : PRIVATE_FULL_MAX_ITEMS;
     if (!is_array($manifest) || ($manifest['version'] ?? null) !== PRIVATE_FULL_VERSION
-        || ($manifest['kind'] ?? null) !== 'class_archive_private_full_library' || !is_array($manifest['items'] ?? null)
-        || count($manifest['items']) < 1 || count($manifest['items']) > PRIVATE_FULL_MAX_ITEMS
+        || ($manifest['kind'] ?? null) !== $expectedKind || !is_array($manifest['items'] ?? null)
+        || count($manifest['items']) < 1 || count($manifest['items']) > $maxItems
+        || ($supplemental && ($manifest['canonical_identity_basis'] ?? null) !== PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS)
     ) {
         throw new RuntimeException('manifest_schema_invalid');
     }
@@ -186,22 +304,23 @@ function privateFullLoadManifest(): array
     $itemDigests = [];
     $stagingNames = [];
     foreach ($manifest['items'] as $rawItem) {
-        $item = privateFullNormalizeItem($rawItem);
+        $item = $supplemental ? privateFullNormalizeSupplementalItem($rawItem) : privateFullNormalizeItem($rawItem);
         if (isset($itemDigests[$item['item_digest']])) {
             throw new RuntimeException('manifest_item_duplicate');
         }
-        if (isset($stagingNames[$item['staging_name']]) && !hash_equals($stagingNames[$item['staging_name']], (string) $item['source_sha256'])) {
+        $stagedChecksum = (string) ($item['presentation_sha256'] ?? $item['source_sha256']);
+        if (isset($stagingNames[$item['staging_name']]) && !hash_equals($stagingNames[$item['staging_name']], $stagedChecksum)) {
             throw new RuntimeException('manifest_staging_collision');
         }
         $itemDigests[$item['item_digest']] = true;
-        $stagingNames[$item['staging_name']] = (string) $item['source_sha256'];
+        $stagingNames[$item['staging_name']] = $stagedChecksum;
         $items[] = $item;
     }
-    $digest = privateFullManifestDigest($items);
+    $digest = $supplemental ? privateFullSupplementalManifestDigest($items) : privateFullManifestDigest($items);
     if (!is_string($manifest['import_digest'] ?? null) || !hash_equals($digest, (string) $manifest['import_digest'])) {
         throw new RuntimeException('manifest_digest_invalid');
     }
-    return ['manifest_digest' => $digest, 'items' => $items, 'staging_root' => $stagingReal];
+    return ['profile' => $supplemental ? 'SUPPLEMENTAL' : 'FULL', 'manifest_digest' => $digest, 'items' => $items, 'staging_root' => $stagingReal];
 }
 
 /** @return array<string,mixed>|null */
@@ -426,8 +545,8 @@ function privateFullVerifyStaging(array $item, string $stagingRoot): array
     $source = $stagingRoot . '/' . $item['staging_name'];
     $real = realpath($source);
     if ($real === false || dirname($real) !== $stagingRoot || !is_file($real) || is_link($source)
-        || (int) filesize($real) !== (int) $item['file_size']
-        || !hash_equals((string) $item['source_sha256'], (string) hash_file('sha256', $real))
+        || (int) filesize($real) !== (int) ($item['presentation_byte_size'] ?? $item['file_size'])
+        || !hash_equals((string) ($item['presentation_sha256'] ?? $item['source_sha256']), (string) hash_file('sha256', $real))
     ) {
         throw new RuntimeException('staging_integrity_invalid');
     }
@@ -529,6 +648,119 @@ function privateFullIsStructural(Throwable $error): bool
         ], true);
 }
 
+/**
+ * Global transformed-source collision gate.
+ *
+ * Every supplemental source is checked before any album/category/image API is
+ * called.  An existing source is accepted only as an exact resumable replay;
+ * an ordinary source row, reference collision, checksum drift, or presentation
+ * drift fails the whole batch closed.  The canonical photo is deliberately
+ * identified by the managed presentation checksum, while the immutable MPO
+ * checksum remains source provenance.
+ *
+ * @param list<array<string,mixed>> $items
+ * @return array{new:int,replay:int}
+ */
+function privateFullPreflightSupplementalSources(ClassIdentity\Repository $repository, array $items): array
+{
+    if ($items === [] || count($items) > PRIVATE_SUPPLEMENTAL_MAX_ITEMS) {
+        throw new RuntimeException('supplemental_preflight_item_count_invalid');
+    }
+    $sourceTable = $repository->table('photo_source');
+    $presentationTable = $repository->table('photo_source_presentation');
+    $photoTable = $repository->table('photo');
+    $new = 0;
+    $replay = 0;
+    $seenIdentity = [];
+    $seenProvenance = [];
+    $seenReference = [];
+    foreach ($items as $item) {
+        if (($item['profile'] ?? null) !== 'SUPPLEMENTAL'
+            || ($item['canonical_identity_basis'] ?? null) !== PRIVATE_SUPPLEMENTAL_CANONICAL_BASIS
+        ) {
+            throw new RuntimeException('supplemental_preflight_contract_invalid');
+        }
+        $identity = hex2bin((string) $item['item_digest']);
+        $reference = hex2bin((string) $item['source_reference_digest']);
+        $filename = hex2bin((string) $item['original_filename_digest']);
+        $sourceChecksum = hex2bin((string) $item['source_sha256']);
+        $presentationChecksum = hex2bin((string) $item['presentation_sha256']);
+        $recipe = hex2bin((string) $item['transform_recipe_digest']);
+        if (!is_string($identity) || !is_string($reference) || !is_string($filename)
+            || !is_string($sourceChecksum) || !is_string($presentationChecksum) || !is_string($recipe)
+        ) {
+            throw new RuntimeException('supplemental_preflight_digest_invalid');
+        }
+        $provenance = privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']);
+        $identityHex = (string) $item['item_digest'];
+        $referenceHex = (string) $item['source_reference_digest'];
+        if (isset($seenIdentity[$identityHex]) || isset($seenProvenance[$provenance]) || isset($seenReference[$referenceHex])) {
+            throw new RuntimeException('supplemental_preflight_batch_source_collision');
+        }
+        $seenIdentity[$identityHex] = true;
+        $seenProvenance[$provenance] = true;
+        $seenReference[$referenceHex] = true;
+        $rows = $repository->fetchAll(
+            'SELECT ps.`id`,ps.`class_photo_id`,ps.`source_kind`,ps.`provenance_code`,'
+                . 'ps.`source_reference_digest`,ps.`original_filename_digest`,ps.`source_checksum`,ps.`byte_size`,ps.`observed_at`,'
+                . 'pp.`presentation_checksum`,pp.`presentation_byte_size`,pp.`source_format`,pp.`presentation_format`,'
+                . 'pp.`transform_kind`,pp.`transform_tool`,pp.`transform_version`,pp.`transform_recipe_digest`,'
+                . 'p.`piwigo_image_id`,p.`media_checksum`,p.`state` AS `photo_state` '
+                . 'FROM `' . $presentationTable . '` pp '
+                . 'INNER JOIN `' . $sourceTable . '` ps ON ps.`id`=pp.`photo_source_id` '
+                . 'INNER JOIN `' . $photoTable . '` p ON p.`class_photo_id`=ps.`class_photo_id` '
+                . 'WHERE pp.`source_identity_digest`=? LIMIT 2',
+            [$identity],
+        );
+        if (count($rows) > 1) {
+            throw new RuntimeException('supplemental_preflight_source_identity_ambiguous');
+        }
+        $provenanceRows = $repository->fetchAll(
+            'SELECT `id` FROM `' . $sourceTable . '` WHERE `source_kind`=? AND `provenance_code`=? LIMIT 2',
+            ['PRIVATE_FULL', $provenance],
+        );
+        $referenceRows = $repository->fetchAll(
+            'SELECT `id` FROM `' . $sourceTable . '` WHERE `source_kind`=? AND `source_reference_digest`=? LIMIT 2',
+            ['PRIVATE_FULL', $reference],
+        );
+        if ($rows === []) {
+            if ($provenanceRows !== [] || $referenceRows !== []) {
+                throw new RuntimeException('supplemental_preflight_existing_source_conflict');
+            }
+            ++$new;
+            continue;
+        }
+        $row = $rows[0];
+        $sourceId = (int) ($row['id'] ?? 0);
+        if ($sourceId <= 0 || count($provenanceRows) !== 1 || count($referenceRows) !== 1
+            || (int) ($provenanceRows[0]['id'] ?? 0) !== $sourceId
+            || (int) ($referenceRows[0]['id'] ?? 0) !== $sourceId
+            || (string) ($row['source_kind'] ?? '') !== 'PRIVATE_FULL'
+            || (string) ($row['provenance_code'] ?? '') !== $provenance
+            || !hash_equals((string) ($row['source_reference_digest'] ?? ''), $reference)
+            || !hash_equals((string) ($row['original_filename_digest'] ?? ''), $filename)
+            || !hash_equals((string) ($row['source_checksum'] ?? ''), $sourceChecksum)
+            || (int) ($row['byte_size'] ?? 0) !== (int) $item['source_byte_size']
+            || ($row['observed_at'] ?? null) !== null
+            || !hash_equals((string) ($row['presentation_checksum'] ?? ''), $presentationChecksum)
+            || (int) ($row['presentation_byte_size'] ?? 0) !== (int) $item['presentation_byte_size']
+            || (string) ($row['source_format'] ?? '') !== (string) $item['source_format']
+            || (string) ($row['presentation_format'] ?? '') !== (string) $item['presentation_format']
+            || (string) ($row['transform_kind'] ?? '') !== (string) $item['transform_kind']
+            || (string) ($row['transform_tool'] ?? '') !== (string) $item['transform_tool']
+            || (string) ($row['transform_version'] ?? '') !== (string) $item['transform_version']
+            || !hash_equals((string) ($row['transform_recipe_digest'] ?? ''), $recipe)
+            || (string) ($row['photo_state'] ?? '') !== ClassArchivePhoto::STATE_ACTIVE
+            || (int) ($row['piwigo_image_id'] ?? 0) <= 0
+            || !hash_equals((string) ($row['media_checksum'] ?? ''), $presentationChecksum)
+        ) {
+            throw new RuntimeException('supplemental_preflight_existing_source_drift');
+        }
+        ++$replay;
+    }
+    return ['new' => $new, 'replay' => $replay];
+}
+
 if (PHP_SAPI !== 'cli' || (function_exists('posix_geteuid') && posix_geteuid() === 0)) {
     privateFullFail('runtime_forbidden');
 }
@@ -586,8 +818,17 @@ $imported = 0;
 $deduplicated = 0;
 $skipped = 0;
 $failed = 0;
+$supplemental = (string) ($manifest['profile'] ?? '') === 'SUPPLEMENTAL';
 try {
     $lease = $library->acquireLease(0);
+    if ($supplemental) {
+        // Verify the complete batch and every existing source identity before
+        // the first Piwigo category, association, metadata or image write.
+        foreach ($manifest['items'] as $item) {
+            privateFullVerifyStaging($item, (string) $manifest['staging_root']);
+        }
+        privateFullPreflightSupplementalSources($repository, $manifest['items']);
+    }
     $run = $library->beginImport(
         $adminUserId,
         (string) $manifest['manifest_digest'],
@@ -630,8 +871,10 @@ try {
         }
         try {
             $staging = privateFullVerifyStaging($item, (string) $manifest['staging_root']);
+            $mediaChecksum = (string) ($item['presentation_sha256'] ?? $item['source_sha256']);
+            $mediaSize = (int) ($item['presentation_byte_size'] ?? $item['file_size']);
             $checkpointedImageId = (int) ($claim['piwigo_image_id'] ?? 0);
-            $existing = $library->findActiveCanonicalByChecksum((string) $item['source_sha256']);
+            $existing = $library->findActiveCanonicalByChecksum($mediaChecksum);
             if ($existing !== null) {
                 if ($checkpointedImageId > 0 && $checkpointedImageId !== (int) $existing['piwigo_image_id']) {
                     // Two physical originals with one checksum were found
@@ -641,23 +884,49 @@ try {
                 }
                 privateFullEnsureAssociation($repository, (int) $existing['piwigo_image_id'], (int) $folder['piwigo_category_id']);
                 privateFullEnsureArchiveSeed($repository, (int) $existing['piwigo_image_id']);
-                $canonical->recordSource(
-                    $adminUserId,
-                    (string) $existing['class_photo_id'],
-                    'PRIVATE_FULL',
-                    privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
-                    (string) $item['source_reference_digest'],
-                    (string) $item['original_filename_digest'],
-                    (string) $item['source_sha256'],
-                    (int) $item['file_size'],
-                    null,
-                    'Private full local library source provenance',
-                );
-                $library->completeItem(
-                    $adminUserId, $importId, (string) $item['item_digest'], 'DEDUPLICATED',
-                    (string) $existing['class_photo_id'], (int) $existing['piwigo_image_id'],
-                    'Private full local library exact canonical reuse',
-                );
+                if ($supplemental) {
+                    $canonical->recordTransformedSource(
+                        $adminUserId, (string) $existing['class_photo_id'], 'PRIVATE_FULL',
+                        privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
+                        (string) $item['item_digest'], (string) $item['source_reference_digest'],
+                        (string) $item['original_filename_digest'], (string) $item['source_sha256'],
+                        (int) $item['source_byte_size'], $mediaChecksum, $mediaSize,
+                        (string) $item['source_format'], (string) $item['presentation_format'],
+                        (string) $item['transform_kind'], (string) $item['transform_tool'],
+                        (string) $item['transform_version'], (string) $item['transform_recipe_digest'],
+                        null, 'Private supplemental transformed source provenance',
+                    );
+                    $completionState = $checkpointedImageId > 0 ? 'APPLIED' : 'DEDUPLICATED';
+                    $library->completeTransformedItem(
+                        $adminUserId, $importId, (string) $item['item_digest'], $completionState,
+                        (string) $existing['class_photo_id'], (int) $existing['piwigo_image_id'], $mediaChecksum,
+                        'Private supplemental exact presentation reuse',
+                    );
+                    // A non-zero native checkpoint means this is recovery of
+                    // the canonical created by this item, not reuse of an
+                    // older library photo. Preserve new-photo-only background
+                    // work across a crash between mapping and completion.
+                    if ($checkpointedImageId > 0) {
+                        if (class_exists('ClassArchiveDerivativeWarmupQueue', false)) {
+                            \ClassArchiveDerivativeWarmupQueue::enqueueBestEffort(
+                                (string) $existing['class_photo_id'], (int) $existing['piwigo_image_id'],
+                            );
+                        }
+                    }
+                } else {
+                    $canonical->recordSource(
+                        $adminUserId, (string) $existing['class_photo_id'], 'PRIVATE_FULL',
+                        privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
+                        (string) $item['source_reference_digest'], (string) $item['original_filename_digest'],
+                        (string) $item['source_sha256'], (int) $item['file_size'], null,
+                        'Private full local library source provenance',
+                    );
+                    $library->completeItem(
+                        $adminUserId, $importId, (string) $item['item_digest'], 'DEDUPLICATED',
+                        (string) $existing['class_photo_id'], (int) $existing['piwigo_image_id'],
+                        'Private full local library exact canonical reuse',
+                    );
+                }
                 ++$deduplicated;
                 continue;
             }
@@ -668,7 +937,7 @@ try {
             // occurring after the native insert but before our InnoDB
             // checkpoint. It is never an authorization credential.
             $opaqueFile = 'frl-' . substr((string) $item['item_digest'], 0, 24) . '-'
-                . substr((string) $item['source_sha256'], 0, 12) . '.' . (string) $item['extension'];
+                . substr($mediaChecksum, 0, 12) . '.' . (string) $item['extension'];
             $imageId = $checkpointedImageId > 0 ? $checkpointedImageId : privateFullExistingOpaqueImage($opaqueFile);
             if ($imageId === null) {
                 $temporary = tempnam(sys_get_temp_dir(), 'class-archive-private-full-');
@@ -677,7 +946,7 @@ try {
                 }
                 try {
                     if (!copy((string) $staging['source'], $temporary) || !chmod($temporary, 0600)
-                        || !hash_equals((string) $item['source_sha256'], (string) hash_file('sha256', $temporary))
+                        || !hash_equals($mediaChecksum, (string) hash_file('sha256', $temporary))
                     ) {
                         throw new RuntimeException('temporary_copy_failed');
                     }
@@ -692,21 +961,25 @@ try {
                 }
             }
             $original = privateFullPiwigoOriginal($imageId);
-            if (!hash_equals((string) $item['source_sha256'], (string) $original['checksum'])) {
+            if (!hash_equals($mediaChecksum, (string) $original['checksum'])) {
                 throw new RuntimeException('piwigo_original_hash_mismatch');
             }
             // This checksum-verified checkpoint is written before metadata,
             // archive, mapping or provenance work. A restart can now resume
             // from the native original without relying on Piwigo's internal
             // randomised filename or duplicate-detection configuration.
-            $library->checkpointPiwigoImage(
-                $adminUserId,
-                $importId,
-                (string) $item['item_digest'],
-                $imageId,
-                (string) $item['source_sha256'],
-                'Private full local library native image checkpoint',
-            );
+            if ($supplemental) {
+                $library->checkpointTransformedPiwigoImage(
+                    $adminUserId, $importId, (string) $item['item_digest'], $imageId,
+                    (string) $item['source_sha256'], $mediaChecksum,
+                    'Private supplemental presentation checkpoint',
+                );
+            } else {
+                $library->checkpointPiwigoImage(
+                    $adminUserId, $importId, (string) $item['item_digest'], $imageId,
+                    $mediaChecksum, 'Private full local library native image checkpoint',
+                );
+            }
             privateFullEnsureAssociation($repository, $imageId, (int) $folder['piwigo_category_id']);
             single_update(IMAGES_TABLE, [
                 'name' => '班级历史照片',
@@ -722,18 +995,27 @@ try {
             if (!is_string($mapped['class_photo_id'] ?? null)) {
                 throw new RuntimeException('canonical_mapping_invalid');
             }
-            $canonical->recordSource(
-                $adminUserId,
-                (string) $mapped['class_photo_id'],
-                'PRIVATE_FULL',
-                privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
-                (string) $item['source_reference_digest'],
-                (string) $item['original_filename_digest'],
-                (string) $item['source_sha256'],
-                (int) $item['file_size'],
-                null,
-                'Private full local library source provenance',
-            );
+            if ($supplemental) {
+                $canonical->recordTransformedSource(
+                    $adminUserId, (string) $mapped['class_photo_id'], 'PRIVATE_FULL',
+                    privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
+                    (string) $item['item_digest'], (string) $item['source_reference_digest'],
+                    (string) $item['original_filename_digest'], (string) $item['source_sha256'],
+                    (int) $item['source_byte_size'], $mediaChecksum, $mediaSize,
+                    (string) $item['source_format'], (string) $item['presentation_format'],
+                    (string) $item['transform_kind'], (string) $item['transform_tool'],
+                    (string) $item['transform_version'], (string) $item['transform_recipe_digest'],
+                    null, 'Private supplemental transformed source provenance',
+                );
+            } else {
+                $canonical->recordSource(
+                    $adminUserId, (string) $mapped['class_photo_id'], 'PRIVATE_FULL',
+                    privateFullProvenanceCode((string) $item['source_collection_code'], (string) $item['item_digest']),
+                    (string) $item['source_reference_digest'], (string) $item['original_filename_digest'],
+                    (string) $item['source_sha256'], (int) $item['file_size'], null,
+                    'Private full local library source provenance',
+                );
+            }
             if (class_exists('ClassArchiveDerivativeWarmupQueue', false)) {
                 // Queue only. A full library must become resumable/browsable
                 // without serialising every derivative profile under the
@@ -741,11 +1023,19 @@ try {
                 // durable queue before the guarded cutover.
                 \ClassArchiveDerivativeWarmupQueue::enqueueBestEffort((string) $mapped['class_photo_id'], $imageId);
             }
-            $library->completeItem(
-                $adminUserId, $importId, (string) $item['item_digest'], 'APPLIED',
-                (string) $mapped['class_photo_id'], $imageId,
-                'Private full local library original imported',
-            );
+            if ($supplemental) {
+                $library->completeTransformedItem(
+                    $adminUserId, $importId, (string) $item['item_digest'], 'APPLIED',
+                    (string) $mapped['class_photo_id'], $imageId, $mediaChecksum,
+                    'Private supplemental presentation imported',
+                );
+            } else {
+                $library->completeItem(
+                    $adminUserId, $importId, (string) $item['item_digest'], 'APPLIED',
+                    (string) $mapped['class_photo_id'], $imageId,
+                    'Private full local library original imported',
+                );
+            }
             ++$imported;
         } catch (Throwable $error) {
             if (privateFullIsStructural($error)) {
@@ -774,7 +1064,27 @@ try {
     // queues work only after the import journal is terminal; no photo import
     // can fail because a private Immich worker is absent, and no runtime read
     // will later compensate by starting model work.
-    $aiQueue = $aiIndex->enqueueImportedActivePhotos();
+    if ($supplemental) {
+        $aiQueue = ['queued' => 0, 'unchanged' => 0];
+        // APPLIED is a durable import-journal fact. If this process dies after
+        // finishImport() or halfway through enqueueing, an exact rerun (even a
+        // completed no-op) reads the same bounded set and retries idempotently.
+        $appliedPhotos = $library->terminalAppliedPhotosForImport(
+            $importId,
+            (string) $manifest['manifest_digest'],
+            count($manifest['items']),
+        );
+        foreach ($appliedPhotos as $photo) {
+            $result = $aiIndex->enqueueNewPhoto((string) $photo['class_photo_id']);
+            if (($result['queued'] ?? false) === true) {
+                ++$aiQueue['queued'];
+            } else {
+                ++$aiQueue['unchanged'];
+            }
+        }
+    } else {
+        $aiQueue = $aiIndex->enqueueImportedActivePhotos();
+    }
     fwrite(STDOUT, 'PRIVATE_FULL_LIBRARY_IMPORT=PASS imported=' . $imported . ' deduplicated=' . $deduplicated
         . ' skipped=' . $skipped . ' failed=' . $failed . ' state=' . (string) $finished['state']
         . ' ai_jobs_queued=' . (int) $aiQueue['queued'] . ' ai_jobs_unchanged=' . (int) $aiQueue['unchanged']

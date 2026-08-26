@@ -34,6 +34,16 @@ function manifestContractExpectReject(array $item): void
     throw new RuntimeException('manifest_contract_rejection_missing');
 }
 
+function supplementalContractExpectReject(array $item): void
+{
+    try {
+        privateFullNormalizeSupplementalItem($item);
+    } catch (RuntimeException $error) {
+        return;
+    }
+    throw new RuntimeException('supplemental_contract_rejection_missing');
+}
+
 try {
     $code = 'PRIVATE_SOURCE_A';
     $sourceReference = hash('sha256', "Private Source A\0synthetic-folder/synthetic-photo.png");
@@ -90,6 +100,76 @@ try {
         throw new RuntimeException('manifest_contract_private_runtime_boundary_missing');
     }
     ++$assertions;
+    $presentationChecksum = hash('sha256', 'synthetic-presentation');
+    $supplemental = [
+        'item_digest' => $item['item_digest'],
+        'source_collection_code' => $code,
+        'source_collection_label' => 'Source Collection A',
+        'folder_path_digest' => $folderDigest,
+        'parent_folder_path_digest' => $parentDigest,
+        'folder_segments' => $segments,
+        'source_reference_digest' => $sourceReference,
+        'original_filename_digest' => $item['original_filename_digest'],
+        'source_sha256' => $checksum,
+        'source_byte_size' => 2345,
+        'presentation_sha256' => $presentationChecksum,
+        'presentation_byte_size' => 1234,
+        'presentation_staging_name' => 'frs-' . $presentationChecksum . '.jpg',
+        'source_format' => 'MPO',
+        'presentation_format' => 'JPEG',
+        'transform_kind' => 'MPO_PRIMARY_FRAME_JPEG',
+        'transform_tool' => 'PILLOW',
+        'transform_version' => '12.3.0',
+        'transform_recipe_digest' => hash('sha256', 'synthetic-recipe'),
+        'canonical_identity_basis' => 'PRESENTATION_SHA256',
+    ];
+    $normalizedSupplemental = privateFullNormalizeSupplementalItem($supplemental);
+    if (($normalizedSupplemental['profile'] ?? null) !== 'SUPPLEMENTAL'
+        || ($normalizedSupplemental['presentation_sha256'] ?? null) !== $presentationChecksum
+        || ($normalizedSupplemental['canonical_identity_basis'] ?? null) !== 'PRESENTATION_SHA256'
+        || ($normalizedSupplemental['file_size'] ?? null) !== 2345
+    ) {
+        throw new RuntimeException('supplemental_contract_normalization_invalid');
+    }
+    ++$assertions;
+    $badTransform = $supplemental;
+    $badTransform['transform_tool'] = 'UNREVIEWED';
+    supplementalContractExpectReject($badTransform);
+    ++$assertions;
+    $badBasis = $supplemental;
+    $badBasis['canonical_identity_basis'] = 'SOURCE_SHA256';
+    supplementalContractExpectReject($badBasis);
+    ++$assertions;
+    $sameBytes = $supplemental;
+    $sameBytes['presentation_sha256'] = $checksum;
+    $sameBytes['presentation_staging_name'] = 'frs-' . $checksum . '.jpg';
+    supplementalContractExpectReject($sameBytes);
+    ++$assertions;
+    if (!str_contains($source, "const PRIVATE_SUPPLEMENTAL_MANIFEST = '/private-real-full/manifests/supplemental-import-manifest.json';")
+        || !str_contains($source, "getenv('CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL') !== '1'")) {
+        throw new RuntimeException('supplemental_contract_fixed_runtime_boundary_missing');
+    }
+    ++$assertions;
+    if (!str_contains($source, '$canonical->recordTransformedSource(')
+        || !str_contains($source, '$library->completeTransformedItem(')
+        || !str_contains($source, '$library->checkpointTransformedPiwigoImage(')) {
+        throw new RuntimeException('supplemental_contract_transformed_provenance_missing');
+    }
+    ++$assertions;
+    if (!str_contains($source, '$library->terminalAppliedPhotosForImport(')
+        || !str_contains($source, '$aiIndex->enqueueNewPhoto((string) $photo[\'class_photo_id\'])')) {
+        throw new RuntimeException('supplemental_contract_incremental_ai_missing');
+    }
+    ++$assertions;
+    $preflight = strpos($source, "privateFullPreflightSupplementalSources(\$repository, \$manifest['items']);");
+    $folderWrite = strpos($source, '$folder = privateFullEnsureFolderHierarchy(');
+    $imageWrite = strpos($source, 'add_uploaded_file(');
+    if ($preflight === false || $folderWrite === false || $imageWrite === false
+        || $preflight >= $folderWrite || $preflight >= $imageWrite
+    ) {
+        throw new RuntimeException('supplemental_contract_global_preflight_order_invalid');
+    }
+    ++$assertions;
     if (!str_contains($source, "'PRIVATE_FULL',") || !str_contains($source, 'privateFullEnsureAssociation(')
         || !str_contains($source, "'DEDUPLICATED'")) {
         throw new RuntimeException('manifest_contract_exact_dedup_membership_missing');
@@ -122,6 +202,16 @@ try {
     if (!is_string($serviceSource) || str_contains($serviceSource, "'result' => 'FAILURE'")
         || !str_contains($serviceSource, "'result' => 'FAILED'")) {
         throw new RuntimeException('manifest_contract_audit_result_enum_invalid');
+    }
+    ++$assertions;
+    $transformedComplete = strpos($serviceSource, 'function completeTransformedItem(');
+    $terminalReconciliation = strpos($serviceSource, 'function terminalAppliedPhotosForImport(');
+    $transformedCompleteSource = $transformedComplete === false || $terminalReconciliation === false
+        ? '' : substr($serviceSource, $transformedComplete, $terminalReconciliation - $transformedComplete);
+    if (!str_contains($transformedCompleteSource, 'SELECT `state`,`source_checksum`,`piwigo_image_id` FROM')
+        || $terminalReconciliation === false
+        || !str_contains($serviceSource, 'class_archive_private_library_terminal_applied_count_drift')) {
+        throw new RuntimeException('supplemental_contract_durable_checkpoint_reconciliation_missing');
     }
     ++$assertions;
     if (!str_contains($source, 'privateFullExistingOpaqueImage($opaqueFile)')

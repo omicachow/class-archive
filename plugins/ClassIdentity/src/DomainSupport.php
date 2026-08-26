@@ -11,7 +11,7 @@ final class DomainSupport
 {
     /** @var list<string> */
     private const TABLES = [
-        'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source',
+        'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source', 'photo_source_presentation',
         'photo_duplicate', 'batch_operation', 'batch_operation_item',
         'private_library_collection', 'private_library_folder',
         'private_library_import', 'private_library_import_item',

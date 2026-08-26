@@ -466,6 +466,67 @@ final class PrivateFullLibraryService
         });
     }
 
+    /**
+     * Checkpoint a native image created from a verified presentation surrogate.
+     * The import item remains bound to the immutable source checksum, so the
+     * distinct presentation checksum is validated by the caller and recorded
+     * later by completeTransformedItem's provenance join.
+     */
+    public function checkpointTransformedPiwigoImage(
+        int $adminUserId,
+        string $importId,
+        string $itemDigestHex,
+        int $piwigoImageId,
+        string $sourceChecksumHex,
+        string $presentationChecksumHex,
+        string $reason,
+    ): void {
+        $admin = DomainSupport::requireSystemAdmin($adminUserId);
+        $importBinary = DomainSupport::idToBinary($importId);
+        $itemDigest = DomainSupport::normalizeHexDigest($itemDigestHex, true) ?? '';
+        $sourceChecksum = DomainSupport::normalizeHexDigest($sourceChecksumHex, true) ?? '';
+        $presentationChecksum = DomainSupport::normalizeHexDigest($presentationChecksumHex, true) ?? '';
+        if ($piwigoImageId <= 0 || hash_equals($sourceChecksum, $presentationChecksum)) {
+            throw new \InvalidArgumentException('class_archive_private_library_transformed_checkpoint_invalid');
+        }
+        $reason = Audit::validateReason($reason, true) ?? '';
+        $this->repository->transaction(function (Repository $repository) use (
+            $admin, $importId, $importBinary, $itemDigest, $piwigoImageId, $sourceChecksum, $reason,
+        ): void {
+            $table = DomainSupport::table($repository, 'private_library_import_item');
+            $row = $repository->fetchOne(
+                'SELECT `state`,`source_checksum`,`piwigo_image_id` FROM `' . $table . '` WHERE `import_id`=? AND `item_digest`=? FOR UPDATE',
+                [$importBinary, $itemDigest],
+            );
+            if ($row === null || (string) $row['state'] !== 'PROCESSING'
+                || !hash_equals((string) $row['source_checksum'], $sourceChecksum)
+            ) {
+                throw new \RuntimeException('class_archive_private_library_checkpoint_invalid');
+            }
+            $existingImageId = (int) ($row['piwigo_image_id'] ?? 0);
+            if ($existingImageId > 0 && $existingImageId !== $piwigoImageId) {
+                throw new \RuntimeException('class_archive_private_library_checkpoint_conflict');
+            }
+            if ($existingImageId === 0) {
+                $changed = $repository->execute(
+                    'UPDATE `' . $table . '` SET `piwigo_image_id`=?,`updated_at`=UTC_TIMESTAMP(6) WHERE `import_id`=? AND `item_digest`=? AND `state`=\'PROCESSING\' AND `piwigo_image_id` IS NULL',
+                    [$piwigoImageId, $importBinary, $itemDigest],
+                );
+                if ($changed !== 1) {
+                    throw new \RuntimeException('class_archive_private_library_checkpoint_race');
+                }
+                (new Audit($repository))->append(DomainSupport::auditActor($admin) + [
+                    'action' => 'PRIVATE_LIBRARY_IMPORT_ITEM_CHECKPOINT',
+                    'target_type' => 'PRIVATE_LIBRARY_IMPORT',
+                    'target_id' => $importId,
+                    'new_value' => ['piwigo_image_id' => $piwigoImageId, 'presentation_kind' => 'MPO_PRIMARY_FRAME_JPEG'],
+                    'reason' => $reason,
+                    'result' => 'SUCCESS',
+                ]);
+            }
+        });
+    }
+
     /** @return array{class_photo_id:string,piwigo_image_id:int}|null */
     public function findActiveCanonicalByChecksum(string $checksumHex): ?array
     {
@@ -511,7 +572,7 @@ final class PrivateFullLibraryService
         ): void {
             $itemTable = DomainSupport::table($repository, 'private_library_import_item');
             $row = $repository->fetchOne(
-                'SELECT `state`,`source_checksum` FROM `' . $itemTable . '` WHERE `import_id`=? AND `item_digest`=? FOR UPDATE',
+                'SELECT `state`,`source_checksum`,`piwigo_image_id` FROM `' . $itemTable . '` WHERE `import_id`=? AND `item_digest`=? FOR UPDATE',
                 [$importBinary, $itemDigest],
             );
             if ($row === null || (string) $row['state'] !== 'PROCESSING') {
@@ -541,6 +602,99 @@ final class PrivateFullLibraryService
                 'target_type' => 'PRIVATE_LIBRARY_IMPORT',
                 'target_id' => $importId,
                 'new_value' => ['state' => $state, 'class_photo_id' => $classPhotoId, 'piwigo_image_id' => $piwigoImageId],
+                'reason' => $reason,
+                'result' => 'SUCCESS',
+            ]);
+        });
+    }
+
+    /**
+     * Complete an item represented by a verified presentation surrogate.
+     * The durable import item remains bound to the immutable source checksum;
+     * publication is allowed only when the active photo and its explicit
+     * presentation provenance both match the caller-supplied media checksum.
+     */
+    public function completeTransformedItem(
+        int $adminUserId,
+        string $importId,
+        string $itemDigestHex,
+        string $state,
+        string $classPhotoId,
+        int $piwigoImageId,
+        string $presentationChecksumHex,
+        string $reason,
+    ): void {
+        $admin = DomainSupport::requireSystemAdmin($adminUserId);
+        $importBinary = DomainSupport::idToBinary($importId);
+        $itemDigest = DomainSupport::normalizeHexDigest($itemDigestHex, true) ?? '';
+        $presentationChecksum = DomainSupport::normalizeHexDigest($presentationChecksumHex, true) ?? '';
+        $state = strtoupper(trim($state));
+        if (!in_array($state, ['APPLIED', 'DEDUPLICATED'], true) || $piwigoImageId <= 0) {
+            throw new \InvalidArgumentException('class_archive_private_library_item_complete_invalid');
+        }
+        $photoBinary = DomainSupport::idToBinary($classPhotoId);
+        $reason = Audit::validateReason($reason, true) ?? '';
+        $this->repository->transaction(function (Repository $repository) use (
+            $admin, $importId, $importBinary, $itemDigest, $state, $classPhotoId, $photoBinary,
+            $piwigoImageId, $presentationChecksum, $reason,
+        ): void {
+            $itemTable = DomainSupport::table($repository, 'private_library_import_item');
+            $row = $repository->fetchOne(
+                'SELECT `state`,`source_checksum`,`piwigo_image_id` FROM `' . $itemTable . '` WHERE `import_id`=? AND `item_digest`=? FOR UPDATE',
+                [$importBinary, $itemDigest],
+            );
+            if ($row === null || (string) $row['state'] !== 'PROCESSING' || !is_string($row['source_checksum'] ?? null)) {
+                throw new \RuntimeException('class_archive_private_library_item_not_processing');
+            }
+            $photo = $repository->fetchOne(
+                'SELECT `class_photo_id`,`piwigo_image_id`,`media_checksum`,`state` FROM `' . $repository->table('photo') . '` WHERE `class_photo_id`=? FOR UPDATE',
+                [$photoBinary],
+            );
+            if ($photo === null || (string) $photo['state'] !== ClassArchivePhoto::STATE_ACTIVE
+                || (int) $photo['piwigo_image_id'] !== $piwigoImageId
+                || !is_string($photo['media_checksum'] ?? null)
+                || !hash_equals((string) $photo['media_checksum'], $presentationChecksum)
+            ) {
+                throw new \RuntimeException('class_archive_private_library_item_presentation_drift');
+            }
+            $presentation = $repository->fetchAll(
+                'SELECT ps.`source_checksum`,pp.`presentation_checksum` FROM `'
+                    . $repository->table('photo_source_presentation') . '` pp INNER JOIN `'
+                    . $repository->table('photo_source') . '` ps ON ps.`id`=pp.`photo_source_id` '
+                    . 'WHERE ps.`class_photo_id`=? AND pp.`source_identity_digest`=? LIMIT 2 FOR UPDATE',
+                [$photoBinary, $itemDigest],
+            );
+            if (count($presentation) !== 1
+                || !hash_equals((string) ($presentation[0]['source_checksum'] ?? ''), (string) $row['source_checksum'])
+                || !hash_equals((string) ($presentation[0]['presentation_checksum'] ?? ''), $presentationChecksum)
+            ) {
+                throw new \RuntimeException('class_archive_private_library_item_presentation_provenance_invalid');
+            }
+            $checkpointedImageId = (int) ($row['piwigo_image_id'] ?? 0);
+            if (($state === 'APPLIED' && $checkpointedImageId !== $piwigoImageId)
+                || ($state === 'DEDUPLICATED' && $checkpointedImageId !== 0)
+            ) {
+                throw new \RuntimeException('class_archive_private_library_item_completion_kind_invalid');
+            }
+            $changed = $repository->execute(
+                'UPDATE `' . $itemTable . '` SET `state`=?,`class_photo_id`=?,`piwigo_image_id`=?,`last_error_code`=NULL,`updated_at`=UTC_TIMESTAMP(6) '
+                    . "WHERE `import_id`=? AND `item_digest`=? AND `state`='PROCESSING'",
+                [$state, $photoBinary, $piwigoImageId, $importBinary, $itemDigest],
+            );
+            if ($changed !== 1) {
+                throw new \RuntimeException('class_archive_private_library_item_complete_race');
+            }
+            $this->refreshImportCounts($repository, $importBinary);
+            (new Audit($repository))->append(DomainSupport::auditActor($admin) + [
+                'action' => 'PRIVATE_LIBRARY_IMPORT_ITEM',
+                'target_type' => 'PRIVATE_LIBRARY_IMPORT',
+                'target_id' => $importId,
+                'new_value' => [
+                    'state' => $state,
+                    'class_photo_id' => $classPhotoId,
+                    'piwigo_image_id' => $piwigoImageId,
+                    'presentation_kind' => 'MPO_PRIMARY_FRAME_JPEG',
+                ],
                 'reason' => $reason,
                 'result' => 'SUCCESS',
             ]);
@@ -628,6 +782,77 @@ final class PrivateFullLibraryService
             ]);
             return ['import_id' => $importId, 'state' => $state, 'item_total' => $itemTotal] + $counts;
         });
+    }
+
+    /**
+     * Return the durable, bounded set of canonical photos created by one
+     * terminal import. This is the crash-recovery source for incremental AI
+     * enqueueing: APPLIED means this import checkpointed the native image;
+     * DEDUPLICATED means it reused an older canonical and must not enqueue it.
+     *
+     * @return list<array{class_photo_id:string,piwigo_image_id:int}>
+     */
+    public function terminalAppliedPhotosForImport(
+        string $importId,
+        string $manifestDigestHex,
+        int $expectedItemTotal,
+    ): array {
+        $importBinary = DomainSupport::idToBinary($importId);
+        $manifestDigest = DomainSupport::normalizeHexDigest($manifestDigestHex, true) ?? '';
+        if ($expectedItemTotal < 1 || $expectedItemTotal > 10000) {
+            throw new \InvalidArgumentException('class_archive_private_library_terminal_query_bound_invalid');
+        }
+        $import = $this->repository->fetchOne(
+            'SELECT `manifest_digest`,`item_total`,`state`,`applied_count` FROM `'
+                . $this->repository->table('private_library_import') . '` WHERE `import_id`=? LIMIT 1',
+            [$importBinary],
+        );
+        if ($import === null
+            || !is_string($import['manifest_digest'] ?? null)
+            || !hash_equals((string) $import['manifest_digest'], $manifestDigest)
+            || (int) ($import['item_total'] ?? 0) !== $expectedItemTotal
+            || !in_array((string) ($import['state'] ?? ''), ['COMPLETED', 'COMPLETED_WITH_ERRORS'], true)
+        ) {
+            throw new \RuntimeException('class_archive_private_library_terminal_import_invalid');
+        }
+        $rows = $this->repository->fetchAll(
+            'SELECT i.`item_digest`,i.`class_photo_id`,i.`piwigo_image_id`,'
+                . 'p.`class_photo_id` AS `active_photo_id`,p.`piwigo_image_id` AS `active_piwigo_image_id`,p.`state` AS `photo_state` '
+                . 'FROM `' . $this->repository->table('private_library_import_item') . '` i '
+                . 'LEFT JOIN `' . $this->repository->table('photo') . '` p ON p.`class_photo_id`=i.`class_photo_id` '
+                . "WHERE i.`import_id`=? AND i.`state`='APPLIED' ORDER BY i.`item_digest` ASC LIMIT "
+                . ($expectedItemTotal + 1),
+            [$importBinary],
+        );
+        if (count($rows) > $expectedItemTotal) {
+            throw new \RuntimeException('class_archive_private_library_terminal_query_overflow');
+        }
+        if ((int) ($import['applied_count'] ?? -1) !== count($rows)) {
+            throw new \RuntimeException('class_archive_private_library_terminal_applied_count_drift');
+        }
+        $result = [];
+        $seen = [];
+        foreach ($rows as $row) {
+            $photoBinary = $row['class_photo_id'] ?? null;
+            $activeBinary = $row['active_photo_id'] ?? null;
+            $imageId = (int) ($row['piwigo_image_id'] ?? 0);
+            if (!is_string($photoBinary) || strlen($photoBinary) !== 16
+                || !is_string($activeBinary) || !hash_equals($photoBinary, $activeBinary)
+                || $imageId <= 0 || (int) ($row['active_piwigo_image_id'] ?? 0) !== $imageId
+                || (string) ($row['photo_state'] ?? '') !== ClassArchivePhoto::STATE_ACTIVE
+            ) {
+                throw new \RuntimeException('class_archive_private_library_terminal_photo_invalid');
+            }
+            $classPhotoId = DomainSupport::binaryToId($photoBinary);
+            if (isset($seen[$classPhotoId])) {
+                // Two source items may theoretically point at one canonical,
+                // but two APPLIED rows would claim they both created it.
+                throw new \RuntimeException('class_archive_private_library_terminal_photo_ambiguous');
+            }
+            $seen[$classPhotoId] = true;
+            $result[] = ['class_photo_id' => $classPhotoId, 'piwigo_image_id' => $imageId];
+        }
+        return $result;
     }
 
     /** @return array{applied_count:int,deduplicated_count:int,failed_count:int} */

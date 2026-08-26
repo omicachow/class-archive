@@ -96,6 +96,152 @@ final class CanonicalPhotoService
         });
     }
 
+    /**
+     * Record a source whose immutable bytes cannot be served directly and are
+     * represented by a separately checksum-bound presentation surrogate.
+     * The ordinary recordSource() contract intentionally remains strict:
+     * only this explicit path may bind different source and media checksums.
+     */
+    public function recordTransformedSource(
+        int $adminUserId,
+        string $classPhotoId,
+        string $sourceKind,
+        string $provenanceCode,
+        string $sourceIdentityDigestHex,
+        ?string $sourceReferenceDigestHex,
+        ?string $originalFilenameDigestHex,
+        string $sourceChecksumHex,
+        int $sourceByteSize,
+        string $presentationChecksumHex,
+        int $presentationByteSize,
+        string $sourceFormat,
+        string $presentationFormat,
+        string $transformKind,
+        string $transformTool,
+        string $transformVersion,
+        string $transformRecipeDigestHex,
+        ?string $observedAtUtc,
+        string $reason,
+    ): int {
+        $admin = DomainSupport::requireSystemAdmin($adminUserId);
+        $sourceKind = strtoupper(trim($sourceKind));
+        if ($sourceKind !== 'PRIVATE_FULL') {
+            throw new \InvalidArgumentException('class_archive_photo_transformed_source_kind_invalid');
+        }
+        $provenanceCode = strtoupper(trim($provenanceCode));
+        if (preg_match('/\A[A-Z0-9][A-Z0-9._:-]{1,63}\z/D', $provenanceCode) !== 1) {
+            throw new \InvalidArgumentException('class_archive_photo_provenance_code_invalid');
+        }
+        if ($sourceByteSize <= 0 || $presentationByteSize <= 0) {
+            throw new \InvalidArgumentException('class_archive_photo_source_size_invalid');
+        }
+        $sourceIdentityDigest = DomainSupport::normalizeHexDigest($sourceIdentityDigestHex, true) ?? '';
+        $referenceDigest = DomainSupport::normalizeHexDigest($sourceReferenceDigestHex);
+        $filenameDigest = DomainSupport::normalizeHexDigest($originalFilenameDigestHex);
+        $sourceChecksum = DomainSupport::normalizeHexDigest($sourceChecksumHex, true) ?? '';
+        $presentationChecksum = DomainSupport::normalizeHexDigest($presentationChecksumHex, true) ?? '';
+        $recipeDigest = DomainSupport::normalizeHexDigest($transformRecipeDigestHex, true) ?? '';
+        $sourceFormat = strtoupper(trim($sourceFormat));
+        $presentationFormat = strtoupper(trim($presentationFormat));
+        $transformKind = strtoupper(trim($transformKind));
+        $transformTool = strtoupper(trim($transformTool));
+        $transformVersion = trim($transformVersion);
+        if ($sourceFormat !== 'MPO' || $presentationFormat !== 'JPEG'
+            || $transformKind !== 'MPO_PRIMARY_FRAME_JPEG' || $transformTool !== 'PILLOW'
+            || preg_match('/\A[0-9A-Za-z][0-9A-Za-z._+\-]{0,31}\z/D', $transformVersion) !== 1
+        ) {
+            throw new \InvalidArgumentException('class_archive_photo_transform_contract_invalid');
+        }
+        $observedAtUtc = $this->normalizeUtc($observedAtUtc);
+        $reason = Audit::validateReason($reason, true) ?? '';
+
+        return $this->repository->transaction(function (Repository $repository) use (
+            $admin, $classPhotoId, $sourceKind, $provenanceCode, $sourceIdentityDigest,
+            $referenceDigest, $filenameDigest, $sourceChecksum, $sourceByteSize,
+            $presentationChecksum, $presentationByteSize, $sourceFormat, $presentationFormat,
+            $transformKind, $transformTool, $transformVersion, $recipeDigest, $observedAtUtc, $reason,
+        ): int {
+            $photo = DomainSupport::requireActivePhoto($repository, $classPhotoId, true);
+            if (!is_string($photo['media_checksum']) || !hash_equals($photo['media_checksum'], $presentationChecksum)) {
+                throw new \RuntimeException('class_archive_photo_presentation_checksum_mismatch');
+            }
+            $sourceTable = DomainSupport::table($repository, 'photo_source');
+            $presentationTable = DomainSupport::table($repository, 'photo_source_presentation');
+            $existing = $repository->fetchAll(
+                'SELECT ps.`id`,ps.`class_photo_id`,ps.`source_kind`,ps.`provenance_code`,'
+                    . 'ps.`source_reference_digest`,ps.`original_filename_digest`,ps.`source_checksum`,ps.`byte_size`,ps.`observed_at`,'
+                    . 'pp.`source_identity_digest`,pp.`presentation_checksum`,pp.`presentation_byte_size`,pp.`source_format`,'
+                    . 'pp.`presentation_format`,pp.`transform_kind`,pp.`transform_tool`,pp.`transform_version`,pp.`transform_recipe_digest` '
+                    . 'FROM `' . $presentationTable . '` pp INNER JOIN `' . $sourceTable . '` ps ON ps.`id`=pp.`photo_source_id` '
+                    . 'WHERE pp.`source_identity_digest`=? LIMIT 2 FOR UPDATE',
+                [$sourceIdentityDigest],
+            );
+            if (count($existing) > 1) {
+                throw new \RuntimeException('class_archive_photo_source_identity_ambiguous');
+            }
+            if ($existing !== []) {
+                $row = $existing[0];
+                if (!is_string($row['class_photo_id'] ?? null)
+                    || !hash_equals((string) $row['class_photo_id'], DomainSupport::idToBinary($classPhotoId))
+                    || (string) $row['source_kind'] !== $sourceKind
+                    || (string) $row['provenance_code'] !== $provenanceCode
+                    || !self::nullableHashEquals($row['source_reference_digest'] ?? null, $referenceDigest)
+                    || !self::nullableHashEquals($row['original_filename_digest'] ?? null, $filenameDigest)
+                    || !hash_equals((string) $row['source_checksum'], $sourceChecksum)
+                    || (int) $row['byte_size'] !== $sourceByteSize
+                    || (($row['observed_at'] ?? null) === null ? null : (string) $row['observed_at']) !== $observedAtUtc
+                    || !hash_equals((string) $row['presentation_checksum'], $presentationChecksum)
+                    || (int) $row['presentation_byte_size'] !== $presentationByteSize
+                    || (string) $row['source_format'] !== $sourceFormat
+                    || (string) $row['presentation_format'] !== $presentationFormat
+                    || (string) $row['transform_kind'] !== $transformKind
+                    || (string) $row['transform_tool'] !== $transformTool
+                    || (string) $row['transform_version'] !== $transformVersion
+                    || !hash_equals((string) $row['transform_recipe_digest'], $recipeDigest)
+                ) {
+                    throw new \RuntimeException('class_archive_photo_transformed_source_drift');
+                }
+                return (int) $row['id'];
+            }
+            $provenanceCollision = $repository->fetchOne(
+                'SELECT `id` FROM `' . $sourceTable . '` WHERE `source_kind`=? AND `provenance_code`=? LIMIT 1 FOR UPDATE',
+                [$sourceKind, $provenanceCode],
+            );
+            if ($provenanceCollision !== null) {
+                throw new \RuntimeException('class_archive_photo_transformed_source_drift');
+            }
+            $repository->execute(
+                'INSERT INTO `' . $sourceTable . '` '
+                    . '(`class_photo_id`,`source_kind`,`provenance_code`,`source_reference_digest`,`original_filename_digest`,`source_checksum`,`byte_size`,`observed_at`,`created_by_principal_id`,`created_at`) '
+                    . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))',
+                [DomainSupport::idToBinary($classPhotoId), $sourceKind, $provenanceCode, $referenceDigest, $filenameDigest, $sourceChecksum, $sourceByteSize, $observedAtUtc, (int) $admin['principal_id']],
+            );
+            $sourceId = $repository->lastInsertId();
+            $repository->execute(
+                'INSERT INTO `' . $presentationTable . '` '
+                    . '(`photo_source_id`,`source_identity_digest`,`presentation_checksum`,`presentation_byte_size`,`source_format`,`presentation_format`,`transform_kind`,`transform_tool`,`transform_version`,`transform_recipe_digest`,`created_at`) '
+                    . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))',
+                [$sourceId, $sourceIdentityDigest, $presentationChecksum, $presentationByteSize, $sourceFormat, $presentationFormat, $transformKind, $transformTool, $transformVersion, $recipeDigest],
+            );
+            (new Audit($repository))->append(DomainSupport::auditActor($admin) + [
+                'action' => 'PHOTO_SOURCE_RECORD',
+                'target_type' => 'PHOTO',
+                'target_id' => $classPhotoId,
+                'new_value' => [
+                    'class_photo_id' => $classPhotoId,
+                    'source_kind' => $sourceKind,
+                    'provenance_code' => $provenanceCode,
+                    'byte_size' => $sourceByteSize,
+                    'presentation_kind' => $transformKind,
+                    'presentation_byte_size' => $presentationByteSize,
+                ],
+                'reason' => $reason,
+                'result' => 'SUCCESS',
+            ]);
+            return $sourceId;
+        });
+    }
+
     public function registerExactCandidate(int $adminUserId, string $leftClassPhotoId, string $rightClassPhotoId, string $reason): string
     {
         return $this->registerCandidate($adminUserId, $leftClassPhotoId, $rightClassPhotoId, 'EXACT', null, $reason);

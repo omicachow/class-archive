@@ -11,12 +11,13 @@ declare(strict_types=1);
 
 const PRIVATE_FULL_SCHEMA_SUFFIXES = [
     'private_library_import_item', 'private_library_import', 'private_library_folder',
-    'private_library_collection', 'photo_source', 'album', 'photo', 'principal',
+    'private_library_collection', 'photo_source_presentation', 'photo_source', 'album', 'photo', 'principal',
 ];
 
 const PRIVATE_FULL_SCHEMA_DIGEST_SUFFIXES = [
     'private_library_collection', 'private_library_folder',
     'private_library_import', 'private_library_import_item',
+    'photo_source_presentation',
 ];
 
 function privateFullSchemaIdentifier(string $identifier): string
@@ -90,9 +91,10 @@ try {
     privateFullSchemaExecute($db, "CREATE TABLE {$principal} (`id` BIGINT UNSIGNED NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     privateFullSchemaExecute($db, "CREATE TABLE {$photo} (`class_photo_id` BINARY(16) NOT NULL, PRIMARY KEY (`class_photo_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     privateFullSchemaExecute($db, "CREATE TABLE {$album} (`class_album_id` BINARY(16) NOT NULL, PRIMARY KEY (`class_album_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-    privateFullSchemaExecute($db, "CREATE TABLE {$photoSource} (`source_kind` VARCHAR(24) NOT NULL, CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION','PIWIGO_IMPORT','PRIVATE_QA','MIGRATION','OTHER'))) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    privateFullSchemaExecute($db, "CREATE TABLE {$photoSource} (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, `source_kind` VARCHAR(24) NOT NULL, PRIMARY KEY (`id`), CONSTRAINT `chk_ci_photo_source_kind` CHECK (`source_kind` IN ('SUBMISSION','PIWIGO_IMPORT','PRIVATE_QA','MIGRATION','OTHER'))) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     (new ReflectionMethod(ClassIdentity\Schema::class, 'migrationPrivateFullLibraryImport'))->invoke($schema);
     (new ReflectionMethod(ClassIdentity\Schema::class, 'migrationPrivateFullNativeCheckpointRecovery'))->invoke($schema);
+    (new ReflectionMethod(ClassIdentity\Schema::class, 'migrationPrivateSourcePresentationSurrogate'))->invoke($schema);
     $check = $db->query("SELECT c.CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS c INNER JOIN information_schema.TABLE_CONSTRAINTS t ON t.CONSTRAINT_SCHEMA=c.CONSTRAINT_SCHEMA AND t.CONSTRAINT_NAME=c.CONSTRAINT_NAME WHERE t.CONSTRAINT_SCHEMA=DATABASE() AND t.TABLE_NAME='" . $db->real_escape_string($tablePrefix . 'photo_source') . "' AND t.CONSTRAINT_NAME='chk_ci_photo_source_kind' LIMIT 1");
     $checkClause = $check instanceof mysqli_result ? (string) (($check->fetch_assoc()['CHECK_CLAUSE'] ?? '')) : '';
     if ($check instanceof mysqli_result) {
@@ -148,7 +150,8 @@ try {
     $status = $derive ? 'DERIVED' : 'PASS';
     fwrite(STDOUT, 'PRIVATE_FULL_LIBRARY_SCHEMA=' . $status . ' collection=' . $values['private_library_collection']
         . ' folder=' . $values['private_library_folder'] . ' import=' . $values['private_library_import']
-        . ' item=' . $values['private_library_import_item'] . ' run=' . $run . "\n");
+        . ' item=' . $values['private_library_import_item']
+        . ' presentation=' . $values['photo_source_presentation'] . ' run=' . $run . "\n");
 } catch (Throwable $error) {
     fwrite(STDERR, 'PRIVATE_FULL_LIBRARY_SCHEMA=FAIL run=' . $run . ' reason=' . $error->getMessage() . "\n");
     $exit = 1;
