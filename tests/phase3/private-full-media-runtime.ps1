@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('staging', 'owner')]
+    [string]$Mode = 'staging'
+)
 
 # Executes the aggregate-only private full-library media verifier. The wrapper
 # captures all child process output and allows through just the fixed summary
@@ -10,7 +13,18 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.staging'
+$modeConfig = if ($Mode -eq 'owner') {
+    @{
+        envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.owner'
+        envFile = 'infra/private-full/.env.piwigo.owner'
+    }
+} else {
+    @{
+        envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.staging'
+        envFile = 'infra/private-full/.env.piwigo.staging'
+    }
+}
+$envPath = [string]$modeConfig.envPath
 $runtimePath = Join-Path $PSScriptRoot 'private-full-media-runtime.php'
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $assertions = 0
@@ -45,7 +59,7 @@ try {
 
     $composePrefix = @(
         '-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose',
-        '--env-file', 'infra/private-full/.env.piwigo.staging',
+        '--env-file', [string]$modeConfig.envFile,
         '-f', 'infra/docker-compose.yml',
         '-f', 'infra/private-full/docker-compose.override.yml',
         '-p', 'class_archive_private_full_v3_piwigo'

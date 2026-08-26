@@ -519,6 +519,9 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase3\private-full-owner-deploy-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\private-full-owner-operations-protocol.ps1')
         exit $LASTEXITCODE
     }
     'test-phase2-gateway-http' {

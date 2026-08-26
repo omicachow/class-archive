@@ -1,8 +1,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'validate-owner', 'config', 'ps', 'runtime-staging', 'runtime-owner', 'up-staging', 'stop-staging', 'cutover-preflight', 'cutover', 'rollback')]
+    [ValidateSet('validate', 'validate-owner', 'config', 'ps', 'runtime-staging', 'runtime-owner', 'up-staging', 'stop-staging', 'backup-owner', 'cutover-preflight', 'cutover', 'rollback')]
     [string]$Action = 'validate',
+
+    # A private-full business backup briefly stops only the owner Piwigo
+    # writer. Requiring the named switch makes that short, observable write
+    # interruption intentional and prevents an ambiguous lifecycle invocation
+    # from selecting 8191 by accident.
+    [switch]$ConfirmOwnerPrivateBackup,
 
     [string]$PiwigoStagingEnvPath,
     [string]$ImmichStagingEnvPath,
@@ -730,8 +736,70 @@ function Stop-Endpoint([hashtable]$Endpoint) {
     Invoke-Compose $Endpoint.piwigoPrefix @('stop', 'piwigo', 'db')
 }
 
+function Assert-OwnerPiwigoStoppedForBackup {
+    # `docker compose stop` returning zero only proves that Compose accepted
+    # the request. The backup service is allowed to run only after the exact
+    # owner writer container has reached the non-running state, while MariaDB
+    # and the compatibility BFF remain available.
+    $name = $piwigoProject + '-piwigo-1'
+    $state = @(& $wsl -d Ubuntu --exec docker inspect --format '{{.State.Running}}|{{.State.Status}}' $name 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $state.Count -ne 1 -or ([string]$state[0]).Trim() -ne 'false|exited') {
+        Stop-PrivateFull 'owner_backup_piwigo_not_stopped'
+    }
+}
+
+function Invoke-OwnerBusinessBackup([hashtable]$Endpoint) {
+    if ([string]$Endpoint.mode -ne 'owner') { Stop-PrivateFull 'owner_backup_endpoint_invalid' }
+
+    # Never convert a fail-closed maintenance/degraded application into a
+    # backup success. The owner runtime must already be serving its exact
+    # loopback boundary before we briefly quiesce the Piwigo writer.
+    $script:stage = 'owner_backup_preflight'
+    $before = Assert-EndpointRuntime $Endpoint
+    if ([string]$before.core_http -ne 'READY') { Stop-PrivateFull 'owner_backup_runtime_not_ready' }
+
+    # Once stop is attempted, always start Piwigo again in finally. This also
+    # covers a partial Compose failure after the writer actually stopped. No
+    # database, media, BFF, Immich, restore, or cleanup operation is invoked.
+    $restartRequired = $false
+    try {
+        $script:stage = 'owner_backup_stop_piwigo'
+        $restartRequired = $true
+        Invoke-Compose $Endpoint.piwigoPrefix @('stop', 'piwigo')
+        Assert-OwnerPiwigoStoppedForBackup
+
+        $script:stage = 'owner_backup_create'
+        Invoke-Compose $Endpoint.piwigoPrefix @(
+            'run', '--rm', '-e', 'CLASS_ARCHIVE_BACKUP_QUIESCED=true', 'backup'
+        )
+
+        $script:stage = 'owner_backup_audit'
+        Invoke-Compose $Endpoint.piwigoPrefix @(
+            'run', '--rm', '-e', 'CLASS_ARCHIVE_BACKUP_AUDIT_WRITE=true', 'backup-audit'
+        )
+    }
+    finally {
+        if ($restartRequired) {
+            $script:stage = 'owner_backup_restart_piwigo'
+            Invoke-Compose $Endpoint.piwigoPrefix @('start', 'piwigo')
+            $script:stage = 'owner_backup_verify_runtime'
+            $after = Assert-EndpointRuntime $Endpoint
+            if ([string]$after.core_http -ne 'READY') { Stop-PrivateFull 'owner_backup_runtime_not_recovered' }
+        }
+    }
+}
+
 try {
     $script:stage = 'validation'
+    if ($Action -eq 'backup-owner') {
+        if (-not $ConfirmOwnerPrivateBackup.IsPresent) { Stop-PrivateFull 'owner_backup_confirmation_required' }
+        $endpoint = Get-ValidatedEndpoint 'owner'
+        Assert-GatewaySubnetAvailable
+        Invoke-OwnerBusinessBackup $endpoint
+        Write-Output 'PRIVATE_FULL=PASS action=backup-owner endpoint=8190_8191 backup=CREATED_AND_AUDITED restore=NOT_RUN runtime=RECOVERED scope=OWNER_PRIVATE_FULL'
+        exit 0
+    }
+
     $singleEndpointActions = @{
         'validate' = 'staging'
         'config' = 'staging'

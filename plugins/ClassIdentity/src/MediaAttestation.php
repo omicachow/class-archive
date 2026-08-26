@@ -18,6 +18,9 @@ final class MediaAttestation
     public const VERSION = 1;
     public const FRESHNESS_SECONDS = 30 * 86400;
 
+    public const TEST_SUITE_PHASE0 = 'phase0-media-guard-v1';
+    public const TEST_SUITE_PRIVATE_FULL_OWNER = 'private-full-owner-media-guard-v1';
+
     private const DATA_DIRECTORY = '_data/class-archive';
     private const FILE_NAME = 'media-attestation.json';
 
@@ -61,7 +64,7 @@ final class MediaAttestation
         }
 
         try {
-            $expected = self::currentEvidence();
+            $expected = self::currentEvidence((string) $record['test_suite_version']);
             $currentCommit = BuildCommit::current();
         } catch (\Throwable) {
             return self::missing('无法重新计算媒体访问安全验证摘要。');
@@ -138,7 +141,7 @@ final class MediaAttestation
         if (!hash_equals(BuildCommit::current(), $commit)) {
             throw new \InvalidArgumentException('class_identity_media_attestation_commit_mismatch');
         }
-        $evidence = self::currentEvidence();
+        $evidence = self::currentEvidence($testSuiteVersion);
         return [
             'media_attestation_version' => self::VERSION,
             'commit' => $commit,
@@ -198,18 +201,13 @@ final class MediaAttestation
     }
 
     /** @return array{policy_sha256:string,nginx_sha256:string,media_guard_sha256:string,schema_sha256:string,schema_version:int,migration_version:int,test_suite_sha256:string} */
-    private static function currentEvidence(): array
+    private static function currentEvidence(string $testSuiteVersion): array
     {
         $policyRoot = PHPWG_ROOT_PATH . 'plugins/ClassArchivePolicy';
         $mediaGuard = $policyRoot . '/src/MediaGuard.php';
         $schema = PHPWG_ROOT_PATH . 'plugins/ClassIdentity/src/Schema.php';
         $nginx = '/etc/nginx/nginx.conf';
-        $tests = [
-            '/workspace/tests/phase0/media-guard-http.ps1',
-            '/workspace/tests/phase0/media-guard-tiny-preview.ps1',
-            '/workspace/tests/phase0/media-guard-state-transitions.ps1',
-            '/workspace/tests/phase0/assert-media-permissions.sh',
-        ];
+        $tests = self::testSuiteFiles($testSuiteVersion);
         foreach ([$mediaGuard, $schema, $nginx, ...$tests] as $path) {
             if (!is_file($path) || is_link($path)) {
                 throw new \RuntimeException('class_identity_media_attestation_source_missing');
@@ -232,6 +230,39 @@ final class MediaAttestation
             'migration_version' => $migrationVersion,
             'test_suite_sha256' => self::filesDigest($tests),
         ];
+    }
+
+    /** @return list<string> */
+    private static function testSuiteFiles(string $testSuiteVersion): array
+    {
+        $phase0 = [
+            '/workspace/tests/phase0/media-guard-http.ps1',
+            '/workspace/tests/phase0/media-guard-tiny-preview.ps1',
+            '/workspace/tests/phase0/media-guard-state-transitions.ps1',
+            '/workspace/tests/phase0/assert-media-permissions.sh',
+        ];
+
+        return match ($testSuiteVersion) {
+            self::TEST_SUITE_PHASE0 => $phase0,
+            self::TEST_SUITE_PRIVATE_FULL_OWNER => [
+                ...$phase0,
+                '/workspace/infra/docker-compose.yml',
+                '/workspace/infra/private-full/docker-compose.override.yml',
+                '/workspace/infra/scripts/attest-private-full-media.ps1',
+                '/workspace/infra/scripts/private-full.ps1',
+                '/workspace/infra/scripts/private-full-storage.ps1',
+                '/workspace/infra/scripts/secret-file-acl.ps1',
+                '/workspace/infra/scripts/write-media-attestation.php',
+                '/workspace/plugins/ClassIdentity/src/BuildCommit.php',
+                '/workspace/plugins/ClassIdentity/src/MediaAttestation.php',
+                '/workspace/tests/phase3/private-full-media-runtime.ps1',
+                '/workspace/tests/phase3/private-full-media-runtime.php',
+                '/workspace/tests/phase3/private-full-owner-media-http.ps1',
+                '/workspace/tests/phase3/private-full-owner-media-http.php',
+                '/workspace/tests/phase3/private-full-owner-operations-protocol.ps1',
+            ],
+            default => throw new \InvalidArgumentException('class_identity_media_attestation_suite_unknown'),
+        };
     }
 
     private static function directory(): string
