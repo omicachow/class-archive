@@ -1691,13 +1691,15 @@ function normalizePeople(payload) {
     throw new Error('safe_people_invalid');
   }
   return payload.people.map((person) => {
-    if (!person || !validId(person.id) || !validId(person.coverPhotoId)) throw new Error('safe_person_invalid');
+    const coverPhotoId = person?.coverPhotoId ?? person?.cover_photo_id;
+    const photoCount = person?.photoCount ?? person?.photo_count;
+    if (!person || !validId(person.id) || !validId(coverPhotoId)) throw new Error('safe_person_invalid');
     return {
       id: person.id.toLowerCase(),
-      coverPhotoId: person.coverPhotoId.toLowerCase(),
-      portraitFocus: normalizePortraitFocus(person.portraitFocus),
-      name: safeText(person.name, t('people.unnamed')),
-      count: Number.isInteger(person.photoCount) && person.photoCount > 0 ? person.photoCount : null,
+      coverPhotoId: coverPhotoId.toLowerCase(),
+      portraitFocus: normalizePortraitFocus(person.portraitFocus ?? person.portrait_focus),
+      name: safeText(person.name ?? person.label, t('people.unnamed')),
+      count: Number.isInteger(photoCount) && photoCount > 0 ? photoCount : null,
     };
   });
 }
@@ -2687,7 +2689,7 @@ function normalizeHomeFeature(item) {
   return {
     href: validId(albumId) ? `/albums/${albumId.toLowerCase()}` : `/photos/${photoId.toLowerCase()}`,
     coverPhotoId: validId(coverPhotoId) ? coverPhotoId.toLowerCase() : null,
-    title: businessLabel(item.title ?? item.label ?? item.name, 'home.featured'),
+    title: businessLabel(item.title ?? item.label ?? item.name ?? item.albumName ?? item.album_name, 'home.featured'),
     subtitle: safeText(item.subtitle ?? item.description, ''),
   };
 }
