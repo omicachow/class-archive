@@ -4,7 +4,7 @@ param(
     [ValidateSet('validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes')]
     [string]$Action = 'validate',
 
-    [ValidateSet('qa', 'full')]
+    [ValidateSet('qa', 'full', 'restore')]
     [string]$Runtime = 'qa'
 )
 
@@ -35,6 +35,25 @@ $runtimeConfig = if ($Runtime -eq 'full') {
         index_report_name = 'private-full-ai-index-runtime.json'
         technical_name = 'Class Archive Private Full Technical User'
         library_name = 'Class Archive Private Full Library'
+    }
+} elseif ($Runtime -eq 'restore') {
+    [ordered]@{
+        private_relative = '.codex-work/owner-restore'
+        piwigo_env_relative = 'infra/owner-restore/.env.piwigo'
+        immich_env_relative = 'infra/owner-restore/.env.immich'
+        piwigo_override = 'infra/owner-restore/docker-compose.piwigo.override.yml'
+        piwigo_worker_override = 'infra/private-full/docker-compose.ai-worker.override.yml'
+        immich_override = 'infra/owner-restore/docker-compose.immich.override.yml'
+        piwigo_project = 'class_archive_owner_restore_v1_piwigo'
+        immich_project = 'class_archive_owner_restore_v1_immich'
+        scope = 'PRIVATE_REAL_FULL'
+        max_assets = 6000
+        core_port = 8290
+        compat_port = 8291
+        report_name = 'owner-restore-immich-runtime.json'
+        index_report_name = 'owner-restore-ai-index-runtime.json'
+        technical_name = 'Class Archive Owner Restore Technical User'
+        library_name = 'Class Archive Owner Restore Library'
     }
 } else {
     [ordered]@{
@@ -170,7 +189,7 @@ function Invoke-PiwigoCompose([string[]]$Arguments) {
     try {
         $ErrorActionPreference = 'Continue'
         $composeFiles = @('-f', $piwigoCompose, '-f', $piwigoOverride)
-        if ($Runtime -eq 'full') {
+        if (-not [string]::IsNullOrWhiteSpace([string]$runtimeConfig.piwigo_worker_override)) {
             $composeFiles += @('-f', [string]$runtimeConfig.piwigo_worker_override)
         }
         $lines = @(& wsl.exe -d Ubuntu --cd $projectRoot --exec docker compose --env-file $piwigoEnvRelative @composeFiles -p $piwigoProject @Arguments 2>&1)
@@ -507,7 +526,7 @@ try {
         Assert-Exact ($counts.users -eq 0 -and $counts.libraries -eq 0 -and $counts.assets -eq 0 -and $counts.memories -eq 0) 'immich_pristine_required'
     } else {
         Assert-Exact ($Action -in @('resume', 'finish', 'finalize-indexes') -and $counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le $maxAssets -and $counts.memories -eq 0) 'immich_resume_state_invalid'
-        Assert-Exact ($Action -ne 'finalize-indexes' -or $Runtime -eq 'full') 'index_finalize_scope_invalid'
+        Assert-Exact ($Action -ne 'finalize-indexes' -or $Runtime -in @('full', 'restore')) 'index_finalize_scope_invalid'
     }
     $immichTemporary = @(
         $runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer,
@@ -781,7 +800,7 @@ try {
             Assert-Exact ($bindResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=bind count=([0-9]+)$') 'binding_failed'
         }
 
-        if ($Runtime -eq 'full') {
+        if ($Runtime -in @('full', 'restore')) {
             # The worker capability is intentionally absent during cold start
             # and all expensive runtime work. Enable it only after the direct
             # Immich runner has proved stable-idle Face/Search queues plus
@@ -947,7 +966,7 @@ NODE
             catalog_count = [int]$catalog.count
             people_count = [int]$runtimeEvidence.metrics.people_count
             metrics = $runtimeEvidence.metrics
-            ai_index_state = $(if ($Runtime -eq 'full') { 'READY' } else { 'EXTERNAL_QA_ONLY' })
+            ai_index_state = $(if ($Runtime -in @('full', 'restore')) { 'READY' } else { 'EXTERNAL_QA_ONLY' })
             ai_models = $runtimeEvidence.index_evidence.models
             media_mount = 'PIWIGO_ORIGINALS_READ_ONLY'
             media_delivery = 'MEDIAGUARD_ONLY'

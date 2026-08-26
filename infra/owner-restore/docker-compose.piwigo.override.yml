@@ -1,0 +1,89 @@
+services:
+  # This overlay is consumed only by owner-full-restore-drill.ps1 through the
+  # second, M-backed Docker daemon.  Project, network and volume identities are
+  # all distinct from both 8091 and 8191.
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-image
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-image
+    environment:
+      # The restored data is the same PRIVATE_REAL_FULL business scope.  This
+      # allows the existing fail-closed catalog/AI verifier to prove the
+      # restored snapshot without making the restore project an ACL identity.
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  pre-migration-db-backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  restore:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+networks:
+  app:
+    # This bridge exists only inside the second daemon.  Its only published
+    # ports are the two explicit 127.0.0.1 listeners in the base compose file.
+    internal: false
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  immich_gateway:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.0.0/16
+
+volumes:
+  piwigo_data:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  piwigo_uploads:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  piwigo_galleries:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  piwigo_derivatives:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  piwigo_db:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  piwigo_scripts:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+  backups:
+    labels:
+      com.classarchive.scope: owner-restore-drill
