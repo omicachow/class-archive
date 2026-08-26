@@ -61,6 +61,20 @@ Assert-True ($runner.Contains('[IO.FileShare]::None')) 'owner_temp_backup_single
 Assert-True ($runner.Contains("Stop-OwnerBackup 'backup_already_running'")) 'owner_temp_backup_single_instance_fail_closed_missing'
 Assert-True ($runner.Contains("recovery_key_boundary = 'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED'")) 'owner_temp_backup_dpapi_recovery_boundary_missing'
 Assert-True ($runner.Contains('does not recover from loss of that')) 'owner_temp_backup_dpapi_readme_warning_missing'
+foreach ($needle in @(
+    'function Get-WslSwapCapacityGuard',
+    "Join-Path `$env:USERPROFILE '.wslconfig'",
+    "'TARGET_NON_SYSTEM_DRIVE'",
+    "'SYSTEM_DRIVE_CAPACITY_FALLBACK'",
+    "Stop-OwnerBackup 'system_drive_wsl_swap_safety_margin_insufficient'",
+    "'WSL_SWAP_PLACEMENT'",
+    "'WSL_SWAP_TARGET_DRIVE_MATCH'",
+    "'SYSTEM_DRIVE_FREE_BYTES'",
+    "'SYSTEM_DRIVE_REQUIRED_FREE_BYTES'",
+    "'SYSTEM_DRIVE_CAPACITY_GUARD'",
+    "'ARCHIVE_HELPER_MEMORY_BYTES'",
+    'private_host_path_recorded = $false'
+)) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_wsl_capacity_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 Assert-True (-not $runner.Contains('<private-source-root>')) 'owner_temp_backup_private_source_hardcoded'
 Assert-True (-not ($runner -match '(?i)Write-(?:Output|Host).*(?:Passphrase|Pseudonym|Pepper|DB_PASSWORD|TOKEN)')) 'owner_temp_backup_secret_output_detected'
@@ -74,7 +88,7 @@ foreach ($needle in @(
     'class_archive_private_full_v3_immich-immich-server-1',
     'com.classarchive.scope',
     'private-real-full',
-    'docker run --rm --network none --read-only --cap-drop ALL',
+    'docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128',
     '--format=posix --numeric-owner --acls --xattrs',
     '--cipher-algo AES256',
     '--s2k-digest-algo SHA512',
@@ -106,6 +120,12 @@ foreach ($needle in @(
 
 Assert-True (-not $helper.Contains('docker stop')) 'owner_temp_backup_must_not_stop_owner_runtime'
 Assert-True (-not $helper.Contains('docker start')) 'owner_temp_backup_must_not_restart_owner_runtime'
+$archiveHelperRunCount = [regex]::Matches($helper, 'docker run --rm').Count
+$limitedArchiveHelperRunCount = [regex]::Matches(
+    $helper,
+    'docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128'
+).Count
+Assert-True ($archiveHelperRunCount -gt 0 -and $limitedArchiveHelperRunCount -eq $archiveHelperRunCount) 'owner_temp_backup_archive_helper_memcg_incomplete'
 Assert-True ($helper.IndexOf('if [ "$mode" = verify ]; then') -lt $helper.IndexOf('assert_container "$piwigo"')) 'owner_temp_backup_verify_must_precede_source_runtime_assertions'
 Assert-True ($runner.Contains("owner_runtime_reads = 'AVAILABLE_DURING_BACKUP'")) 'owner_temp_backup_read_availability_manifest_missing'
 Assert-True ($runner.Contains('services_stopped = $false')) 'owner_temp_backup_online_manifest_missing'

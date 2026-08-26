@@ -119,6 +119,122 @@ function Get-TargetBoundary {
     }
 }
 
+function Convert-WslSizeToBytes([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $normalized = $Value.Trim().ToUpperInvariant()
+    if ($normalized -eq '0') { return [uint64]0 }
+    if ($normalized -notmatch '\A([0-9]{1,12})(KB|MB|GB|TB)\z') { return $null }
+    $count = [uint64]$Matches[1]
+    $multiplier = switch ([string]$Matches[2]) {
+        'KB' { [uint64]1KB }
+        'MB' { [uint64]1MB }
+        'GB' { [uint64]1GB }
+        'TB' { [uint64]1TB }
+    }
+    if ($count -gt ([uint64]::MaxValue / $multiplier)) { return $null }
+    return [uint64]($count * $multiplier)
+}
+
+function Get-WslSwapCapacityGuard([hashtable]$Boundary) {
+    $systemRoot = [IO.Path]::GetPathRoot($env:SystemRoot)
+    if ([string]::IsNullOrWhiteSpace($systemRoot) -or $systemRoot -notmatch '\A([A-Za-z]):\\\z') {
+        Stop-OwnerBackup 'system_drive_invalid'
+    }
+    $systemDrive = $Matches[1].ToUpperInvariant()
+    try {
+        $systemDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $systemDrive + ":'") -ErrorAction Stop
+    }
+    catch { Stop-OwnerBackup 'system_drive_unavailable' }
+    if ($null -eq $systemDisk -or [uint64]$systemDisk.FreeSpace -le 0) { Stop-OwnerBackup 'system_drive_free_space_invalid' }
+
+    $settings = @{}
+    $configValid = $true
+    $configPath = Join-Path $env:USERPROFILE '.wslconfig'
+    if (Test-Path -LiteralPath $configPath) {
+        $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
+        if ($configItem.PSIsContainer -or ($configItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $configItem.Length -le 0 -or $configItem.Length -gt 65536) {
+            $configValid = $false
+        }
+        else {
+            $section = ''
+            foreach ($rawLine in [IO.File]::ReadAllLines($configItem.FullName)) {
+                $line = $rawLine.Trim()
+                if ($line.Length -eq 0 -or $line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+                if ($line -match '\A\[([A-Za-z0-9_-]+)\]\z') {
+                    $section = $Matches[1].ToLowerInvariant()
+                    continue
+                }
+                if ($section -ne 'wsl2') { continue }
+                if ($line -notmatch '\A([A-Za-z][A-Za-z0-9]*)\s*=\s*(.*?)\s*\z') {
+                    $configValid = $false
+                    continue
+                }
+                $name = $Matches[1].ToLowerInvariant()
+                if ($settings.ContainsKey($name)) {
+                    $configValid = $false
+                    continue
+                }
+                $settings[$name] = [string]$Matches[2]
+            }
+        }
+    }
+    else { $configValid = $false }
+
+    $configuredSwapBytes = $null
+    if ($settings.ContainsKey('swap')) {
+        $configuredSwapBytes = Convert-WslSizeToBytes ([string]$settings.swap)
+        if ($null -eq $configuredSwapBytes) { $configValid = $false }
+    }
+
+    $swapTargetMatch = $false
+    if ($configValid -and $settings.ContainsKey('swapfile')) {
+        $rawSwapPath = [string]$settings.swapfile
+        if ($rawSwapPath -notmatch '[%$]' -and -not [string]::IsNullOrWhiteSpace($rawSwapPath)) {
+            try {
+                $swapPath = [IO.Path]::GetFullPath($rawSwapPath)
+                $swapRoot = [IO.Path]::GetPathRoot($swapPath)
+                if ($swapRoot -match '\A([A-Za-z]):\\\z') {
+                    $swapDrive = $Matches[1].ToUpperInvariant()
+                    $swapTargetMatch = $swapDrive -eq [string]$Boundary.drive -and $swapDrive -ne $systemDrive
+                }
+            }
+            catch { $swapTargetMatch = $false }
+        }
+    }
+
+    $systemRequired = [uint64]0
+    $placement = 'TARGET_NON_SYSTEM_DRIVE'
+    if (-not $swapTargetMatch) {
+        $placement = 'SYSTEM_DRIVE_CAPACITY_FALLBACK'
+        if ($null -eq $configuredSwapBytes) {
+            $defaultSwap = [uint64](32GB)
+            try {
+                $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+                if ($null -ne $computer -and [uint64]$computer.TotalPhysicalMemory -gt 0) {
+                    $quarterMemory = [uint64]([uint64]$computer.TotalPhysicalMemory / 4)
+                    if ($quarterMemory -gt [uint64](8GB)) { $defaultSwap = $quarterMemory }
+                    else { $defaultSwap = [uint64](8GB) }
+                }
+            }
+            catch { }
+            $configuredSwapBytes = $defaultSwap
+        }
+        $systemRequired = [uint64]$configuredSwapBytes + [uint64](10GB)
+        if ([uint64]$systemDisk.FreeSpace -lt $systemRequired) {
+            Stop-OwnerBackup 'system_drive_wsl_swap_safety_margin_insufficient'
+        }
+    }
+
+    return @{
+        WSL_SWAP_PLACEMENT = $placement
+        WSL_SWAP_TARGET_DRIVE_MATCH = [uint64]$(if ($swapTargetMatch) { 1 } else { 0 })
+        SYSTEM_DRIVE_FREE_BYTES = [uint64]$systemDisk.FreeSpace
+        SYSTEM_DRIVE_REQUIRED_FREE_BYTES = $systemRequired
+        SYSTEM_DRIVE_CAPACITY_GUARD = 'PASS'
+    }
+}
+
 function Assert-IgnoredOwnerFile([string]$Path, [string]$ExpectedName) {
     $resolved = (Resolve-Path -LiteralPath $Path).Path
     $item = Get-Item -LiteralPath $resolved -Force
@@ -257,6 +373,12 @@ function Get-Preflight([hashtable]$Boundary) {
     $values['M_FREE_BYTES'] = [uint64]$Boundary.free_bytes
     $values['SAFE_MARGIN_BYTES'] = $margin
     $values['REQUIRED_FREE_BYTES'] = $required
+    $hostGuard = Get-WslSwapCapacityGuard $Boundary
+    foreach ($name in @(
+        'WSL_SWAP_PLACEMENT', 'WSL_SWAP_TARGET_DRIVE_MATCH', 'SYSTEM_DRIVE_FREE_BYTES',
+        'SYSTEM_DRIVE_REQUIRED_FREE_BYTES', 'SYSTEM_DRIVE_CAPACITY_GUARD'
+    )) { $values[$name] = $hostGuard[$name] }
+    $values['ARCHIVE_HELPER_MEMORY_BYTES'] = [uint64](256MB)
     return $values
 }
 
@@ -517,6 +639,12 @@ try {
             ' EST_RESTORE_BYTES=' + $preflight.EST_RESTORE_BYTES +
             ' M_FREE_BYTES=' + $preflight.M_FREE_BYTES +
             ' SAFE_MARGIN_BYTES=' + $preflight.SAFE_MARGIN_BYTES +
+            ' WSL_SWAP_PLACEMENT=' + $preflight.WSL_SWAP_PLACEMENT +
+            ' WSL_SWAP_TARGET_DRIVE_MATCH=' + $preflight.WSL_SWAP_TARGET_DRIVE_MATCH +
+            ' SYSTEM_DRIVE_FREE_BYTES=' + $preflight.SYSTEM_DRIVE_FREE_BYTES +
+            ' SYSTEM_DRIVE_REQUIRED_FREE_BYTES=' + $preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES +
+            ' SYSTEM_DRIVE_CAPACITY_GUARD=' + $preflight.SYSTEM_DRIVE_CAPACITY_GUARD +
+            ' ARCHIVE_HELPER_MEMORY_BYTES=' + $preflight.ARCHIVE_HELPER_MEMORY_BYTES +
             ' filesystem=exFAT temporary_target=YES independent_disaster_backup=NO')
         exit 0
     }
@@ -629,6 +757,15 @@ try {
                 owner_runtime_reads = 'AVAILABLE_DURING_BACKUP'
                 mariadb_writes = 'BRIEFLY_BLOCKED_BY_GLOBAL_READ_LOCK_DURING_LOGICAL_DUMP'
                 services_stopped = $false
+            }
+            host_capacity_guard = [ordered]@{
+                wsl_swap_placement = [string]$preflight.WSL_SWAP_PLACEMENT
+                wsl_swap_target_drive_match = [bool]([uint64]$preflight.WSL_SWAP_TARGET_DRIVE_MATCH -eq 1)
+                system_drive_free_bytes = [uint64]$preflight.SYSTEM_DRIVE_FREE_BYTES
+                system_drive_required_free_bytes = [uint64]$preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES
+                system_drive_capacity_guard = [string]$preflight.SYSTEM_DRIVE_CAPACITY_GUARD
+                archive_helper_memory_bytes = [uint64]$preflight.ARCHIVE_HELPER_MEMORY_BYTES
+                private_host_path_recorded = $false
             }
             consistency_guard = [ordered]@{
                 strategy = 'ONLINE_LOGICAL_SNAPSHOTS_WITH_BEFORE_AFTER_FAIL_CLOSED_GUARDS'

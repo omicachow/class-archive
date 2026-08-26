@@ -131,14 +131,16 @@ assert_volume "$immich_db" class_archive_private_full_v3_immich immich_db
 
 helper_image=$(docker inspect --format '{{.Image}}' "$mariadb" 2>/dev/null)
 case "$helper_image" in sha256:[0-9a-f][0-9a-f]*) ;; *) fail helper_image_invalid ;; esac
-docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
+  --cap-drop ALL --security-opt no-new-privileges:true \
   --entrypoint tar "$helper_image" --version 2>/dev/null | grep -F 'GNU tar' >/dev/null || fail gnu_tar_required
 command -v gpg >/dev/null 2>&1 || fail gpg_missing
 gpg --version 2>/dev/null | grep -Eq '^gpg \(GnuPG\) 2\.[234]\.' || fail gpg_version_invalid
 gpg --version 2>/dev/null | grep -Eq '^Cipher:.*AES256' || fail gpg_aes256_unavailable
 
 volume_bytes() {
-  value=$(docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  value=$(docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
     --security-opt no-new-privileges:true --entrypoint /bin/sh -v "$1:/source:ro" "$helper_image" \
     -eu -c 'du -sb /source | cut -f1' 2>/dev/null) || fail volume_size_failed
   case "$value" in ''|*[!0-9]*) fail volume_size_invalid ;; esac
@@ -245,7 +247,8 @@ done
 
 archive_volume() {
   volume=$1 output=$2
-  docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
     --security-opt no-new-privileges:true --entrypoint /bin/sh -v "$volume:/source:ro" "$helper_image" \
     -eu -c 'exec tar --sort=name --format=posix --pax-option=delete=atime,delete=ctime \
       --numeric-owner --acls --xattrs --xattrs-include="*" -C /source -cf - .' \
@@ -255,7 +258,8 @@ archive_volume() {
 
 volume_state_digest() {
   volume=$1
-  value=$(docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  value=$(docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
     --security-opt no-new-privileges:true --entrypoint /bin/sh -v "$volume:/source:ro" "$helper_image" \
     -eu -c 'exec tar --sort=name --format=posix --pax-option=delete=atime,delete=ctime \
       --numeric-owner --acls --xattrs --xattrs-include="*" -C /source -cf - .' 2>/dev/null \
@@ -274,7 +278,8 @@ encrypted_plaintext_digest() {
 
 archive_piwigo_data() {
   output=$1
-  docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
     --security-opt no-new-privileges:true --entrypoint /bin/sh -v "$piwigo_data:/source:ro" "$helper_image" \
     -eu -c 'exec tar --format=posix --numeric-owner --acls --xattrs --xattrs-include="*" \
       --exclude=./local/config/database.inc.php \
