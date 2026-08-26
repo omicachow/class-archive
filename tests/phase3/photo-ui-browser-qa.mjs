@@ -393,7 +393,9 @@ async function homePage(page, role, mobile) {
   } catch { fail(`${role}_home_root_transport`); }
   assert(rootResponse !== null && rootResponse.status() === 200, `${role}_home_root_http_status`);
   assert(new URL(page.url()).pathname === '/home', `${role}_home_root_redirect`);
-  await page.waitForTimeout(180);
+  const homeReady = await page.locator('.home-featured').waitFor({ state: 'visible', timeout: 20_000 })
+    .then(() => true).catch(() => false);
+  assert(homeReady, `${role}_home_render_timeout`);
   assert(await page.getByRole('heading', { name: '首页', exact: true }).count() >= 1, `${role}_home_heading`);
   for (const selector of ['.home-featured', '.home-memory-row', '.home-album-row', '.home-people-row', '[data-home-all-photos]']) {
     assert(await page.locator(selector).count() === 1, `${role}_home_${selector.replace(/[^a-z]+/gi, '_')}`);
