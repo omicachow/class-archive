@@ -110,6 +110,32 @@ async function request(operation, path, method = 'GET', body = undefined, token 
   }
 }
 
+async function allVisiblePeople(token, maximumPeople) {
+  const pageSize = Math.min(1000, maximumPeople);
+  const maximumPages = Math.ceil(maximumPeople / pageSize);
+  const result = [];
+  let page = 1;
+  for (let pageCount = 0; pageCount < maximumPages; pageCount += 1) {
+    const response = await request(`people_page_${page}`, `/people?page=${page}&size=${pageSize}&withHidden=false`, 'GET', undefined, token);
+    const batch = response?.people;
+    const hasNextPage = response?.hasNextPage;
+    const total = response?.total;
+    const hidden = response?.hidden;
+    if (!Array.isArray(batch) || batch.length > pageSize || typeof hasNextPage !== 'boolean'
+      || !Number.isSafeInteger(total) || total < 0 || total > maximumPeople
+      || !Number.isSafeInteger(hidden) || hidden < 0 || hidden > total) {
+      fail('people_response_invalid');
+    }
+    result.push(...batch);
+    if (result.length > maximumPeople || result.length > total || (hasNextPage && batch.length === 0)) {
+      fail('people_response_invalid');
+    }
+    if (!hasNextPage) return result;
+    page += 1;
+  }
+  fail('people_response_invalid');
+}
+
 function queueActive(statistics, code) {
   if (!statistics || typeof statistics !== 'object') fail(`${code}_shape_invalid`);
   const values = ['active', 'completed', 'delayed', 'failed', 'paused', 'waiting'].map((key) => statistics[key]);
@@ -422,8 +448,8 @@ try {
   }
 
   runtimeStage = 'people';
-  const people = await request('people', '/people?size=500&withHidden=false', 'GET', undefined, accessToken);
-  if (!Array.isArray(people?.people) || people.people.length < 1) fail('people_response_invalid');
+  const people = await allVisiblePeople(accessToken, runtimeScope === 'PRIVATE_REAL_FULL' ? 5000 : 500);
+  if (people.length < 1) fail('people_response_invalid');
   const searchQueries = [
     ['zh_classroom', '教室里的照片'],
     ['zh_playground', '操场上的合照'],
@@ -455,7 +481,7 @@ try {
   };
   const metrics = {
     asset_count: photos.length,
-    people_count: people.people.length,
+    people_count: people.length,
     face_jobs: faceJobs,
     recognition_jobs: recognitionJobs,
     smart_jobs: smartJobs,
@@ -495,7 +521,7 @@ try {
     `CATALOG_DIGEST=${catalogDigest}`,
     `ACCESS_TOKEN=${accessToken}`,
     `ASSET_COUNT=${photos.length}`,
-    `PEOPLE_COUNT=${people.people.length}`,
+    `PEOPLE_COUNT=${people.length}`,
     `RUNTIME_MODE=${mode}`,
     `FACE_MODEL_NAME=${models.face_model_name}`,
     `FACE_MODEL_REVISION=${models.face_model_revision}`,
@@ -531,7 +557,7 @@ try {
     catalog_digest: catalogDigest,
     runtime_mode: mode,
     asset_count: photos.length,
-    people_count: people.people.length,
+    people_count: people.length,
     face_model_name: models.face_model_name,
     face_model_revision: models.face_model_revision,
     search_model_name: models.search_model_name,
@@ -545,7 +571,7 @@ try {
   writePrivateText(SUMMARY_PATH, summary, 'summary_file_invalid');
   writePrivateJson(BINDINGS_PATH, bindingArtifact, 'bindings_file_invalid', 512 * 1024);
   writePrivateJson(INDEX_EVIDENCE_PATH, indexEvidenceArtifact, 'index_evidence_file_invalid', 1024 * 1024);
-  console.log(`PRIVATE_QA_IMMICH_RUNTIME=PASS assets=${photos.length} people=${people.people.length} face_jobs=${faceJobs} recognition_jobs=${recognitionJobs} smart_jobs=${smartJobs}`);
+  console.log(`PRIVATE_QA_IMMICH_RUNTIME=PASS assets=${photos.length} people=${people.length} face_jobs=${faceJobs} recognition_jobs=${recognitionJobs} smart_jobs=${smartJobs}`);
 } catch (error) {
   const safeStage = /^[a-z_]{1,48}$/.test(runtimeStage) ? runtimeStage : 'unknown';
   const code = error instanceof RuntimeError ? error.code : `unexpected_${safeStage}`;

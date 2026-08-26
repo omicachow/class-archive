@@ -9,6 +9,9 @@ const MAX_ASSETS = 500;
 const MAX_MEMBERS = 1000;
 const SEARCH_CANDIDATE_WINDOW = 500;
 const MAX_SEARCH_RESULTS = 50;
+const PEOPLE_PAGE_SIZE = 1000;
+const MAX_PEOPLE_PAGES = 5;
+const MAX_PEOPLE = PEOPLE_PAGE_SIZE * MAX_PEOPLE_PAGES;
 const PEOPLE_ASSET_PAGE_SIZE = 500;
 const MAX_PEOPLE_ASSET_PAGES = 40;
 const FACE_LOOKUP_CONCURRENCY = 24;
@@ -160,6 +163,30 @@ async function immich(path, method = 'GET', body = undefined) {
   }
 }
 
+async function allVisiblePeople() {
+  const result = [];
+  let page = 1;
+  for (let pageCount = 0; pageCount < MAX_PEOPLE_PAGES; pageCount += 1) {
+    const response = await immich(`/people?page=${page}&size=${PEOPLE_PAGE_SIZE}&withHidden=false`);
+    const batch = response?.people;
+    const hasNextPage = response?.hasNextPage;
+    const total = response?.total;
+    const hidden = response?.hidden;
+    if (!Array.isArray(batch) || batch.length > PEOPLE_PAGE_SIZE || typeof hasNextPage !== 'boolean'
+      || !Number.isSafeInteger(total) || total < 0 || total > MAX_PEOPLE
+      || !Number.isSafeInteger(hidden) || hidden < 0 || hidden > total) {
+      fail('immich_people_invalid');
+    }
+    result.push(...batch);
+    if (result.length > MAX_PEOPLE || result.length > total || (hasNextPage && batch.length === 0)) {
+      fail('immich_people_invalid');
+    }
+    if (!hasNextPage) return result;
+    page += 1;
+  }
+  fail('immich_people_invalid');
+}
+
 function assetIdsFromResponse(value) {
   const items = value?.assets?.items;
   if (!Array.isArray(items) || items.length > MAX_MEMBERS) fail('immich_assets_invalid');
@@ -216,9 +243,11 @@ async function memories(allowed) {
 }
 
 async function people(allowed) {
-  const response = await immich('/people?size=500&withHidden=false');
-  const people = response?.people;
-  if (!Array.isArray(people) || people.length > 500) fail('immich_people_invalid');
+  // Immich v3.1.0 defaults to 500 people per page. A full archive can exceed
+  // that without being large, so consume its explicit page/hasNextPage
+  // contract while retaining a hard 5,000-cluster ceiling. Upstream totals
+  // still never cross this private boundary.
+  const people = await allVisiblePeople();
   const records = new Map();
   for (const person of people) {
     const id = person?.id;

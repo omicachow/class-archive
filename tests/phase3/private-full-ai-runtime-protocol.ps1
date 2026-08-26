@@ -13,6 +13,8 @@ function Assert-Protocol([bool]$Condition, [string]$Code) {
 $operator = Get-Content -LiteralPath (Join-Path $root 'infra\scripts\private-full-immich.ps1') -Raw
 $runner = Get-Content -LiteralPath (Join-Path $root 'infra\scripts\private-qa-immich.ps1') -Raw
 $runtime = Get-Content -LiteralPath (Join-Path $root 'infra\scripts\private-qa-immich-runtime.mjs') -Raw
+$bridge = Get-Content -LiteralPath (Join-Path $root 'infra\immich-spike\bridge\server.mjs') -Raw
+$bridgeAdapter = Get-Content -LiteralPath (Join-Path $root 'plugins\ClassIdentity\src\Gateway\BridgeImmichAdapter.php') -Raw
 $catalog = Get-Content -LiteralPath (Join-Path $root 'infra\scripts\private-qa-immich-catalog.php') -Raw
 $workerOverride = Get-Content -LiteralPath (Join-Path $root 'infra\private-full\docker-compose.ai-worker.override.yml') -Raw
 
@@ -90,6 +92,16 @@ $runtimeCollisionProbe = & {
     return 'PASS'
 }
 Assert-Protocol ($runtimeCollisionProbe -eq 'PASS') 'runtime_parameter_collision_regression'
+Assert-Protocol ($runtime.Contains('async function allVisiblePeople(token, maximumPeople)') `
+    -and $runtime.Contains('typeof hasNextPage !== ''boolean''') `
+    -and $runtime.Contains("page += 1;") `
+    -and $runtime.Contains("runtimeScope === 'PRIVATE_REAL_FULL' ? 5000 : 500")) 'runtime_people_pagination_missing'
+Assert-Protocol ($bridge.Contains('const PEOPLE_PAGE_SIZE = 1000;') `
+    -and $bridge.Contains('const MAX_PEOPLE_PAGES = 5;') `
+    -and $bridge.Contains('async function allVisiblePeople()') `
+    -and $bridge.Contains('typeof hasNextPage !== ''boolean''') `
+    -and $bridge.Contains('const people = await allVisiblePeople();')) 'bridge_people_pagination_missing'
+Assert-Protocol ($bridgeAdapter.Contains('count($items) > 5000')) 'bridge_adapter_people_page_limit_invalid'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",

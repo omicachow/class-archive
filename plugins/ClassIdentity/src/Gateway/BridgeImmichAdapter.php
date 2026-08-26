@@ -140,7 +140,7 @@ final class BridgeImmichAdapter implements ImmichAdapter
             }
             $decoded = $this->post($endpoint, ['assets' => $assets]);
             $items = $decoded['items'] ?? null;
-            if (!is_array($items) || count($items) > 500) {
+            if (!is_array($items) || count($items) > 5000) {
                 throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
             }
             foreach ($items as $item) {
