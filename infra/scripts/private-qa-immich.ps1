@@ -183,7 +183,10 @@ function Invoke-PiwigoCompose([string[]]$Arguments) {
 function Get-ModelContract {
     $script:stage = 'model_contract'
     Assert-Exact (Test-Path -LiteralPath $modelManifest -PathType Leaf) 'model_manifest_missing'
-    try { $manifest = Get-Content -LiteralPath $modelManifest -Raw | ConvertFrom-Json -ErrorAction Stop } catch { Fail 'model_manifest_invalid' }
+    # Windows PowerShell 5.1 otherwise decodes BOM-less UTF-8 as the current
+    # ANSI code page.  The manifest deliberately carries Chinese descriptive
+    # metadata, so an explicit UTF-8 decode is part of its integrity boundary.
+    try { $manifest = Get-Content -LiteralPath $modelManifest -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { Fail 'model_manifest_invalid' }
     Assert-Exact ($manifest.manifest_version -eq 1 -and $manifest.generated_for.immich_version -eq '3.1.0' `
         -and $manifest.generated_for.immich_commit -eq '8aa95c67470a02a8ddedf03c2e52963af33065ff') 'model_manifest_identity_invalid'
     $face = @($manifest.artifacts | Where-Object { [string]$_.relative_cache_path -like 'facial-recognition/*' -and $_.required -eq $true })

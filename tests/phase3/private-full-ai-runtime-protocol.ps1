@@ -44,6 +44,7 @@ Assert-Protocol ($runner.Contains("if (`$Action -in @('provision', 'resume')) {`
     -or $runner.Contains("if (`$Action -in @('provision', 'resume')) {`n            `$script:stage = 'canonical_bind'")) 'finalize_must_not_rebind'
 Assert-Protocol ($runner.Contains("`$runtime.index_evidence.queue_idle.smart_search -eq `$true")) 'runtime_queue_evidence_required'
 Assert-Protocol ($runner.Contains("'complete-indexes'")) 'v15_completion_invocation_missing'
+Assert-Protocol ($runner.Contains('Get-Content -LiteralPath $modelManifest -Raw -Encoding UTF8')) 'model_manifest_utf8_decode_required'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
