@@ -380,7 +380,13 @@ async function photosPage(page, role, mobile) {
 }
 
 async function homePage(page, role, mobile) {
-  await goto(page, photoOrigin, '/home', `${role}_home`);
+  let rootResponse;
+  try {
+    rootResponse = await page.goto(safeUrl('/', photoOrigin), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  } catch { fail(`${role}_home_root_transport`); }
+  assert(rootResponse !== null && rootResponse.status() === 200, `${role}_home_root_http_status`);
+  assert(new URL(page.url()).pathname === '/home', `${role}_home_root_redirect`);
+  await page.waitForTimeout(180);
   assert(await page.getByRole('heading', { name: '首页', exact: true }).count() >= 1, `${role}_home_heading`);
   for (const selector of ['.home-featured', '.home-memory-row', '.home-album-row', '.home-people-row', '[data-home-all-photos]']) {
     assert(await page.locator(selector).count() === 1, `${role}_home_${selector.replace(/[^a-z]+/gi, '_')}`);
