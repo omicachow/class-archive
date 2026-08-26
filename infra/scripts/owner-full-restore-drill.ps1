@@ -838,6 +838,11 @@ try {
             Assert-RestoreNetworkRangesFree
             foreach ($spec in Get-RestoreVolumeSpecs) { New-RestoreVolume $spec[0] $spec[1] $spec[2] }
             [void](Invoke-RestoreCompose piwigo @('up','-d','db'))
+            # `docker compose up db` creates only the app network used by the
+            # selected service.  Let Compose create (but not start) Piwigo so
+            # the shared gateway gets its trusted Compose identity labels
+            # before Immich consumes it as an external network.
+            [void](Invoke-RestoreCompose piwigo @('create','--no-recreate','piwigo'))
             Assert-RestoreGatewayNetwork
             Wait-RestoreContainer ($piwigoProject + '-db-1')
             [void](Invoke-RestoreCompose immich @('--profile','immich-spike','up','-d','database','redis'))
