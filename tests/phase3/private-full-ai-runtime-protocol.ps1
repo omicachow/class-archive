@@ -49,6 +49,7 @@ Assert-Protocol ($runner.Contains("if (`$Action -in @('provision', 'resume')) {`
 Assert-Protocol ($runner.Contains("`$runtime.index_evidence.queue_idle.smart_search -eq `$true")) 'runtime_queue_evidence_required'
 Assert-Protocol ($runner.Contains("'complete-indexes'")) 'v15_completion_invocation_missing'
 Assert-Protocol ($runner.Contains('Get-Content -LiteralPath $modelManifest -Raw -Encoding UTF8')) 'model_manifest_utf8_decode_required'
+Assert-Protocol ($runner.Contains("`$runtimeCommand = 'exec node ' + `$runtimeScriptContainer + ' --input-file ' + `$runtimeInputContainer + ' 2>&1'")) 'runtime_marker_must_avoid_ps51_native_stderr'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",

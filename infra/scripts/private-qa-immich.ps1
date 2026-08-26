@@ -406,7 +406,12 @@ try {
         [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('chown 0:0 ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' && chmod 0500 ' + $runtimeScriptContainer + ' && chmod 0600 ' + $runtimeInputContainer)))
 
         $script:stage = 'ml_runtime'
-        $runtimeResult = Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'node', $runtimeScriptContainer, '--input-file', $runtimeInputContainer)
+        # The runtime emits only an allowlisted PASS/FAIL marker. Redirect its
+        # stderr inside the Linux container so Windows PowerShell 5.1 cannot
+        # turn that marker into a NativeCommandError before the wrapper gets a
+        # chance to validate and map the safe reason code.
+        $runtimeCommand = 'exec node ' + $runtimeScriptContainer + ' --input-file ' + $runtimeInputContainer + ' 2>&1'
+        $runtimeResult = Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'sh', '-lc', $runtimeCommand)
         Assert-Exact ($runtimeResult -match '^PRIVATE_QA_IMMICH_RUNTIME=PASS assets=([0-9]+) people=([0-9]+) face_jobs=([0-9]+) recognition_jobs=([0-9]+) smart_jobs=([0-9]+)$') 'runtime_failed'
         [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeOutputContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-output.json')))
         Set-ClassArchiveOwnerOnlyFileAcl -Path $nodeOutputHost
