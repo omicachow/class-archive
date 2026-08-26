@@ -510,7 +510,7 @@ function Mount-RestoreStorage([bool]$AllowCreate) {
     Assert-Restore ($loopLines.Count -ne 0) 'loop_device_missing'
     Assert-Restore ($loopLines.Count -eq 1) 'loop_device_ambiguous'
     if (-not ($loopLines[0].Trim() -match '\A/dev/loop[0-9]+\z')) {
-        $safeHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes([string]$loopLines[0]))
+        $safeHex = -join ([Text.Encoding]::UTF8.GetBytes([string]$loopLines[0]) | ForEach-Object { $_.ToString('x2') })
         Write-Output ('OWNER_RESTORE_DIAGNOSTIC field=loop_device_hex value=' + $safeHex)
         Stop-Restore 'loop_device_shape_invalid'
     }
