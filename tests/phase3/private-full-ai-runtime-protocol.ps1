@@ -60,6 +60,9 @@ foreach ($stage in @('ml_runtime_execute','ml_runtime_marker','ml_runtime_output
 }
 Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
     -and $runner.Contains('[Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)') `
+    -and $runner.Contains('System.Web.Script.Serialization.JavaScriptSerializer') `
+    -and $runner.Contains('$runtimeSerializer.MaxJsonLength = 4MB') `
+    -and $runner.Contains('$runtimeSerializer.RecursionLimit = 32') `
     -and $runner.Contains("Fail 'runtime_output_decode_invalid'")) 'runtime_output_must_use_strict_utf8'
 
 foreach ($needle in @(

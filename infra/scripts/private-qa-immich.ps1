@@ -434,13 +434,22 @@ try {
             $runtimeBytes = [IO.File]::ReadAllBytes($nodeOutputHost)
             if ($runtimeBytes.Length -lt 16 -or $runtimeBytes.Length -gt 4MB) { Fail 'runtime_output_size_invalid' }
             $runtimeJson = [Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)
-            $runtime = $runtimeJson | ConvertFrom-Json -ErrorAction Stop
+            # Windows PowerShell 5.1 ConvertFrom-Json is not reliable for this
+            # bounded 2,351-item evidence document. Use the in-box .NET JSON
+            # parser with explicit size and recursion limits instead; the
+            # document remains private and no field is emitted to stdout.
+            Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+            $runtimeSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+            $runtimeSerializer.MaxJsonLength = 4MB
+            $runtimeSerializer.RecursionLimit = 32
+            $runtime = $runtimeSerializer.DeserializeObject($runtimeJson)
         } catch {
             if ([string]$_.Exception.Message -match '^PRIVATE_QA_IMMICH=FAIL ') { throw }
             Fail 'runtime_output_decode_invalid'
         } finally {
             $runtimeBytes = $null
             $runtimeJson = $null
+            $runtimeSerializer = $null
         }
         $script:stage = 'ml_runtime_output_contract'
         Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest -and @($runtime.assets).Count -eq [int]$catalog.count) 'runtime_output_invalid'
