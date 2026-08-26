@@ -80,6 +80,9 @@ Assert-True (-not $runner.Contains("Invoke-Ubuntu @('mkfs.ext4'")) 'restore_mkfs
 Assert-True ($runner.Contains('restore_unformatted_image_requires_confirmation')) 'restore_unformatted_retry_confirmation_missing'
 Assert-True ($runner.Contains('restore_unformatted_image_size_invalid')) 'restore_unformatted_retry_size_guard_missing'
 Assert-True ($runner.Contains("[string]`$imageType[0] -eq 'ext4'")) 'restore_existing_image_type_guard_missing'
+foreach ($needle in @('`$line = @(Invoke-Ubuntu', '`$loopLines = @(Invoke-Ubuntu', '`$lines = @(Invoke-Ubuntu', '`$rootLines = @(Invoke-RestoreDocker', '`$sourceManifestLines = @(Invoke-Ubuntu', '`$targetManifestLines = @(Invoke-RestoreDocker')) {
+    Assert-True ($runner.Contains($needle.Replace('`$','$'))) ('restore_native_array_normalization_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+}
 Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
 Assert-True ($runner.Contains('docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'

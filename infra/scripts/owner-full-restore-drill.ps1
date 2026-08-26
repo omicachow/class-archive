@@ -383,7 +383,7 @@ function Get-PrimaryOwnerFingerprint {
         'class_archive_private_full_v3_immich-immich-server-1','class_archive_private_full_v3_immich-database-1'
     )
     $parts = foreach ($name in $names) {
-        $line = Invoke-Ubuntu @('docker','inspect','--format','{{.Id}}|{{.State.Running}}|{{.State.StartedAt}}',$name) 'owner_runtime_unavailable'
+        $line = @(Invoke-Ubuntu @('docker','inspect','--format','{{.Id}}|{{.State.Running}}|{{.State.StartedAt}}',$name) 'owner_runtime_unavailable')
         Assert-Restore ($line.Count -eq 1 -and $line[0] -match '\A[a-f0-9]{64}\|true\|') 'owner_runtime_unhealthy'
         $name + '=' + $line[0]
     }
@@ -426,7 +426,7 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
     else {
         Assert-Restore ([string]$imageType[0] -eq 'ext4') 'restore_image_filesystem_invalid'
     }
-    $loopLines = Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed'
+    $loopLines = @(Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed')
     Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0] -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
     $loop = $loopLines[0]
     [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; mkdir -p "$1/docker-data" "$1/daemon"','sh',$mountPoint,$loop) 'restore_mount_failed')
@@ -439,9 +439,13 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
             if ($ready -contains $dockerRoot) { break }
         }
     }
-    $root = (Invoke-RestoreDocker @('info','--format','{{.DockerRootDir}}'))[-1].Trim()
+    $rootLines = @(Invoke-RestoreDocker @('info','--format','{{.DockerRootDir}}'))
+    Assert-Restore ($rootLines.Count -eq 1) 'restore_daemon_root_output_invalid'
+    $root = [string]$rootLines[0].Trim()
     Assert-Restore ($root -eq $dockerRoot) 'restore_daemon_root_invalid'
-    $primaryRoot = (Invoke-Ubuntu @('docker','info','--format','{{.DockerRootDir}}'))[-1].Trim()
+    $primaryRootLines = @(Invoke-Ubuntu @('docker','info','--format','{{.DockerRootDir}}'))
+    Assert-Restore ($primaryRootLines.Count -eq 1) 'primary_docker_root_output_invalid'
+    $primaryRoot = [string]$primaryRootLines[0].Trim()
     Assert-Restore ($primaryRoot -eq '/var/lib/docker') 'primary_docker_root_changed'
 }
 
@@ -480,25 +484,31 @@ function Assert-RestoreGatewayNetwork {
 function Invoke-StreamHelper([string]$Mode, [string]$Bundle, [string]$PassphrasePath, [switch]$NeedsPiwigoEnv) {
     $arguments = @((Get-WslPath $streamHelper),$Mode,'--bundle',(Get-WslPath $Bundle),'--passphrase-file',(Get-WslPath $PassphrasePath))
     if ($NeedsPiwigoEnv) { $arguments += @('--piwigo-env',(Get-WslPath $piwigoEnvPath)) }
-    $lines = Invoke-Ubuntu (@('bash') + $arguments) 'restore_stream_failed'
+    $lines = @(Invoke-Ubuntu (@('bash') + $arguments) 'restore_stream_failed')
     Assert-Restore ($lines.Count -eq 1 -and $lines[0] -eq ('OWNER_RESTORE_STREAM=PASS action=' + $Mode)) 'restore_stream_output_invalid'
 }
 
 function Copy-VerifiedModelCache([object]$BundleInfo) {
     $sourceVolume = 'class_archive_private_full_v3_immich_model_cache'
     $targetVolume = 'class_archive_owner_restore_v1_immich_model_cache'
-    $identity = (Invoke-Ubuntu @('docker','volume','inspect','--format','{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}',$sourceVolume))[-1]
+    $identityLines = @(Invoke-Ubuntu @('docker','volume','inspect','--format','{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}',$sourceVolume))
+    Assert-Restore ($identityLines.Count -eq 1) 'source_model_cache_identity_output_invalid'
+    $identity = [string]$identityLines[0]
     Assert-Restore ($identity -eq 'class_archive_private_full_v3_immich|immich_model_cache|private-real-full') 'source_model_cache_identity_invalid'
     $mlImage = 'ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05'
     $expectedManifestHash = (Get-FileHash -LiteralPath (Join-Path $BundleInfo.bundle 'business-state\ml-artifact-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
-    $sourceManifest = (Invoke-Ubuntu @('docker','run','--rm','--network','none','--read-only','--cap-drop','ALL','--cap-add','DAC_READ_SEARCH','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($sourceVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))[-1]
+    $sourceManifestLines = @(Invoke-Ubuntu @('docker','run','--rm','--network','none','--read-only','--cap-drop','ALL','--cap-add','DAC_READ_SEARCH','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($sourceVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))
+    Assert-Restore ($sourceManifestLines.Count -eq 1) 'source_model_manifest_output_invalid'
+    $sourceManifest = [string]$sourceManifestLines[0]
     Assert-Restore ($sourceManifest -match '\A([0-9a-f]{64})  /cache/class-archive-model-manifest\.json\z' -and (Test-FixedAsciiEqual $Matches[1] $expectedManifestHash)) 'source_model_manifest_mismatch'
     $copyScript = @'
 docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges:true --entrypoint tar -v "$1:/source:ro" "$3" --numeric-owner --acls --xattrs --xattrs-include="*" -C /source -cf - . |
 docker --host "$2" run --rm -i --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true --entrypoint sh -v "$4:/target" "$3" -eu -c 'test -z "$(find /target -mindepth 1 -print -quit)"; exec tar --numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include="*" -C /target -xf -'
 '@
     [void](Invoke-Ubuntu @('bash','-o','pipefail','-c',$copyScript,'bash',$sourceVolume,$dockerHost,$mlImage,$targetVolume) 'model_cache_copy_failed')
-    $targetManifest = (Invoke-RestoreDocker @('run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($targetVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))[-1]
+    $targetManifestLines = @(Invoke-RestoreDocker @('run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','sha256sum','-v',($targetVolume + ':/cache:ro'),$mlImage,'/cache/class-archive-model-manifest.json'))
+    Assert-Restore ($targetManifestLines.Count -eq 1) 'target_model_manifest_output_invalid'
+    $targetManifest = [string]$targetManifestLines[0]
     Assert-Restore ($targetManifest -match '\A([0-9a-f]{64})  /cache/class-archive-model-manifest\.json\z' -and (Test-FixedAsciiEqual $Matches[1] $expectedManifestHash)) 'target_model_manifest_mismatch'
 }
 
@@ -571,9 +581,9 @@ printf 'memories=%s\n' "$(q "SELECT COUNT(*) FROM ${base}auto_collection;")"
 printf 'audit_events=%s\n' "$(q "SELECT COUNT(*) FROM ${base}audit_event;")"
 printf 'ai_asset_index=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_asset_index;")"
 '@
-    $lines = Invoke-RestoreDocker @('exec','class_archive_owner_restore_v1_piwigo-db-1','sh','-eu','-c',$mariaSql) 'restore_mariadb_verify_failed'
+    $lines = @(Invoke-RestoreDocker @('exec','class_archive_owner_restore_v1_piwigo-db-1','sh','-eu','-c',$mariaSql) 'restore_mariadb_verify_failed')
     $pgSql = 'SELECT ''immich_assets=''||COUNT(*) FROM asset UNION ALL SELECT ''immich_face_records=''||COUNT(*) FROM asset_face UNION ALL SELECT ''immich_raw_persons=''||COUNT(*) FROM person UNION ALL SELECT ''immich_search_index=''||COUNT(*) FROM smart_search;'
-    $lines += Invoke-RestoreDocker @('exec','--user','postgres','class_archive_owner_restore_v1_immich-database-1','psql','--no-psqlrc','--tuples-only','--no-align','--set','ON_ERROR_STOP=1','--dbname=immich','--command',$pgSql) 'restore_postgres_verify_failed'
+    $lines += @(Invoke-RestoreDocker @('exec','--user','postgres','class_archive_owner_restore_v1_immich-database-1','psql','--no-psqlrc','--tuples-only','--no-align','--set','ON_ERROR_STOP=1','--dbname=immich','--command',$pgSql) 'restore_postgres_verify_failed')
     $result = @{}
     foreach ($line in $lines) {
         if ($line -match '\A([a-z_]+)=([0-9]+)\z' -and -not $result.ContainsKey($Matches[1])) { $result[[string]$Matches[1]] = [uint64]$Matches[2] }
@@ -613,13 +623,13 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
         Assert-Restore ($counts.ContainsKey($property.Name) -and [uint64]$counts[$property.Name] -eq [uint64]$property.Value) 'restored_count_mismatch'
     }
     Assert-AiRestoreEvidence
-    $published = Invoke-RestoreDocker @('ps','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Names}}|{{.Ports}}')
+    $published = @(Invoke-RestoreDocker @('ps','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Names}}|{{.Ports}}'))
     $joined = $published -join "`n"
     Assert-Restore ($joined -match '127\.0\.0\.1:8290->80/tcp' -and $joined -match '127\.0\.0\.1:8291->8081/tcp') 'restore_loopback_ports_missing'
     Assert-Restore (-not ($joined -match '0\.0\.0\.0|\[::\]|:2283->|:3000->|:8080->')) 'restore_internal_service_exposed'
-    $badMode = Invoke-RestoreCompose piwigo @('exec','-T','piwigo','sh','-eu','-c','find /var/www/html/piwigo/upload /var/www/html/piwigo/galleries -type f ! -perm 0660 -print -quit')
+    $badMode = @(Invoke-RestoreCompose piwigo @('exec','-T','piwigo','sh','-eu','-c','find /var/www/html/piwigo/upload /var/www/html/piwigo/galleries -type f ! -perm 0660 -print -quit'))
     Assert-Restore ([string]::IsNullOrWhiteSpace(($badMode -join ''))) 'restored_original_mode_invalid'
-    $media = Invoke-RestoreCompose piwigo @('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_HTTP=1','piwigo','php','/workspace/tests/phase3/private-full-owner-media-http.php')
+    $media = @(Invoke-RestoreCompose piwigo @('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_HTTP=1','piwigo','php','/workspace/tests/phase3/private-full-owner-media-http.php'))
     Assert-Restore (@($media | Where-Object { $_ -match '\APRIVATE_FULL_OWNER_MEDIA_HTTP=PASS .*direct_guest_requests=6 ' }).Count -eq 1) 'restore_mediaguard_probe_failed'
     $health0 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
     $health1 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8291/healthz' -ErrorAction Stop
