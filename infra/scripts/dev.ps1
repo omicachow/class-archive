@@ -516,6 +516,9 @@ switch ($Action) {
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-cache-contract.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-product-contract.mjs')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\private-full-owner-deploy-protocol.ps1')
         exit $LASTEXITCODE
     }
     'test-phase2-gateway-http' {
@@ -717,6 +720,17 @@ try {
         }
         & wsl.exe @($composeArguments + $runtimeVerificationArguments)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        # Schema/plugin publication and read-projection publication are one
+        # maintenance-gated product transition. Never remove the outer nginx
+        # gate while the browser would still observe an old or STALE Home,
+        # album, People, Memory or Spotlight projection.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Start-PublicCompatibility
 
         # Finalization is a separate process and repeats current tree, active plugin,
         # schema, enforcement and principal assertions before exact-marker removal.

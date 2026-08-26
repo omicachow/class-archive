@@ -243,6 +243,38 @@ services:
     networks:
       - app
 
+  # A narrow, one-time rollback point for a forward-only ClassIdentity schema
+  # migration. It deliberately contains database state only: media volumes are
+  # not mounted and therefore cannot be read, changed, or accidentally treated
+  # as part of a schema rollback. The owner deployment helper stops Piwigo and
+  # proves the trusted maintenance gate before it enables this service.
+  pre-migration-db-backup:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
+    profiles: ["ops"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/create-pre-migration-db-snapshot.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:-piwigo}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.piwigo}
+      CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION: "14"
+      CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION: "15"
+      CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE: "snapshot"
+      CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM: "false"
+    volumes:
+      - backups:/backup
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+
   backup-audit:
     image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
     profiles: ["ops"]

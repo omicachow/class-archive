@@ -61,6 +61,16 @@ services:
         max-size: "10m"
         max-file: "2"
 
+  pre-migration-db-backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
   backup-audit:
     restart: "no"
     network_mode: "none"

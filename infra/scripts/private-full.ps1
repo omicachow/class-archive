@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'config', 'ps', 'runtime-staging', 'up-staging', 'stop-staging', 'cutover-preflight', 'cutover', 'rollback')]
+    [ValidateSet('validate', 'validate-owner', 'config', 'ps', 'runtime-staging', 'runtime-owner', 'up-staging', 'stop-staging', 'cutover-preflight', 'cutover', 'rollback')]
     [string]$Action = 'validate',
 
     [string]$PiwigoStagingEnvPath,
@@ -670,7 +670,7 @@ function Assert-RuntimeReadonlyInputs([object]$Container, [string]$StagingWsl, [
     }
 }
 
-function Assert-StagingRuntime([hashtable]$Endpoint) {
+function Assert-EndpointRuntime([hashtable]$Endpoint) {
     Assert-ManagedPayloadRuntimeSupported
     $piwigoContainerName = $piwigoProject + '-piwigo-1'
     $piwigoDbContainerName = $piwigoProject + '-db-1'
@@ -732,32 +732,44 @@ function Stop-Endpoint([hashtable]$Endpoint) {
 
 try {
     $script:stage = 'validation'
-    if ($Action -in @('validate','config','ps','runtime-staging','up-staging','stop-staging')) {
-        $staging = Get-ValidatedEndpoint 'staging'
+    $singleEndpointActions = @{
+        'validate' = 'staging'
+        'config' = 'staging'
+        'ps' = 'staging'
+        'runtime-staging' = 'staging'
+        'up-staging' = 'staging'
+        'stop-staging' = 'staging'
+        'validate-owner' = 'owner'
+        'runtime-owner' = 'owner'
+    }
+    if ($singleEndpointActions.ContainsKey($Action)) {
+        $endpointMode = [string]$singleEndpointActions[$Action]
+        $endpoint = Get-ValidatedEndpoint $endpointMode
         Assert-GatewaySubnetAvailable
         if ($Action -eq 'up-staging') {
             Assert-FullOwnerNotBound
             Assert-ManagedPayloadRuntimeSupported
             $script:stage = 'start_staging'
-            Start-Endpoint $staging
+            Start-Endpoint $endpoint
         }
         elseif ($Action -eq 'stop-staging') {
             Assert-FullOwnerNotBound
             $script:stage = 'stop_staging'
-            Stop-Endpoint $staging
+            Stop-Endpoint $endpoint
         }
         elseif ($Action -eq 'ps') {
-            Invoke-Compose $staging.piwigoPrefix @('ps')
-            Invoke-Compose $staging.immichPrefix @('ps')
+            Invoke-Compose $endpoint.piwigoPrefix @('ps')
+            Invoke-Compose $endpoint.immichPrefix @('ps')
         }
-        elseif ($Action -eq 'runtime-staging') {
-            $script:stage = 'runtime_staging'
-            $runtime = Assert-StagingRuntime $staging
+        elseif ($Action -in @('runtime-staging', 'runtime-owner')) {
+            $script:stage = 'runtime_' + $endpointMode
+            $runtime = Assert-EndpointRuntime $endpoint
         }
-        if ($Action -eq 'runtime-staging') {
-            Write-Output ('PRIVATE_FULL=PASS action=runtime-staging endpoint=8290_8291 evidence=RUNTIME_BOUNDARY_VALIDATED core_http=' + $runtime.core_http + ' piwigo_health=' + $runtime.piwigo_health + ' ml=DEFERRED_CAPACITY_GUARDED')
+        if ($Action -in @('runtime-staging', 'runtime-owner')) {
+            $endpointLabel = [string]$endpoint.spec.http + '_' + [string]$endpoint.spec.compat
+            Write-Output ('PRIVATE_FULL=PASS action=' + $Action + ' endpoint=' + $endpointLabel + ' evidence=RUNTIME_BOUNDARY_VALIDATED core_http=' + $runtime.core_http + ' piwigo_health=' + $runtime.piwigo_health + ' ml=DEFERRED_CAPACITY_GUARDED')
         }
-        else { Write-Output "PRIVATE_FULL=PASS action=$Action endpoint=staging evidence=CONFIG_VALIDATED" }
+        else { Write-Output "PRIVATE_FULL=PASS action=$Action endpoint=$endpointMode evidence=CONFIG_VALIDATED" }
         exit 0
     }
 
