@@ -210,17 +210,27 @@ function Get-ModelContract {
 
 function Invoke-ImmichCompose([string[]]$Arguments) {
     $previous = $ErrorActionPreference
+    $lines = @()
+    $code = -1
+    $nativeError = ''
     try {
         $ErrorActionPreference = 'Continue'
         $lines = @(& wsl.exe -d Ubuntu --cd $projectRoot --exec docker compose --env-file $immichEnvRelative -f $immichCompose -f $immichOverride -p $immichProject @Arguments 2>&1)
         $code = $LASTEXITCODE
+    } catch {
+        # Windows PowerShell 5.1 can still surface a native stderr record as
+        # an exception even while ErrorActionPreference is temporarily set to
+        # Continue. Keep only its allowlisted machine marker; never return the
+        # arbitrary native message or command output to the caller.
+        $nativeError = [string]$_.Exception.Message
     } finally { $ErrorActionPreference = $previous }
     if ($code -ne 0) {
-        $safe = [regex]::Match([string]::Join("`n", $lines), '(?m)^PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=([a-z0-9_.-]{1,96})$')
+        $safeInput = [string]::Join("`n", @($lines | ForEach-Object { [string]$_ }) + @($nativeError))
+        $safe = [regex]::Match($safeInput, '(?m)^PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=([a-z0-9_.-]{1,96})$')
         if ($safe.Success) { Fail ('immich_' + $safe.Groups[1].Value) }
         Fail 'immich_compose_failed'
     }
-    return [string]::Join("`n", $lines)
+    return [string]::Join("`n", @($lines | ForEach-Object { [string]$_ }))
 }
 
 function Read-DotEnvValue([string]$Path, [string]$Name, [string]$Fallback) {

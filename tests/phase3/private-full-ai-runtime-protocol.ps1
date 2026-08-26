@@ -52,6 +52,9 @@ Assert-Protocol ($runner.Contains("`$runtime.index_evidence.queue_idle.smart_sea
 Assert-Protocol ($runner.Contains("'complete-indexes'")) 'v15_completion_invocation_missing'
 Assert-Protocol ($runner.Contains('Get-Content -LiteralPath $modelManifest -Raw -Encoding UTF8')) 'model_manifest_utf8_decode_required'
 Assert-Protocol ($runner.Contains("`$runtimeCommand = 'exec node ' + `$runtimeScriptContainer + ' --input-file ' + `$runtimeInputContainer + ' 2>&1'")) 'runtime_marker_must_avoid_ps51_native_stderr'
+Assert-Protocol ($runner.Contains("`$nativeError = [string]`$_.Exception.Message") `
+    -and $runner.Contains("`$safeInput = [string]::Join") `
+    -and $runner.Contains("Fail 'immich_compose_failed'")) 'runtime_native_exception_must_remain_sanitized'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
