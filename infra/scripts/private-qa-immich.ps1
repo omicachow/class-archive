@@ -80,6 +80,9 @@ $passwordResetScriptHost = 'infra/scripts/private-qa-immich-reset-admin.mjs'
 $passwordResetScriptContainer = '/tmp/class-archive-private-qa-immich-reset-admin.mjs'
 $runtimeInputContainer = '/tmp/class-archive-private-qa-immich-runtime-input.json'
 $runtimeOutputContainer = '/tmp/class-archive-private-qa-immich-runtime-output.json'
+$runtimeSummaryContainer = '/tmp/class-archive-private-qa-immich-runtime-summary.json'
+$runtimeBindingsContainer = '/tmp/class-archive-private-qa-immich-runtime-bindings.json'
+$runtimeIndexEvidenceContainer = '/tmp/class-archive-private-qa-immich-runtime-index-evidence.json'
 $passwordResetInputContainer = '/tmp/class-archive-private-qa-immich-password-reset-input.txt'
 $passwordResetOutputContainer = '/tmp/class-archive-private-qa-immich-password-reset-output.txt'
 $catalogContainer = '/tmp/class-archive-private-qa-immich-catalog.json'
@@ -349,7 +352,11 @@ try {
         Assert-Exact ($Action -in @('resume', 'finish', 'finalize-indexes') -and $counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le $maxAssets -and $counts.memories -eq 0) 'immich_resume_state_invalid'
         Assert-Exact ($Action -ne 'finalize-indexes' -or $Runtime -eq 'full') 'index_finalize_scope_invalid'
     }
-    $immichTemporary = @($runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer, $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer)
+    $immichTemporary = @(
+        $runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer,
+        $runtimeSummaryContainer, $runtimeBindingsContainer, $runtimeIndexEvidenceContainer,
+        $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer
+    )
     foreach ($path in @($immichTemporary + @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer))) {
         $service = if ($path -in $immichTemporary) { 'immich-server' } else { 'piwigo' }
         $probe = if ($service -eq 'immich-server') { Invoke-ImmichCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) } else { Invoke-PiwigoCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) }
@@ -361,7 +368,7 @@ try {
     [void][IO.Directory]::CreateDirectory($work)
     $catalogHost = Join-Path $work 'catalog.json'
     $nodeInputHost = Join-Path $work 'runtime-input.json'
-    $nodeOutputHost = Join-Path $work 'runtime-output.json'
+    $nodeOutputHost = Join-Path $work 'runtime-summary.json'
     $bindingHost = Join-Path $work 'bindings.json'
     $indexEvidenceHost = Join-Path $work 'index-evidence.json'
     $enableHost = Join-Path $work 'enable.json'
@@ -425,10 +432,14 @@ try {
         $script:stage = 'ml_runtime_marker'
         Assert-Exact ($runtimeResult -match '^PRIVATE_QA_IMMICH_RUNTIME=PASS assets=([0-9]+) people=([0-9]+) face_jobs=([0-9]+) recognition_jobs=([0-9]+) smart_jobs=([0-9]+)$') 'runtime_failed'
         $script:stage = 'ml_runtime_output_copy'
-        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeOutputContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-output.json')))
+        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeSummaryContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-summary.json')))
+        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeBindingsContainer), ($privateRelative + '/runtime/immich/' + $run + '/bindings.json')))
+        [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeIndexEvidenceContainer), ($privateRelative + '/runtime/immich/' + $run + '/index-evidence.json')))
         $script:stage = 'ml_runtime_output_acl'
-        Set-ClassArchiveOwnerOnlyFileAcl -Path $nodeOutputHost
-        Assert-IgnoredOwnerOnly $nodeOutputHost 'runtime_output'
+        foreach ($privateArtifact in @($nodeOutputHost, $bindingHost, $indexEvidenceHost)) {
+            Set-ClassArchiveOwnerOnlyFileAcl -Path $privateArtifact
+            Assert-IgnoredOwnerOnly $privateArtifact 'runtime_output'
+        }
         $script:stage = 'ml_runtime_output_read'
         $runtimeReadStep = 'bytes'
         try {
@@ -458,7 +469,10 @@ try {
             $runtimeReadStep = $null
         }
         $script:stage = 'ml_runtime_output_contract'
-        Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest -and @($runtime.assets).Count -eq [int]$catalog.count) 'runtime_output_invalid'
+        Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope `
+            -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest `
+            -and [int]$runtime.asset_count -eq [int]$catalog.count `
+            -and [int]$runtime.people_count -ge 1) 'runtime_output_invalid'
         Assert-Exact ($runtime.index_evidence.runtime_mode -in @('INITIAL', 'RESUME') `
             -and $runtime.index_evidence.queue_idle.face_detection -eq $true `
             -and $runtime.index_evidence.queue_idle.facial_recognition -eq $true `
@@ -470,7 +484,6 @@ try {
 
         if ($Action -in @('provision', 'resume')) {
             $script:stage = 'canonical_bind'
-            Write-OwnerOnlyJson $bindingHost ([ordered]@{ version = 1; scope = $runtimeScope; catalog_digest = [string]$catalog.catalog_digest; assets = @($runtime.assets) })
             [void](Invoke-PiwigoCompose @('cp', ($privateRelative + '/runtime/immich/' + $run + '/bindings.json'), ('piwigo:' + $bindingContainer)))
             [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $bindingContainer + ' && chmod 0600 ' + $bindingContainer)))
             $bindResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'bind')
@@ -487,22 +500,6 @@ try {
             Wait-ContainerHealthy ($piwigoProject + '-piwigo-1') 300
             $script:stage = 'index_evidence'
             $models = $runtime.index_evidence.models
-            Write-OwnerOnlyJson $indexEvidenceHost ([ordered]@{
-                version = 1
-                scope = $runtimeScope
-                catalog_digest = [string]$catalog.catalog_digest
-                runtime_mode = [string]$runtime.index_evidence.runtime_mode
-                asset_count = [int]$catalog.count
-                people_count = [int]$runtime.metrics.people_count
-                face_model_name = [string]$models.face_model_name
-                face_model_revision = [string]$models.face_model_revision
-                search_model_name = [string]$models.search_model_name
-                search_model_revision = [string]$models.search_model_revision
-                face_queue_idle = [bool]$runtime.index_evidence.queue_idle.face_detection
-                recognition_queue_idle = [bool]$runtime.index_evidence.queue_idle.facial_recognition
-                search_queue_idle = [bool]$runtime.index_evidence.queue_idle.smart_search
-                assets = @($runtime.assets)
-            })
             [void](Invoke-PiwigoCompose @('cp', ($privateRelative + '/runtime/immich/' + $run + '/index-evidence.json'), ('piwigo:' + $indexEvidenceContainer)))
             [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $indexEvidenceContainer + ' && chmod 0600 ' + $indexEvidenceContainer)))
             $script:stage = 'index_control_plane_complete'
@@ -574,7 +571,7 @@ try {
         $technicalPassword = $null
         $accessToken = $null
         $bridgeToken = $null
-        try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
+        try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $runtimeSummaryContainer + ' ' + $runtimeBindingsContainer + ' ' + $runtimeIndexEvidenceContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
         try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $indexEvidenceContainer + ' ' + $enableContainer))) } catch { }
         foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeHost, $passwordResetHost)) {
             try { Remove-PrivateFile $path } catch { }

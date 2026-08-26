@@ -5,6 +5,9 @@ import { createHash } from 'node:crypto';
 // private-qa-immich.ps1.  It is never mounted into or run by public CI.
 const INPUT_PATH = '/tmp/class-archive-private-qa-immich-runtime-input.json';
 const OUTPUT_PATH = '/tmp/class-archive-private-qa-immich-runtime-output.json';
+const SUMMARY_PATH = '/tmp/class-archive-private-qa-immich-runtime-summary.json';
+const BINDINGS_PATH = '/tmp/class-archive-private-qa-immich-runtime-bindings.json';
+const INDEX_EVIDENCE_PATH = '/tmp/class-archive-private-qa-immich-runtime-index-evidence.json';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 class RuntimeError extends Error {
@@ -36,6 +39,14 @@ function uuid(value, code) {
 function assertPrivateFile(path, code, max = 2 * 1024 * 1024) {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.nlink !== 1 || stat.size < 16 || stat.size > max) fail(code);
+}
+
+function writePrivateJson(path, value, code, max = 2 * 1024 * 1024) {
+  const raw = JSON.stringify(value);
+  if (Buffer.byteLength(raw, 'utf8') < 16 || Buffer.byteLength(raw, 'utf8') > max) fail(code);
+  writeFileSync(path, raw, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  chmodSync(path, 0o600);
+  assertPrivateFile(path, code, max);
 }
 
 function mediaReference(value) {
@@ -429,6 +440,29 @@ try {
   await drainOutOfScopeOcr(accessToken);
 
   runtimeStage = 'output';
+  const queueIdle = {
+    face_detection: faceQueue.active === 0 && faceQueue.waiting === 0 && faceQueue.delayed === 0 && faceQueue.failed === 0,
+    facial_recognition: recognitionQueue.active === 0 && recognitionQueue.waiting === 0 && recognitionQueue.delayed === 0 && recognitionQueue.failed === 0,
+    smart_search: smartQueue.active === 0 && smartQueue.waiting === 0 && smartQueue.delayed === 0 && smartQueue.failed === 0,
+  };
+  const metrics = {
+    asset_count: photos.length,
+    people_count: people.people.length,
+    face_jobs: faceJobs,
+    recognition_jobs: recognitionJobs,
+    smart_jobs: smartJobs,
+    reused_existing_indexes: mode === 'RESUME',
+    search_counts: searchCounts,
+    timings_ms: {
+      mounted_sha256: verifyMs,
+      library_scan: scanMs,
+      face_detection: faceMs,
+      face_recognition: recognitionMs,
+      smart_index: searchIndexMs,
+      smart_queries: searchMs,
+      total: Date.now() - started,
+    },
+  };
   const output = {
     version: 1,
     scope: runtimeScope,
@@ -438,34 +472,41 @@ try {
     index_evidence: {
       runtime_mode: mode,
       models,
-      queue_idle: {
-        face_detection: faceQueue.active === 0 && faceQueue.waiting === 0 && faceQueue.delayed === 0 && faceQueue.failed === 0,
-        facial_recognition: recognitionQueue.active === 0 && recognitionQueue.waiting === 0 && recognitionQueue.delayed === 0 && recognitionQueue.failed === 0,
-        smart_search: smartQueue.active === 0 && smartQueue.waiting === 0 && smartQueue.delayed === 0 && smartQueue.failed === 0,
-      },
+      queue_idle: queueIdle,
     },
-    metrics: {
-      asset_count: photos.length,
-      people_count: people.people.length,
-      face_jobs: faceJobs,
-      recognition_jobs: recognitionJobs,
-      smart_jobs: smartJobs,
-      reused_existing_indexes: mode === 'RESUME',
-      search_counts: searchCounts,
-      timings_ms: {
-        mounted_sha256: verifyMs,
-        library_scan: scanMs,
-        face_detection: faceMs,
-        face_recognition: recognitionMs,
-        smart_index: searchIndexMs,
-        smart_queries: searchMs,
-        total: Date.now() - started,
-      },
-    },
+    metrics,
   };
-  writeFileSync(OUTPUT_PATH, JSON.stringify(output), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  chmodSync(OUTPUT_PATH, 0o600);
-  assertPrivateFile(OUTPUT_PATH, 'output_file_invalid');
+  const summary = {
+    version: 1,
+    scope: runtimeScope,
+    catalog_digest: catalogDigest,
+    access_token: accessToken,
+    asset_count: photos.length,
+    people_count: people.people.length,
+    index_evidence: { runtime_mode: mode, models, queue_idle: queueIdle },
+    metrics,
+  };
+  const bindingArtifact = { version: 1, scope: runtimeScope, catalog_digest: catalogDigest, assets: bindings };
+  const indexEvidenceArtifact = {
+    version: 1,
+    scope: runtimeScope,
+    catalog_digest: catalogDigest,
+    runtime_mode: mode,
+    asset_count: photos.length,
+    people_count: people.people.length,
+    face_model_name: models.face_model_name,
+    face_model_revision: models.face_model_revision,
+    search_model_name: models.search_model_name,
+    search_model_revision: models.search_model_revision,
+    face_queue_idle: queueIdle.face_detection,
+    recognition_queue_idle: queueIdle.facial_recognition,
+    search_queue_idle: queueIdle.smart_search,
+    assets: bindings,
+  };
+  writePrivateJson(OUTPUT_PATH, output, 'output_file_invalid');
+  writePrivateJson(SUMMARY_PATH, summary, 'summary_file_invalid', 128 * 1024);
+  writePrivateJson(BINDINGS_PATH, bindingArtifact, 'bindings_file_invalid', 512 * 1024);
+  writePrivateJson(INDEX_EVIDENCE_PATH, indexEvidenceArtifact, 'index_evidence_file_invalid', 1024 * 1024);
   console.log(`PRIVATE_QA_IMMICH_RUNTIME=PASS assets=${photos.length} people=${people.people.length} face_jobs=${faceJobs} recognition_jobs=${recognitionJobs} smart_jobs=${smartJobs}`);
 } catch (error) {
   const safeStage = /^[a-z_]{1,48}$/.test(runtimeStage) ? runtimeStage : 'unknown';

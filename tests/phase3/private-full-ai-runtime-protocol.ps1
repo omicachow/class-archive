@@ -43,6 +43,9 @@ Assert-Protocol ($runtime.Contains('`unexpected_${safeStage}`') `
     -and $runtime.Contains("runtimeStage = 'output'")) 'runtime_failure_stage_must_be_sanitized'
 Assert-Protocol (@([regex]::Matches($runtime, 'console\.log\(`PRIVATE_QA_IMMICH_RUNTIME=FAIL reason=\$\{code\}`\);')).Count -eq 2 `
     -and -not $runtime.Contains('console.error(`PRIVATE_QA_IMMICH_RUNTIME=FAIL')) 'runtime_failure_marker_must_use_stdout'
+foreach ($artifact in @('SUMMARY_PATH','BINDINGS_PATH','INDEX_EVIDENCE_PATH')) {
+    Assert-Protocol ($runtime.Contains("writePrivateJson($artifact")) ('runtime_private_artifact_missing_' + $artifact)
+}
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'
@@ -65,6 +68,11 @@ Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
     -and $runner.Contains('$runtimeSerializer.RecursionLimit = 32') `
     -and $runner.Contains("`$runtimeReadStep = 'deserialize'") `
     -and $runner.Contains("Fail ('runtime_output_' + `$runtimeReadStep + '_invalid')")) 'runtime_output_must_use_strict_utf8'
+Assert-Protocol ($runner.Contains("'runtime-summary.json'") `
+    -and $runner.Contains("'bindings.json'") `
+    -and $runner.Contains("'index-evidence.json'") `
+    -and $runner.Contains('[int]$runtime.asset_count -eq [int]$catalog.count') `
+    -and -not $runner.Contains('@($runtime.assets)')) 'large_runtime_assets_must_bypass_ps_json'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
