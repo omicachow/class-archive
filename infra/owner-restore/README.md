@@ -23,26 +23,26 @@ interrupt the owner runtime.
 
 ```powershell
 # Read-only bundle and host-capability checks.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 validate -BackupBundlePath <verified-bundle>
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 validate -BackupBundlePath <verified-bundle>
 
 # One-time M-backed ext4 image mount and control-plane preflight.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 prepare-storage -BackupBundlePath <verified-bundle> -ConfirmCreateRestoreStorage
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 prepare-storage -BackupBundlePath <verified-bundle> -ConfirmCreateRestoreStorage
 
 # Stream-decrypt into fresh databases/volumes, then build a new bridge secret.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 restore -BackupBundlePath <verified-bundle> -ConfirmIsolatedRestore
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 restore -BackupBundlePath <verified-bundle> -ConfirmIsolatedRestore
 
 # Read-only aggregate/runtime checks. Browser E2E remains a separate gate.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
 
 # Explicit cold restart: indexes must be immediately reusable, with zero jobs.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 cold-restart -BackupBundlePath <verified-bundle> -ConfirmColdRestart
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 cold-restart -BackupBundlePath <verified-bundle> -ConfirmColdRestart
 
 # Repeat the exact aggregate check after the cold restart, before browser QA.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
+pwsh.exe -NoProfile -File .\infra\scripts\owner-full-restore-drill.ps1 verify -BackupBundlePath <verified-bundle>
 
 # Real Chromium acceptance against the isolated restore projects on 8290/8291.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-browser-qa.ps1 -Mode restore
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\full-real-family-browser-qa.ps1 -Mode restore
+pwsh.exe -NoProfile -File .\tests\phase3\full-real-browser-qa.ps1 -Mode restore
+pwsh.exe -NoProfile -File .\tests\phase3\full-real-family-browser-qa.ps1 -Mode restore
 ```
 
 Encrypted archives are never expanded onto exFAT. The DPAPI recovery payload

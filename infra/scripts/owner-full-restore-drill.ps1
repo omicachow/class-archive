@@ -26,6 +26,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) {
+    throw 'OWNER_RESTORE_STOP:powershell_7_required'
+}
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $wsl = "$env:SystemRoot\System32\wsl.exe"
@@ -509,16 +512,12 @@ function Mount-RestoreStorage([bool]$AllowCreate) {
         ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     Assert-Restore ($loopLines.Count -ne 0) 'loop_device_missing'
     Assert-Restore ($loopLines.Count -eq 1) 'loop_device_ambiguous'
-    if (-not ($loopLines[0].Trim() -match '\A/dev/loop[0-9]+\z')) {
-        $safeHex = -join ([Text.Encoding]::UTF8.GetBytes([string]$loopLines[0]) | ForEach-Object { $_.ToString('x2') })
-        Write-Output ('OWNER_RESTORE_DIAGNOSTIC field=loop_device_hex value=' + $safeHex)
-        Stop-Restore 'loop_device_shape_invalid'
-    }
+    Assert-Restore ($loopLines[0].Trim() -match '\A/dev/loop[0-9]+\z') 'loop_device_shape_invalid'
     $loop = $loopLines[0].Trim()
     [void](Invoke-Ubuntu @('sh','-eu','-c','mkdir -p "$1"; if ! mountpoint -q "$1"; then mount -t ext4 -o nodev,nosuid "$2" "$1"; fi; test "$(findmnt -n -o SOURCE -T "$1")" = "$2"; test "$(blkid -s LABEL -o value "$2")" = CLASSARCHIVE_OWN; install -d -m 0755 "$1/volumes"','sh',$mountPoint,$loop) 'restore_mount_failed')
     $legacySocketState = @(Invoke-Ubuntu @('sh','-c','test -S "$1" && printf PRESENT || true','sh',$legacyDockerSocket))
     Assert-Restore ($legacySocketState -notcontains 'PRESENT') 'legacy_restore_daemon_active'
-    $legacyProcesses = @(Invoke-Ubuntu @('sh','-eu','-c','for path in /proc/[0-9]*/cmdline; do [ -r "$path" ] || continue; args=$(tr "\0" "\n" < "$path"); case "$args" in (*"/mnt/classarchive-owner-restore-v1/docker-data"*|*"/run/classarchive-owner-restore-v1/docker.sock"*|*"/run/classarchive-owner-restore-v1/exec"*) printf "%s\n" "$path";; esac; done'))
+    $legacyProcesses = @(Invoke-Ubuntu @('sh','-eu','-c','for process in /proc/[0-9]*; do [ -r "$process/comm" ] && [ "$(cat "$process/comm")" = dockerd ] || continue; args=$(tr "\0" "\n" < "$process/cmdline"); case "$args" in (*"/mnt/classarchive-owner-restore-v1/docker-data"*|*"/run/classarchive-owner-restore-v1/docker.sock"*|*"/run/classarchive-owner-restore-v1/exec"*) printf "%s\n" "$process";; esac; done'))
     Assert-Restore ($legacyProcesses.Count -eq 0) 'legacy_restore_daemon_process_active'
     $rootLines = @(Invoke-RestoreDocker @('info','--format','{{.ID}}|{{.DockerRootDir}}'))
     Assert-Restore ($rootLines.Count -eq 1 -and $rootLines[0] -match '\A([A-Za-z0-9_-]{8,128})\|/var/lib/docker\z') 'restore_control_plane_root_output_invalid'
@@ -676,7 +675,7 @@ function Invoke-PrivateImmichFinish {
     try {
         $env:DOCKER_HOST = $dockerHost
         $env:WSLENV = if ([string]::IsNullOrWhiteSpace($oldWslEnv)) { 'DOCKER_HOST/u' } elseif ($oldWslEnv -match '(^|:)DOCKER_HOST(?:/u)?(:|$)') { $oldWslEnv } else { $oldWslEnv + ':DOCKER_HOST/u' }
-        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'private-qa-immich.ps1') finish -Runtime restore 2>&1)
+        $lines = @(& pwsh.exe -NoProfile -File (Join-Path $PSScriptRoot 'private-qa-immich.ps1') finish -Runtime restore 2>&1)
         Assert-Restore ($LASTEXITCODE -eq 0 -and @($lines | Where-Object { [string]$_ -match '\APRIVATE_QA_IMMICH=PASS action=finish ' }).Count -eq 1) 'immich_finish_failed'
     }
     finally { $env:DOCKER_HOST = $oldDockerHost; $env:WSLENV = $oldWslEnv }
