@@ -350,7 +350,6 @@ try {
   });
   if (bindings.length !== photos.length || new Set(bindings.map((item) => item.immich_asset_id)).size !== photos.length) fail('asset_binding_duplicate');
 
-  const assetIds = bindings.map((item) => item.immich_asset_id);
   let faceJobs = 0;
   let recognitionJobs = 0;
   let smartJobs = 0;
@@ -362,7 +361,10 @@ try {
   let smartQueue;
   if (mode === 'INITIAL') {
     const faceStarted = Date.now();
-    await request('refresh_faces', '/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }, accessToken, 60_000);
+    // Library discovery already schedules missing Face jobs. Starting the
+    // queue only when idle avoids enqueuing a second per-asset pass while
+    // retaining a deterministic fallback if upstream did not auto-schedule.
+    await startQueueIfIdle(accessToken, 'faceDetection');
     faceQueue = await waitForQueue(accessToken, 'faceDetection', 1_800_000);
     faceJobs = faceQueue.completed;
     faceMs = Date.now() - faceStarted;

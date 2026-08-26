@@ -35,6 +35,8 @@ foreach ($needle in @(
 )) {
     Assert-Protocol ($runtime.Contains($needle)) ('runtime_contract_missing_' + $assertions)
 }
+Assert-Protocol ($runtime.Contains("await startQueueIfIdle(accessToken, 'faceDetection')") `
+    -and -not $runtime.Contains("'/assets/jobs', 'POST', { assetIds, name: 'refresh-faces' }")) 'face_jobs_must_not_be_double_enqueued'
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'
