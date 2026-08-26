@@ -53,7 +53,7 @@ Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n   
     -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'
 Assert-Protocol ($runner.Contains("if (`$Action -in @('provision', 'resume')) {`r`n            `$script:stage = 'canonical_bind'") `
     -or $runner.Contains("if (`$Action -in @('provision', 'resume')) {`n            `$script:stage = 'canonical_bind'")) 'finalize_must_not_rebind'
-Assert-Protocol ($runner.Contains("`$runtime.index_evidence.queue_idle.smart_search -eq `$true")) 'runtime_queue_evidence_required'
+Assert-Protocol ($runner.Contains("`$runtimeEvidence.index_evidence.queue_idle.smart_search -eq `$true")) 'runtime_queue_evidence_required'
 Assert-Protocol ($runner.Contains("'complete-indexes'")) 'v15_completion_invocation_missing'
 Assert-Protocol ($runner.Contains('Get-Content -LiteralPath $modelManifest -Raw -Encoding UTF8')) 'model_manifest_utf8_decode_required'
 Assert-Protocol ($runner.Contains("`$runtimeCommand = 'exec node ' + `$runtimeScriptContainer + ' --input-file ' + `$runtimeInputContainer + ' 2>&1'")) 'runtime_marker_must_avoid_ps51_native_stderr'
@@ -69,7 +69,8 @@ Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
     -and $runner.Contains("`$runtimeReadStep = 'line_endings'") `
     -and $runner.Contains("`$runtimeReadStep = 'keys'") `
     -and $runner.Contains("`$runtimeReadStep = 'values'") `
-    -and $runner.Contains("`$runtimeReadStep = 'projection'") `
+    -and $runner.Contains("`$runtimeReadStep = 'number_projection'") `
+    -and $runner.Contains("`$runtimeReadStep = 'root_projection'") `
     -and $runner.Contains("'^([A-Z][A-Z0-9_]*)=(.*)$'") `
     -and $runner.Contains("'ACCESS_TOKEN'") `
     -and $runner.Contains("'TIMING_TOTAL'") `
@@ -78,8 +79,17 @@ Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
 Assert-Protocol ($runner.Contains("'runtime-summary.txt'") `
     -and $runner.Contains("'bindings.json'") `
     -and $runner.Contains("'index-evidence.json'") `
-    -and $runner.Contains('[int]$runtime.asset_count -eq [int]$catalog.count') `
-    -and -not $runner.Contains('@($runtime.assets)')) 'large_runtime_assets_must_bypass_ps_json'
+    -and $runner.Contains('[int]$runtimeEvidence.asset_count -eq [int]$catalog.count') `
+    -and -not $runner.Contains('@($runtimeEvidence.assets)')) 'large_runtime_assets_must_bypass_ps_json'
+Assert-Protocol ($runner.Contains('$runtimeEvidence = [ordered]@{') `
+    -and -not [regex]::IsMatch($runner, '(?im)^\s*\$runtime\s*=')) 'runtime_parameter_must_not_be_overwritten'
+$runtimeCollisionProbe = & {
+    param([ValidateSet('qa', 'full')][string]$Runtime = 'full')
+    $runtimeEvidence = [ordered]@{ version = 1 }
+    if ($Runtime -ne 'full' -or $runtimeEvidence.version -ne 1) { return 'FAIL' }
+    return 'PASS'
+}
+Assert-Protocol ($runtimeCollisionProbe -eq 'PASS') 'runtime_parameter_collision_regression'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",

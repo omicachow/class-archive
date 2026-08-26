@@ -502,56 +502,83 @@ try {
             foreach ($key in $numericRuntimeKeys) {
                 if ($runtimeFields[$key] -notmatch '^(?:0|[1-9][0-9]{0,11})$') { Fail 'runtime_output_number_invalid' }
             }
+            foreach ($key in @(
+                'SEARCH_ZH_CLASSROOM', 'SEARCH_ZH_PLAYGROUND', 'SEARCH_ZH_GRADUATION', 'SEARCH_ZH_NIGHT',
+                'SEARCH_EN_CLASSROOM', 'SEARCH_EN_PLAYGROUND', 'SEARCH_EN_GRADUATION', 'SEARCH_EN_NIGHT'
+            )) {
+                if ([long]::Parse($runtimeFields[$key], [Globalization.CultureInfo]::InvariantCulture) -lt 1 `
+                    -or [long]::Parse($runtimeFields[$key], [Globalization.CultureInfo]::InvariantCulture) -gt 50) {
+                    Fail 'runtime_output_search_count_invalid'
+                }
+            }
 
-            $runtimeReadStep = 'projection'
-            $runtime = [pscustomobject][ordered]@{
+            $runtimeReadStep = 'number_projection'
+            $runtimeNumbers = @{}
+            foreach ($key in $numericRuntimeKeys) {
+                $runtimeNumbers[$key] = [long]::Parse($runtimeFields[$key], [Globalization.CultureInfo]::InvariantCulture)
+            }
+            $runtimeReadStep = 'model_projection'
+            $runtimeModels = [ordered]@{
+                face_model_name = $runtimeFields.FACE_MODEL_NAME
+                face_model_revision = $runtimeFields.FACE_MODEL_REVISION
+                search_model_name = $runtimeFields.SEARCH_MODEL_NAME
+                search_model_revision = $runtimeFields.SEARCH_MODEL_REVISION
+            }
+            $runtimeReadStep = 'queue_projection'
+            $runtimeQueueIdle = [ordered]@{
+                face_detection = $runtimeFields.FACE_QUEUE_IDLE -eq '1'
+                facial_recognition = $runtimeFields.RECOGNITION_QUEUE_IDLE -eq '1'
+                smart_search = $runtimeFields.SEARCH_QUEUE_IDLE -eq '1'
+            }
+            $runtimeReadStep = 'search_projection'
+            $runtimeSearchCounts = [ordered]@{
+                zh_classroom = $runtimeNumbers.SEARCH_ZH_CLASSROOM
+                zh_playground = $runtimeNumbers.SEARCH_ZH_PLAYGROUND
+                zh_graduation = $runtimeNumbers.SEARCH_ZH_GRADUATION
+                zh_night = $runtimeNumbers.SEARCH_ZH_NIGHT
+                en_classroom = $runtimeNumbers.SEARCH_EN_CLASSROOM
+                en_playground = $runtimeNumbers.SEARCH_EN_PLAYGROUND
+                en_graduation = $runtimeNumbers.SEARCH_EN_GRADUATION
+                en_night = $runtimeNumbers.SEARCH_EN_NIGHT
+            }
+            $runtimeReadStep = 'timing_projection'
+            $runtimeTimings = [ordered]@{
+                mounted_sha256 = $runtimeNumbers.TIMING_MOUNTED_SHA256
+                library_scan = $runtimeNumbers.TIMING_LIBRARY_SCAN
+                face_detection = $runtimeNumbers.TIMING_FACE_DETECTION
+                face_recognition = $runtimeNumbers.TIMING_FACE_RECOGNITION
+                smart_index = $runtimeNumbers.TIMING_SMART_INDEX
+                smart_queries = $runtimeNumbers.TIMING_SMART_QUERIES
+                total = $runtimeNumbers.TIMING_TOTAL
+            }
+            $runtimeReadStep = 'metrics_projection'
+            $runtimeMetrics = [ordered]@{
+                asset_count = $runtimeNumbers.ASSET_COUNT
+                people_count = $runtimeNumbers.PEOPLE_COUNT
+                face_jobs = $runtimeNumbers.FACE_JOBS
+                recognition_jobs = $runtimeNumbers.RECOGNITION_JOBS
+                smart_jobs = $runtimeNumbers.SMART_JOBS
+                reused_existing_indexes = $runtimeFields.REUSED_EXISTING_INDEXES -eq '1'
+                search_counts = $runtimeSearchCounts
+                timings_ms = $runtimeTimings
+            }
+            $runtimeReadStep = 'root_projection'
+            # PowerShell variable names are case-insensitive. Do not call this
+            # `$runtime`: that would overwrite the validated [string]$Runtime
+            # parameter and fail (or corrupt the selected runtime scope).
+            $runtimeEvidence = [ordered]@{
                 version = 1
                 scope = $runtimeFields.SCOPE
                 catalog_digest = $runtimeFields.CATALOG_DIGEST
                 access_token = $runtimeFields.ACCESS_TOKEN
-                asset_count = [long]$runtimeFields.ASSET_COUNT
-                people_count = [long]$runtimeFields.PEOPLE_COUNT
-                index_evidence = [pscustomobject][ordered]@{
+                asset_count = $runtimeNumbers.ASSET_COUNT
+                people_count = $runtimeNumbers.PEOPLE_COUNT
+                index_evidence = [ordered]@{
                     runtime_mode = $runtimeFields.RUNTIME_MODE
-                    models = [pscustomobject][ordered]@{
-                        face_model_name = $runtimeFields.FACE_MODEL_NAME
-                        face_model_revision = $runtimeFields.FACE_MODEL_REVISION
-                        search_model_name = $runtimeFields.SEARCH_MODEL_NAME
-                        search_model_revision = $runtimeFields.SEARCH_MODEL_REVISION
-                    }
-                    queue_idle = [pscustomobject][ordered]@{
-                        face_detection = $runtimeFields.FACE_QUEUE_IDLE -eq '1'
-                        facial_recognition = $runtimeFields.RECOGNITION_QUEUE_IDLE -eq '1'
-                        smart_search = $runtimeFields.SEARCH_QUEUE_IDLE -eq '1'
-                    }
+                    models = $runtimeModels
+                    queue_idle = $runtimeQueueIdle
                 }
-                metrics = [pscustomobject][ordered]@{
-                    asset_count = [long]$runtimeFields.ASSET_COUNT
-                    people_count = [long]$runtimeFields.PEOPLE_COUNT
-                    face_jobs = [long]$runtimeFields.FACE_JOBS
-                    recognition_jobs = [long]$runtimeFields.RECOGNITION_JOBS
-                    smart_jobs = [long]$runtimeFields.SMART_JOBS
-                    reused_existing_indexes = $runtimeFields.REUSED_EXISTING_INDEXES -eq '1'
-                    search_counts = [pscustomobject][ordered]@{
-                        zh_classroom = [long]$runtimeFields.SEARCH_ZH_CLASSROOM
-                        zh_playground = [long]$runtimeFields.SEARCH_ZH_PLAYGROUND
-                        zh_graduation = [long]$runtimeFields.SEARCH_ZH_GRADUATION
-                        zh_night = [long]$runtimeFields.SEARCH_ZH_NIGHT
-                        en_classroom = [long]$runtimeFields.SEARCH_EN_CLASSROOM
-                        en_playground = [long]$runtimeFields.SEARCH_EN_PLAYGROUND
-                        en_graduation = [long]$runtimeFields.SEARCH_EN_GRADUATION
-                        en_night = [long]$runtimeFields.SEARCH_EN_NIGHT
-                    }
-                    timings_ms = [pscustomobject][ordered]@{
-                        mounted_sha256 = [long]$runtimeFields.TIMING_MOUNTED_SHA256
-                        library_scan = [long]$runtimeFields.TIMING_LIBRARY_SCAN
-                        face_detection = [long]$runtimeFields.TIMING_FACE_DETECTION
-                        face_recognition = [long]$runtimeFields.TIMING_FACE_RECOGNITION
-                        smart_index = [long]$runtimeFields.TIMING_SMART_INDEX
-                        smart_queries = [long]$runtimeFields.TIMING_SMART_QUERIES
-                        total = [long]$runtimeFields.TIMING_TOTAL
-                    }
-                }
+                metrics = $runtimeMetrics
             }
         } catch {
             if ([string]$_.Exception.Message -match '^PRIVATE_QA_IMMICH=FAIL ') { throw }
@@ -564,22 +591,28 @@ try {
             $allowedRuntimeKeys = $null
             $numericRuntimeKeys = $null
             $runtimeFields = $null
+            $runtimeNumbers = $null
+            $runtimeModels = $null
+            $runtimeQueueIdle = $null
+            $runtimeSearchCounts = $null
+            $runtimeTimings = $null
+            $runtimeMetrics = $null
             $match = $null
             $key = $null
             $runtimeReadStep = $null
         }
         $script:stage = 'ml_runtime_output_contract'
-        Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope `
-            -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest `
-            -and [int]$runtime.asset_count -eq [int]$catalog.count `
-            -and [int]$runtime.people_count -ge 1) 'runtime_output_invalid'
-        Assert-Exact ($runtime.index_evidence.runtime_mode -in @('INITIAL', 'RESUME') `
-            -and $runtime.index_evidence.queue_idle.face_detection -eq $true `
-            -and $runtime.index_evidence.queue_idle.facial_recognition -eq $true `
-            -and $runtime.index_evidence.queue_idle.smart_search -eq $true `
-            -and [int]$runtime.metrics.people_count -ge 1) 'runtime_index_evidence_invalid'
+        Assert-Exact ($runtimeEvidence.version -eq 1 -and $runtimeEvidence.scope -eq $runtimeScope `
+            -and [string]$runtimeEvidence.catalog_digest -eq [string]$catalog.catalog_digest `
+            -and [int]$runtimeEvidence.asset_count -eq [int]$catalog.count `
+            -and [int]$runtimeEvidence.people_count -ge 1) 'runtime_output_invalid'
+        Assert-Exact ($runtimeEvidence.index_evidence.runtime_mode -in @('INITIAL', 'RESUME') `
+            -and $runtimeEvidence.index_evidence.queue_idle.face_detection -eq $true `
+            -and $runtimeEvidence.index_evidence.queue_idle.facial_recognition -eq $true `
+            -and $runtimeEvidence.index_evidence.queue_idle.smart_search -eq $true `
+            -and [int]$runtimeEvidence.metrics.people_count -ge 1) 'runtime_index_evidence_invalid'
         $script:stage = 'ml_runtime_access_token'
-        $accessToken = [string]$runtime.access_token
+        $accessToken = [string]$runtimeEvidence.access_token
         Assert-Exact ($accessToken -match '^[A-Za-z0-9._~-]{32,8192}$') 'access_token_invalid'
 
         if ($Action -in @('provision', 'resume')) {
@@ -599,7 +632,7 @@ try {
             [void](Invoke-PiwigoCompose @('up', '-d', '--force-recreate', 'piwigo'))
             Wait-ContainerHealthy ($piwigoProject + '-piwigo-1') 300
             $script:stage = 'index_evidence'
-            $models = $runtime.index_evidence.models
+            $models = $runtimeEvidence.index_evidence.models
             [void](Invoke-PiwigoCompose @('cp', ($privateRelative + '/runtime/immich/' + $run + '/index-evidence.json'), ('piwigo:' + $indexEvidenceContainer)))
             [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $indexEvidenceContainer + ' && chmod 0600 ' + $indexEvidenceContainer)))
             $script:stage = 'index_control_plane_complete'
@@ -659,18 +692,19 @@ try {
             scope = $runtimeScope
             timestamp_utc = [DateTime]::UtcNow.ToString('o')
             catalog_count = [int]$catalog.count
-            people_count = [int]$runtime.metrics.people_count
-            metrics = $runtime.metrics
+            people_count = [int]$runtimeEvidence.metrics.people_count
+            metrics = $runtimeEvidence.metrics
             ai_index_state = $(if ($Runtime -eq 'full') { 'READY' } else { 'EXTERNAL_QA_ONLY' })
-            ai_models = $runtime.index_evidence.models
+            ai_models = $runtimeEvidence.index_evidence.models
             media_mount = 'PIWIGO_ORIGINALS_READ_ONLY'
             media_delivery = 'MEDIAGUARD_ONLY'
         })
-        Write-Output ("PRIVATE_QA_IMMICH=PASS action={0} assets={1} people={2} assertions={3} evidence=RUNTIME_TESTED" -f $Action, [int]$catalog.count, [int]$runtime.metrics.people_count, $script:assertions)
+        Write-Output ("PRIVATE_QA_IMMICH=PASS action={0} assets={1} people={2} assertions={3} evidence=RUNTIME_TESTED" -f $Action, [int]$catalog.count, [int]$runtimeEvidence.metrics.people_count, $script:assertions)
     } finally {
         $technicalPassword = $null
         $accessToken = $null
         $bridgeToken = $null
+        $runtimeEvidence = $null
         try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $runtimeSummaryContainer + ' ' + $runtimeBindingsContainer + ' ' + $runtimeIndexEvidenceContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
         try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $indexEvidenceContainer + ' ' + $enableContainer))) } catch { }
         foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeHost, $passwordResetHost)) {
