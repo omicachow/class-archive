@@ -149,6 +149,7 @@ function Get-WslSwapCapacityGuard([hashtable]$Boundary) {
 
     $settings = @{}
     $configValid = $true
+    $configItem = $null
     $configPath = Join-Path $env:USERPROFILE '.wslconfig'
     if (Test-Path -LiteralPath $configPath) {
         $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
@@ -187,7 +188,9 @@ function Get-WslSwapCapacityGuard([hashtable]$Boundary) {
         if ($null -eq $configuredSwapBytes) { $configValid = $false }
     }
 
-    $swapTargetMatch = $false
+    $swapPathOnTargetDrive = $false
+    $swapFileTrusted = $false
+    $swapPath = $null
     if ($configValid -and $settings.ContainsKey('swapfile')) {
         $rawSwapPath = [string]$settings.swapfile
         if ($rawSwapPath -notmatch '[%$]' -and -not [string]::IsNullOrWhiteSpace($rawSwapPath)) {
@@ -196,12 +199,54 @@ function Get-WslSwapCapacityGuard([hashtable]$Boundary) {
                 $swapRoot = [IO.Path]::GetPathRoot($swapPath)
                 if ($swapRoot -match '\A([A-Za-z]):\\\z') {
                     $swapDrive = $Matches[1].ToUpperInvariant()
-                    $swapTargetMatch = $swapDrive -eq [string]$Boundary.drive -and $swapDrive -ne $systemDrive
+                    $swapPathOnTargetDrive = $swapDrive -eq [string]$Boundary.drive -and $swapDrive -ne $systemDrive
+                    if ($swapPathOnTargetDrive -and (Test-Path -LiteralPath $swapPath -PathType Leaf)) {
+                        $swapItem = Get-Item -LiteralPath $swapPath -Force -ErrorAction Stop
+                        $swapFileTrusted = -not ($swapItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $swapItem.Length -gt 0
+                    }
                 }
             }
-            catch { $swapTargetMatch = $false }
+            catch {
+                $swapPathOnTargetDrive = $false
+                $swapFileTrusted = $false
+            }
         }
     }
+
+    # .wslconfig is loaded only when the WSL2 VM starts. Prove this exact file
+    # predates the current kernel boot and that the active swap size matches the
+    # explicit setting; otherwise text on disk is not evidence of active state.
+    $activeSwapCount = [uint64]0
+    $activeSwapBytes = [uint64]0
+    $configAppliedToVm = $false
+    if ($configValid -and $null -ne $configItem -and $null -ne $configuredSwapBytes -and
+        [uint64]$configuredSwapBytes -gt 0 -and $swapPathOnTargetDrive -and $swapFileTrusted) {
+        $bootLines = @(& $wsl -d Ubuntu --exec awk '/^btime / {print $2}' /proc/stat 2>$null)
+        $bootCode = $LASTEXITCODE
+        $swapLines = @(& $wsl -d Ubuntu --exec awk 'NR > 1 { count += 1; kib += $3 } END { print count + 0; print kib + 0 }' /proc/swaps 2>$null)
+        $swapCode = $LASTEXITCODE
+        $bootConfirm = @(& $wsl -d Ubuntu --exec awk '/^btime / {print $2}' /proc/stat 2>$null)
+        $bootConfirmCode = $LASTEXITCODE
+        if ($bootCode -eq 0 -and $swapCode -eq 0 -and $bootConfirmCode -eq 0 -and
+            $bootLines.Count -eq 1 -and $bootConfirm.Count -eq 1 -and $swapLines.Count -eq 2 -and
+            [string]$bootLines[0] -match '\A[0-9]{1,20}\z' -and [string]$bootConfirm[0] -eq [string]$bootLines[0] -and
+            [string]$swapLines[0] -match '\A[0-9]{1,20}\z' -and [string]$swapLines[1] -match '\A[0-9]{1,20}\z') {
+            $activeSwapCount = [uint64]$swapLines[0]
+            $activeSwapKiB = [uint64]$swapLines[1]
+            if ($activeSwapKiB -le ([uint64]::MaxValue / 1024)) {
+                $activeSwapBytes = [uint64]($activeSwapKiB * 1024)
+                $bootUtc = [DateTimeOffset]::FromUnixTimeSeconds([int64]$bootLines[0]).UtcDateTime
+                $configPredatesVm = $configItem.LastWriteTimeUtc -le $bootUtc
+                $sizeDelta = if ($activeSwapBytes -ge [uint64]$configuredSwapBytes) {
+                    $activeSwapBytes - [uint64]$configuredSwapBytes
+                }
+                else { [uint64]$configuredSwapBytes - $activeSwapBytes }
+                $configAppliedToVm = $configPredatesVm -and $activeSwapCount -eq 1 -and $sizeDelta -le [uint64](16MB)
+            }
+        }
+    }
+
+    $swapTargetMatch = $swapPathOnTargetDrive -and $swapFileTrusted -and $configAppliedToVm
 
     $systemRequired = [uint64]0
     $placement = 'TARGET_NON_SYSTEM_DRIVE'
@@ -229,6 +274,9 @@ function Get-WslSwapCapacityGuard([hashtable]$Boundary) {
     return @{
         WSL_SWAP_PLACEMENT = $placement
         WSL_SWAP_TARGET_DRIVE_MATCH = [uint64]$(if ($swapTargetMatch) { 1 } else { 0 })
+        WSL_SWAP_ACTIVE = [uint64]$(if ($activeSwapCount -gt 0) { 1 } else { 0 })
+        WSL_SWAP_ACTIVE_BYTES = $activeSwapBytes
+        WSL_CONFIG_APPLIED_TO_VM = [uint64]$(if ($configAppliedToVm) { 1 } else { 0 })
         SYSTEM_DRIVE_FREE_BYTES = [uint64]$systemDisk.FreeSpace
         SYSTEM_DRIVE_REQUIRED_FREE_BYTES = $systemRequired
         SYSTEM_DRIVE_CAPACITY_GUARD = 'PASS'
@@ -375,7 +423,8 @@ function Get-Preflight([hashtable]$Boundary) {
     $values['REQUIRED_FREE_BYTES'] = $required
     $hostGuard = Get-WslSwapCapacityGuard $Boundary
     foreach ($name in @(
-        'WSL_SWAP_PLACEMENT', 'WSL_SWAP_TARGET_DRIVE_MATCH', 'SYSTEM_DRIVE_FREE_BYTES',
+        'WSL_SWAP_PLACEMENT', 'WSL_SWAP_TARGET_DRIVE_MATCH', 'WSL_SWAP_ACTIVE', 'WSL_SWAP_ACTIVE_BYTES',
+        'WSL_CONFIG_APPLIED_TO_VM', 'SYSTEM_DRIVE_FREE_BYTES',
         'SYSTEM_DRIVE_REQUIRED_FREE_BYTES', 'SYSTEM_DRIVE_CAPACITY_GUARD'
     )) { $values[$name] = $hostGuard[$name] }
     $values['ARCHIVE_HELPER_MEMORY_BYTES'] = [uint64](256MB)
@@ -641,6 +690,9 @@ try {
             ' SAFE_MARGIN_BYTES=' + $preflight.SAFE_MARGIN_BYTES +
             ' WSL_SWAP_PLACEMENT=' + $preflight.WSL_SWAP_PLACEMENT +
             ' WSL_SWAP_TARGET_DRIVE_MATCH=' + $preflight.WSL_SWAP_TARGET_DRIVE_MATCH +
+            ' WSL_SWAP_ACTIVE=' + $preflight.WSL_SWAP_ACTIVE +
+            ' WSL_SWAP_ACTIVE_BYTES=' + $preflight.WSL_SWAP_ACTIVE_BYTES +
+            ' WSL_CONFIG_APPLIED_TO_VM=' + $preflight.WSL_CONFIG_APPLIED_TO_VM +
             ' SYSTEM_DRIVE_FREE_BYTES=' + $preflight.SYSTEM_DRIVE_FREE_BYTES +
             ' SYSTEM_DRIVE_REQUIRED_FREE_BYTES=' + $preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES +
             ' SYSTEM_DRIVE_CAPACITY_GUARD=' + $preflight.SYSTEM_DRIVE_CAPACITY_GUARD +
@@ -761,6 +813,9 @@ try {
             host_capacity_guard = [ordered]@{
                 wsl_swap_placement = [string]$preflight.WSL_SWAP_PLACEMENT
                 wsl_swap_target_drive_match = [bool]([uint64]$preflight.WSL_SWAP_TARGET_DRIVE_MATCH -eq 1)
+                wsl_swap_active = [bool]([uint64]$preflight.WSL_SWAP_ACTIVE -eq 1)
+                wsl_swap_active_bytes = [uint64]$preflight.WSL_SWAP_ACTIVE_BYTES
+                wsl_config_applied_to_vm = [bool]([uint64]$preflight.WSL_CONFIG_APPLIED_TO_VM -eq 1)
                 system_drive_free_bytes = [uint64]$preflight.SYSTEM_DRIVE_FREE_BYTES
                 system_drive_required_free_bytes = [uint64]$preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES
                 system_drive_capacity_guard = [string]$preflight.SYSTEM_DRIVE_CAPACITY_GUARD

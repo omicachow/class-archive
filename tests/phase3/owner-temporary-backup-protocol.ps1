@@ -69,12 +69,25 @@ foreach ($needle in @(
     "Stop-OwnerBackup 'system_drive_wsl_swap_safety_margin_insufficient'",
     "'WSL_SWAP_PLACEMENT'",
     "'WSL_SWAP_TARGET_DRIVE_MATCH'",
+    "'WSL_SWAP_ACTIVE'",
+    "'WSL_SWAP_ACTIVE_BYTES'",
+    "'WSL_CONFIG_APPLIED_TO_VM'",
     "'SYSTEM_DRIVE_FREE_BYTES'",
     "'SYSTEM_DRIVE_REQUIRED_FREE_BYTES'",
     "'SYSTEM_DRIVE_CAPACITY_GUARD'",
     "'ARCHIVE_HELPER_MEMORY_BYTES'",
     'private_host_path_recorded = $false'
 )) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_wsl_capacity_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+
+foreach ($needle in @(
+    "'/^btime / {print `$2}'",
+    '/proc/stat',
+    '/proc/swaps',
+    '$configItem.LastWriteTimeUtc -le $bootUtc',
+    '$activeSwapCount -eq 1',
+    '$sizeDelta -le [uint64](16MB)',
+    '$swapFileTrusted -and $configAppliedToVm'
+)) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_active_wsl_evidence_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 Assert-True (-not $runner.Contains('<private-source-root>')) 'owner_temp_backup_private_source_hardcoded'
 Assert-True (-not ($runner -match '(?i)Write-(?:Output|Host).*(?:Passphrase|Pseudonym|Pepper|DB_PASSWORD|TOKEN)')) 'owner_temp_backup_secret_output_detected'
