@@ -124,18 +124,22 @@ case "$action" in
   verify)
     decrypt "$bundle/databases/mariadb.sql.gz.gpg" | gzip -t || fail mariadb_dump_invalid
     assert_container "$postgres_container" "$immich_project" database
-    # First consume the complete encrypted stream so GPG verifies its MDC.
-    # pg_restore --list may intentionally stop before GPG reaches EOF, which
-    # otherwise turns a valid large dump into a pipefail/SIGPIPE false alarm.
-    decrypt "$bundle/databases/immich-postgres.dump.gpg" >/dev/null || fail postgres_gpg_integrity_invalid
+    # Materialize the small logical dump only inside the isolated PostgreSQL
+    # container. This forces GPG to authenticate the complete stream and gives
+    # pg_restore a seekable file; the temporary plaintext is always removed.
     set +e
     decrypt "$bundle/databases/immich-postgres.dump.gpg" | \
-      "${docker_host[@]}" exec -i --user postgres "$postgres_container" sh -eu -c 'exec pg_restore --list' \
+      "${docker_host[@]}" exec -i --user postgres "$postgres_container" sh -eu -c '
+        dump=$(mktemp /tmp/class-archive-owner-verify.XXXXXXXX)
+        trap '\''rm -f -- "$dump"'\'' EXIT HUP INT TERM
+        cat > "$dump"
+        pg_restore --list "$dump"
+      ' \
       >/dev/null 2>&1
     postgres_list_status=("${PIPESTATUS[@]}")
     set -e
+    [ "${postgres_list_status[0]:-1}" = 0 ] || fail postgres_gpg_integrity_invalid
     [ "${postgres_list_status[1]:-1}" = 0 ] || fail postgres_dump_invalid
-    case "${postgres_list_status[0]:-1}" in 0|141) ;; *) fail postgres_dump_invalid ;; esac
     for archive in \
       "$bundle/business-state/piwigo-data.tar.gpg" \
       "$bundle/business-state/piwigo-scripts.tar.gpg" \
@@ -155,10 +159,18 @@ case "$action" in
     ;;
   restore-immich-postgres)
     assert_container "$postgres_container" "$immich_project" database
+    set +e
     decrypt "$bundle/databases/immich-postgres.dump.gpg" | \
       "${docker_host[@]}" exec -i --user postgres "$postgres_container" sh -eu -c \
-      'exec pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
-      >/dev/null 2>&1 || fail postgres_restore_failed
+      'dump=$(mktemp /tmp/class-archive-owner-restore.XXXXXXXX)
+       trap '\''rm -f -- "$dump"'\'' EXIT HUP INT TERM
+       cat > "$dump"
+       pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" "$dump"' \
+      >/dev/null 2>&1
+    postgres_restore_status=("${PIPESTATUS[@]}")
+    set -e
+    [ "${postgres_restore_status[0]:-1}" = 0 ] || fail postgres_gpg_integrity_invalid
+    [ "${postgres_restore_status[1]:-1}" = 0 ] || fail postgres_restore_failed
     ;;
   restore-piwigo-data) restore_tar "$bundle/business-state/piwigo-data.tar.gpg" "$piwigo_data" "$piwigo_project" piwigo_data ;;
   restore-piwigo-scripts) restore_tar "$bundle/business-state/piwigo-scripts.tar.gpg" "$piwigo_scripts" "$piwigo_project" piwigo_scripts ;;

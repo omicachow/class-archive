@@ -172,7 +172,9 @@ foreach ($needle in @(
     '--pinentry-mode loopback', '--passphrase-file "$passphrase_file"', '--decrypt "$1"',
     'tar -tf -', '/(^|\/)\.\.($|\/)/', '--numeric-owner --same-owner --same-permissions --acls --xattrs',
     'restore_volume_not_empty', 'mariadb_not_empty', 'pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges',
-    'postgres_gpg_integrity_invalid', 'postgres_list_status=("${PIPESTATUS[@]}")', '0|141',
+    'postgres_gpg_integrity_invalid', 'postgres_list_status=("${PIPESTATUS[@]}")',
+    'class-archive-owner-verify.XXXXXXXX', 'cat > "$dump"', 'pg_restore --list "$dump"',
+    'postgres_restore_status=("${PIPESTATUS[@]}")', 'class-archive-owner-restore.XXXXXXXX',
     'local/config/database.inc.php', 'chmod 0660', 'OWNER_RESTORE_STREAM=PASS action=$action'
 )) { Assert-True ($helper.Contains($needle)) ('restore_helper_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 Assert-True (-not ($helper -match '(?i)(?:printf|echo).*(?:PASSWORD|PASSPHRASE|TOKEN|PEPPER|PSEUDONYM)=')) 'restore_helper_secret_output_detected'
