@@ -364,7 +364,7 @@ function Initialize-RestoreEnvironments([hashtable]$Secrets) {
 function Assert-HostCapabilities {
     $script:stage = 'host_capabilities'
     Assert-Restore (Test-Path -LiteralPath $wsl -PathType Leaf) 'wsl_unavailable'
-    $values = Invoke-Ubuntu @('sh','-eu','-c','test "$(id -u)" = 0; command -v dockerd; command -v losetup; command -v mkfs.ext4; command -v mount; command -v findmnt; command -v gpg; command -v tar; docker info --format "{{.DockerRootDir}}"')
+    $values = Invoke-Ubuntu @('sh','-eu','-c','test "$(id -u)" = 0; command -v dockerd; command -v losetup; command -v mkfs.ext4; command -v blkid; command -v mount; command -v findmnt; command -v gpg; command -v tar; docker info --format "{{.DockerRootDir}}"')
     Assert-Restore ($values[-1].Trim() -eq '/var/lib/docker') 'primary_docker_root_changed'
     $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='M:'" -ErrorAction Stop
     Assert-Restore ($null -ne $disk -and [string]::Equals([string]$disk.FileSystem, 'exFAT', [StringComparison]::OrdinalIgnoreCase)) 'm_filesystem_invalid'
@@ -404,13 +404,26 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
         $bytes = [uint64]$RuntimeImageSizeGiB * [uint64]1GB
         Assert-Restore ([uint64]$disk.FreeSpace -gt ($bytes + [uint64]10GB)) 'restore_image_space_insufficient'
         [void](Invoke-Ubuntu @('sh','-eu','-c','if ! fallocate -l "$1" "$2"; then truncate -s "$1" "$2"; fi; test "$(stat -c %s "$2")" = "$3"','sh',($RuntimeImageSizeGiB.ToString() + 'G'),$imageWsl,([string]([uint64]$RuntimeImageSizeGiB * [uint64]1GB))) 'restore_image_allocate_failed')
-        # `wsl.exe --exec` does not consistently inherit /usr/sbin in PATH even
-        # though an interactive shell can resolve mkfs.ext4. Resolve it inside
-        # the already-validated shell boundary before formatting this exact,
-        # newly-created restore image.
-        [void](Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v mkfs.ext4); test -n "$tool"; exec "$tool" -F -L CLASSARCHIVE_OWNER_RESTORE_V1 "$1"','sh',$imageWsl) 'restore_image_format_failed')
     }
     Assert-PlainFile $runtimeImage 'restore_image_untrusted'
+    $imageType = @(Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v blkid); test -n "$tool"; "$tool" -p -s TYPE -o value "$1" 2>/dev/null || true','sh',$imageWsl) 'restore_image_probe_failed')
+    Assert-Restore ($imageType.Count -le 1) 'restore_image_type_ambiguous'
+    if ($imageType.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$imageType[0])) {
+        # A failed first-time mkfs may leave the exact preallocated image behind.
+        # Retrying is permitted only through the explicit create action, with
+        # confirmation and the exact requested byte size. Any recognized
+        # filesystem is handled below and is never overwritten.
+        Assert-Restore ($AllowCreate -and $ConfirmCreateRestoreStorage.IsPresent) 'restore_unformatted_image_requires_confirmation'
+        $expectedBytes = [uint64]$RuntimeImageSizeGiB * [uint64]1GB
+        Assert-Restore ([uint64](Get-Item -LiteralPath $runtimeImage -Force).Length -eq $expectedBytes) 'restore_unformatted_image_size_invalid'
+        # `wsl.exe --exec` does not consistently inherit /usr/sbin in PATH even
+        # though an interactive shell can resolve mkfs.ext4. Resolve it inside
+        # the already-validated shell boundary before formatting this exact file.
+        [void](Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v mkfs.ext4); test -n "$tool"; exec "$tool" -F -L CLASSARCHIVE_OWNER_RESTORE_V1 "$1"','sh',$imageWsl) 'restore_image_format_failed')
+    }
+    else {
+        Assert-Restore ([string]$imageType[0] -eq 'ext4') 'restore_image_filesystem_invalid'
+    }
     $loopLines = Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed'
     Assert-Restore ($loopLines.Count -eq 1 -and $loopLines[0] -match '\A/dev/loop[0-9]+\z') 'loop_device_invalid'
     $loop = $loopLines[0]
