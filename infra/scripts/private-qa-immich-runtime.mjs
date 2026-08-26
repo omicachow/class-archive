@@ -165,15 +165,24 @@ async function disableOutOfScopeOcr(token) {
   const verified = await request('system_config_verify_ocr', '/system-config', 'GET', undefined, token);
   if (verified?.machineLearning?.ocr?.enabled !== false) fail('system_config_ocr_not_disabled');
   // OCR is outside this phase and its model is deliberately absent from the
-  // verified read-only cache. Pause and empty only that queue so Immich never
-  // attempts a cache-miss download; Face/Search queues remain untouched.
-  await request('queue_ocr_pause', '/jobs/ocr', 'PUT', { command: 'pause' }, token);
-  await request('queue_ocr_empty', '/jobs/ocr', 'PUT', { command: 'empty' }, token);
-  await request('queue_ocr_clear_failed', '/jobs/ocr', 'PUT', { command: 'clear-failed' }, token);
-  const ocrQueue = await request('queue_ocr_verify', '/queues/ocr', 'GET', undefined, token);
-  const stats = ocrQueue?.statistics;
-  if (ocrQueue?.isPaused !== true || !stats || stats.active !== 0 || stats.waiting !== 0
-    || stats.delayed !== 0 || stats.failed !== 0) fail('queue_ocr_not_quiescent');
+  // verified read-only cache. Keep the queue unpaused after disabling OCR so
+  // any already-created jobs terminate as SKIPPED instead of accumulating in
+  // BullMQ's paused list. No OCR request can reach ML with this config false.
+  await request('queue_ocr_resume', '/jobs/ocr', 'PUT', { command: 'resume' }, token);
+  await drainOutOfScopeOcr(token);
+}
+
+async function drainOutOfScopeOcr(token) {
+  const deadline = Date.now() + 300_000;
+  while (Date.now() < deadline) {
+    await request('queue_ocr_clear_failed', '/jobs/ocr', 'PUT', { command: 'clear-failed' }, token);
+    const ocrQueue = await request('queue_ocr_verify', '/queues/ocr', 'GET', undefined, token);
+    const stats = ocrQueue?.statistics;
+    if (ocrQueue?.isPaused !== false || !stats) fail('queue_ocr_shape_invalid');
+    if (stats.active === 0 && stats.waiting === 0 && stats.delayed === 0 && stats.paused === 0 && stats.failed === 0) return;
+    await delay(1_000);
+  }
+  fail('queue_ocr_not_quiescent');
 }
 
 let input;
@@ -400,6 +409,7 @@ try {
   }
   const searchMs = Date.now() - searchStarted;
   if (Object.values(searchCounts).some((count) => !Number.isSafeInteger(count) || count < 1)) fail('search_runtime_empty');
+  await drainOutOfScopeOcr(accessToken);
 
   const output = {
     version: 1,

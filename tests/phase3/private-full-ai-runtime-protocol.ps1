@@ -26,9 +26,9 @@ $libraryCreate = $runtime.IndexOf("request('library_create'", [StringComparison]
 Assert-Protocol ($disableOcr -gt 0 -and $libraryCreate -gt $disableOcr) 'ocr_must_be_disabled_before_scan'
 foreach ($needle in @(
     "config.machineLearning.ocr.enabled = false",
-    "'/jobs/ocr', 'PUT', { command: 'pause' }",
-    "'/jobs/ocr', 'PUT', { command: 'empty' }",
+    "'/jobs/ocr', 'PUT', { command: 'resume' }",
     "'/jobs/ocr', 'PUT', { command: 'clear-failed' }",
+    'stats.paused === 0',
     "faceQueue = await waitForQueue(accessToken, 'faceDetection', 300_000)",
     "recognitionQueue = await waitForQueue(accessToken, 'facialRecognition', 300_000)",
     "smartQueue = await waitForQueue(accessToken, 'smartSearch', 300_000)"
