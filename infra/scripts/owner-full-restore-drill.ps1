@@ -419,8 +419,9 @@ function Assert-RestoreNetworkRangesFree {
 function Assert-HostCapabilities {
     $script:stage = 'host_capabilities'
     Assert-Restore (Test-Path -LiteralPath $wsl -PathType Leaf) 'wsl_unavailable'
-    $values = Invoke-Ubuntu @('sh','-eu','-c','test "$(id -u)" = 0; command -v losetup; command -v mkfs.ext4; command -v blkid; command -v mount; command -v findmnt; command -v gpg; command -v tar; docker --host unix:///var/run/docker.sock info --format "{{.DockerRootDir}}"')
-    Assert-Restore ($values[-1].Trim() -eq '/var/lib/docker') 'primary_docker_root_changed'
+    [void](Invoke-Ubuntu @('sh','-eu','-c','test "$(id -u)" = 0; for tool in losetup mkfs.ext4 blkid mount findmnt gpg tar; do command -v "$tool" >/dev/null; done') 'host_tooling_unavailable')
+    $primaryRoot = @(Invoke-RestoreDocker @('info','--format','{{.DockerRootDir}}') 'primary_docker_unavailable')
+    Assert-Restore ($primaryRoot.Count -eq 1 -and $primaryRoot[0].Trim() -eq '/var/lib/docker') 'primary_docker_root_changed'
     $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='M:'" -ErrorAction Stop
     Assert-Restore ($null -ne $disk -and [string]::Equals([string]$disk.FileSystem, 'exFAT', [StringComparison]::OrdinalIgnoreCase)) 'm_filesystem_invalid'
 }
