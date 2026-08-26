@@ -252,7 +252,8 @@ try {
         ($secondPage['total'] ?? null) === 3
         && count((array) ($secondPage['items'] ?? [])) === 1
         && ($secondPage['hasMore'] ?? null) === false
-        && ($secondPage['nextCursor'] ?? false) === null,
+        && array_key_exists('nextCursor', $secondPage)
+        && $secondPage['nextCursor'] === null,
         'comment_second_page_invalid',
     );
     $pagedIds = array_map(static fn (array $item): string => (string) ($item['id'] ?? ''), [
@@ -333,7 +334,9 @@ try {
     photoCommentRuntimeAssert(($projection['total'] ?? null) === 3, 'comment_projection_count_invalid');
     photoCommentRuntimeAssert(photoCommentRuntimeNoPrivateKeys($projection), 'comment_projection_private_key_leak');
     $encoded = json_encode($projection, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
-    foreach (['fixture-classmate', 'fixture-teacher', 'fixture-family', 'fixture-anonymous', $marker] as $forbidden) {
+    // Public comment text is expected to contain the synthetic body marker;
+    // only backing account/user identifiers are forbidden from the DTO.
+    foreach (['fixture-classmate', 'fixture-teacher', 'fixture-family', 'fixture-anonymous'] as $forbidden) {
         photoCommentRuntimeAssert(!str_contains($encoded, $forbidden), 'comment_projection_private_value_leak');
     }
     $anonymousItem = null;
