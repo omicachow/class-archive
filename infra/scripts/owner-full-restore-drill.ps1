@@ -396,7 +396,7 @@ function Get-Ipv4CidrRange([string]$Cidr) {
     $value = ([uint64]$bytes[0] -shl 24) -bor ([uint64]$bytes[1] -shl 16) -bor ([uint64]$bytes[2] -shl 8) -bor [uint64]$bytes[3]
     $size = [uint64]1 -shl (32 - $prefix)
     $start = [uint64]([Math]::Floor($value / $size) * $size)
-    return @($start, $start + $size - 1)
+    return @($start, ($start + $size - 1))
 }
 
 function Assert-RestoreNetworkRangesFree {
