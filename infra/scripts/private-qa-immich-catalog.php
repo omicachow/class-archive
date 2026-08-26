@@ -20,6 +20,7 @@ const PRIVATE_QA_CATALOG_OUTPUT = '/tmp/class-archive-private-qa-immich-catalog.
 const PRIVATE_QA_BIND_INPUT = '/tmp/class-archive-private-qa-immich-bindings.json';
 const PRIVATE_QA_INDEX_INPUT = '/tmp/class-archive-private-qa-immich-index-evidence.json';
 const PRIVATE_QA_ENABLE_INPUT = '/tmp/class-archive-private-qa-immich-enable.json';
+const PRIVATE_QA_BRIDGE_TOKEN_OUTPUT = '/tmp/class-archive-private-qa-immich-bridge-token.json';
 const PRIVATE_QA_BRIDGE_SECRET = '_data/.class-archive-immich-bridge.json';
 const PRIVATE_QA_BRIDGE_FLAG = 'class_identity_immich_bridge_enabled';
 
@@ -44,7 +45,7 @@ if (!$privateQaRuntime && !$privateFullRuntime) {
 define('PRIVATE_IMMICH_SCOPE', $runtimeScope);
 define('PRIVATE_IMMICH_MAX_ASSETS', $privateFullRuntime ? 5000 : 500);
 $action = (string) ($_SERVER['argv'][1] ?? '');
-if (!in_array($action, ['export', 'export-bound', 'bind', 'complete-indexes', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
+if (!in_array($action, ['export', 'export-bound', 'bind', 'complete-indexes', 'export-bridge-token', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
     privateQaImmichFail('action_invalid');
 }
 
@@ -224,8 +225,10 @@ function privateQaImmichWriteExclusive(string $path, array $value): void
     if ($handle === false) {
         throw new RuntimeException('output_create_failed');
     }
+    $length = 0;
     try {
         $raw = json_encode($value, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        $length = strlen($raw);
         if (!chmod($path, 0600) || fwrite($handle, $raw) !== strlen($raw) || !fflush($handle)) {
             throw new RuntimeException('output_write_failed');
         }
@@ -233,6 +236,114 @@ function privateQaImmichWriteExclusive(string $path, array $value): void
         fclose($handle);
         $raw = null;
     }
+    clearstatcache(true, $path);
+    $stat = @lstat($path);
+    if (!is_array($stat) || is_link($path) || (((int) ($stat['mode'] ?? 0) & 0170000) !== 0100000)
+        || (((int) ($stat['mode'] ?? 0) & 0777) !== 0600) || (int) ($stat['nlink'] ?? 0) !== 1
+        || (function_exists('posix_geteuid') && (int) ($stat['uid'] ?? -1) !== posix_geteuid())
+        || (int) ($stat['size'] ?? -1) !== $length) {
+        throw new RuntimeException('output_write_failed');
+    }
+}
+
+function privateQaImmichServiceId(string $name): int
+{
+    $raw = getenv($name);
+    if (!is_string($raw) || preg_match('/\A(?:0|[1-9][0-9]{0,9})\z/D', $raw) !== 1) {
+        throw new RuntimeException('bridge_service_identity_invalid');
+    }
+    $value = (int) $raw;
+    if ((string) $value !== $raw || $value <= 0 || $value > 2147483647) {
+        throw new RuntimeException('bridge_service_identity_invalid');
+    }
+    return $value;
+}
+
+/**
+ * Validate the durable Piwigo-side bridge credential before replacing it.
+ *
+ * Container initialization deliberately normalizes durable private files to
+ * 0660 under the configured service uid/gid.  Freshly created files may still
+ * be 0600 and owned by the current nginx process.  No other type, mode, owner,
+ * group, hard-link count or JSON shape is trusted.
+ *
+ * @return array{token:string,mode:int,dev:int,ino:int,uid:int,gid:int,nlink:int}
+ */
+function privateQaImmichReadDurableBridgeSecret(string $path): array
+{
+    clearstatcache(true, $path);
+    $stat = @lstat($path);
+    $mode = is_array($stat) ? ((int) ($stat['mode'] ?? 0) & 0777) : 0;
+    $uid = privateQaImmichServiceId('PIWIGO_UID');
+    $gid = privateQaImmichServiceId('PIWIGO_GID');
+    $effectiveUid = function_exists('posix_geteuid') ? posix_geteuid() : $uid;
+    $ownerOnly = $mode === 0600 && (int) ($stat['uid'] ?? -1) === $effectiveUid;
+    $serviceShared = $mode === 0660
+        && (int) ($stat['uid'] ?? -1) === $uid
+        && (int) ($stat['gid'] ?? -1) === $gid;
+    if ($serviceShared) {
+        $parent = dirname($path);
+        clearstatcache(true, $parent);
+        $parentStat = @lstat($parent);
+        $serviceShared = is_array($parentStat)
+            && !is_link($parent)
+            && (((int) ($parentStat['mode'] ?? 0) & 0170000) === 0040000)
+            && (((int) ($parentStat['mode'] ?? 0) & 0007) === 0)
+            && (int) ($parentStat['uid'] ?? -1) === $uid
+            && (int) ($parentStat['gid'] ?? -1) === $gid;
+    }
+    if (!is_array($stat) || is_link($path)
+        || (((int) ($stat['mode'] ?? 0) & 0170000) !== 0100000)
+        || !($ownerOnly || $serviceShared)
+        || (int) ($stat['nlink'] ?? 0) !== 1
+        || (int) ($stat['size'] ?? 0) < 48 || (int) ($stat['size'] ?? 0) > 512) {
+        throw new RuntimeException('bridge_secret_existing_invalid');
+    }
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        throw new RuntimeException('bridge_secret_existing_invalid');
+    }
+    $raw = null;
+    try {
+        $opened = fstat($handle);
+        foreach (['dev', 'ino', 'uid', 'gid', 'nlink', 'size'] as $key) {
+            if (!is_array($opened) || (int) ($opened[$key] ?? -1) !== (int) ($stat[$key] ?? -2)) {
+                throw new RuntimeException('bridge_secret_existing_invalid');
+            }
+        }
+        if (((int) ($opened['mode'] ?? 0) & 0777) !== $mode) {
+            throw new RuntimeException('bridge_secret_existing_invalid');
+        }
+        $raw = stream_get_contents($handle, 513);
+        $after = fstat($handle);
+        foreach (['dev', 'ino', 'uid', 'gid', 'nlink', 'size'] as $key) {
+            if (!is_array($after) || (int) ($after[$key] ?? -1) !== (int) ($opened[$key] ?? -2)) {
+                throw new RuntimeException('bridge_secret_existing_invalid');
+            }
+        }
+        $decoded = is_string($raw) && strlen($raw) === (int) $stat['size']
+            ? json_decode($raw, true, 8, JSON_THROW_ON_ERROR)
+            : null;
+    } catch (Throwable) {
+        $decoded = null;
+    } finally {
+        fclose($handle);
+        $raw = null;
+    }
+    if (!is_array($decoded) || !privateQaImmichExactKeys($decoded, ['version', 'token'])
+        || ($decoded['version'] ?? null) !== 1 || !is_string($decoded['token'] ?? null)
+        || preg_match('/\A[A-Za-z0-9_-]{32,128}\z/D', $decoded['token']) !== 1) {
+        throw new RuntimeException('bridge_secret_existing_invalid');
+    }
+    return [
+        'token' => $decoded['token'],
+        'mode' => $mode,
+        'dev' => (int) ($stat['dev'] ?? -1),
+        'ino' => (int) ($stat['ino'] ?? -1),
+        'uid' => (int) ($stat['uid'] ?? -1),
+        'gid' => (int) ($stat['gid'] ?? -1),
+        'nlink' => (int) ($stat['nlink'] ?? -1),
+    ];
 }
 
 try {
@@ -469,6 +580,30 @@ try {
         exit(0);
     }
 
+    if ($action === 'export-bridge-token') {
+        if (!$privateFullRuntime) {
+            throw new RuntimeException('bridge_export_runtime_forbidden');
+        }
+        $catalog = privateQaImmichCatalog($repository, false);
+        $config = privateQaImmichBridgeConfig($repository);
+        if (!$config['present'] || $config['value'] !== '1') {
+            throw new RuntimeException('bridge_export_disabled');
+        }
+        $secret = privateQaImmichReadDurableBridgeSecret(PRIVATE_QA_BRIDGE_SECRET);
+        privateQaImmichWriteExclusive(
+            PRIVATE_QA_BRIDGE_TOKEN_OUTPUT,
+            [
+                'version' => 1,
+                'scope' => PRIVATE_IMMICH_SCOPE,
+                'catalog_digest' => $catalog['catalog_digest'],
+                'token' => $secret['token'],
+            ],
+        );
+        $secret = null;
+        fwrite(STDOUT, 'PRIVATE_QA_IMMICH_CATALOG=PASS action=export-bridge-token count=' . $catalog['count'] . "\n");
+        exit(0);
+    }
+
     if ($action === 'enable') {
         $catalog = privateQaImmichCatalog($repository, false);
         $input = privateQaImmichReadJson(PRIVATE_QA_ENABLE_INPUT, 2048);
@@ -513,7 +648,9 @@ try {
         'output_write_failed', 'binding_input_invalid', 'binding_asset_duplicate', 'binding_race', 'enable_input_invalid',
         'index_runtime_forbidden', 'index_evidence_invalid', 'index_binding_invalid', 'index_job_invalid',
         'index_completion_invalid',
-        'bridge_secret_not_clean', 'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',
+        'bridge_secret_not_clean', 'bridge_service_identity_invalid', 'bridge_secret_existing_invalid',
+        'bridge_export_disabled', 'bridge_export_runtime_forbidden',
+        'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',
         'bridge_config_invalid', 'bridge_not_pristine',
         'class_archive_immich_bridge_enablement_invalid', 'class_archive_immich_bridge_response_invalid',
         'class_archive_immich_bridge_secret_unavailable', 'class_archive_immich_bridge_transport_unavailable',

@@ -89,6 +89,7 @@ $catalogContainer = '/tmp/class-archive-private-qa-immich-catalog.json'
 $bindingContainer = '/tmp/class-archive-private-qa-immich-bindings.json'
 $indexEvidenceContainer = '/tmp/class-archive-private-qa-immich-index-evidence.json'
 $enableContainer = '/tmp/class-archive-private-qa-immich-enable.json'
+$bridgeTokenContainer = '/tmp/class-archive-private-qa-immich-bridge-token.json'
 $script:assertions = 0
 $script:stage = 'initialization'
 
@@ -313,6 +314,155 @@ function Wait-ContainerHealthy([string]$Name, [int]$Seconds) {
     Fail 'container_health_timeout'
 }
 
+function Enter-MutatingOperationLock {
+    $script:stage = 'mutating_operation_lock'
+    if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+        [void][IO.Directory]::CreateDirectory($runtimeRoot)
+    }
+    $path = Join-Path $runtimeRoot '.mutating-operation.lock'
+    $handle = $null
+    try {
+        if (-not (Test-Path -LiteralPath $path)) {
+            try {
+                $created = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+                $created.Dispose()
+            } catch [IO.IOException] {
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw }
+            }
+        }
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        $expectedParent = [IO.Path]::GetFullPath($runtimeRoot).TrimEnd('\') + '\'
+        Assert-Exact (-not $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) `
+            -and $item.FullName.StartsWith($expectedParent, [StringComparison]::OrdinalIgnoreCase)) 'mutating_operation_lock_path_invalid'
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $path
+        Assert-IgnoredOwnerOnly $path 'mutating_operation_lock'
+        # ACL inspection occurs before the exclusive handle is taken; Windows
+        # can otherwise reject Get-Acl with a sharing violation.
+        $handle = [IO.FileStream]::new($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $lockedItem = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        Assert-Exact (-not $lockedItem.PSIsContainer -and -not ($lockedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) `
+            -and $lockedItem.FullName -ceq $item.FullName) 'mutating_operation_lock_replaced'
+        return $handle
+    } catch {
+        if ($null -ne $handle) { $handle.Dispose() }
+        if ([string]$_.Exception.Message -like 'PRIVATE_QA_IMMICH=FAIL*') { throw }
+        Fail 'mutating_operation_lock_held'
+    }
+}
+
+function Read-StrictBridgeTokenExport([string]$Path) {
+    $script:stage = 'bridge_token_export_read'
+    Assert-IgnoredOwnerOnly $Path 'bridge_token_export'
+    $bytes = $null
+    $raw = $null
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        Assert-Exact ($bytes.Length -ge 128 -and $bytes.Length -le 768) 'bridge_token_export_size_invalid'
+        $raw = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $match = [regex]::Match($raw, '^\{"version":1,"scope":"([A-Z_]{8,32})","catalog_digest":"([0-9a-f]{64})","token":"([A-Za-z0-9_-]{32,128})"\}$')
+        Assert-Exact ($match.Success) 'bridge_token_export_invalid'
+        return [ordered]@{
+            scope = [string]$match.Groups[1].Value
+            catalog_digest = [string]$match.Groups[2].Value
+            token = [string]$match.Groups[3].Value
+        }
+    } finally {
+        $bytes = $null
+        $raw = $null
+        $match = $null
+    }
+}
+
+function Invoke-BridgeStagerScript([string]$Script, [string]$Code) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+    try {
+        [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'exec', '-T', 'immich-gateway-secret-stager', 'sh', '-lc', ('echo ' + $encoded + ' | base64 -d | sh')))
+    } catch {
+        Fail $Code
+    } finally {
+        $encoded = $null
+    }
+}
+
+function Ensure-FinalizeStagerStopped {
+    if ($Action -ne 'finalize-indexes' -or -not $rotationStagerCleanupRequired) { return }
+    $name = $immichProject + '-immich-gateway-secret-stager-1'
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rows = @(& wsl.exe -d Ubuntu --exec docker ps -a --filter ('name=^/' + $name + '$') --format '{{.Names}}|{{.State}}' 2>&1)
+        if ($LASTEXITCODE -ne 0) { Fail 'bridge_stager_cleanup_unproven' }
+        $present = @($rows | Where-Object { [string]$_ -ne '' })
+        if ($present.Count -eq 0) {
+            if ($rotationSecretCopyAttempted) { Fail 'bridge_stager_cleanup_unproven' }
+            return
+        }
+        if ($present.Count -ne 1 -or [string]$present[0] -notmatch ('^' + [regex]::Escape($name) + '\|[a-z]+$')) {
+            Fail 'bridge_stager_cleanup_unproven'
+        }
+        [void](& wsl.exe -d Ubuntu --exec docker stop -t 5 $name 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            [void](& wsl.exe -d Ubuntu --exec docker kill $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { Fail 'bridge_stager_cleanup_failed' }
+        }
+        $secretCleanupFailed = $false
+        if ($rotationSecretCopyAttempted) {
+            [void](& wsl.exe -d Ubuntu --exec docker start $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { $secretCleanupFailed = $true }
+            if (-not $secretCleanupFailed) {
+                [void](& wsl.exe -d Ubuntu --exec docker exec $name sh -lc 'rm -f -- /run/secrets/bridge.next; test ! -e /run/secrets/bridge.next && test ! -L /run/secrets/bridge.next' 2>&1)
+                if ($LASTEXITCODE -ne 0) { $secretCleanupFailed = $true }
+            }
+            [void](& wsl.exe -d Ubuntu --exec docker stop -t 5 $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { $secretCleanupFailed = $true }
+        }
+        $final = @(& wsl.exe -d Ubuntu --exec docker inspect $name --format '{{.State.Status}}' 2>&1)
+        if ($LASTEXITCODE -ne 0) { Fail 'bridge_stager_cleanup_unproven' }
+        $finalState = ([string]::Join("`n", $final)).Trim()
+        if ($secretCleanupFailed -or $finalState -notin @('exited', 'dead', 'created')) { Fail 'bridge_stager_cleanup_failed' }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Ensure-FinalizeGatewayFailClosed {
+    if ($Action -ne 'finalize-indexes' -or $finalizeOperationVerified) { return }
+    $name = $immichProject + '-immich-gateway-1'
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rows = @(& wsl.exe -d Ubuntu --exec docker ps -a --filter ('name=^/' + $name + '$') --format '{{.Names}}|{{.State}}' 2>&1)
+        if ($LASTEXITCODE -ne 0) { Fail 'gateway_fail_closed_unproven' }
+        $present = @($rows | Where-Object { [string]$_ -ne '' })
+        if ($present.Count -eq 0) { return }
+        if ($present.Count -ne 1 -or [string]$present[0] -notmatch ('^' + [regex]::Escape($name) + '\|[a-z]+$')) {
+            Fail 'gateway_fail_closed_unproven'
+        }
+        [void](& wsl.exe -d Ubuntu --exec docker stop -t 5 $name 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            [void](& wsl.exe -d Ubuntu --exec docker kill $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { Fail 'gateway_fail_closed_failed' }
+        }
+        $final = @(& wsl.exe -d Ubuntu --exec docker inspect $name --format '{{.State.Status}}' 2>&1)
+        $finalState = ([string]::Join("`n", $final)).Trim()
+        if ($LASTEXITCODE -ne 0 -or $finalState -notin @('exited', 'dead', 'created')) {
+            Fail 'gateway_fail_closed_unproven'
+        }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Remove-FinalizeBridgeTransients {
+    if ($Action -ne 'finalize-indexes') { return }
+    $script:stage = 'bridge_transient_cleanup'
+    [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $bridgeTokenContainer + '; test ! -e ' + $bridgeTokenContainer + ' && test ! -L ' + $bridgeTokenContainer)))
+    foreach ($path in @($bridgeTokenHost, $bridgeHost)) {
+        Remove-PrivateFile $path
+        Assert-Exact (-not (Test-Path -LiteralPath $path)) 'bridge_transient_cleanup_failed'
+    }
+}
+
 function Assert-RuntimeBoundary {
     $script:stage = 'boundary'
     foreach ($path in @($piwigoEnv, $immichEnv)) { Assert-IgnoredOwnerOnly $path 'env' }
@@ -330,8 +480,15 @@ function Assert-RuntimeBoundary {
     Assert-Exact ($ports -notmatch '(?m)^' + [regex]::Escape($immichProject) + '-[^|]+\|[^\r\n]*(?:0\.0\.0\.0|\[::\]|127\.0\.0\.1):') 'immich_port_published'
 }
 
+$mutatingOperationLock = $null
+$rotationStagerCleanupRequired = $false
+$rotationSecretCopyAttempted = $false
+$finalizeOperationVerified = $false
 try {
     Assert-RuntimeBoundary
+    if ($Action -in @('provision', 'resume', 'finish', 'finalize-indexes')) {
+        $mutatingOperationLock = Enter-MutatingOperationLock
+    }
     if ($Action -eq 'validate') {
         Write-Output "PRIVATE_QA_IMMICH=PASS action=validate assertions=$script:assertions evidence=RUNTIME_BOUNDARY"
         exit 0
@@ -357,7 +514,7 @@ try {
         $runtimeSummaryContainer, $runtimeBindingsContainer, $runtimeIndexEvidenceContainer,
         $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer
     )
-    foreach ($path in @($immichTemporary + @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer))) {
+    foreach ($path in @($immichTemporary + @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer, $bridgeTokenContainer))) {
         $service = if ($path -in $immichTemporary) { 'immich-server' } else { 'piwigo' }
         $probe = if ($service -eq 'immich-server') { Invoke-ImmichCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) } else { Invoke-PiwigoCompose @('exec', '-T', $service, 'sh', '-lc', ('test ! -e ' + $path + '; echo $?')) }
         Assert-Exact ($probe.Trim() -eq '0') 'container_temporary_not_clean'
@@ -372,6 +529,7 @@ try {
     $bindingHost = Join-Path $work 'bindings.json'
     $indexEvidenceHost = Join-Path $work 'index-evidence.json'
     $enableHost = Join-Path $work 'enable.json'
+    $bridgeTokenHost = Join-Path $work 'bridge-token.json'
     $bridgeHost = Join-Path $work 'bridge-secret.json'
     $passwordResetHost = Join-Path $work 'password-reset-input.txt'
     $sanitizedReport = Join-Path $reportRoot $(if ($Action -eq 'finalize-indexes') { [string]$runtimeConfig.index_report_name } else { [string]$runtimeConfig.report_name })
@@ -675,15 +833,110 @@ try {
         [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $enableContainer + ' && chmod 0600 ' + $enableContainer)))
         $enableResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'enable')
         Assert-Exact ($enableResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=enable count=([0-9]+)$') 'bridge_enable_failed'
+        } else {
+            # Resetting the technical user's password revokes the gateway's
+            # prior Immich access token. Preserve the already-bound Piwigo
+            # bridge token and rotate only the gateway's composite secret.
+            # While the two stores differ the gateway remains stopped, so all
+            # reads fail closed instead of accepting either partial state.
+            $script:stage = 'bridge_token_export'
+            $exportResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'export-bridge-token')
+            Assert-Exact ($exportResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=export-bridge-token count=([0-9]+)$') 'bridge_token_export_failed'
+            [void](Invoke-PiwigoCompose @('cp', ('piwigo:' + $bridgeTokenContainer), ($privateRelative + '/runtime/immich/' + $run + '/bridge-token.json')))
+            Set-ClassArchiveOwnerOnlyFileAcl -Path $bridgeTokenHost
+            $bridgeTokenExport = Read-StrictBridgeTokenExport $bridgeTokenHost
+            Assert-Exact ($bridgeTokenExport.scope -ceq $runtimeScope `
+                -and $bridgeTokenExport.catalog_digest -ceq [string]$catalog.catalog_digest) 'bridge_token_export_binding_invalid'
+            $bridgeToken = [string]$bridgeTokenExport.token
+            [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $bridgeTokenContainer))
+            Write-OwnerOnlyJson $bridgeHost ([ordered]@{ version = 1; bridge_token = $bridgeToken; immich_access_token = $accessToken })
+            $bridgeSecretLength = (Get-Item -LiteralPath $bridgeHost -Force).Length
+            $bridgeSecretSha256 = (Get-FileHash -LiteralPath $bridgeHost -Algorithm SHA256).Hash.ToLowerInvariant()
+            Assert-Exact ($bridgeSecretLength -ge 80 -and $bridgeSecretLength -le 8700 -and $bridgeSecretSha256 -match '^[0-9a-f]{64}$') 'bridge_secret_host_invalid'
+
+            $script:stage = 'gateway_stop_for_secret_rotation'
+            [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'stop', '-t', '10', 'immich-gateway'))
+            $gatewayId = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-a', '-q', 'immich-gateway')).Trim()
+            if ($gatewayId -ne '') {
+                Assert-Exact ($gatewayId -match '^[a-f0-9]{12,64}$') 'gateway_identity_invalid'
+                $gatewayStatus = (Invoke-UbuntuDocker @('inspect', $gatewayId, '--format', '{{.State.Status}}')).Trim()
+                Assert-Exact ($gatewayStatus -ne 'running') 'gateway_stop_failed'
+            }
+
+            $script:stage = 'bridge_rotation_stager_start'
+            $rotationStagerCleanupRequired = $true
+            [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'up', '-d', 'immich-gateway-secret-stager'))
+            $stagerId = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-q', 'immich-gateway-secret-stager')).Trim()
+            Assert-Exact ($stagerId -match '^[a-f0-9]{12,64}$') 'bridge_stager_identity_invalid'
+            $stagerState = (Invoke-UbuntuDocker @('inspect', $stagerId, '--format', '{{.State.Status}}|{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}')).Trim()
+            Assert-Exact ($stagerState -eq 'running|none|null' -or $stagerState -eq 'running|none|{}') 'bridge_stager_boundary_invalid'
+
+            $script:stage = 'bridge_rotation_existing_verify'
+            Invoke-BridgeStagerScript @'
+set -eu
+node <<'NODE'
+const fs=require('node:fs');
+const dir='/run/secrets', current=dir+'/bridge.json', next=dir+'/bridge.next';
+const names=fs.readdirSync(dir).sort();
+if(names.some((name)=>name!=='bridge.json'&&name!=='bridge.next')||!names.includes('bridge.json'))process.exit(11);
+if(names.includes('bridge.next')){const stale=fs.lstatSync(next);if(stale.isDirectory())process.exit(12);fs.unlinkSync(next);}
+const st=fs.lstatSync(current);
+if(!st.isFile()||st.isSymbolicLink()||(st.mode&0o777)!==0o600||st.uid!==65532||st.gid!==65532||st.nlink!==1||st.size<80||st.size>8700)process.exit(13);
+NODE
+'@ 'bridge_rotation_existing_invalid'
+
+            $script:stage = 'bridge_rotation_copy'
+            $rotationSecretCopyAttempted = $true
+            [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'cp', ($privateRelative + '/runtime/immich/' + $run + '/bridge-secret.json'), 'immich-gateway-secret-stager:/run/secrets/bridge.next'))
+            $rotationScript = @'
+set -eu
+chmod 0600 /run/secrets/bridge.next
+node <<'NODE'
+const crypto=require('node:crypto'),fs=require('node:fs');
+const current='/run/secrets/bridge.json',next='/run/secrets/bridge.next',expectedLength=__EXPECTED_LENGTH__,expectedHash='__EXPECTED_HASH__';
+const st=fs.lstatSync(next);
+if(!st.isFile()||st.isSymbolicLink()||(st.mode&0o777)!==0o600||st.uid!==0||st.gid!==0||st.nlink!==1||st.size!==expectedLength)process.exit(21);
+const raw=fs.readFileSync(next);
+if(crypto.createHash('sha256').update(raw).digest('hex')!==expectedHash)process.exit(22);
+let value;try{value=JSON.parse(raw.toString('utf8'));}catch{process.exit(23)}
+if(Object.keys(value).sort().join(',')!=='bridge_token,immich_access_token,version'||value.version!==1||typeof value.bridge_token!=='string'||typeof value.immich_access_token!=='string'||!/^[A-Za-z0-9_-]{32,128}$/.test(value.bridge_token)||!/^[A-Za-z0-9._~-]{32,8192}$/.test(value.immich_access_token))process.exit(24);
+fs.chownSync(next,65532,65532);
+const owned=fs.lstatSync(next);for(const key of ['dev','ino','nlink','size'])if(owned[key]!==st[key])process.exit(25);
+if(!owned.isFile()||owned.isSymbolicLink()||(owned.mode&0o777)!==0o600||owned.uid!==65532||owned.gid!==65532||owned.nlink!==1)process.exit(26);
+fs.renameSync(next,current);
+const published=fs.lstatSync(current);for(const key of ['dev','ino','nlink','size'])if(published[key]!==st[key])process.exit(27);
+if(!published.isFile()||published.isSymbolicLink()||(published.mode&0o777)!==0o600||published.uid!==65532||published.gid!==65532||published.nlink!==1)process.exit(28);
+if(fs.readdirSync('/run/secrets').sort().join(',')!=='bridge.json')process.exit(29);
+NODE
+'@
+            $rotationScript = $rotationScript.Replace('__EXPECTED_LENGTH__', [string]$bridgeSecretLength).Replace('__EXPECTED_HASH__', $bridgeSecretSha256)
+            $script:stage = 'bridge_rotation_publish'
+            Invoke-BridgeStagerScript $rotationScript 'bridge_rotation_publish_failed'
+            $rotationSecretCopyAttempted = $false
+
+            $script:stage = 'gateway_restart_after_secret_rotation'
+            [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'up', '-d', '--force-recreate', 'immich-gateway'))
+            Wait-ContainerHealthy ($immichProject + '-immich-gateway-1') 120
+            $gatewayId = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-q', 'immich-gateway')).Trim()
+            Assert-Exact ($gatewayId -match '^[a-f0-9]{12,64}$') 'gateway_not_running'
+            $gatewayState = (Invoke-UbuntuDocker @('inspect', $gatewayId, '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{json .HostConfig.PortBindings}}')).Trim()
+            Assert-Exact ($gatewayState -eq 'running|healthy|null' -or $gatewayState -eq 'running|healthy|{}') 'gateway_exposure_invalid'
+            $script:stage = 'bridge_rotation_stager_stop'
+            [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'stop', '-t', '5', 'immich-gateway-secret-stager'))
+        }
 
         $script:stage = 'bridge_probe'
         $probe = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'probe')
-        Assert-Exact ($probe -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=probe count=([0-9]+) people=([0-9]+)$') 'bridge_probe_failed'
-        } else {
-            $script:stage = 'bridge_probe_existing'
-            $probe = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'probe')
-            Assert-Exact ($probe -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=probe count=([0-9]+) people=([0-9]+)$') 'bridge_probe_failed'
-        }
+        $probeMatch = [regex]::Match($probe, '^PRIVATE_QA_IMMICH_CATALOG=PASS action=probe count=([0-9]+) people=([0-9]+)$')
+        Assert-Exact ($probeMatch.Success -and [int]$probeMatch.Groups[1].Value -eq [int]$catalog.count `
+            -and [int]$probeMatch.Groups[2].Value -eq [int]$runtimeEvidence.metrics.people_count) 'bridge_probe_failed'
+        Remove-FinalizeBridgeTransients
+        if ($runtimeEvidence.Contains('access_token')) { $runtimeEvidence.Remove('access_token') }
+        $nodeInput = $null
+        $technicalPassword = $null
+        $accessToken = $null
+        $bridgeToken = $null
+        $bridgeTokenExport = $null
 
         $script:stage = 'sanitized_report'
         if (Test-Path -LiteralPath $sanitizedReport) { Fail 'sanitized_report_already_exists' }
@@ -699,20 +952,37 @@ try {
             media_mount = 'PIWIGO_ORIGINALS_READ_ONLY'
             media_delivery = 'MEDIAGUARD_ONLY'
         })
+        if ($Action -eq 'finalize-indexes') { $finalizeOperationVerified = $true }
         Write-Output ("PRIVATE_QA_IMMICH=PASS action={0} assets={1} people={2} assertions={3} evidence=RUNTIME_TESTED" -f $Action, [int]$catalog.count, [int]$runtimeEvidence.metrics.people_count, $script:assertions)
     } finally {
+        $stagerCleanupFailure = $null
+        $bridgeCleanupFailure = $null
+        $gatewayCleanupFailure = $null
+        try { Ensure-FinalizeStagerStopped } catch { $stagerCleanupFailure = $_.Exception; $finalizeOperationVerified = $false }
+        try { Remove-FinalizeBridgeTransients } catch { $bridgeCleanupFailure = $_.Exception; $finalizeOperationVerified = $false }
+        try { Ensure-FinalizeGatewayFailClosed } catch { $gatewayCleanupFailure = $_.Exception }
         $technicalPassword = $null
         $accessToken = $null
         $bridgeToken = $null
+        $bridgeTokenExport = $null
+        $bridgeSecretSha256 = $null
+        $rotationScript = $null
         $runtimeEvidence = $null
         try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $runtimeSummaryContainer + ' ' + $runtimeBindingsContainer + ' ' + $runtimeIndexEvidenceContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
-        try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $indexEvidenceContainer + ' ' + $enableContainer))) } catch { }
-        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeHost, $passwordResetHost)) {
+        try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $indexEvidenceContainer + ' ' + $enableContainer + ' ' + $bridgeTokenContainer))) } catch { }
+        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeTokenHost, $bridgeHost, $passwordResetHost)) {
             try { Remove-PrivateFile $path } catch { }
+        }
+        if ($null -ne $mutatingOperationLock) {
+            $mutatingOperationLock.Dispose()
+            $mutatingOperationLock = $null
         }
         # The catalog contains only opaque private runtime references and is
         # retained under the ignored owner-only tree as an audit input.  It is
         # never copied to Git or public reports.
+        if ($null -ne $gatewayCleanupFailure) { throw $gatewayCleanupFailure }
+        if ($null -ne $bridgeCleanupFailure) { throw $bridgeCleanupFailure }
+        if ($null -ne $stagerCleanupFailure) { throw $stagerCleanupFailure }
     }
 } catch {
     $message = [string]$_.Exception.Message

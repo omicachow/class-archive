@@ -52,7 +52,7 @@ Assert-Protocol ($runtime.Contains("writePrivateText(SUMMARY_PATH") `
     -and $runtime.Contains("const SUMMARY_PATH = '/tmp/class-archive-private-qa-immich-runtime-summary.txt'")) 'runtime_summary_must_use_text_protocol'
 
 Assert-Protocol ($runner.Contains("if (`$Action -ne 'finalize-indexes') {`r`n        `$script:stage = 'bridge_stager_start'") `
-    -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_reenable_bridge'
+    -or $runner.Contains("if (`$Action -ne 'finalize-indexes') {`n        `$script:stage = 'bridge_stager_start'")) 'finalize_must_not_create_second_piwigo_token'
 Assert-Protocol ($runner.Contains("if (`$Action -in @('provision', 'resume')) {`r`n            `$script:stage = 'canonical_bind'") `
     -or $runner.Contains("if (`$Action -in @('provision', 'resume')) {`n            `$script:stage = 'canonical_bind'")) 'finalize_must_not_rebind'
 Assert-Protocol ($runner.Contains("`$runtimeEvidence.index_evidence.queue_idle.smart_search -eq `$true")) 'runtime_queue_evidence_required'
@@ -105,6 +105,61 @@ Assert-Protocol ($bridgeAdapter.Contains('count($items) > 5000')) 'bridge_adapte
 Assert-Protocol ($bridgeAdapter.Contains('$clusters[$immichPersonId]') `
     -and $bridgeAdapter.Contains("ksort(`$clusters, SORT_STRING)") `
     -and $bridgeAdapter.Contains('if ($totalMemberships > 50000)')) 'bridge_adapter_people_batches_must_merge'
+
+$credentialReset = $runner.IndexOf("Reset-ImmichAdminPassword -HostInput `$passwordResetHost -Password `$technicalPassword", [StringComparison]::Ordinal)
+$tokenExport = $runner.IndexOf("`$script:stage = 'bridge_token_export'", [StringComparison]::Ordinal)
+$gatewayStop = $runner.IndexOf("`$script:stage = 'gateway_stop_for_secret_rotation'", [StringComparison]::Ordinal)
+$secretPublish = $runner.IndexOf("`$script:stage = 'bridge_rotation_publish'", [StringComparison]::Ordinal)
+$gatewayRestart = $runner.IndexOf("`$script:stage = 'gateway_restart_after_secret_rotation'", [StringComparison]::Ordinal)
+$bridgeProbe = $runner.LastIndexOf("`$script:stage = 'bridge_probe'", [StringComparison]::Ordinal)
+Assert-Protocol ($credentialReset -ge 0 -and $tokenExport -gt $credentialReset -and $gatewayStop -gt $tokenExport `
+    -and $secretPublish -gt $gatewayStop -and $gatewayRestart -gt $secretPublish -and $bridgeProbe -gt $gatewayRestart) 'finalize_secret_rotation_order_invalid'
+Assert-Protocol ($runner.Contains("if (`$Action -in @('provision', 'resume', 'finish', 'finalize-indexes')) {`r`n        `$mutatingOperationLock = Enter-MutatingOperationLock") `
+    -or $runner.Contains("if (`$Action -in @('provision', 'resume', 'finish', 'finalize-indexes')) {`n        `$mutatingOperationLock = Enter-MutatingOperationLock")) 'mutating_operation_single_instance_lock_missing'
+Assert-Protocol ($runner.Contains('[IO.FileShare]::None') `
+    -and $runner.IndexOf('Assert-IgnoredOwnerOnly $path', [StringComparison]::Ordinal) -lt $runner.IndexOf('[IO.FileShare]::None', [StringComparison]::Ordinal)) 'finalize_lock_acl_order_invalid'
+Assert-Protocol ($runner.Contains("'running|none|null'") `
+    -and $runner.Contains("'running|none|{}'") `
+    -and $runner.Contains('bridge_stager_boundary_invalid')) 'rotation_stager_must_be_no_network'
+Assert-Protocol ($runner.Contains("Invoke-BridgeStagerScript `$rotationScript 'bridge_rotation_publish_failed'") `
+    -and $runner.Contains("fs.renameSync(next,current)") `
+    -and $runner.Contains("createHash('sha256')") `
+    -and $runner.Contains("readdirSync('/run/secrets').sort().join(',')!=='bridge.json'")) 'gateway_secret_atomic_rotation_contract_missing'
+$nextRead = $runner.IndexOf("const raw=fs.readFileSync(next)", [StringComparison]::Ordinal)
+$nextChown = $runner.IndexOf("fs.chownSync(next,65532,65532)", [StringComparison]::Ordinal)
+Assert-Protocol ($nextRead -ge 0 -and $nextChown -gt $nextRead `
+    -and -not $runner.Contains("readFileSync(current")) 'stager_must_not_read_unprivileged_secret_after_chown'
+Assert-Protocol ($runner.Contains('Ensure-FinalizeStagerStopped') `
+    -and $runner.Contains('docker stop -t 5 $name') `
+    -and $runner.Contains('docker kill $name') `
+    -and $runner.Contains('bridge_stager_cleanup_unproven')) 'rotation_stager_failure_cleanup_missing'
+Assert-Protocol ($runner.Contains('Ensure-FinalizeGatewayFailClosed') `
+    -and $runner.Contains('if ($Action -eq ''finalize-indexes'') { $finalizeOperationVerified = $true }') `
+    -and $runner.Contains('$finalizeOperationVerified = $false')) 'finalize_failure_must_stop_gateway'
+Assert-Protocol ($runner.Contains('Remove-FinalizeBridgeTransients') `
+    -and $runner.Contains("test ! -e ' + `$bridgeTokenContainer") `
+    -and $runner.Contains('if ($null -ne $bridgeCleanupFailure)')) 'finalize_bridge_transient_cleanup_missing'
+Assert-Protocol ($runner.Contains("`$bridgeTokenExport.scope -ceq `$runtimeScope") `
+    -and $runner.Contains("`$bridgeTokenExport.catalog_digest -ceq [string]`$catalog.catalog_digest") `
+    -and $runner.Contains("[int]`$probeMatch.Groups[1].Value -eq [int]`$catalog.count") `
+    -and $runner.Contains("[int]`$probeMatch.Groups[2].Value -eq [int]`$runtimeEvidence.metrics.people_count")) 'bridge_export_and_probe_binding_missing'
+Assert-Protocol ($catalog.Contains("'export-bridge-token'") `
+    -and -not $catalog.Contains("'rotate-bridge'") `
+    -and $catalog.Contains('if (!$privateFullRuntime)') `
+    -and $catalog.Contains('privateQaImmichReadDurableBridgeSecret(PRIVATE_QA_BRIDGE_SECRET)') `
+    -and $catalog.Contains("'scope' => PRIVATE_IMMICH_SCOPE") `
+    -and $catalog.Contains("'catalog_digest' => `$catalog['catalog_digest']")) 'piwigo_bridge_token_export_contract_missing'
+Assert-Protocol ($catalog.Contains('$mode === 0600') `
+    -and $catalog.Contains('$mode === 0660') `
+    -and $catalog.Contains("privateQaImmichServiceId('PIWIGO_UID')") `
+    -and $catalog.Contains("privateQaImmichServiceId('PIWIGO_GID')") `
+    -and $catalog.Contains("(int) (`$stat['nlink'] ?? 0) !== 1") `
+    -and $catalog.Contains("privateQaImmichExactKeys(`$decoded, ['version', 'token'])") `
+    -and $catalog.Contains('stream_get_contents($handle, 513)') `
+    -and $catalog.Contains("`$opened = fstat(`$handle)") `
+    -and $catalog.Contains("`$after = fstat(`$handle)")) 'piwigo_existing_bridge_secret_validation_missing'
+Assert-Protocol ($catalog.Contains("((int) (`$stat['mode'] ?? 0) & 0777) !== 0600") `
+    -and $catalog.Contains("(int) (`$stat['size'] ?? -1) !== `$length")) 'piwigo_export_post_write_validation_missing'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
