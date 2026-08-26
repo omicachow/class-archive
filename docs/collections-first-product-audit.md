@@ -48,7 +48,7 @@ Class Archive 应把 **所有照片**、**来源集合**、**面向成员的相�
 2. 父目录既有直接照片又有子目录时，父目录自己的直接照片必须生成可见 Album；不能为了扁平化而遗失。
 3. 不向所有 ancestor 复制 photo membership。父相册的递归可见计数由 projection 计算，并始终经过 ClassArchivePolicy。
 4. 重名 leaf album 保留简短主标题；仅以低视觉权重副标题区分来源/父上下文，例如“来自 QQ 相册 · 高三”。
-5. display alias 是 Album 的通用字段，不能通过改源目录实现。例如将公开展示的“高速下载 - cnzx”改为“CNZX 班级记忆”，副标题“来自 QQ 相册”；source path 与管理员 provenance 不变。
+5. display alias 是 Album 的通用字段，不能通过改源目录实现。例如将公开展示的“高速下载 - cnzx”改为“CNZX 班级记忆”；副标题必须继续从持久 source provenance 生成，不能为了匹配期望文案把实际来源伪装成另一个来源集合，source path 与管理员 provenance 始终不变。
 
 ### C. AutoCollection / Memory（自动回忆）
 
