@@ -240,9 +240,11 @@ try {
     $assertions += 6;
 
     // A Memory rebuild first commits STALE, then synchronizes AutoCollection
-    // inside the same aggregate publish transaction. Inject an unavailable
+    // inside the same aggregate publish transaction. Inject a malformed
     // candidate through the real service and prove MariaDB rolls back the
-    // sync while MEMORIES remains fail-closed.
+    // sync while MEMORIES remains fail-closed. The exact bounded
+    // {available:false,total:0,items:[]} payload is intentionally a safe
+    // no-op for an optional source outage and is covered separately.
     $autoCollectionTable = '`' . $repository->table('auto_collection') . '`';
     $autoMemberTable = '`' . $repository->table('auto_collection_photo') . '`';
     if ($db->query(
@@ -264,7 +266,7 @@ try {
         projectionFail('memory_barrier_fixture_create_failed');
     }
     $validMemory = ['available' => true, 'total' => 0, 'items' => []];
-    $invalidMemory = ['available' => false, 'total' => 0, 'items' => []];
+    $invalidMemory = ['available' => false, 'total' => 1, 'items' => []];
     $barrierPayloads = $aggregatePayloads;
     $barrierPayloads[\ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL][\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES] = $invalidMemory;
     $barrierPayloads[\ClassIdentity\Gateway\ReadProjectionStore::SCOPE_HERITAGE][\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES] = ['available' => true, 'total' => 0, 'items' => []];
