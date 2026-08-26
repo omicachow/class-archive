@@ -416,7 +416,10 @@ try {
 
     $classmateRoot = Invoke-Http -Uri $compatUri -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmateRoot -Status 302 -Label 'classmate web root'
-    Assert-True ([Uri]::new($compatUri, $classmateRoot.Location).AbsoluteUri -eq [Uri]::new($compatUri, 'photos').AbsoluteUri) 'classmate_photo_home_redirect_invalid'
+    Assert-True ([Uri]::new($compatUri, $classmateRoot.Location).AbsoluteUri -eq [Uri]::new($compatUri, 'home').AbsoluteUri) 'classmate_collections_home_redirect_invalid'
+    $classmateHomeRoute = Invoke-Http -Uri ([Uri]::new($compatUri, 'home')) -Session $sessions['CLASSMATE']
+    Assert-PrivateResponse -Response $classmateHomeRoute -Status 200 -Label 'classmate collections home route'
+    Assert-True ($classmateHomeRoute.ContentType -like 'text/html*' -and $classmateHomeRoute.Text.Contains('/photo-ui/app.js')) 'classmate_collections_home_document_invalid'
     $classmatePhotosRoute = Invoke-Http -Uri ([Uri]::new($compatUri, 'photos')) -Session $sessions['CLASSMATE']
     Assert-PrivateResponse -Response $classmatePhotosRoute -Status 200 -Label 'classmate photos route'
     Assert-True ($classmatePhotosRoute.ContentType -like 'text/html*' -and $classmatePhotosRoute.Text.Contains('application-name" content="')) 'classmate_branding_document_invalid'
