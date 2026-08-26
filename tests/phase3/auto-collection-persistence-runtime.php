@@ -143,7 +143,9 @@ try {
     }
     $statement->close();
 
-    $reason = 'MEMORY:' . str_repeat('A', 56);
+    // Gateway memory identities are SHA-256 hex and therefore include
+    // lowercase a-f. The durable validator must accept its own producer.
+    $reason = 'MEMORY:' . str_repeat('a', 56);
     $payload = [
         'available' => true,
         'total' => 1,
@@ -242,7 +244,7 @@ try {
         'photo_count' => 1,
         'cover_photo_id' => $photoIds[1],
         'photo_ids' => [$photoIds[1]],
-        'source_reason' => 'MEMORY:' . str_repeat('B', 56),
+        'source_reason' => 'MEMORY:' . str_repeat('b', 56),
         'archive_date' => null,
         'date_precision' => 'EVENT_ONLY',
     ];

@@ -14,6 +14,7 @@ $spikeEnvPath = Join-Path $projectRoot 'infra\immich-spike\.env'
 $fixturePassword = $null
 $run = $null
 $prepared = $false
+$script:ArchiveTimelineStage = 'startup'
 
 function New-Hex { $b = New-Object byte[] 8; $r = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $r.GetBytes($b) } finally { $r.Dispose() }; return (($b | ForEach-Object { $_.ToString('x2') }) -join '') }
 function New-Secret { $b = New-Object byte[] 32; $r = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $r.GetBytes($b) } finally { $r.Dispose() }; return 'Tlr' + (($b | ForEach-Object { $_.ToString('x2') }) -join '') }
@@ -30,7 +31,9 @@ function Invoke-Docker([string[]]$arguments) {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    if ($exitCode -ne 0) { throw ("archive_timeline_runtime_docker_failed_exit_" + $exitCode) }
+    if ($exitCode -ne 0) {
+        throw ("archive_timeline_runtime_docker_failed_" + $script:ArchiveTimelineStage + "_exit_" + $exitCode)
+    }
     return $output
 }
 
@@ -56,15 +59,19 @@ $spike=@('-d','Ubuntu','--cd',$projectRoot,'--','docker','compose','--project-di
 try {
     $run=New-Hex
     $fixturePassword=New-Secret
+    $script:ArchiveTimelineStage = 'fixture_provision'
     $ready=Invoke-Docker ($compose+@('exec','-T','--user','nginx','-e',("CLASS_ARCHIVE_FIXTURE_PASSWORD=$fixturePassword"),'piwigo','php','/workspace/tests/fixtures/provision-access-users.php'))
     if('ACCESS_FIXTURES_READY' -notin $ready){throw 'archive_timeline_runtime_fixture_provision_failed'}
+    $script:ArchiveTimelineStage = 'fixture_prepare'
     $preparedOutput=Invoke-Docker ($compose+@('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_ALLOW_TIMELINE_RUNTIME_FIXTURE=1','piwigo','php','/workspace/tests/phase2/archive-timeline-runtime-fixture.php','prepare',$run))
     if(("$preparedOutput") -notmatch 'ARCHIVE_TIMELINE_RUNTIME_FIXTURE=READY'){throw 'archive_timeline_runtime_prepare_failed'}
     $prepared=$true
     # This fixture writes directly for deterministic fault injection. Product
     # writes use the incremental mutation boundary; a direct test write must
     # explicitly materialize the durable read model before GET is exercised.
+    $script:ArchiveTimelineStage = 'projection_rebuild'
     Invoke-ProjectionRebuild
+    $script:ArchiveTimelineStage = 'compat_recreate'
     [void](Invoke-Docker ($spike+@('up','-d','--force-recreate','immich-web-compat')))
     for($i=0;$i -lt 30;$i++){ $health=(wsl.exe -d Ubuntu --exec docker inspect --format '{{.State.Health.Status}}' 'class-archive-immich-spike-immich-web-compat-1').Trim(); if($health -eq 'healthy'){break}; Start-Sleep -Seconds 1 }
     if($health -ne 'healthy'){throw 'archive_timeline_runtime_bff_not_healthy'}
@@ -94,10 +101,12 @@ finally {
     $cleanupFailure = $null
     if($prepared -and $run -match '^[a-f0-9]{16}$'){
         try {
+            $script:ArchiveTimelineStage = 'fixture_cleanup'
             [void](Invoke-Docker ($compose + @(
                 'exec','-T','--user','nginx','-e','CLASS_ARCHIVE_ALLOW_TIMELINE_RUNTIME_FIXTURE=1',
                 'piwigo','php','/workspace/tests/phase2/archive-timeline-runtime-fixture.php','cleanup',$run
             )))
+            $script:ArchiveTimelineStage = 'cleanup_projection_rebuild'
             Invoke-ProjectionRebuild
         } catch {
             $cleanupFailure = 'archive_timeline_runtime_cleanup_failed'
@@ -109,6 +118,7 @@ finally {
         # every password used by this HTTP test without persisting a secret.
         $rotate=New-Secret
         try {
+            $script:ArchiveTimelineStage = 'fixture_password_rotate'
             [void](Invoke-Docker ($compose + @(
                 'exec','-T','--user','nginx','-e',("CLASS_ARCHIVE_FIXTURE_PASSWORD=$rotate"),
                 'piwigo','php','/workspace/tests/fixtures/provision-access-users.php'

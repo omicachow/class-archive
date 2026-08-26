@@ -300,7 +300,7 @@ final class AutoCollectionService
             $collectionId = strtolower((string) ($row['collection_id'] ?? ''));
             $subject = preg_match('/\A[a-f0-9]{32}\z/D', $collectionId) === 1 ? $collectionId : 'invalid';
             $reason = is_string($row['source_reason'] ?? null) ? (string) $row['source_reason'] : '';
-            if (preg_match('/\A[A-Z][A-Z0-9_:-]{1,63}\z/D', $reason) !== 1) {
+            if (preg_match('/\A[A-Z][A-Za-z0-9_:-]{1,63}\z/D', $reason) !== 1) {
                 $issues[] = self::reconciliationIssue('AUTO_COLLECTION_SOURCE_REASON_INVALID', $subject);
             }
             if (isset($seenReasons[$reason])) {
@@ -625,7 +625,7 @@ final class AutoCollectionService
 
     private static function sourceReason(mixed $value): string
     {
-        if (!is_string($value) || preg_match('/\A[A-Z][A-Z0-9_:-]{1,63}\z/D', $value) !== 1) {
+        if (!is_string($value) || preg_match('/\A[A-Z][A-Za-z0-9_:-]{1,63}\z/D', $value) !== 1) {
             throw new \RuntimeException('class_archive_auto_collection_source_reason_invalid');
         }
         return $value;
