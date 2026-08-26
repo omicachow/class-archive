@@ -3241,7 +3241,10 @@ async function renderAlbum(id) {
       shell('albums', page);
     };
     paint();
-  } catch {
+  } catch (error) {
+    // Keep the member-facing surface fail-closed while leaving one bounded,
+    // non-sensitive diagnostic code for local browser acceptance.
+    console.error('SAFE_ALBUM_DETAIL_RENDER_FAILED', error instanceof Error ? error.message : 'unknown');
     const page = element('div');
     append(page, pageHeader('albums.title', 'albums.lead'), errorState());
     shell('albums', page);

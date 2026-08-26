@@ -744,6 +744,10 @@ async function leafAlbumDetail(page, role, mobile) {
     card.click(),
   ]);
   assert(/^\/albums\/[0-9a-f-]{36}$/i.test(new URL(page.url()).pathname), `${role}_leaf_album_route`);
+  // URL changes before the bounded album-detail request and render finish.
+  // Wait for the actual product surface so the browser gate measures the
+  // user-visible result rather than racing the History API transition.
+  await page.locator('.album-photo-grid').waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
   assert(await page.locator('.album-children').count() === 0, `${role}_leaf_album_no_folder_tree`);
   assert(await page.locator('.album-photo-grid').count() === 1, `${role}_leaf_album_grid`);
   const within = page.getByRole('link', { name: '在此相册中搜索', exact: true });
@@ -1170,6 +1174,12 @@ async function runRole(role, viewport, baseline = null) {
   try {
     stageAt(`${role}_${viewport}_login`);
     page = await login(context, role);
+    if (process.env.CLASS_ARCHIVE_BROWSER_DEBUG === '1') {
+      page.on('pageerror', (error) => process.stderr.write(`ROLE_PAGE_ERROR ${role} ${error.message}\n`));
+      page.on('console', (message) => {
+        if (message.type() === 'error') process.stderr.write(`ROLE_CONSOLE_ERROR ${role} ${message.text()}\n`);
+      });
+    }
     stageAt(`${role}_${viewport}_home`);
     await homePage(page, role, mobile);
     await screenshot(page, role, 'home', viewport);
