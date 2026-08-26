@@ -37,6 +37,7 @@ check(html.includes('href="/photo-ui/app.css?v=__PHOTO_UI_ASSET_REV__"'), 'docum
 check(!/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), 'document must not use inline scripts');
 
 for (const [route, label] of [
+  ['/home', '首页'],
   ['/photos', '照片'],
   ['/people', '人物'],
   ['/search', '搜索'],
@@ -58,9 +59,9 @@ const uiDocument = server.indexOf("readPhotoUiFile('index.html')", uiRouteStart)
 check(uiRouteStart >= 0 && uiPrincipal > uiRouteStart && uiDocument > uiPrincipal, 'BFF must authenticate before reading the owned application document');
 const rootRouteStart = server.indexOf("if (url.pathname === '/')");
 const rootPrincipal = server.indexOf('await principal(request, clientAddress)', rootRouteStart);
-const rootPhotoRedirect = server.indexOf("response.setHeader('Location', '/photos')", rootRouteStart);
-check(rootRouteStart >= 0 && rootPrincipal > rootRouteStart && rootPhotoRedirect > rootPrincipal, 'root route must authenticate before redirecting to the photo product');
-check((server.match(/url\.searchParams\.size !== 0/g) ?? []).length >= 2, 'root and owned routes must fail closed on unknown query parameters');
+const rootHomeRedirect = server.indexOf("response.setHeader('Location', '/home')", rootRouteStart);
+check(rootRouteStart >= 0 && rootPrincipal > rootRouteStart && rootHomeRedirect > rootPrincipal, 'root route must authenticate before redirecting to the Collections-first home');
+check(server.includes('function photoUiDocumentQueryAllowed(url)') && server.includes("url.searchParams.has('album')"), 'owned routes must fail closed while allowing only the bounded album search context');
 check(server.includes("url.searchParams.get('v') !== revision"), 'owned static assets must accept only their current content revision');
 const detailPhotoPrecheck = server.indexOf('gatewayJson(request, `/api/photos/${photoId}`', uiRouteStart);
 const detailPersonPrecheck = server.indexOf('gatewayJson(request, `/api/people/${personId}`', uiRouteStart);
@@ -82,6 +83,16 @@ check(server.includes('/class-archive-person/'), 'legacy class-archive person ro
 check(server.includes('/class-archive-photo/'), 'legacy class-archive photo route must remain available');
 
 check(app.includes("presentationJson('/api/class-archive/timeline')"), 'timeline must use the cached archive-aware projection');
+const homeRenderStart = app.indexOf('async function renderHome()');
+const homeRenderEnd = app.indexOf('async function loadAlbums()', homeRenderStart);
+const homeRender = app.slice(homeRenderStart, homeRenderEnd);
+check(homeRenderStart >= 0 && homeRenderEnd > homeRenderStart, 'home route must own a bounded projection renderer');
+check(homeRender.includes("presentationJson('/api/class-archive/home')"), 'home must use its dedicated compact projection');
+check(!homeRender.includes("presentationJson('/api/class-archive/timeline')") && !homeRender.includes('photoGrid('), 'home must not fetch or render the full timeline');
+for (const selector of ['home-featured', 'home-memory-row', 'home-album-row', 'home-people-row', 'homeAllPhotos']) {
+  check(homeRender.includes(selector), `home must expose a stable product selector for ${selector}`);
+}
+check(server.includes("['/api/class-archive/home', '/api/home']"), 'BFF must explicitly map the home projection');
 check(app.includes("presentationJson('/api/people?size=500&withHidden=false')"), 'people must use the policy-filtered presentation cache');
 check(app.includes("apiJson('/api/search/metadata'"), 'hybrid search must use metadata search');
 check(app.includes("apiJson('/api/search/smart'"), 'hybrid search must use safe smart search');
@@ -105,9 +116,12 @@ for (const key of [
 check(css.includes('.search-discovery') && css.includes('.search-suggestion') && !css.includes('.search-discovery { min-height:'),
   'search discovery must stay lightweight instead of becoming a large empty-state card');
 check(app.includes("presentationJson('/api/class-archive/albums')"), 'albums must use the cached BFF contract');
-check(app.includes('function sourceCollectionPresentation(albums, hierarchy)')
-  && app.includes("album.sourceRoot === true")
-  && i18n.includes("'albums.sourceCollections'"), 'safe source collections must be promoted without exposing source paths');
+check(app.includes('const leafAlbums = albums.filter((album) => album.directCount > 0)')
+  && !app.includes('function sourceCollectionPresentation(albums, hierarchy)')
+  && !app.includes("'album-children'"), 'album landing and detail must expose only leaf albums rather than source/folder trees');
+check(app.includes('function albumDisplayName(album)') && app.includes('album.displayAlias || album.name')
+  && app.includes("album.sourceLabel ? element('p', 'album-source'"), 'album cards must use a display alias and a low-weight source subtitle');
+check(app.includes('searchWithin.href = `/search?album=${album.id}`') && app.includes("new URLSearchParams(location.search).get('album')"), 'search must support a bounded current-album context');
 check(app.includes("presentationJson('/api/class-archive/memories')"), 'memories must use the cached archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
 check(app.includes("['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)"), 'owned media helper must use only canonical responsive derivatives');
@@ -123,6 +137,14 @@ check(app.includes("event.key === 'ArrowRight'"), 'viewer must support next-phot
 check(app.includes("event.key === 'Escape'"), 'viewer must support Escape');
 check(app.includes('updateZoom'), 'viewer must expose bounded zoom controls');
 check(app.includes("responsivePhotoImage(photo, 'viewer'"), 'viewer must use a responsive MediaGuard-backed preview');
+check(app.includes("loadComments(photoId)") && app.includes("'/api/class-archive/comments/create'")
+  && app.includes("'/api/class-archive/comments/reply'") && app.includes("'/api/class-archive/manage/comments/delete'"), 'viewer comments must use the audited bounded comment contract');
+check(app.includes("if (canCreateComment(role)) section.append(commentComposer")
+  && app.includes("else if (role === 'FAMILY')"), 'family must be read-only while eligible member roles can comment');
+check(app.includes("role === 'SYSTEM_ADMIN' && item.canDelete"), 'comment deletion must remain limited to the system-admin product role');
+check(server.includes("'/api/class-archive/manage/comments/delete' && role !== 'SYSTEM_ADMIN'"), 'BFF must enforce actual server-side admin-only comment deletion');
+check(app.includes("const title = context.album || t('viewer.photoContext')") && !app.includes('businessLabel(asset?.originalFileName'), 'viewer must not make original file names its main context');
+check(app.includes("viewerComments(id, state.role, comments, refreshComments)") && app.includes('viewerPhotoInfo(photo, context)'), 'viewer must put comments first and retain photo information behind a details control');
 check(app.includes("addEventListener('touchstart'"), 'viewer must start mobile touch gesture tracking');
 check(app.includes("addEventListener('touchmove'"), 'viewer must handle two-finger pinch movement');
 check(app.includes("addEventListener('touchend'"), 'viewer must complete horizontal swipe navigation');
@@ -157,8 +179,8 @@ check(css.includes('html[data-session-revalidating="true"] #app')
   && css.includes('visibility: hidden')
   && css.includes('pointer-events: none'),
   'the session barrier must hide and disable the old private interface');
-check(app.includes("const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my'])"), 'mobile navigation must use the five product tabs');
-check(css.includes('grid-template-columns: repeat(5, minmax(0, 1fr))'), 'mobile navigation must have five equal tabs');
+check(app.includes("const MOBILE_NAVIGATION = new Set(['home', 'photos', 'people', 'search', 'albums', 'my'])"), 'mobile navigation must include the Collections-first home tab');
+check(css.includes('grid-template-columns: repeat(6, minmax(0, 1fr))'), 'mobile navigation must have six equal tabs');
 check(css.includes('env(safe-area-inset-bottom)'), 'mobile navigation must respect the safe area');
 check(css.includes('min-height: 52px'), 'mobile tab hit areas must exceed 44px');
 check(css.includes('@media (max-width: 760px)'), 'owned UI must include a mobile layout');
@@ -183,6 +205,6 @@ check(server.includes('async function photoUiPrincipalContext(request, clientAdd
   && server.includes("gatewayJson(request, '/api/product-state', clientAddress)"),
   'presentation cache scope must bind to a consistent fresh role and scoped projection epoch');
 check(server.includes("'/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app'"), 'login must return through Piwigo\'s canonical authenticated photo-first bridge');
-check(server.includes("fetchSite === 'same-site'") && server.includes("url.pathname === '/photos'") && server.includes("request.headers['sec-fetch-mode'] === 'navigate'") && server.includes("request.headers['sec-fetch-dest'] === 'document'"), 'cross-port login return must be limited to the exact top-level photos document');
+check(server.includes("fetchSite === 'same-site'") && server.includes("url.pathname === '/photos' || url.pathname === '/home'") && server.includes("request.headers['sec-fetch-mode'] === 'navigate'") && server.includes("request.headers['sec-fetch-dest'] === 'document'"), 'cross-port login return must be limited to exact top-level product documents');
 
 process.stdout.write(`${JSON.stringify({ suite: 'phase3-photo-ui-static', assertions, result: 'PASS' })}\n`);

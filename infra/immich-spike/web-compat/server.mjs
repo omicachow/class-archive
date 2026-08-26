@@ -64,13 +64,14 @@ const photoUiStaticPaths = new Map([
   ['/photo-ui/app.js', 'app.js'],
   ['/photo-ui/i18n.js', 'i18n.js'],
 ]);
-const photoUiRootRoutes = new Set(['/photos', '/people', '/search', '/albums', '/memories', '/my']);
+const photoUiRootRoutes = new Set(['/home', '/photos', '/people', '/search', '/albums', '/memories', '/my']);
 // This is an explicit public API boundary for the owned Photo UI.  Keep the
 // mapping here, rather than accepting a caller-provided upstream path: the
 // Web compatibility process must not become a general Piwigo/Gateway proxy.
 const photoUiGatewayReadRoutes = new Map([
   ['/api/class-archive/product-state', '/api/product-state'],
   ['/api/class-archive/albums', '/api/albums'],
+  ['/api/class-archive/home', '/api/home'],
   ['/api/class-archive/spotlight', '/api/spotlight'],
   ['/api/class-archive/manage/people', '/api/manage/people'],
   ['/api/class-archive/manage/options', '/api/manage/options'],
@@ -88,6 +89,9 @@ const photoUiGatewayMutationRoutes = new Map([
   ['/api/class-archive/manage/duplicates/consolidate', '/api/manage/duplicates/consolidate'],
   ['/api/class-archive/spotlight/create', '/api/spotlight/create'],
   ['/api/class-archive/spotlight/cancel', '/api/spotlight/cancel'],
+  ['/api/class-archive/comments/create', '/api/comments/create'],
+  ['/api/class-archive/comments/reply', '/api/comments/reply'],
+  ['/api/class-archive/manage/comments/delete', '/api/manage/comments/delete'],
 ]);
 const timelineCursorPattern = /^[A-Za-z0-9_-]{48}$/;
 const timelinePageDefault = 120;
@@ -569,7 +573,7 @@ function rejectForeignRequest(request, response, url) {
   // same-origin-only and cannot use this transition.
   const isPiwigoLoginReturn = fetchSite === 'same-site'
     && (request.method === 'GET' || request.method === 'HEAD')
-    && url.pathname === '/photos'
+    && (url.pathname === '/photos' || url.pathname === '/home')
     && url.search === ''
     && request.headers.origin === undefined
     && request.headers['sec-fetch-mode'] === 'navigate'
@@ -777,6 +781,14 @@ function isPhotoUiRoute(pathname) {
   }
   const detail = /^\/(?:photos|people|albums)\/([0-9a-f-]{36})$/i.exec(pathname);
   return detail !== null && UUID_V4.test(detail[1]);
+}
+
+function photoUiDocumentQueryAllowed(url) {
+  if (url.pathname !== '/search') return url.searchParams.size === 0;
+  if (url.searchParams.size === 0) return true;
+  if (url.searchParams.size !== 1 || !url.searchParams.has('album')) return false;
+  const albumId = url.searchParams.get('album');
+  return typeof albumId === 'string' && UUID_V4.test(albumId);
 }
 
 function sessionCookie(request) {
@@ -1857,13 +1869,24 @@ async function handleApi(request, response, url, clientAddress) {
       await relayPublicGatewayApi(request, response, `/api/albums/${assertUuid(albumMatch[1])}${suffix}`, clientAddress, { responseOptions: { metadata: true } });
       return;
     }
+    const commentsMatch = /^\/api\/class-archive\/comments\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (commentsMatch) {
+      exactQuery(url, new Set());
+      await relayPublicGatewayApi(request, response, `/api/comments/${assertUuid(commentsMatch[1])}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
     if (url.pathname === '/api/class-archive/search/hybrid') {
-      const query = exactQuery(url, new Set(['q']));
+      const query = exactQuery(url, new Set(['q', 'albumId']));
       const value = query.get('q');
       if (value === undefined) {
         throw new TypeError('class_archive_web_compat_hybrid_search_query_missing');
       }
-      await relayPublicGatewayApi(request, response, `/api/search/hybrid?q=${encodeURIComponent(value)}`, clientAddress);
+      const albumId = query.get('albumId');
+      if (albumId !== undefined && !UUID_V4.test(albumId)) {
+        throw new TypeError('class_archive_web_compat_hybrid_search_album_invalid');
+      }
+      const suffix = albumId === undefined ? '' : `&albumId=${encodeURIComponent(assertUuid(albumId))}`;
+      await relayPublicGatewayApi(request, response, `/api/search/hybrid?q=${encodeURIComponent(value)}${suffix}`, clientAddress);
       return;
     }
     const mutationPath = photoUiGatewayMutationRoutes.get(url.pathname);
@@ -1871,6 +1894,10 @@ async function handleApi(request, response, url, clientAddress) {
       if (request.method !== 'POST') {
         response.setHeader('Allow', 'POST');
         respondJson(response, request.method, 405, { error: '仅支持 POST' });
+        return;
+      }
+      if (url.pathname === '/api/class-archive/manage/comments/delete' && role !== 'SYSTEM_ADMIN') {
+        respondJson(response, request.method, 403, { error: '请求被拒绝' });
         return;
       }
       exactQuery(url, new Set());
@@ -2287,7 +2314,7 @@ async function serveApplication(request, response, url) {
       redirectToPiwigoLogin(request, response);
       return;
     }
-    response.setHeader('Location', '/photos');
+    response.setHeader('Location', '/home');
     respond(response, request.method, 302, 'text/plain; charset=utf-8', '');
     return;
   }
@@ -2306,7 +2333,7 @@ async function serveApplication(request, response, url) {
       respond(response, request.method, 403, 'text/plain; charset=utf-8', '禁止访问', { html: true });
       return;
     }
-    if (url.searchParams.size !== 0) {
+    if (!photoUiDocumentQueryAllowed(url)) {
       respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
       return;
     }

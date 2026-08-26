@@ -67,6 +67,7 @@ check(schema.includes("`state` IN ('PREPARED', 'APPLIED', 'FAILED', 'COMPENSATED
 const readRoutes = [
   ['/api/class-archive/product-state', '/api/product-state'],
   ['/api/class-archive/albums', '/api/albums'],
+  ['/api/class-archive/home', '/api/home'],
   ['/api/class-archive/spotlight', '/api/spotlight'],
   ['/api/class-archive/manage/people', '/api/manage/people'],
   ['/api/class-archive/manage/options', '/api/manage/options'],
@@ -84,6 +85,9 @@ const mutationRoutes = [
   '/api/class-archive/manage/duplicates/consolidate',
   '/api/class-archive/spotlight/create',
   '/api/class-archive/spotlight/cancel',
+  '/api/class-archive/comments/create',
+  '/api/class-archive/comments/reply',
+  '/api/class-archive/manage/comments/delete',
 ];
 for (const path of mutationRoutes) {
   check(server.includes(`['${path}', `), `BFF must explicitly allowlist mutation ${path}`);
@@ -122,8 +126,8 @@ check(gateway.includes("'sourceRoot' => ($mapping['source_root'] ?? false) === t
 check(albumService.includes('privateSourceRootAlbumIds') && albumService.includes("f.`parent_folder_id` IS NULL"), 'full-library source roots must be derived from the private folder hierarchy rather than a client path');
 check(controller.includes('DomainSupport::idToBinary($value)') && controller.includes('return strtolower($value)'), 'product detail routes must require normalized opaque UUIDs');
 
-check(app.includes("const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my'])"), 'mobile information architecture must use five tabs');
-check(css.includes('grid-template-columns: repeat(5, minmax(0, 1fr))'), 'mobile tab layout must render five equal targets');
+check(app.includes("const MOBILE_NAVIGATION = new Set(['home', 'photos', 'people', 'search', 'albums', 'my'])"), 'mobile information architecture must include the Collections-first home tab');
+check(css.includes('grid-template-columns: repeat(6, minmax(0, 1fr))'), 'mobile tab layout must render six equal targets');
 check(css.includes('env(safe-area-inset-bottom)') && css.includes('min-height: 52px'), 'mobile tabs must honor safe area and accessible hit size');
 check(app.includes("credentials: 'same-origin'") && app.includes("'X-Class-Archive-CSRF': state.csrfToken"), 'mutations must use same-origin sessions and CSRF');
 check(app.includes('body: JSON.stringify({ ...payload, csrfToken: state.csrfToken })'), 'CSRF must be relayed in the validated mutation body');
@@ -147,7 +151,11 @@ check(app.includes('sourcePersonId: person.id') && app.includes('photoIds,'), 'p
 check(app.includes("group.exact ? t('duplicates.exact') : t('duplicates.near')") && app.includes('if (!group.exact) return card;'), 'near duplicates must remain review-only in the UI');
 
 check(app.includes('card.href = `/albums/${album.id}`'), 'album cards must navigate by stable opaque album id');
-check(app.includes('function sourceCollectionPresentation(albums, hierarchy)') && app.includes("album.sourceRoot === true"), 'the album landing page must promote safe source-root collections without flattening membership');
+check(app.includes('const leafAlbums = albums.filter((album) => album.directCount > 0)')
+  && !app.includes('function sourceCollectionPresentation(albums, hierarchy)')
+  && !app.includes("'album-children'"), 'the album landing page must suppress source containers while keeping only direct-photo leaf cards');
+check(app.includes('function albumDisplayName(album)') && app.includes('album.displayAlias || album.name')
+  && app.includes('sourceLabel: safeText(album.sourceLabel'), 'album aliases and source subtitles must remain a presentation layer over durable provenance');
 check(app.includes("apiJson(`/api/class-archive/albums/${id.toLowerCase()}?${params}`)"), 'album detail must use the Class Archive album contract with bounded cursor pagination');
 check(app.includes('window.scrollTo(0, 0);') && app.includes('newly opened Search'), 'top-level photo routes must reset the viewport after their rendered content settles');
 check(server.includes("const query = exactQuery(url, new Set(['cursor', 'limit']));")
@@ -166,6 +174,32 @@ check(app.includes("state.canSpotlight && album.owned && album.canSpotlight"), '
 check(app.includes('const item = payload?.item ?? payload?.spotlight'), 'Spotlight UI must unwrap the active/item API envelope instead of treating the active boolean as a record');
 check(app.includes("'/api/class-archive/spotlight/cancel'"), 'Spotlight must expose explicit cancellation');
 
+const homeStart = app.indexOf('async function renderHome()');
+const homeEnd = app.indexOf('async function loadAlbums()', homeStart);
+const home = app.slice(homeStart, homeEnd);
+check(homeStart >= 0 && homeEnd > homeStart && home.includes("presentationJson('/api/class-archive/home')"), 'home must use an explicit compact Gateway projection');
+check(!home.includes("presentationJson('/api/class-archive/timeline')") && !home.includes('photoGrid('), 'home must not fetch or render the full library timeline');
+for (const selector of ['home-featured', 'home-memory-row', 'home-album-row', 'home-people-row', 'homeAllPhotos']) {
+  check(home.includes(selector), `home must retain stable Collections-first selector ${selector}`);
+}
+check(server.includes("response.setHeader('Location', '/home')"), 'authenticated BFF root must default to Collections-first home');
+check(server.includes('function photoUiDocumentQueryAllowed(url)') && server.includes("url.searchParams.has('album')"), 'only the explicit current-album search context may add a product document query parameter');
+
+for (const path of [
+  '/api/class-archive/comments/create',
+  '/api/class-archive/comments/reply',
+  '/api/class-archive/manage/comments/delete',
+]) {
+  check(app.includes(`'${path}'`) && server.includes(`['${path}', `), `comments must use explicit bounded BFF mutation ${path}`);
+}
+check(app.includes('function normalizeComments(payload)') && app.includes('function viewerComments(photoId, role, comments, onRefresh)'), 'comments must be normalized before rendering a viewer panel');
+check(app.includes("if (canCreateComment(role)) section.append(commentComposer")
+  && app.includes("else if (role === 'FAMILY')"), 'Family comment UI must stay read-only while eligible principals can comment');
+check(app.includes("role === 'SYSTEM_ADMIN' && item.canDelete")
+  && server.includes("'/api/class-archive/manage/comments/delete' && role !== 'SYSTEM_ADMIN'"), 'comment deletion must have both UI and BFF system-admin controls');
+check(app.includes("const title = context.album || t('viewer.photoContext')") && !app.includes('businessLabel(asset?.originalFileName'), 'viewer primary context must not expose original file names');
+check(app.includes('viewerPhotoInfo(photo, context)') && css.includes('.viewer-comments') && css.includes('.viewer-photo-info'), 'viewer must render comments first and keep photo details collapsible');
+
 const structuredIndex = app.indexOf('if (exactCount > 0)');
 const smartIndex = app.indexOf('if (response.smartPhotos.length > 0)', structuredIndex);
 check(structuredIndex >= 0 && smartIndex > structuredIndex, 'search must render structured results before semantic Beta results');
@@ -179,6 +213,7 @@ check(app.includes("if (state.canManage)") && app.includes("'/people/manage'"), 
 for (const key of [
   'photos.bulkTitle', 'people.manageTitle', 'albums.official', 'albums.community',
   'albums.sourceCollections', 'albums.sourceCollectionsLead',
+  'home.title', 'home.featured', 'comments.title', 'comments.familyReadonly',
   'spotlight.eyebrow', 'search.structured', 'search.smartBeta', 'my.currentRole',
 ]) {
   check(i18n.includes(`'${key}'`), `i18n must centralize ${key}`);

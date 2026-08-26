@@ -3,7 +3,7 @@ import { applyDocumentTranslations, t } from './i18n.js?v=__PHOTO_UI_ASSET_REV__
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIMELINE_CURSOR = /^[A-Za-z0-9_-]{48}$/;
 const app = document.getElementById('app');
-const MOBILE_NAVIGATION = new Set(['photos', 'people', 'search', 'albums', 'my']);
+const MOBILE_NAVIGATION = new Set(['home', 'photos', 'people', 'search', 'albums', 'my']);
 const MUTATION_PATHS = new Set([
   '/api/class-archive/manage/people/create',
   '/api/class-archive/manage/people/update',
@@ -16,6 +16,9 @@ const MUTATION_PATHS = new Set([
   '/api/class-archive/manage/duplicates/consolidate',
   '/api/class-archive/spotlight/create',
   '/api/class-archive/spotlight/cancel',
+  '/api/class-archive/comments/create',
+  '/api/class-archive/comments/reply',
+  '/api/class-archive/manage/comments/delete',
 ]);
 const PRESENTATION_CACHE_PREFIX = 'class-archive-photo-ui-v3:';
 const PRESENTATION_CACHE_SCOPE_KEY = `${PRESENTATION_CACHE_PREFIX}active-scope`;
@@ -24,6 +27,7 @@ const PRESENTATION_CACHE_PATHS = new Set([
   '/api/class-archive/spotlight',
   '/api/class-archive/albums',
   '/api/class-archive/memories',
+  '/api/class-archive/home',
   '/api/people?size=500&withHidden=false',
 ]);
 const PRESENTATION_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -41,6 +45,7 @@ const runtime = {
 };
 
 const navigation = Object.freeze([
+  { key: 'home', href: '/home' },
   { key: 'photos', href: '/photos' },
   { key: 'people', href: '/people' },
   { key: 'search', href: '/search' },
@@ -76,7 +81,7 @@ function navLink(item, active, mobile = false) {
 function sidebar(active) {
   const side = element('aside', 'sidebar');
   const brand = element('a', 'brand');
-  brand.href = '/photos';
+  brand.href = '/home';
   append(
     brand,
     element('span', 'brand-title', t('product.name')),
@@ -1329,6 +1334,184 @@ function infoRow(labelKey, value) {
   return row;
 }
 
+function normalizeComments(payload) {
+  if (!payload || !Number.isInteger(payload.total) || !Array.isArray(payload.items)
+    || payload.total !== payload.items.length || payload.total < 0) {
+    throw new Error('safe_comments_invalid');
+  }
+  return {
+    total: payload.total,
+    items: payload.items.map((item) => {
+      const parentId = item?.parentId ?? item?.parent_id ?? null;
+      const author = item?.author;
+      if (!item || !validId(item.id) || (parentId !== null && !validId(parentId))
+        || typeof item.body !== 'string' || item.body.length < 1 || item.body.length > 2_000
+        || !author || typeof author !== 'object' || !safeText(author.label, '')
+        || typeof author.kind !== 'string' || !/^[A-Z_]{1,32}$/.test(author.kind)
+        || typeof item.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(item.createdAt)
+        || typeof item.canReply !== 'boolean' || typeof item.canDelete !== 'boolean') {
+        throw new Error('safe_comment_invalid');
+      }
+      return {
+        id: item.id.toLowerCase(),
+        parentId: parentId ? parentId.toLowerCase() : null,
+        body: item.body,
+        author: { label: safeText(author.label, t('comments.author')), kind: author.kind },
+        createdAt: item.createdAt,
+        canReply: item.canReply,
+        canDelete: item.canDelete,
+      };
+    }),
+  };
+}
+
+async function loadComments(photoId) {
+  if (!validId(photoId)) throw new Error('safe_comment_photo_invalid');
+  return normalizeComments(await apiJson(`/api/class-archive/comments/${photoId.toLowerCase()}`, { cache: 'no-store' }));
+}
+
+function formatCommentTime(value) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return '';
+  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(time));
+}
+
+function canCreateComment(role) {
+  return ['CLASSMATE', 'TEACHER', 'ANONYMOUS'].includes(role);
+}
+
+function commentComposer(photoId, parentId, onComplete) {
+  const form = element('form', parentId ? 'comment-composer comment-reply-form' : 'comment-composer');
+  const input = element('textarea', 'text-area');
+  input.name = 'body';
+  input.maxLength = 2_000;
+  input.required = true;
+  input.placeholder = t(parentId ? 'comments.replyPlaceholder' : 'comments.placeholder');
+  input.setAttribute('aria-label', t(parentId ? 'comments.replyPlaceholder' : 'comments.placeholder'));
+  const actions = element('div', 'comment-composer-actions');
+  const submit = element('button', 'primary-button compact-button', t(parentId ? 'comments.reply' : 'comments.submit'));
+  submit.type = 'submit';
+  actions.append(submit);
+  append(form, input, actions);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = input.value.trim();
+    if (!body) {
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    try {
+      await mutate(parentId ? '/api/class-archive/comments/reply' : '/api/class-archive/comments/create', {
+        photoUuid: photoId,
+        parentId,
+        body,
+      });
+      input.value = '';
+      await onComplete();
+      toast(t('comments.saved'));
+    } catch {
+      submit.disabled = false;
+      toast(t('comments.failed'), 'error');
+    }
+  });
+  return form;
+}
+
+function viewerContext(asset, photo) {
+  const rawAlbums = Array.isArray(asset?.albums) ? asset.albums : [];
+  const album = rawAlbums.map((item) => (item && typeof item === 'object'
+    ? safeText(item.displayAlias ?? item.name, '') : '')).find(Boolean)
+    ?? safeText(asset?.albumName ?? asset?.album_name, '');
+  const source = safeText(asset?.sourceLabel ?? asset?.source_label, '');
+  const archiveDate = photo?.archiveDate?.label && photo.archiveDate.label !== t('common.unknownDate')
+    ? photo.archiveDate.label : '';
+  return { album, source, archiveDate };
+}
+
+function viewerPhotoInfo(photo, context) {
+  const details = element('details', 'viewer-photo-info');
+  const summary = element('summary', '', t('viewer.photoInfo'));
+  const list = element('dl', 'info-list');
+  const rows = [];
+  if (context.album) rows.push(infoRow('viewer.album', context.album));
+  if (context.source) rows.push(infoRow('viewer.sourceCollection', context.source));
+  if (context.archiveDate) rows.push(infoRow('viewer.archiveDate', context.archiveDate));
+  if (photo?.archiveDate?.precision && photo.archiveDate.precision !== t('precision.unknown')) rows.push(infoRow('viewer.precision', photo.archiveDate.precision));
+  if (rows.length === 0) rows.push(infoRow('viewer.archiveDate', t('viewer.timePending')));
+  append(list, rows);
+  append(details, summary, list);
+  return details;
+}
+
+function commentItem(item, role, photoId, onComplete) {
+  const card = element('article', 'comment-item');
+  card.dataset.commentId = item.id;
+  if (item.parentId) card.dataset.reply = 'true';
+  const heading = element('header', 'comment-header');
+  append(heading,
+    element('strong', 'comment-author', item.author.label),
+    element('time', 'comment-time', formatCommentTime(item.createdAt)),
+  );
+  const body = element('p', 'comment-body', item.body);
+  const actions = element('div', 'comment-actions');
+  if (canCreateComment(role) && item.canReply) {
+    const reply = element('button', 'ghost-button compact-button comment-reply', t('comments.reply'));
+    reply.type = 'button';
+    reply.addEventListener('click', () => {
+      const existing = card.querySelector('.comment-reply-form');
+      if (existing) {
+        existing.remove();
+        reply.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      card.append(commentComposer(photoId, item.id, onComplete));
+      reply.setAttribute('aria-expanded', 'true');
+      card.querySelector('.comment-reply-form textarea')?.focus();
+    });
+    reply.setAttribute('aria-expanded', 'false');
+    actions.append(reply);
+  }
+  if (role === 'SYSTEM_ADMIN' && item.canDelete) {
+    const remove = element('button', 'ghost-button compact-button comment-delete', t('comments.delete'));
+    remove.type = 'button';
+    remove.addEventListener('click', () => openReasonMutation(
+      'comments.deleteTitle',
+      'comments.deleteLead',
+      '/api/class-archive/manage/comments/delete',
+      { commentId: item.id },
+      async () => {
+        await onComplete();
+        toast(t('comments.deleted'));
+      },
+    ));
+    actions.append(remove);
+  }
+  append(card, heading, body, actions.childElementCount > 0 ? actions : null);
+  return card;
+}
+
+function viewerComments(photoId, role, comments, onRefresh) {
+  const section = element('section', 'viewer-comments');
+  const heading = element('div', 'viewer-comments-heading');
+  append(heading, element('h2', '', t('comments.title')), element('span', '', t('comments.count', { count: comments?.total ?? 0 })));
+  section.append(heading);
+  if (!comments) {
+    section.append(element('p', 'comment-unavailable', t('comments.unavailable')));
+    return section;
+  }
+  if (comments.items.length === 0) {
+    append(section, element('p', 'comment-empty-title', t('comments.emptyTitle')), element('p', 'comment-empty-body', t('comments.emptyBody')));
+  } else {
+    const list = element('div', 'comments-list');
+    append(list, comments.items.map((item) => commentItem(item, role, photoId, onRefresh)));
+    section.append(list);
+  }
+  if (canCreateComment(role)) section.append(commentComposer(photoId, null, onRefresh));
+  else if (role === 'FAMILY') section.append(element('p', 'comment-readonly', t('comments.familyReadonly')));
+  return section;
+}
+
 async function renderViewer(id) {
   app.replaceChildren(loadingState());
   try {
@@ -1359,7 +1542,10 @@ async function renderViewer(id) {
       throw new Error('safe_viewer_scope_changed');
     }
     const photo = photos[index];
-    const title = businessLabel(asset?.originalFileName, 'accessibility.photo');
+    const context = viewerContext(asset, photo);
+    const title = context.album || t('viewer.photoContext');
+    let comments = null;
+    try { comments = await loadComments(id); } catch { comments = null; }
 
     const page = element('main', 'viewer-page');
     page.id = 'main-content';
@@ -1378,7 +1564,7 @@ async function renderViewer(id) {
     const rightActions = element('div', 'viewer-actions');
     const zoomOut = viewerButton('accessibility.zoomOut');
     const zoomIn = viewerButton('accessibility.zoomIn');
-    const infoToggle = viewerButton('accessibility.info');
+    const infoToggle = viewerButton('accessibility.comments');
     infoToggle.setAttribute('aria-expanded', 'false');
     append(rightActions, zoomOut, zoomIn, infoToggle);
     append(toolbar, leftActions, rightActions);
@@ -1404,15 +1590,22 @@ async function renderViewer(id) {
 
     const info = element('aside', 'viewer-info');
     info.dataset.open = 'false';
-    const position = t('viewer.position', { current: index + 1, total: photos.length });
-    const list = element('dl', 'info-list');
-    append(
-      list,
-      infoRow('viewer.archiveDate', photo.archiveDate.label),
-      infoRow('viewer.precision', photo.archiveDate.precision),
-      infoRow('viewer.source', photo.archiveDate.source),
+    const contextHeader = element('header', 'viewer-context');
+    append(contextHeader,
+      element('p', 'viewer-context-eyebrow', context.source || t('viewer.photoContext')),
+      context.album ? element('h1', '', context.album) : null,
+      context.archiveDate ? element('p', 'viewer-context-date', context.archiveDate) : null,
     );
-    append(info, element('h1', '', title), element('p', 'viewer-position', position), list, element('p', 'viewer-security', t('viewer.security')));
+    const commentsRoot = element('div', 'viewer-comments-root');
+    const paintComments = () => {
+      commentsRoot.replaceChildren(viewerComments(id, state.role, comments, refreshComments));
+    };
+    const refreshComments = async () => {
+      try { comments = await loadComments(id); } catch { comments = null; }
+      paintComments();
+    };
+    paintComments();
+    append(info, contextHeader, commentsRoot, viewerPhotoInfo(photo, context));
 
     let zoom = 1;
     const updateZoom = (nextZoom) => {
@@ -2254,12 +2447,14 @@ function normalizeHybridSearch(payload) {
   };
 }
 
-async function hybridSearch(query) {
+async function hybridSearch(query, albumId = null) {
   try {
     const params = new URLSearchParams({ q: query });
+    if (albumId && validId(albumId)) params.set('albumId', albumId.toLowerCase());
     return normalizeHybridSearch(await apiJson(`/api/class-archive/search/hybrid?${params}`));
   } catch (error) {
     if (error?.status && error.status !== 404) throw error;
+    if (albumId) throw error;
     return legacySearch(query);
   }
 }
@@ -2360,12 +2555,20 @@ async function renderSearch() {
   status.setAttribute('aria-live', 'polite');
   status.hidden = true;
   const results = element('div');
+  const albumId = new URLSearchParams(location.search).get('album');
+  const albumContext = validId(albumId) ? albumId.toLowerCase() : null;
   const runQuery = (value) => {
     input.value = value;
     form.requestSubmit();
   };
   const discovery = searchDiscovery(runQuery);
-  append(page, form, discovery, status);
+  const context = albumContext ? element('div', 'search-context') : null;
+  if (context) {
+    const clear = element('a', 'search-context-clear', t('search.clearAlbumContext'));
+    clear.href = '/search';
+    append(context, element('span', '', t('search.albumContext')), clear);
+  }
+  append(page, form, context, discovery, status);
   shell('search', page);
 
   form.addEventListener('submit', async (event) => {
@@ -2382,7 +2585,7 @@ async function renderSearch() {
     status.textContent = t('search.searching');
     results.replaceChildren(loadingState());
     try {
-      const response = await hybridSearch(query);
+      const response = await hybridSearch(query, albumContext);
       const total = response.structuredPhotos.length + response.smartPhotos.length;
       status.textContent = response.partial
         ? t('search.partial')
@@ -2416,6 +2619,10 @@ function normalizeAlbums(payload) {
       id: id.toLowerCase(),
       parentAlbumId: parentAlbumId ? parentAlbumId.toLowerCase() : null,
       name: safeText(album.name ?? album.albumName ?? album.album_name, t('albums.title')),
+      displayAlias: safeText(album.displayAlias ?? album.display_alias, ''),
+      sourceLabel: safeText(album.sourceLabel ?? album.source_label, ''),
+      sourceKind: ['QQ', 'GRADUATION', 'ARCHIVE', 'COMMUNITY'].includes(album.sourceKind ?? album.source_kind)
+        ? (album.sourceKind ?? album.source_kind) : null,
       type: (album.type ?? album.album_type) === 'COMMUNITY' ? 'COMMUNITY' : 'OFFICIAL',
       description: safeText(album.description, ''),
       eventLabel: safeText(album.eventLabel ?? album.event_label, ''),
@@ -2430,68 +2637,27 @@ function normalizeAlbums(payload) {
   });
 }
 
-function albumHierarchy(albums) {
-  const known = new Map(albums.map((album) => [album.id, album]));
-  const childrenByParent = new Map();
-  const roots = [];
-  for (const album of albums) {
-    const parent = album.parentAlbumId ? known.get(album.parentAlbumId) : null;
-    if (!parent || parent.id === album.id || parent.type !== album.type) {
-      roots.push(album);
-      continue;
-    }
-    if (!childrenByParent.has(parent.id)) childrenByParent.set(parent.id, []);
-    childrenByParent.get(parent.id).push(album);
-  }
-  const order = (left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN', { numeric: true });
-  roots.sort(order);
-  for (const children of childrenByParent.values()) children.sort(order);
-  return { roots, childrenByParent };
+function albumDisplayName(album) {
+  return album.displayAlias || album.name;
 }
 
-// Source collections are a private full-library presentation affordance, not
-// a replacement for the actual Piwigo/Class Archive hierarchy.  Promoting
-// their two root folders on the landing page preserves the source structure
-// while avoiding an extra generic archive wrapper before the owner can reach
-// either original collection.  No source path or provenance identifier is
-// ever sent to this UI.
-function sourceCollectionPresentation(albums, hierarchy) {
-  const sourceRoots = albums.filter((album) => album.sourceRoot === true);
-  const sourceRootIds = new Set(sourceRoots.map((album) => album.id));
-  const byId = new Map(albums.map((album) => [album.id, album]));
-  const sourceAncestorIds = new Set();
-  for (const source of sourceRoots) {
-    let parentId = source.parentAlbumId;
-    const seen = new Set([source.id]);
-    while (parentId && !seen.has(parentId)) {
-      seen.add(parentId);
-      sourceAncestorIds.add(parentId);
-      parentId = byId.get(parentId)?.parentAlbumId ?? null;
-    }
-  }
-  return {
-    sourceRoots,
-    ordinaryRoots: hierarchy.roots.filter((album) => !sourceRootIds.has(album.id) && !sourceAncestorIds.has(album.id)),
-  };
-}
-
-function albumCard(album, childCount = 0) {
+function albumCard(album) {
   const card = element('a', 'album-card');
   card.href = `/albums/${album.id}`;
   const cover = element('div', 'album-cover');
   if (album.coverPhotoId) cover.append(resilientImage(mediaUrl(album.coverPhotoId, 'medium'), '', false, { sizes: '(max-width: 680px) 100vw, 34vw' }));
   const copy = element('div', 'album-copy');
   append(copy,
-    element('h3', 'album-title', album.name),
+    element('h3', 'album-title', albumDisplayName(album)),
+    album.sourceLabel ? element('p', 'album-source', album.sourceLabel) : null,
     album.eventLabel || album.dateLabel ? element('p', 'album-meta', [album.eventLabel, album.dateLabel].filter(Boolean).join(' · ')) : null,
     element('p', 'album-count', t('common.photosCount', { count: album.count })),
-    childCount > 0 ? element('p', 'album-folder-count', t('albums.foldersCount', { count: childCount })) : null,
   );
   append(card, cover, copy);
   return card;
 }
 
-function albumSection(titleKey, leadKey, albums, childrenByParent) {
+function albumSection(titleKey, leadKey, albums) {
   const section = element('section', 'album-section');
   const heading = element('div', 'collection-heading');
   const copy = element('div');
@@ -2499,13 +2665,201 @@ function albumSection(titleKey, leadKey, albums, childrenByParent) {
   heading.append(copy);
   section.append(heading);
   const grid = element('div', 'album-grid');
-  append(grid, albums.map((album) => albumCard(album, childrenByParent.get(album.id)?.length ?? 0)));
+  append(grid, albums.map((album) => albumCard(album)));
   section.append(grid);
   return section;
 }
 
+function homeItems(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object' && Array.isArray(value.items)) return value.items;
+  if (value && typeof value === 'object' && Array.isArray(value.people)) return value.people;
+  if (value && typeof value === 'object' && value.item && typeof value.item === 'object') return [value.item];
+  return [];
+}
+
+function normalizeHomeFeature(item) {
+  if (!item || typeof item !== 'object') return null;
+  const albumId = item.albumId ?? item.album_id;
+  const photoId = item.photoId ?? item.photo_id ?? item.coverPhotoId ?? item.cover_photo_id;
+  const coverPhotoId = item.coverPhotoId ?? item.cover_photo_id ?? photoId;
+  if (!validId(albumId) && !validId(photoId)) return null;
+  return {
+    href: validId(albumId) ? `/albums/${albumId.toLowerCase()}` : `/photos/${photoId.toLowerCase()}`,
+    coverPhotoId: validId(coverPhotoId) ? coverPhotoId.toLowerCase() : null,
+    title: businessLabel(item.title ?? item.label ?? item.name, 'home.featured'),
+    subtitle: safeText(item.subtitle ?? item.description, ''),
+  };
+}
+
+function normalizeHomeMemory(item) {
+  if (!item || typeof item !== 'object') return null;
+  const coverPhotoId = item.coverPhotoId ?? item.cover_photo_id;
+  const albumId = item.albumId ?? item.album_id;
+  if (!validId(coverPhotoId)) return null;
+  const count = item.photoCount ?? item.photo_count ?? item.count;
+  return {
+    coverPhotoId: coverPhotoId.toLowerCase(),
+    href: validId(albumId) ? `/albums/${albumId.toLowerCase()}` : `/photos/${coverPhotoId.toLowerCase()}`,
+    title: businessLabel(item.title ?? item.label ?? item.name, 'memories.title'),
+    subtitle: safeText(item.subtitle, ''),
+    count: Number.isInteger(count) && count > 0 ? count : null,
+  };
+}
+
+function normalizeHome(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || !Object.hasOwn(payload, 'featured') || !Object.hasOwn(payload, 'memories')
+    || !Object.hasOwn(payload, 'albums') || !Object.hasOwn(payload, 'people')
+    || !Object.hasOwn(payload, 'allPhotos')) {
+    throw new Error('safe_home_invalid');
+  }
+  const allPhotos = payload.allPhotos;
+  const allPhotosCount = allPhotos?.total ?? allPhotos?.photoCount ?? allPhotos?.photo_count ?? allPhotos?.count;
+  if (!Number.isInteger(allPhotosCount) || allPhotosCount < 0) throw new Error('safe_home_photo_count_invalid');
+  const albums = normalizeAlbums({ items: homeItems(payload.albums) }).filter((album) => album.directCount > 0);
+  const peopleItems = homeItems(payload.people);
+  const people = peopleItems.length > 0
+    ? normalizePeople({ people: peopleItems, total: peopleItems.length }) : [];
+  return {
+    featured: homeItems(payload.featured).map(normalizeHomeFeature).filter(Boolean).slice(0, 1),
+    memories: homeItems(payload.memories).map(normalizeHomeMemory).filter(Boolean).slice(0, 8),
+    albums: albums.slice(0, 8),
+    people: people.slice(0, 8),
+    allPhotosCount,
+  };
+}
+
+function homeRowHeading(titleKey, leadKey, href = '') {
+  const heading = element('div', 'home-row-heading');
+  const copy = element('div');
+  append(copy, element('h2', '', t(titleKey)), leadKey ? element('p', '', t(leadKey)) : null);
+  heading.append(copy);
+  if (href) {
+    const link = element('a', 'home-row-link', t('home.viewAll'));
+    link.href = href;
+    heading.append(link);
+  }
+  return heading;
+}
+
+function homeMemoryCard(memory) {
+  const card = element('a', 'home-memory-card');
+  card.href = memory.href;
+  const cover = element('span', 'home-memory-cover');
+  cover.append(resilientImage(mediaUrl(memory.coverPhotoId, 'large'), '', false, { sizes: '(max-width: 760px) 68vw, 280px' }));
+  const copy = element('span', 'home-memory-copy');
+  append(copy,
+    element('strong', '', memory.title),
+    memory.subtitle ? element('span', '', memory.subtitle) : null,
+    memory.count === null ? null : element('span', '', t('common.photosCount', { count: memory.count })),
+  );
+  append(card, cover, copy);
+  return card;
+}
+
+function homePersonCard(person) {
+  const card = element('a', 'home-person-card');
+  card.href = `/people/${person.id}`;
+  const portrait = element('span', 'home-person-photo');
+  portrait.append(portraitImage(person));
+  append(card, portrait, element('strong', '', person.name),
+    person.count === null ? null : element('span', '', t('common.photosCount', { count: person.count })));
+  return card;
+}
+
+async function renderHome() {
+  showLoading('home', 'home.title', 'home.lead');
+  try {
+    // The home projection is intentionally its own compact server-side read.
+    // It must never fetch or aggregate the full timeline in the browser.
+    const home = normalizeHome((await presentationJson('/api/class-archive/home')).value);
+    assertPresentationActive();
+    const page = element('div', 'home-page');
+    page.append(pageHeader('home.title', 'home.lead'));
+
+    const featured = element('section', 'home-featured');
+    featured.append(homeRowHeading('home.featured', 'home.featuredLead'));
+    if (home.featured.length === 0) {
+      featured.append(element('p', 'home-row-empty', t('home.featuredEmpty')));
+    } else {
+      const item = home.featured[0];
+      const card = element('a', 'home-featured-card');
+      card.href = item.href;
+      if (item.coverPhotoId) card.append(resilientImage(mediaUrl(item.coverPhotoId, 'large'), '', true, { sizes: '(max-width: 760px) 100vw, 72vw' }));
+      const shade = element('div', 'home-featured-copy');
+      append(shade, element('p', '', t('home.featured')), element('h2', '', item.title), item.subtitle ? element('span', '', item.subtitle) : null);
+      card.append(shade);
+      featured.append(card);
+    }
+
+    const memories = element('section', 'home-section');
+    memories.append(homeRowHeading('home.memories', 'home.memoriesLead', '/memories'));
+    const memoryRow = element('div', 'home-memory-row');
+    if (home.memories.length > 0) append(memoryRow, home.memories.map(homeMemoryCard));
+    else memoryRow.append(element('p', 'home-row-empty', t('home.memoriesEmpty')));
+    memories.append(memoryRow);
+
+    const albums = element('section', 'home-section');
+    albums.append(homeRowHeading('home.albums', 'home.albumsLead', '/albums'));
+    const albumRow = element('div', 'home-album-row');
+    if (home.albums.length > 0) append(albumRow, home.albums.map(albumCard));
+    else albumRow.append(element('p', 'home-row-empty', t('home.albumsEmpty')));
+    albums.append(albumRow);
+
+    const people = element('section', 'home-section');
+    people.append(homeRowHeading('home.people', 'home.peopleLead', '/people'));
+    const peopleRow = element('div', 'home-people-row');
+    if (home.people.length > 0) append(peopleRow, home.people.map(homePersonCard));
+    else peopleRow.append(element('p', 'home-row-empty', t('home.peopleEmpty')));
+    people.append(peopleRow);
+
+    const allPhotos = element('a', 'home-all-photos', t('home.allPhotos'));
+    allPhotos.href = '/photos';
+    allPhotos.dataset.homeAllPhotos = 'true';
+    allPhotos.setAttribute('aria-label', t('home.allPhotosCount', { count: home.allPhotosCount }));
+    page.append(featured, memories, albums, people, allPhotos);
+    shell('home', page);
+  } catch {
+    const page = element('div');
+    append(page, pageHeader('home.title', 'home.lead'), errorState());
+    shell('home', page);
+  }
+}
+
 async function loadAlbums() {
   return (await presentationJson('/api/class-archive/albums')).value;
+}
+
+const ALBUM_FILTERS = Object.freeze([
+  { key: 'all', labelKey: 'albums.filterAll' },
+  { key: 'qq', labelKey: 'albums.filterQq' },
+  { key: 'graduation', labelKey: 'albums.filterGraduation' },
+  { key: 'archive', labelKey: 'albums.filterArchive' },
+  { key: 'community', labelKey: 'albums.filterCommunity' },
+]);
+
+function albumMatchesFilter(album, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'community') return album.type === 'COMMUNITY' || album.sourceKind === 'COMMUNITY';
+  if (filter === 'archive') return album.type === 'OFFICIAL' && album.sourceKind === 'ARCHIVE';
+  if (filter === 'qq') return album.sourceKind === 'QQ';
+  if (filter === 'graduation') return album.sourceKind === 'GRADUATION';
+  return false;
+}
+
+function albumFilterBar(activeFilter, onFilter) {
+  const bar = element('div', 'album-filter-bar');
+  bar.setAttribute('aria-label', t('albums.filtersLabel'));
+  for (const filter of ALBUM_FILTERS) {
+    const button = element('button', 'album-filter', t(filter.labelKey));
+    button.type = 'button';
+    button.dataset.active = String(filter.key === activeFilter);
+    button.setAttribute('aria-pressed', String(filter.key === activeFilter));
+    button.addEventListener('click', () => onFilter(filter.key));
+    bar.append(button);
+  }
+  return bar;
 }
 
 async function renderAlbums() {
@@ -2513,20 +2867,29 @@ async function renderAlbums() {
   try {
     const albums = normalizeAlbums(await loadAlbums());
     assertPresentationActive();
-    const page = element('div');
-    append(page, pageHeader('albums.title', 'albums.lead'));
-    if (albums.length === 0) page.append(emptyState('albums.emptyTitle', 'albums.emptyBody'));
-    else {
-      const official = albumHierarchy(albums.filter((album) => album.type === 'OFFICIAL'));
-      const community = albumHierarchy(albums.filter((album) => album.type === 'COMMUNITY'));
-      const sourceCollections = sourceCollectionPresentation(albums.filter((album) => album.type === 'OFFICIAL'), official);
-      if (sourceCollections.sourceRoots.length > 0) {
-        page.append(albumSection('albums.sourceCollections', 'albums.sourceCollectionsLead', sourceCollections.sourceRoots, official.childrenByParent));
+    // Source collections and folder containers remain durable provenance only.
+    // The member-facing grid receives leaf albums from the Gateway, then keeps
+    // a second defensive direct-membership check so an accidental container
+    // payload never restores file-manager navigation to the product surface.
+    const leafAlbums = albums.filter((album) => album.directCount > 0);
+    let activeFilter = 'all';
+    const paint = () => {
+      const page = element('div');
+      append(page, pageHeader('albums.title', 'albums.lead'));
+      if (leafAlbums.length === 0) {
+        page.append(emptyState('albums.emptyTitle', 'albums.emptyBody'));
+      } else {
+        page.append(albumFilterBar(activeFilter, (next) => {
+          activeFilter = next;
+          paint();
+        }));
+        const visible = leafAlbums.filter((album) => albumMatchesFilter(album, activeFilter));
+        if (visible.length === 0) page.append(emptyState('albums.emptyFilterTitle', 'albums.emptyFilterBody'));
+        else page.append(albumSection('albums.leafTitle', 'albums.leafLead', visible));
       }
-      if (sourceCollections.ordinaryRoots.length > 0) page.append(albumSection('albums.official', 'albums.officialLead', sourceCollections.ordinaryRoots, official.childrenByParent));
-      if (community.roots.length > 0) page.append(albumSection('albums.community', 'albums.communityLead', community.roots, community.childrenByParent));
-    }
-    shell('albums', page);
+      shell('albums', page);
+    };
+    paint();
   } catch {
     const page = element('div');
     append(page, pageHeader('albums.title', 'albums.lead'), errorState());
@@ -2599,17 +2962,13 @@ async function loadAlbumPage(id, cursor = null, limit = 120) {
 async function renderAlbum(id) {
   showLoading('albums', 'albums.title', 'albums.lead');
   try {
-    const [initialAlbum, allAlbumPayload, state, spotlightRead] = await Promise.all([
+    const [initialAlbum, state, spotlightRead] = await Promise.all([
       loadAlbumPage(id),
-      loadAlbums(),
       productState(),
       presentationJson('/api/class-archive/spotlight'),
     ]);
     assertPresentationActive();
     let album = initialAlbum;
-    const allAlbums = normalizeAlbums(allAlbumPayload);
-    const hierarchy = albumHierarchy(allAlbums);
-    const childAlbums = hierarchy.childrenByParent.get(album.id) ?? [];
     const spotlight = normalizeSpotlight(spotlightRead.value);
     let pageRequestActive = false;
     const paint = () => {
@@ -2622,12 +2981,15 @@ async function renderAlbum(id) {
       if (album.coverPhotoId) hero.append(resilientImage(mediaUrl(album.coverPhotoId, 'preview'), '', true, { sizes: '100vw' }));
       const shade = element('div', 'album-detail-shade');
       append(shade,
-        element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
-        element('h1', '', album.name),
+        album.sourceLabel ? element('p', 'page-eyebrow', album.sourceLabel) : element('p', 'page-eyebrow', album.type === 'COMMUNITY' ? t('albums.community') : t('albums.official')),
+        element('h1', '', albumDisplayName(album)),
         album.description ? element('p', 'album-description', album.description) : null,
         element('p', 'album-detail-meta', [album.eventLabel, album.dateLabel, t('common.photosCount', { count: album.count })].filter(Boolean).join(' · ')),
       );
       const heroActions = element('div', 'album-hero-actions');
+      const searchWithin = element('a', 'light-button', t('albums.searchWithin'));
+      searchWithin.href = `/search?album=${album.id}`;
+      heroActions.append(searchWithin);
       if (state.canSpotlight && album.owned && album.canSpotlight && spotlight?.albumId !== album.id) {
         const create = element('button', 'light-button', t('spotlight.create'));
         create.type = 'button';
@@ -2644,17 +3006,6 @@ async function renderAlbum(id) {
       shade.append(heroActions);
       hero.append(shade);
       page.append(hero);
-      if (childAlbums.length > 0) {
-        const children = element('section', 'album-children');
-        const heading = element('div', 'collection-heading');
-        const headingCopy = element('div');
-        append(headingCopy, element('h2', '', t('albums.childAlbums')), element('p', '', t('albums.childAlbumsLead')));
-        heading.append(headingCopy);
-        const grid = element('div', 'album-grid');
-        append(grid, childAlbums.map((child) => albumCard(child, hierarchy.childrenByParent.get(child.id)?.length ?? 0)));
-        append(children, heading, grid);
-        page.append(children);
-      }
       if (album.photos.length === 0) {
         page.append(element('p', 'manage-empty', t('albums.noPhotos')));
       } else {
@@ -2812,6 +3163,7 @@ async function renderMy() {
 
 function route() {
   const path = location.pathname;
+  if (path === '/home') return { name: 'home' };
   if (path === '/photos') return { name: 'photos' };
   const photo = /^\/photos\/([0-9a-f-]{36})$/i.exec(path);
   if (photo && validId(photo[1])) return { name: 'viewer', id: photo[1].toLowerCase() };
@@ -2825,7 +3177,7 @@ function route() {
   if (album && validId(album[1])) return { name: 'album', id: album[1].toLowerCase() };
   if (path === '/memories') return { name: 'memories' };
   if (path === '/my') return { name: 'my' };
-  return { name: 'photos' };
+  return { name: 'home' };
 }
 
 async function start() {
@@ -2834,6 +3186,7 @@ async function start() {
   applyDocumentTranslations();
   const current = route();
   const handlers = {
+    home: () => renderHome(),
     photos: () => renderPhotos(),
     viewer: () => renderViewer(current.id),
     people: () => renderPeople(),

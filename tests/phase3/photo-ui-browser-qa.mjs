@@ -142,7 +142,7 @@ async function assertLayout(page, mobile, code, requireMobileNavigation = true) 
   }, mobile);
   assert(!result.overflow, `${code}_horizontal_overflow`);
   if (mobile && requireMobileNavigation) {
-    assert(result.mobileVisible && result.mobileLinks === 5, `${code}_mobile_navigation`);
+    assert(result.mobileVisible && result.mobileLinks === 6, `${code}_mobile_navigation`);
     assert(result.minimumTarget >= 44, `${code}_mobile_touch_target`);
   }
 }
@@ -371,12 +371,25 @@ async function photosPage(page, role, mobile) {
   assert(photos >= 1, `${role}_photos_media`);
   await waitForDecoded(page, '.photo-card img[src^="/api/assets/"]', Math.min(9, photos), `${role}_photos_decoded`);
   assert(await page.locator('.photo-card img[data-load-state="error"]').count() === 0, `${role}_photos_image_error`);
-  for (const label of mobile ? ['照片', '人物', '搜索', '相册', '我的'] : ['照片', '人物', '搜索', '相册', '回忆', '我的']) {
+  for (const label of mobile ? ['首页', '照片', '人物', '搜索', '相册', '我的'] : ['首页', '照片', '人物', '搜索', '相册', '回忆', '我的']) {
     assert(await page.getByRole('link', { name: label, exact: true }).count() >= 1, `${role}_nav_${label.length}`);
   }
   await assertLayout(page, mobile, `${role}_photos`);
   await assertBusinessCopy(page, `${role}_photos`);
   return timelineContract(page, role);
+}
+
+async function homePage(page, role, mobile) {
+  await goto(page, photoOrigin, '/home', `${role}_home`);
+  assert(await page.getByRole('heading', { name: '首页', exact: true }).count() >= 1, `${role}_home_heading`);
+  for (const selector of ['.home-featured', '.home-memory-row', '.home-album-row', '.home-people-row', '[data-home-all-photos]']) {
+    assert(await page.locator(selector).count() === 1, `${role}_home_${selector.replace(/[^a-z]+/gi, '_')}`);
+  }
+  const requestedTimeline = await page.evaluate(() => performance.getEntriesByType('resource')
+    .some((entry) => entry.name.includes('/api/class-archive/timeline')));
+  assert(!requestedTimeline, `${role}_home_full_timeline_request`);
+  await assertLayout(page, mobile, `${role}_home`);
+  await assertBusinessCopy(page, `${role}_home`);
 }
 
 async function viewer(page, role, mobile) {
@@ -388,16 +401,20 @@ async function viewer(page, role, mobile) {
   assert(await page.locator('.viewer-image[data-load-state="error"]').count() === 0, `${role}_viewer_image_error`);
   const src = await page.locator('.viewer-image').getAttribute('src');
   assert(/^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=preview&v=[a-f0-9]{32}$/i.test(src ?? ''), `${role}_viewer_media_path`);
-  const info = page.getByRole('button', { name: '照片信息', exact: true });
-  assert(await info.count() === 1, `${role}_viewer_info_button`);
+  const info = page.getByRole('button', { name: '打开评论', exact: true });
+  assert(await info.count() === 1, `${role}_viewer_comments_button`);
+  assert(await page.locator('.viewer-comments').count() === 1, `${role}_viewer_comments_panel`);
+  assert(await page.locator('.viewer-photo-info').count() === 1, `${role}_viewer_photo_info_collapsed`);
+  if (role === 'family') assert(await page.locator('.comment-composer').count() === 0, `${role}_viewer_comments_readonly`);
+  else assert(await page.locator('.comment-composer').count() >= 1, `${role}_viewer_comments_composer`);
   await info.click();
-  assert(await info.getAttribute('aria-expanded') === 'true', `${role}_viewer_info_panel`);
+  assert(await info.getAttribute('aria-expanded') === 'true', `${role}_viewer_comments_drawer`);
   if (mobile) {
     const navHidden = await page.locator('.viewer-next').evaluate((button) => {
       const style = getComputedStyle(button);
       return style.pointerEvents === 'none' && Number(style.opacity) === 0;
     });
-    assert(navHidden, `${role}_viewer_info_navigation_overlap`);
+    assert(navHidden, `${role}_viewer_comments_navigation_overlap`);
   }
   const zoom = page.getByRole('button', { name: '放大', exact: true });
   assert(await zoom.count() === 1, `${role}_viewer_zoom_button`);
@@ -509,6 +526,28 @@ async function simplePage(page, role, route, heading, surface, mobile) {
   }
   await assertLayout(page, mobile, `${role}_${surface}`);
   await assertBusinessCopy(page, `${role}_${surface}`);
+}
+
+async function leafAlbumDetail(page, role, mobile) {
+  const card = page.locator('.album-card').first();
+  assert(await card.count() === 1, `${role}_leaf_album_card`);
+  await Promise.all([
+    page.waitForURL(/\/albums\/[0-9a-f-]{36}$/i, { timeout: 30_000 }).catch(() => null),
+    card.click(),
+  ]);
+  assert(/^\/albums\/[0-9a-f-]{36}$/i.test(new URL(page.url()).pathname), `${role}_leaf_album_route`);
+  assert(await page.locator('.album-children').count() === 0, `${role}_leaf_album_no_folder_tree`);
+  assert(await page.locator('.album-photo-grid').count() === 1, `${role}_leaf_album_grid`);
+  const within = page.getByRole('link', { name: '在此相册中搜索', exact: true });
+  assert(await within.count() === 1 && /\/search\?album=[0-9a-f-]{36}$/i.test(await within.getAttribute('href') ?? ''), `${role}_leaf_album_search_context_link`);
+  await assertLayout(page, mobile, `${role}_leaf_album`);
+  await assertBusinessCopy(page, `${role}_leaf_album`);
+  await Promise.all([
+    page.waitForURL(/\/search\?album=[0-9a-f-]{36}$/i, { timeout: 30_000 }).catch(() => null),
+    within.click(),
+  ]);
+  assert(/^\/search$/.test(new URL(page.url()).pathname) && new URL(page.url()).searchParams.has('album'), `${role}_album_search_context_route`);
+  assert(await page.locator('.search-context').count() === 1, `${role}_album_search_context_visible`);
 }
 
 async function familyDenied(page, context, timeline) {
@@ -922,6 +961,9 @@ async function runRole(role, viewport, baseline = null) {
   try {
     stageAt(`${role}_${viewport}_login`);
     page = await login(context, role);
+    stageAt(`${role}_${viewport}_home`);
+    await homePage(page, role, mobile);
+    await screenshot(page, role, 'home', viewport);
     stageAt(`${role}_${viewport}_photos`);
     const timeline = await photosPage(page, role, mobile);
     const peopleCounts = await canonicalPeopleContract(context, role, timeline);
@@ -940,6 +982,7 @@ async function runRole(role, viewport, baseline = null) {
       stageAt(`${role}_${viewport}_albums`);
       await simplePage(page, role, '/albums', '相册', 'albums', mobile);
       await screenshot(page, role, 'albums', viewport);
+      await leafAlbumDetail(page, role, mobile);
     }
     if (role === 'classmate') {
       stageAt(`${role}_${viewport}_memories`);
