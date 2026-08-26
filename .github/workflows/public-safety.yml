@@ -55,10 +55,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          php tests/phase3/photo-comment-security-static.php
+          php tests/phase3/auto-collection-persistence-static.php
+          php tests/phase3/ai-index-persistence-static.php
           php tests/phase3/photo-product-ops-protocol.php
           php tests/phase3/presentation-epoch-static.php
           php tests/phase3/responsive-media-contract.php
           php tests/phase3/photo-cache-warmup-static.php
+          node tests/phase3/search-suggestions-contract.mjs
           node tests/phase3/photo-ui-static.mjs
           node tests/phase3/photo-cache-contract.mjs
           node tests/phase3/photo-product-contract.mjs
