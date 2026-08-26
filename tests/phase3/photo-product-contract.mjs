@@ -134,7 +134,7 @@ check(privateAlbumAliasScript.includes("['PRIVATE_SOURCE_A', 'PRIVATE_SOURCE_B']
   && privateAlbumAliasScript.includes("`depth`=0")
   && privateAlbumAliasScript.includes("f.`display_name`=?")
   && privateAlbumAliasScript.includes('setDisplayAlias')
-  && !privateAlbumAliasScript.includes('<private-drive-root>/\\'), 'the private alias applicator must target one allowlisted source root without embedding a workstation path');
+  && !/[A-Za-z]:\\\\/.test(privateAlbumAliasScript), 'the private alias applicator must target one allowlisted source root without embedding a workstation path');
 check(gateway.includes('if ($directMembers === [])') && gateway.includes("'directTotal' => count($directMembers)"), 'pure folder containers must be excluded while direct-photo leaf albums retain their own membership');
 check(gateway.includes('public function searchSuggestions(string $query = \'\', ?string $albumId = null): array')
   && gateway.includes('self::boundedSuggestions($people)')

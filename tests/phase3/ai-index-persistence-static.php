@@ -132,8 +132,9 @@ $assert(str_contains($source['backup_evidence'], 'public const VERSION = 7'), 'b
 $assert(str_contains($source['backup_evidence'], 'public const BACKUP_MANIFEST_FORMAT = 8'), 'backup evidence does not bind manifest v8');
 $assert(str_contains($source['backup_evidence'], '/workspace/plugins/ClassIdentity/src/AiIndexService.php'), 'backup evidence digest omits AI control plane');
 $assert(str_contains($source['fixture'], 'body_sha256') && !str_contains($source['fixture'], '`body` FROM'), 'restore fixture must not export comment plaintext');
+$windowsAbsolutePathPattern = '/[A-Za-z]:\\\\/';
 foreach ($source as $name => $contents) {
-    $assert(!str_contains($contents, '<private-drive-root>/'), "{$name} contains a private source path");
+    $assert(preg_match($windowsAbsolutePathPattern, $contents) !== 1, "{$name} contains a private source path");
     $assert(!str_contains($contents, '127.0.0.1:8191'), "{$name} couples AI control plane to the private UI port");
 }
 

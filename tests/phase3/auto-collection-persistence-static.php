@@ -110,8 +110,9 @@ $assert(str_contains($source['service'], 'sort($actualReasonKeys, SORT_STRING)')
     && str_contains($source['service'], 'sort($expectedReasonKeys, SORT_STRING)'),
     'reconciliation_source_set_comparison_must_be_order_independent');
 
+$windowsAbsolutePathPattern = '/[A-Za-z]:\\\\/';
 foreach ($source as $name => $contents) {
-    $assert(!str_contains($contents, '<private-drive-root>/'), $name . '_contains_private_source_path');
+    $assert(preg_match($windowsAbsolutePathPattern, $contents) !== 1, $name . '_contains_private_source_path');
     $assert(!str_contains($contents, '127.0.0.1:8191'), $name . '_couples_to_private_ui_port');
 }
 
