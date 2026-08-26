@@ -62,19 +62,56 @@ final class BridgeImmichAdapter implements ImmichAdapter
     public function peopleForVisiblePhotos(array $visibleClassPhotoIds): array
     {
         $items = $this->requestCandidates('/people', $visibleClassPhotoIds);
-        $result = [];
+        /** @var array<string,array{class_photo_ids:array<string,true>,cover_class_photo_id:string,portrait_focus:?array{x:float,y:float,zoom:float}}> $clusters */
+        $clusters = [];
+        $totalMemberships = 0;
         foreach ($items as $item) {
             $immichPersonId = $item['immich_person_id'] ?? null;
-            if (!is_string($immichPersonId)) {
+            $coverPhotoId = $item['cover_class_photo_id'] ?? null;
+            if (!is_string($immichPersonId) || !is_string($coverPhotoId)) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $immichPersonId = ClassArchivePerson::normalizeImmichPersonId($immichPersonId);
+            if (!isset($clusters[$immichPersonId])) {
+                $clusters[$immichPersonId] = [
+                    'class_photo_ids' => [],
+                    'cover_class_photo_id' => $coverPhotoId,
+                    'portrait_focus' => $item['portrait_focus'] ?? null,
+                ];
+            } elseif ($clusters[$immichPersonId]['portrait_focus'] === null && ($item['portrait_focus'] ?? null) !== null) {
+                // Keep cover and focus coupled; both were already authorized
+                // against the same policy-scoped batch by requestCandidates.
+                $clusters[$immichPersonId]['cover_class_photo_id'] = $coverPhotoId;
+                $clusters[$immichPersonId]['portrait_focus'] = $item['portrait_focus'];
+            }
+            foreach ($item['class_photo_ids'] as $classPhotoId) {
+                if (!isset($clusters[$immichPersonId]['class_photo_ids'][$classPhotoId])) {
+                    $clusters[$immichPersonId]['class_photo_ids'][$classPhotoId] = true;
+                    ++$totalMemberships;
+                    if ($totalMemberships > 50000) {
+                        throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
+                    }
+                }
+            }
+        }
+        if (count($clusters) > 5000) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
+        }
+        ksort($clusters, SORT_STRING);
+        $result = [];
+        foreach ($clusters as $immichPersonId => $cluster) {
+            $photoIds = array_keys($cluster['class_photo_ids']);
+            $coverPhotoId = $cluster['cover_class_photo_id'];
+            if (!in_array($coverPhotoId, $photoIds, true)) {
                 throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
             }
             $mapped = $this->personMapping->ensureImmichCluster($immichPersonId);
             $result[] = new GatewayPersonCandidate(
                 (string) $mapped['class_person_id'],
                 $mapped['display_name'] ?? null,
-                $item['class_photo_ids'],
-                $item['cover_class_photo_id'] ?? null,
-                $item['portrait_focus'] ?? null,
+                $photoIds,
+                $coverPhotoId,
+                $cluster['portrait_focus'],
             );
         }
         return $result;

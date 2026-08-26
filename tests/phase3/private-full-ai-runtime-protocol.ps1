@@ -102,6 +102,9 @@ Assert-Protocol ($bridge.Contains('const PEOPLE_PAGE_SIZE = 1000;') `
     -and $bridge.Contains('typeof hasNextPage !== ''boolean''') `
     -and $bridge.Contains('const people = await allVisiblePeople();')) 'bridge_people_pagination_missing'
 Assert-Protocol ($bridgeAdapter.Contains('count($items) > 5000')) 'bridge_adapter_people_page_limit_invalid'
+Assert-Protocol ($bridgeAdapter.Contains('$clusters[$immichPersonId]') `
+    -and $bridgeAdapter.Contains("ksort(`$clusters, SORT_STRING)") `
+    -and $bridgeAdapter.Contains('if ($totalMemberships > 50000)')) 'bridge_adapter_people_batches_must_merge'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
