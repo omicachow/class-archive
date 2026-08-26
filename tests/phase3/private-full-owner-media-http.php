@@ -128,6 +128,10 @@ try {
         privateFullOwnerMediaHttpFail('piwigo_root_untrusted');
     }
     chdir($root) || privateFullOwnerMediaHttpFail('piwigo_root_unavailable');
+    // Piwigo's CLI bootstrap still consults REMOTE_ADDR while constructing
+    // the session. Keep the probe deterministic and loopback-only instead of
+    // allowing an unset CLI server variable to abort before MediaGuard runs.
+    $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
     define('PHPWG_ROOT_PATH', './');
     ob_start();
     require PHPWG_ROOT_PATH . 'include/common.inc.php';
