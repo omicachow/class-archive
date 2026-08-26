@@ -432,6 +432,16 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & wsl.exe @($composeArguments + @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/ai-index-persistence-static.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/ai-index-persistence-runtime.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
             'php', '/workspace/tests/phase3/photo-product-ops-protocol.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

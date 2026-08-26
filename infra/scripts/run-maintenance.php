@@ -150,6 +150,11 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         );
         $cleanup = \ClassIdentitySubmissionService::fromPiwigo()->cleanupRejectedBinaries($retentionDays, $applyRejectedCleanup);
         $reconciliation = \ClassIdentity\ReconciliationService::fromPiwigo()->scanAndPersist();
+        // This is intentionally a read-only control-plane scan. It neither
+        // enqueues a retry nor contacts the isolated Immich runtime: model
+        // work remains explicit/background-only and product GETs never repair
+        // a missing index on demand.
+        $aiIndex = \ClassIdentity\AiIndexService::fromPiwigo()->maintenanceReport();
         // Precompute only bounded, canonical Piwigo derivatives. This is an
         // explicit maintenance action; product reads never call the warmer.
         $firstScreenWarmup = classArchivePhotoCacheWarm(
@@ -175,6 +180,7 @@ function maintenanceRun(bool $applyRejectedCleanup): array
         $backup = backupFreshnessStatus();
         $attention = (
             ($reconciliation['result'] ?? null) !== 'PASS'
+            || ($aiIndex['result'] ?? null) !== 'PASS'
             || ($attestation['state'] ?? null) !== 'VERIFIED'
             || ($backup['state'] ?? null) !== 'FRESH'
             || (int) ($cleanup['failed'] ?? 0) > 0
@@ -202,6 +208,17 @@ function maintenanceRun(bool $applyRejectedCleanup): array
                 'result' => (string) ($reconciliation['result'] ?? 'REVIEW_REQUIRED'),
                 'issue_count' => (int) ($reconciliation['issue_count'] ?? 0),
                 'checked_images' => (int) ($reconciliation['checked_images'] ?? 0),
+            ],
+            'ai_index' => [
+                'result' => (string) ($aiIndex['result'] ?? 'REVIEW_REQUIRED'),
+                'runtime_state' => (string) ($aiIndex['runtime_state'] ?? 'UNAVAILABLE'),
+                'open_jobs' => (int) ($aiIndex['open_jobs'] ?? 0),
+                'missing_index_rows' => (int) ($aiIndex['missing_index_rows'] ?? 0),
+                'checksum_drift' => (int) ($aiIndex['checksum_drift'] ?? 0),
+                'failed_assets' => (int) ($aiIndex['failed_assets'] ?? 0),
+                'failed_jobs' => (int) ($aiIndex['failed_jobs'] ?? 0),
+                'worker_configured' => (bool) ($aiIndex['worker_configured'] ?? false),
+                'safe_auto_fix' => false,
             ],
             'media_permission_verification' => [
                 'derivative_files' => (int) (($reconciliation['derivative']['file_count'] ?? 0)),

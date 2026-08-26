@@ -289,10 +289,10 @@ function Save-JsonArtifact {
 
 function Assert-CanonicalFixture {
     param([Parameter(Mandatory = $true)]$Fixture)
-    if ([int]$Fixture.fixture_version -ne 6 -or [int]$Fixture.class_identity_schema_version -ne 14) {
-        throw 'Refusing destructive drill: restore fixture does not attest the ClassIdentity v14 product schema.'
+    if ([int]$Fixture.fixture_version -ne 7 -or [int]$Fixture.class_identity_schema_version -ne 15) {
+        throw 'Refusing destructive drill: restore fixture does not attest the ClassIdentity v15 product schema.'
     }
-    $v14BusinessState = @(
+    $v15BusinessState = @(
         'person',
         'person_merge',
         'person_photo_rule',
@@ -306,12 +306,17 @@ function Assert-CanonicalFixture {
         'private_library_folder',
         'private_library_import',
         'private_library_import_item',
+        'photo_comment',
+        'auto_collection',
+        'auto_collection_photo',
+        'ai_asset_index',
+        'ai_index_job',
         'migration'
     )
-    foreach ($name in $v14BusinessState) {
+    foreach ($name in $v15BusinessState) {
         $property = $Fixture.summary.PSObject.Properties[$name]
         if ($null -eq $property -or $null -eq $property.Value.count -or [string]$property.Value.sha256 -notmatch '^[0-9a-f]{64}$') {
-            throw "Refusing destructive drill: restore fixture is missing deterministic v14 business state: $name"
+            throw "Refusing destructive drill: restore fixture is missing deterministic v15 business state: $name"
         }
     }
     if (

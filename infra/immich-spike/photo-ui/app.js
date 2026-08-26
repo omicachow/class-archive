@@ -2469,6 +2469,95 @@ async function hybridSearch(query, albumId = null) {
   }
 }
 
+const SEARCH_SUGGESTION_SECTIONS = Object.freeze([
+  { key: 'people', resultType: 'people', titleKey: 'search.peopleSection' },
+  { key: 'albums', resultType: 'albums', titleKey: 'search.albumsSection' },
+  { key: 'events', resultType: 'events', titleKey: 'search.eventsSection' },
+  { key: 'archiveTime', resultType: 'dates', titleKey: 'search.datesSection' },
+]);
+
+function normalizeSearchSuggestionItem(type, item) {
+  if (!item || typeof item !== 'object') throw new Error('safe_search_suggestion_item_invalid');
+  const label = safeText(item.label ?? item.displayAlias ?? item.name ?? item.title, '');
+  const rawCount = item.total ?? item.count ?? item.photoCount ?? item.photo_count;
+  const rawId = item.id ?? item.classPersonId ?? item.class_person_id ?? item.albumId ?? item.album_id;
+  if (!label || (rawCount !== undefined && (!Number.isInteger(rawCount) || rawCount < 0))) {
+    throw new Error('safe_search_suggestion_item_invalid');
+  }
+  if ((type === 'people' || type === 'albums') && !validId(rawId)) {
+    throw new Error('safe_search_suggestion_item_invalid');
+  }
+  let href = null;
+  if (type === 'people') href = `/people/${rawId.toLowerCase()}`;
+  if (type === 'albums') href = `/albums/${rawId.toLowerCase()}`;
+  return { label, count: rawCount ?? null, href };
+}
+
+function normalizeSearchSuggestions(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('safe_search_suggestions_invalid');
+  }
+  return SEARCH_SUGGESTION_SECTIONS.map((section) => {
+    const source = payload[section.key];
+    if (!source || typeof source !== 'object' || !Number.isInteger(source.total) || source.total < 0
+      || !Array.isArray(source.items) || source.items.length > 24 || source.total < source.items.length) {
+      throw new Error('safe_search_suggestions_invalid');
+    }
+    return {
+      ...section,
+      total: source.total,
+      items: source.items.map((item) => normalizeSearchSuggestionItem(section.resultType, item)),
+    };
+  }).filter((section) => section.items.length > 0);
+}
+
+async function searchSuggestions(query, albumId = null, signal = undefined) {
+  if (typeof query !== 'string' || query.length > 190 || query.includes('\0')) {
+    throw new Error('safe_search_suggestion_query_invalid');
+  }
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (albumId) {
+    if (!validId(albumId)) throw new Error('safe_search_suggestion_album_invalid');
+    params.set('albumId', albumId.toLowerCase());
+  }
+  const suffix = params.size > 0 ? `?${params}` : '';
+  return normalizeSearchSuggestions(await apiJson(`/api/class-archive/search/suggestions${suffix}`, {
+    cache: 'no-store', signal,
+  }));
+}
+
+function searchSuggestionSection(section, onQuery) {
+  const group = element('section', 'search-live-suggestion-group');
+  group.dataset.suggestionType = section.key;
+  group.append(element('h2', '', t(section.titleKey)));
+  const list = element('div', 'search-live-suggestion-list');
+  for (const item of section.items) {
+    const node = item.href ? element('a', 'search-live-suggestion') : element('button', 'search-live-suggestion');
+    if (item.href) node.href = item.href;
+    else {
+      node.type = 'button';
+      node.addEventListener('click', () => onQuery(item.label));
+    }
+    append(node,
+      element('strong', '', item.label),
+      item.count === null ? null : element('span', '', t('common.photosCount', { count: item.count })),
+    );
+    list.append(node);
+  }
+  group.append(list);
+  return group;
+}
+
+function renderSearchSuggestions(sections, onQuery) {
+  if (sections.length === 0) return null;
+  const panel = element('section', 'search-live-suggestions');
+  panel.setAttribute('aria-label', t('search.liveSuggestions'));
+  panel.append(element('p', 'search-live-suggestions-label', t('search.liveSuggestions')));
+  append(panel, sections.map((section) => searchSuggestionSection(section, onQuery)));
+  return panel;
+}
+
 function structuredSection(section, onQuery) {
   const key = `search.${section.type}Section`;
   const group = element('section', 'search-structured-group');
@@ -2565,10 +2654,29 @@ async function renderSearch() {
   status.setAttribute('aria-live', 'polite');
   status.hidden = true;
   const results = element('div');
+  const suggestionHost = element('div', 'search-live-suggestions-host');
+  suggestionHost.hidden = true;
   const albumId = new URLSearchParams(location.search).get('album');
   const albumContext = validId(albumId) ? albumId.toLowerCase() : null;
+  let suggestionTimer = null;
+  let suggestionController = null;
+  let suggestionGeneration = 0;
+  const clearSearchSuggestions = () => {
+    suggestionGeneration += 1;
+    if (suggestionTimer !== null) {
+      clearTimeout(suggestionTimer);
+      suggestionTimer = null;
+    }
+    if (suggestionController !== null) {
+      suggestionController.abort();
+      suggestionController = null;
+    }
+    suggestionHost.hidden = true;
+    suggestionHost.replaceChildren();
+  };
   const runQuery = (value) => {
     input.value = value;
+    clearSearchSuggestions();
     form.requestSubmit();
   };
   const discovery = searchDiscovery(runQuery);
@@ -2578,8 +2686,37 @@ async function renderSearch() {
     clear.href = '/search';
     append(context, element('span', '', t('search.albumContext')), clear);
   }
-  append(page, form, context, discovery, status);
+  append(page, form, context, suggestionHost, discovery, status);
   shell('search', page);
+
+  input.addEventListener('input', () => {
+    const query = input.value.trim();
+    clearSearchSuggestions();
+    if (!query) return;
+    const generation = suggestionGeneration;
+    suggestionTimer = setTimeout(async () => {
+      const controller = new AbortController();
+      suggestionController = controller;
+      try {
+        const sections = await searchSuggestions(query, albumContext, controller.signal);
+        if (generation !== suggestionGeneration || input.value.trim() !== query) return;
+        const panel = renderSearchSuggestions(sections, runQuery);
+        if (panel) suggestionHost.replaceChildren(panel);
+        else suggestionHost.replaceChildren();
+        suggestionHost.hidden = panel === null;
+      } catch {
+        // Suggestions are optional presentation metadata. A failed or stale
+        // request must disappear rather than leave cached candidate labels on
+        // screen; the explicit submitted search remains independently safe.
+        if (generation === suggestionGeneration) {
+          suggestionHost.hidden = true;
+          suggestionHost.replaceChildren();
+        }
+      } finally {
+        if (suggestionController === controller) suggestionController = null;
+      }
+    }, 180);
+  });
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -2588,6 +2725,7 @@ async function renderSearch() {
       input.focus();
       return;
     }
+    clearSearchSuggestions();
     discovery.hidden = true;
     status.hidden = false;
     if (!results.isConnected) page.append(results);

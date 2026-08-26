@@ -1875,6 +1875,26 @@ async function handleApi(request, response, url, clientAddress) {
       await relayPublicGatewayApi(request, response, `/api/comments/${assertUuid(commentsMatch[1])}`, clientAddress, { responseOptions: { metadata: true } });
       return;
     }
+    if (url.pathname === '/api/class-archive/search/suggestions') {
+      // Suggestions remain a deliberately narrow Gateway read: there is no
+      // caller-controlled upstream path, no unbounded query, and only one
+      // opaque album context may scope the policy-filtered response.
+      const query = exactQuery(url, new Set(['q', 'albumId']));
+      const value = query.get('q');
+      if (value !== undefined && (value.length > 190 || value.includes('\0'))) {
+        throw new TypeError('class_archive_web_compat_search_suggestions_query_invalid');
+      }
+      const albumId = query.get('albumId');
+      if (albumId !== undefined && !UUID_V4.test(albumId)) {
+        throw new TypeError('class_archive_web_compat_search_suggestions_album_invalid');
+      }
+      const params = new URLSearchParams();
+      if (value !== undefined) params.set('q', value);
+      if (albumId !== undefined) params.set('albumId', assertUuid(albumId));
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/search/suggestions${suffix}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
     if (url.pathname === '/api/class-archive/search/hybrid') {
       const query = exactQuery(url, new Set(['q', 'albumId']));
       const value = query.get('q');

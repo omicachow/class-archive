@@ -172,6 +172,7 @@ const zhCN = Object.freeze({
   'search.suggestionGroupPhoto': '合照',
   'search.suggestionBasketball': '篮球',
   'search.discoveryHint': '也可以查找：人物 · 相册 · 活动 · 学期',
+  'search.liveSuggestions': '搜索建议',
   'search.albumContext': '正在当前相册中搜索',
   'search.clearAlbumContext': '搜索全部照片',
   'search.searching': '正在搜索…',

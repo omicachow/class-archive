@@ -12,10 +12,10 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class BackupRestoreEvidence
 {
-    public const VERSION = 6;
-    public const FIXTURE_VERSION = 6;
-    public const CLASS_IDENTITY_SCHEMA_VERSION = 14;
-    public const BACKUP_MANIFEST_FORMAT = 7;
+    public const VERSION = 7;
+    public const FIXTURE_VERSION = 7;
+    public const CLASS_IDENTITY_SCHEMA_VERSION = 15;
+    public const BACKUP_MANIFEST_FORMAT = 8;
     public const FRESHNESS_SECONDS = 90 * 86400;
 
     private const DATA_DIRECTORY = '_data/class-archive';
@@ -168,6 +168,7 @@ final class BackupRestoreEvidence
             '/workspace/infra/scripts/restore-backup.sh',
             '/workspace/infra/scripts/backup-restore-drill.ps1',
             '/workspace/infra/scripts/rebuild-photo-read-projection.php',
+            '/workspace/plugins/ClassIdentity/src/AiIndexService.php',
         ];
         $context = hash_init('sha256');
         foreach ($paths as $path) {

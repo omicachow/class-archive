@@ -17,7 +17,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
  */
 final class ReconciliationService
 {
-    public const VERSION = 2;
+    public const VERSION = 3;
     public const FRESHNESS_SECONDS = 24 * 3600;
 
     private const DATA_DIRECTORY = '_data/class-archive';
@@ -198,6 +198,12 @@ final class ReconciliationService
         $productDomain = $this->productDomainFindings($heritageRoot, $livingRoot);
         $issues = array_merge($issues, $productDomain['issues']);
 
+        // The optional AI runtime is not allowed to hide lifecycle drift. It
+        // remains a separate, checksum-bound control plane: this scan only
+        // classifies rows/jobs and never invokes Immich or a model.
+        $aiIndex = $this->aiIndexFindings();
+        $issues = array_merge($issues, $aiIndex['issues']);
+
         foreach (self::discoverOriginals() as $path) {
             if (!isset($managedPaths[$path])) {
                 $issues[] = self::issue('UNMANAGED_ORIGINAL', 'QUARANTINE', 'file:' . hash('sha256', $path));
@@ -222,7 +228,109 @@ final class ReconciliationService
             'checked_images' => count($images),
             'canonical_photo_mappings' => count($photoMappings),
             'product_domain' => $productDomain['counts'],
+            'ai_index' => $aiIndex['counts'],
         ];
+    }
+
+    /**
+     * @return array{issues:list<array{code:string,disposition:string,subject:string}>,counts:array<string,int>}
+     */
+    private function aiIndexFindings(): array
+    {
+        $issues = [];
+        $photo = '`' . $this->prefix . 'class_identity_photo`';
+        $index = '`' . $this->prefix . 'class_identity_ai_asset_index`';
+        $jobs = '`' . $this->prefix . 'class_identity_ai_index_job`';
+
+        $indexRows = $this->all(
+            'SELECT HEX(p.`class_photo_id`) AS `photo_id`,p.`state` AS `photo_state`,p.`media_checksum` AS `photo_checksum`,'
+                . 'ai.`class_photo_id` AS `index_photo_id`,ai.`source_checksum`,ai.`face_state`,ai.`search_state` '
+                . 'FROM ' . $photo . ' p LEFT JOIN ' . $index . ' ai ON ai.`class_photo_id`=p.`class_photo_id` '
+                . 'ORDER BY p.`created_at` ASC'
+        );
+        $stateCounts = [
+            'indexed_rows' => 0,
+            'active_missing_rows' => 0,
+            'checksum_drift' => 0,
+            'retired_state_drift' => 0,
+            'failed_assets' => 0,
+            'jobs_pending' => 0,
+            'jobs_running' => 0,
+            'jobs_unavailable' => 0,
+            'jobs_failed' => 0,
+            'job_target_drift' => 0,
+        ];
+        foreach ($indexRows as $row) {
+            $photoId = (string) ($row['photo_id'] ?? '');
+            $subject = self::opaqueSubject('ai-photo', $photoId);
+            $active = ($row['photo_state'] ?? null) === ClassArchivePhoto::STATE_ACTIVE;
+            if ($row['index_photo_id'] === null) {
+                if ($active) {
+                    ++$stateCounts['active_missing_rows'];
+                    $issues[] = self::issue('AI_INDEX_MAPPING_MISSING', 'MANUAL_REVIEW', $subject);
+                }
+                continue;
+            }
+            ++$stateCounts['indexed_rows'];
+            $face = (string) ($row['face_state'] ?? '');
+            $search = (string) ($row['search_state'] ?? '');
+            if (!in_array($face, AiIndexService::indexStates(), true) || !in_array($search, AiIndexService::indexStates(), true)) {
+                $issues[] = self::issue('AI_INDEX_STATE_INVALID', 'MANUAL_REVIEW', $subject);
+                continue;
+            }
+            if ($active && (!is_string($row['source_checksum'] ?? null)
+                || !is_string($row['photo_checksum'] ?? null)
+                || !hash_equals((string) $row['source_checksum'], (string) $row['photo_checksum'])
+            )) {
+                ++$stateCounts['checksum_drift'];
+                $issues[] = self::issue('AI_INDEX_CHECKSUM_DRIFT', 'MANUAL_REVIEW', $subject);
+            }
+            if (!$active && ($face !== AiIndexService::FACE_REMOVED || $search !== AiIndexService::SEARCH_REMOVED)) {
+                ++$stateCounts['retired_state_drift'];
+                $issues[] = self::issue('AI_INDEX_RETIRED_TARGET_DRIFT', 'MANUAL_REVIEW', $subject);
+            }
+            if ($face === AiIndexService::FACE_FAILED || $search === AiIndexService::SEARCH_FAILED) {
+                ++$stateCounts['failed_assets'];
+                $issues[] = self::issue('AI_INDEX_ASSET_FAILED', 'MANUAL_REVIEW', $subject);
+            }
+        }
+
+        $jobRows = $this->all(
+            'SELECT HEX(j.`job_id`) AS `job_id`,j.`class_photo_id`,j.`expected_checksum`,j.`state`,p.`state` AS `photo_state`,'
+                . 'p.`media_checksum` AS `photo_checksum` FROM ' . $jobs . ' j '
+                . 'LEFT JOIN ' . $photo . ' p ON p.`class_photo_id`=j.`class_photo_id` ORDER BY j.`created_at` ASC'
+        );
+        foreach ($jobRows as $row) {
+            $state = (string) ($row['state'] ?? '');
+            $subject = self::opaqueSubject('ai-job', (string) ($row['job_id'] ?? ''));
+            if (!in_array($state, AiIndexService::jobStates(), true)) {
+                $issues[] = self::issue('AI_INDEX_JOB_STATE_INVALID', 'MANUAL_REVIEW', $subject);
+                continue;
+            }
+            if ($state === AiIndexService::JOB_PENDING) {
+                ++$stateCounts['jobs_pending'];
+            } elseif ($state === AiIndexService::JOB_RUNNING) {
+                ++$stateCounts['jobs_running'];
+            } elseif ($state === AiIndexService::JOB_UNAVAILABLE) {
+                ++$stateCounts['jobs_unavailable'];
+            } elseif ($state === AiIndexService::JOB_FAILED) {
+                ++$stateCounts['jobs_failed'];
+                $issues[] = self::issue('AI_INDEX_JOB_FAILED', 'MANUAL_REVIEW', $subject);
+            }
+            if (!in_array($state, [AiIndexService::JOB_PENDING, AiIndexService::JOB_RUNNING, AiIndexService::JOB_UNAVAILABLE], true)) {
+                continue;
+            }
+            if ($row['class_photo_id'] === null || ($row['photo_state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE
+                || !is_string($row['expected_checksum'] ?? null)
+                || !is_string($row['photo_checksum'] ?? null)
+                || !hash_equals((string) $row['expected_checksum'], (string) $row['photo_checksum'])
+            ) {
+                ++$stateCounts['job_target_drift'];
+                $issues[] = self::issue('AI_INDEX_JOB_TARGET_DRIFT', 'MANUAL_REVIEW', $subject);
+            }
+        }
+
+        return ['issues' => $issues, 'counts' => $stateCounts];
     }
 
     /**
@@ -764,12 +872,23 @@ final class ReconciliationService
 
     private static function selfDigest(): string
     {
-        $path = __FILE__;
-        $hash = hash_file('sha256', $path);
-        if (!is_string($hash)) {
-            throw new \RuntimeException('class_identity_reconciliation_digest_unavailable');
+        // Findings depend on the constrained AI enum contract as well as this
+        // scanner. A change in either invalidates a prior reconciliation
+        // record, but neither file gives the reconciler permission to invoke
+        // a model or repair rows itself.
+        $paths = [__FILE__, __DIR__ . '/AiIndexService.php'];
+        $context = hash_init('sha256');
+        foreach ($paths as $path) {
+            if (!is_file($path) || is_link($path)) {
+                throw new \RuntimeException('class_identity_reconciliation_digest_unavailable');
+            }
+            $hash = hash_file('sha256', $path);
+            if (!is_string($hash)) {
+                throw new \RuntimeException('class_identity_reconciliation_digest_unavailable');
+            }
+            hash_update($context, basename($path) . "\0" . $hash . "\n");
         }
-        return $hash;
+        return hash_final($context);
     }
 
     private static function statusPath(): string

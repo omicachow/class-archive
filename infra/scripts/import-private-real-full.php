@@ -12,6 +12,7 @@ declare(strict_types=1);
  */
 
 use ClassIdentity\AlbumService;
+use ClassIdentity\AiIndexService;
 use ClassIdentity\CanonicalPhotoService;
 use ClassIdentity\ClassArchivePhoto;
 use ClassIdentity\ClassArchivePhotoMappingService;
@@ -556,7 +557,7 @@ require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
 require_once PHPWG_ROOT_PATH . 'admin/include/functions_upload.inc.php';
 
 if (!class_exists(PrivateFullLibraryService::class) || !class_exists(ClassArchivePhotoMappingService::class)
-    || !class_exists(CanonicalPhotoService::class)
+    || !class_exists(CanonicalPhotoService::class) || !class_exists(AiIndexService::class)
 ) {
     privateFullFail('class_archive_runtime_unavailable');
 }
@@ -579,6 +580,7 @@ $library = PrivateFullLibraryService::fromPiwigo();
 $albums = AlbumService::fromPiwigo();
 $mapping = ClassArchivePhotoMappingService::fromPiwigo();
 $canonical = CanonicalPhotoService::fromPiwigo();
+$aiIndex = AiIndexService::fromPiwigo();
 $lease = null;
 $imported = 0;
 $deduplicated = 0;
@@ -768,8 +770,15 @@ try {
             invalidate_user_cache();
         }
     }
+    // This is a metadata-only, idempotent post-import hook. It intentionally
+    // queues work only after the import journal is terminal; no photo import
+    // can fail because a private Immich worker is absent, and no runtime read
+    // will later compensate by starting model work.
+    $aiQueue = $aiIndex->enqueueImportedActivePhotos();
     fwrite(STDOUT, 'PRIVATE_FULL_LIBRARY_IMPORT=PASS imported=' . $imported . ' deduplicated=' . $deduplicated
-        . ' skipped=' . $skipped . ' failed=' . $failed . ' state=' . (string) $finished['state'] . " originals_mode=0660\n");
+        . ' skipped=' . $skipped . ' failed=' . $failed . ' state=' . (string) $finished['state']
+        . ' ai_jobs_queued=' . (int) $aiQueue['queued'] . ' ai_jobs_unchanged=' . (int) $aiQueue['unchanged']
+        . " originals_mode=0660\n");
 } catch (Throwable $error) {
     privateFullFail($error->getMessage());
 } finally {

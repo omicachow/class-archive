@@ -116,7 +116,7 @@ $tables = [
     'person' => 'SELECT HEX(`class_person_id`) AS `class_person_id`,`immich_person_id`,`display_name`,`classmate_identity_id`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`source_kind`,`visibility`,`state`,`lock_version` FROM `' . $ci . 'person` ORDER BY `created_at` ASC',
     'person_merge' => 'SELECT HEX(`merge_id`) AS `merge_id`,HEX(`source_class_person_id`) AS `source_class_person_id`,HEX(`target_class_person_id`) AS `target_class_person_id`,`state`,`created_by_principal_id`,`reverted_by_principal_id`,`created_at`,`reverted_at` FROM `' . $ci . 'person_merge` ORDER BY `created_at`,`merge_id` ASC',
     'person_photo_rule' => 'SELECT HEX(`class_person_id`) AS `class_person_id`,HEX(`class_photo_id`) AS `class_photo_id`,`rule`,`updated_by_principal_id`,`created_at`,`updated_at` FROM `' . $ci . 'person_photo_rule` ORDER BY `class_person_id`,`class_photo_id` ASC',
-    'album' => 'SELECT HEX(`class_album_id`) AS `class_album_id`,`piwigo_category_id`,`album_type`,`owner_principal_id`,`era`,`event_label`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`state` FROM `' . $ci . 'album` ORDER BY `created_at`,`class_album_id` ASC',
+    'album' => 'SELECT HEX(`class_album_id`) AS `class_album_id`,`piwigo_category_id`,SHA2(CAST(COALESCE(`display_alias`,\'\') AS CHAR),256) AS `display_alias_sha256`,`album_type`,`owner_principal_id`,`era`,`event_label`,HEX(`manual_cover_class_photo_id`) AS `manual_cover_class_photo_id`,`state` FROM `' . $ci . 'album` ORDER BY `created_at`,`class_album_id` ASC',
     'spotlight' => 'SELECT HEX(`spotlight_id`) AS `spotlight_id`,`owner_principal_id`,HEX(`class_album_id`) AS `class_album_id`,`state`,`starts_at`,`expires_at`,`cancelled_at`,`cancelled_by_principal_id` FROM `' . $ci . 'spotlight` ORDER BY `created_at`,`spotlight_id` ASC',
     'photo_source' => 'SELECT `id`,HEX(`class_photo_id`) AS `class_photo_id`,`source_kind`,`provenance_code`,HEX(`source_reference_digest`) AS `source_reference_digest`,HEX(`original_filename_digest`) AS `original_filename_digest`,HEX(`source_checksum`) AS `source_checksum`,`byte_size`,`observed_at`,`created_by_principal_id` FROM `' . $ci . 'photo_source` ORDER BY `id` ASC',
     'photo_duplicate' => 'SELECT HEX(`duplicate_id`) AS `duplicate_id`,HEX(`left_class_photo_id`) AS `left_class_photo_id`,HEX(`right_class_photo_id`) AS `right_class_photo_id`,`relation_kind`,`similarity`,`state`,HEX(`canonical_class_photo_id`) AS `canonical_class_photo_id`,`created_by_principal_id`,`reviewed_by_principal_id`,`reviewed_at` FROM `' . $ci . 'photo_duplicate` ORDER BY `created_at`,`duplicate_id` ASC',
@@ -130,6 +130,19 @@ $tables = [
     'private_library_folder' => 'SELECT HEX(`folder_id`) AS `folder_id`,HEX(`source_collection_id`) AS `source_collection_id`,HEX(`relative_path_digest`) AS `relative_path_digest`,HEX(`parent_folder_id`) AS `parent_folder_id`,`piwigo_category_id`,HEX(`class_album_id`) AS `class_album_id`,`display_name`,`depth`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_folder` ORDER BY `source_collection_id`,`relative_path_digest` ASC',
     'private_library_import' => 'SELECT HEX(`import_id`) AS `import_id`,HEX(`manifest_digest`) AS `manifest_digest`,`manifest_version`,`item_total`,`state`,`applied_count`,`deduplicated_count`,`failed_count`,`last_error_code`,`created_by_principal_id`,`started_at`,`completed_at`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_import` ORDER BY `created_at`,`import_id` ASC',
     'private_library_import_item' => 'SELECT HEX(`import_id`) AS `import_id`,HEX(`item_digest`) AS `item_digest`,HEX(`source_collection_id`) AS `source_collection_id`,HEX(`folder_id`) AS `folder_id`,HEX(`source_reference_digest`) AS `source_reference_digest`,HEX(`original_filename_digest`) AS `original_filename_digest`,HEX(`source_checksum`) AS `source_checksum`,HEX(`staging_name_digest`) AS `staging_name_digest`,`byte_size`,`state`,HEX(`class_photo_id`) AS `class_photo_id`,`piwigo_image_id`,`attempt_count`,`last_error_code`,`created_at`,`updated_at` FROM `' . $ci . 'private_library_import_item` ORDER BY `import_id`,`item_digest` ASC',
+    // User-authored comment text is business state, but a restore fixture
+    // fingerprints it rather than emitting it. This keeps the synthetic
+    // recovery proof useful without making the fixture a comment export.
+    'photo_comment' => 'SELECT HEX(`comment_id`) AS `comment_id`,HEX(`class_photo_id`) AS `class_photo_id`,HEX(`parent_comment_id`) AS `parent_comment_id`,`author_principal_id`,`author_role`,SHA2(CAST(`body` AS CHAR),256) AS `body_sha256`,`state`,`deleted_by_principal_id`,SHA2(CAST(COALESCE(`delete_reason`,\'\') AS CHAR),256) AS `delete_reason_sha256`,`created_at`,`updated_at`,`deleted_at` FROM `' . $ci . 'photo_comment` ORDER BY `created_at`,`comment_id` ASC',
+    // Auto collection labels can be curator-authored. Persist their exact
+    // state through opaque digests, never raw labels, in recovery evidence.
+    'auto_collection' => 'SELECT HEX(`auto_collection_id`) AS `auto_collection_id`,`collection_kind`,SHA2(CAST(`title` AS CHAR),256) AS `title_sha256`,SHA2(CAST(COALESCE(`subtitle`,\'\') AS CHAR),256) AS `subtitle_sha256`,SHA2(CAST(`source_reason` AS CHAR),256) AS `source_reason_sha256`,`archive_date`,`date_precision`,HEX(`cover_class_photo_id`) AS `cover_class_photo_id`,`visibility_scope`,HEX(`projection_revision`) AS `projection_revision`,`state`,`generated_at`,`updated_at` FROM `' . $ci . 'auto_collection` ORDER BY `generated_at`,`auto_collection_id` ASC',
+    'auto_collection_photo' => 'SELECT HEX(`auto_collection_id`) AS `auto_collection_id`,HEX(`class_photo_id`) AS `class_photo_id`,`ordinal`,`created_at` FROM `' . $ci . 'auto_collection_photo` ORDER BY `auto_collection_id`,`ordinal`,`class_photo_id` ASC',
+    // The Class Archive control plane records only checksum/model state. Face
+    // vectors and search embeddings remain in isolated Immich/Postgres and
+    // are intentionally absent from this MariaDB-only fixture.
+    'ai_asset_index' => 'SELECT HEX(`class_photo_id`) AS `class_photo_id`,HEX(`source_checksum`) AS `source_checksum`,SHA2(CAST(COALESCE(`immich_asset_id`,\'\') AS CHAR),256) AS `immich_asset_id_sha256`,`face_state`,`search_state`,`face_model_name`,`face_model_revision`,`search_model_name`,`search_model_revision`,`indexed_at`,`last_error_code`,`created_at`,`updated_at` FROM `' . $ci . 'ai_asset_index` ORDER BY `class_photo_id` ASC',
+    'ai_index_job' => 'SELECT HEX(`job_id`) AS `job_id`,HEX(`class_photo_id`) AS `class_photo_id`,`job_kind`,`trigger_kind`,HEX(`expected_checksum`) AS `expected_checksum`,`state`,`attempt_count`,`not_before`,`last_error_code`,`created_at`,`updated_at`,`completed_at` FROM `' . $ci . 'ai_index_job` ORDER BY `created_at`,`job_id` ASC',
     'native_source_epoch' => 'SELECT `source_key`,HEX(`generation`) AS `generation`,`updated_at` FROM `' . $ci . 'native_source_epoch` ORDER BY `source_key` ASC',
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
     'migration' => 'SELECT `version`,`migration_name`,HEX(`checksum`) AS `checksum`,`plugin_version`,`applied_at` FROM `' . $ci . 'migration` ORDER BY `version` ASC',
@@ -146,8 +159,8 @@ if (!$multi instanceof mysqli_result || ($row = $multi->fetch_assoc()) === null)
 }
 $summary['multi_album_images'] = (int) $row['count'];
 $payload = [
-    'fixture_version' => 6,
-    'class_identity_schema_version' => 14,
+    'fixture_version' => 7,
+    'class_identity_schema_version' => 15,
     'projection_recovery' => [
         'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
         'projection' => 'ALL',
