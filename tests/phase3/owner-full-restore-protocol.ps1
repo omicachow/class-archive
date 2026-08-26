@@ -190,6 +190,7 @@ foreach ($subnet in @('10.245.2.0/24','10.245.3.0/24','10.245.4.0/24')) { Assert
 Assert-True ($immichOverlay.Contains('10.245.0.10')) 'restore_bff_address_missing'
 Assert-True ($piwigoOverlay.Contains('create_host_path: false')) 'restore_nginx_bind_may_autocreate'
 Assert-True ($runner.Contains("Invoke-RestoreCompose piwigo @('create','--no-recreate','piwigo')")) 'restore_gateway_not_compose_created_before_identity_check'
+Assert-True ($runner.Contains("Stop-Restore ('restore_stream_' + [string]`$Matches[1])")) 'restore_stream_failure_code_not_safely_propagated'
 
 foreach ($needle in @(
     "[ValidateSet('qa', 'full', 'restore')]", "`$Runtime -eq 'restore'", "private_relative = '.codex-work/owner-restore'",

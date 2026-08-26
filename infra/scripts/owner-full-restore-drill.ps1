@@ -92,7 +92,15 @@ function Invoke-Ubuntu([string[]]$Arguments, [string]$FailureCode = 'ubuntu_comm
         $code = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
-    if ($code -ne 0) { Stop-Restore $FailureCode }
+    if ($code -ne 0) {
+        if ($FailureCode -eq 'restore_stream_failed') {
+            $streamFailures = @($result | ForEach-Object { [string]$_ } | Where-Object { $_ -match '\AOWNER_RESTORE_STREAM=FAIL code=[a-z0-9_]{1,128}\z' })
+            if ($streamFailures.Count -eq 1 -and $streamFailures[0] -match '\AOWNER_RESTORE_STREAM=FAIL code=([a-z0-9_]{1,128})\z') {
+                Stop-Restore ('restore_stream_' + [string]$Matches[1])
+            }
+        }
+        Stop-Restore $FailureCode
+    }
     return @($result | ForEach-Object { [string]$_ })
 }
 
