@@ -415,24 +415,30 @@ try {
         # ClassIdentity database mount and leaves no executable behind.
         [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('chown 0:0 ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' && chmod 0500 ' + $runtimeScriptContainer + ' && chmod 0600 ' + $runtimeInputContainer)))
 
-        $script:stage = 'ml_runtime'
+        $script:stage = 'ml_runtime_execute'
         # The runtime emits only an allowlisted PASS/FAIL marker. Redirect its
         # stderr inside the Linux container so Windows PowerShell 5.1 cannot
         # turn that marker into a NativeCommandError before the wrapper gets a
         # chance to validate and map the safe reason code.
         $runtimeCommand = 'exec node ' + $runtimeScriptContainer + ' --input-file ' + $runtimeInputContainer + ' 2>&1'
         $runtimeResult = Invoke-ImmichCompose @('exec', '-T', '--user', '0:0', 'immich-server', 'sh', '-lc', $runtimeCommand)
+        $script:stage = 'ml_runtime_marker'
         Assert-Exact ($runtimeResult -match '^PRIVATE_QA_IMMICH_RUNTIME=PASS assets=([0-9]+) people=([0-9]+) face_jobs=([0-9]+) recognition_jobs=([0-9]+) smart_jobs=([0-9]+)$') 'runtime_failed'
+        $script:stage = 'ml_runtime_output_copy'
         [void](Invoke-ImmichCompose @('cp', ('immich-server:' + $runtimeOutputContainer), ($privateRelative + '/runtime/immich/' + $run + '/runtime-output.json')))
+        $script:stage = 'ml_runtime_output_acl'
         Set-ClassArchiveOwnerOnlyFileAcl -Path $nodeOutputHost
         Assert-IgnoredOwnerOnly $nodeOutputHost 'runtime_output'
+        $script:stage = 'ml_runtime_output_read'
         $runtime = Get-Content -LiteralPath $nodeOutputHost -Raw | ConvertFrom-Json -ErrorAction Stop
+        $script:stage = 'ml_runtime_output_contract'
         Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest -and @($runtime.assets).Count -eq [int]$catalog.count) 'runtime_output_invalid'
         Assert-Exact ($runtime.index_evidence.runtime_mode -in @('INITIAL', 'RESUME') `
             -and $runtime.index_evidence.queue_idle.face_detection -eq $true `
             -and $runtime.index_evidence.queue_idle.facial_recognition -eq $true `
             -and $runtime.index_evidence.queue_idle.smart_search -eq $true `
             -and [int]$runtime.metrics.people_count -ge 1) 'runtime_index_evidence_invalid'
+        $script:stage = 'ml_runtime_access_token'
         $accessToken = [string]$runtime.access_token
         Assert-Exact ($accessToken -match '^[A-Za-z0-9._~-]{32,8192}$') 'access_token_invalid'
 

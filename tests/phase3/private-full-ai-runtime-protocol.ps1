@@ -55,6 +55,9 @@ Assert-Protocol ($runner.Contains("`$runtimeCommand = 'exec node ' + `$runtimeSc
 Assert-Protocol ($runner.Contains("`$nativeError = [string]`$_.Exception.Message") `
     -and $runner.Contains("`$safeInput = [string]::Join") `
     -and $runner.Contains("Fail 'immich_compose_failed'")) 'runtime_native_exception_must_remain_sanitized'
+foreach ($stage in @('ml_runtime_execute','ml_runtime_marker','ml_runtime_output_copy','ml_runtime_output_acl','ml_runtime_output_read','ml_runtime_output_contract','ml_runtime_access_token')) {
+    Assert-Protocol ($runner.Contains("`$script:stage = '$stage'")) ('runtime_safe_stage_missing_' + $stage)
+}
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
