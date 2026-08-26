@@ -122,6 +122,8 @@ check(app.includes('const leafAlbums = albums.filter((album) => album.directCoun
 check(app.includes('function albumDisplayName(album)') && app.includes('album.displayAlias || album.name')
   && app.includes("album.sourceLabel ? element('p', 'album-source'"), 'album cards must use a display alias and a low-weight source subtitle');
 check(app.includes('searchWithin.href = `/search?album=${album.id}`') && app.includes("new URLSearchParams(location.search).get('album')"), 'search must support a bounded current-album context');
+check(app.includes("structuredSource.dates ?? structuredSource.archiveTime ?? structuredSource.archive_time"),
+  'structured archive-time results must remain visible under the natural date section');
 check(app.includes("presentationJson('/api/class-archive/memories')"), 'memories must use the cached archive-aware BFF contract');
 check(app.includes("apiJson('/api/users/me')"), 'profile must use the presentation-only current user endpoint');
 check(app.includes("['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)"), 'owned media helper must use only canonical responsive derivatives');

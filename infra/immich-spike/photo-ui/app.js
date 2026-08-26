@@ -2417,16 +2417,24 @@ function normalizeHybridSearch(payload) {
   const structuredSource = payload.structured ?? payload.exact ?? payload.sections ?? {};
   const structured = [];
   const typeNames = ['people', 'albums', 'events', 'dates', 'tags', 'descriptions'];
+  // The Class Archive Gateway calls its archival-date bucket `archiveTime`.
+  // Keep the presentation vocabulary as `dates`, while accepting that
+  // canonical server field so a structured archive-time result can never
+  // disappear merely because it does not share an older compatibility name.
+  const structuredType = (value) => value === 'archiveTime' || value === 'archive_time' ? 'dates' : value;
   if (Array.isArray(structuredSource)) {
     for (const section of structuredSource) {
-      const type = typeNames.includes(section?.type) ? section.type : null;
+      const candidate = structuredType(section?.type);
+      const type = typeNames.includes(candidate) ? candidate : null;
       if (!type) continue;
       const items = resultItems(section);
       structured.push({ type, items: items.map((item) => normalizeStructuredResult(type, item)).filter(Boolean) });
     }
   } else {
     for (const type of typeNames) {
-      const items = resultItems(structuredSource[type]);
+      const items = resultItems(type === 'dates'
+        ? (structuredSource.dates ?? structuredSource.archiveTime ?? structuredSource.archive_time)
+        : structuredSource[type]);
       if (items.length > 0) structured.push({ type, items: items.map((item) => normalizeStructuredResult(type, item)).filter(Boolean) });
     }
   }
