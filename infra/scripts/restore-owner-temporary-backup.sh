@@ -89,9 +89,13 @@ assert_container() {
 assert_volume() {
   expected=$1 project=$2 logical=$3
   expected_device=/mnt/classarchive-owner-restore-v1/volumes/$expected
-  identity=$("${docker_host[@]}" volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.storage"}}|{{index .Options "device"}}' "$expected" 2>/dev/null) || fail restore_volume_missing
-  [ "$identity" = "$project|$logical|owner-restore-drill|m-ext4-bind|$expected_device" ] || fail restore_volume_identity_invalid
+  identity=$("${docker_host[@]}" volume inspect --format '{{.Driver}}|{{index .Options "type"}}|{{index .Options "o"}}|{{index .Options "device"}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.storage"}}' "$expected" 2>/dev/null) || fail restore_volume_missing
+  [ "$identity" = "local|none|bind|$expected_device|$project|$logical|owner-restore-drill|m-ext4-bind" ] || fail restore_volume_identity_invalid
   [ -d "$expected_device" ] && [ ! -L "$expected_device" ] || fail restore_volume_backing_untrusted
+  [ "$(findmnt -n -o TARGET -T "$expected_device")" = /mnt/classarchive-owner-restore-v1 ] || fail restore_volume_mount_invalid
+  [ "$(findmnt -n -o FSTYPE -T "$expected_device")" = ext4 ] || fail restore_volume_mount_invalid
+  volume_device=$(findmnt -n -o SOURCE -T "$expected_device") || fail restore_volume_mount_invalid
+  [ "$(blkid -s LABEL -o value "$volume_device")" = CLASSARCHIVE_OWN ] || fail restore_volume_mount_invalid
 }
 
 helper_image() {

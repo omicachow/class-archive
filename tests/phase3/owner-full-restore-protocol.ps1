@@ -46,7 +46,7 @@ foreach ($needle in @(
     'mount -t ext4 -o nodev,nosuid', 'legacy_restore_daemon_active',
     "'--driver','local','--opt','type=none','--opt','o=bind','--opt',('device=' + `$device)",
     'com.classarchive.storage=m-ext4-bind', 'restore_volume_backing_identity_invalid',
-    "`$root -eq `$dockerRoot", '127.0.0.1:8290', '127.0.0.1:8291',
+    "`$script:controlPlaneId = [string]`$Matches[1]", '127.0.0.1:8290', '127.0.0.1:8291',
     "format -eq 'owner-temporary-recovery-v1'", "scope -eq 'OWNER_PRIVATE_FULL'",
     'temporary_recovery_target -eq $true', 'independent_disaster_backup -eq $false',
     "archive -eq 'GPG_SYMMETRIC_AES256'", "key_protection -eq 'WINDOWS_DPAPI_CURRENT_USER'",
@@ -61,7 +61,11 @@ foreach ($needle in @(
     'log --format= --name-only --no-renames', 'restore_tool_diff_outside_allowlist',
     'restore_tool_head=', "`$BundleInfo.restore_tool_head", "`$state.restore_tool_head -eq [string]`$BundleInfo.restore_tool_head",
     'class_archive_owner_restore_v1_piwigo', 'class_archive_owner_restore_v1_immich',
-    'Assert-RestoreGatewayNetwork', "`$piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/16'",
+    'Assert-RestoreGatewayNetwork', "`$piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/24'",
+    'Assert-RestoreNetworkRangesFree', 'Assert-RestoreNetworkIsolation', 'restore_network_foreign_member', 'restore_container_foreign_network',
+    'Assert-FreshRestoreRuntime', 'Assert-AllRestoreVolumeIdentities', 'restore_volume_backing_mount_invalid',
+    'New-RestoreNginxConfiguration', 'set_real_ip_from 10.245.0.10/32;', 'restore_nginx_sha256',
+    "storage_kind='M_EXT4_BIND'", 'Assert-PrimaryOwnerHttp', 'primary_owner_http_unhealthy',
     'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', "Invoke-RestoreDocker @('image','inspect',`$ref)",
     'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Copy-VerifiedModelCache $bundleInfo',
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore',
@@ -83,11 +87,11 @@ Assert-True ($runner.Contains("[string]`$imageType[0] -eq 'ext4'")) 'restore_exi
 Assert-True (-not $runner.Contains('--bip=')) 'restore_daemon_bip_must_be_absent'
 Assert-True (-not $runner.Contains('nohup dockerd')) 'restore_second_daemon_forbidden'
 Assert-True (-not $runner.Contains('--data-root=/mnt/classarchive-owner-restore-v1')) 'restore_second_data_root_forbidden'
-foreach ($needle in @('`$line = @(Invoke-Ubuntu', '`$loopLines = @(Invoke-Ubuntu', '`$lines = @(Invoke-Ubuntu', '`$rootLines = @(Invoke-RestoreDocker', '`$sourceManifestLines = @(Invoke-Ubuntu', '`$targetManifestLines = @(Invoke-RestoreDocker')) {
+foreach ($needle in @('`$line = @(Invoke-RestoreDocker', '`$loopLines = @(Invoke-Ubuntu', '`$lines = @(Invoke-Ubuntu', '`$rootLines = @(Invoke-RestoreDocker', '`$sourceManifestLines = @(Invoke-RestoreDocker', '`$targetManifestLines = @(Invoke-RestoreDocker')) {
     Assert-True ($runner.Contains($needle.Replace('`$','$'))) ('restore_native_array_normalization_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
 Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
-Assert-True ($runner.Contains('docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
+Assert-True ($runner.Contains('docker --host "$2" run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
 
 # Execute the real environment renderer with synthetic in-memory secrets. This
@@ -117,7 +121,7 @@ $capturedEnvironment = & {
     return $captured
 }
 Assert-True ($capturedEnvironment.Count -eq 2) 'restore_environment_output_count_invalid'
-$expectedEnvironmentLineCounts = @{ 'piwigo.env' = 30; 'immich.env' = 14 }
+$expectedEnvironmentLineCounts = @{ 'piwigo.env' = 31; 'immich.env' = 14 }
 foreach ($environmentPath in $expectedEnvironmentLineCounts.Keys) {
     $environmentText = [string]$capturedEnvironment[$environmentPath]
     Assert-True ($environmentText.EndsWith("`n", [StringComparison]::Ordinal)) ('restore_environment_final_lf_missing_' + $environmentPath)
@@ -177,11 +181,13 @@ foreach ($forbidden in @('docker volume rm','docker compose down','docker system
 
 foreach ($overlay in @($piwigoOverlay,$immichOverlay)) {
     Assert-True ($overlay.Contains('com.classarchive.scope: owner-restore-drill')) 'restore_overlay_scope_label_missing'
-    Assert-True ($overlay.Contains('com.classarchive.storage: m-ext4-image')) 'restore_overlay_storage_label_missing'
+    Assert-True ($overlay.Contains('com.classarchive.storage: m-ext4-bind')) 'restore_overlay_storage_label_missing'
     Assert-True (-not ($overlay -match '(?m)^\s*ports:\s*$')) 'restore_overlay_unexpected_ports'
 }
-Assert-True ($piwigoOverlay.Contains('10.245.0.0/16')) 'restore_gateway_subnet_missing'
+foreach ($subnet in @('10.245.0.0/24','10.245.1.0/24')) { Assert-True ($piwigoOverlay.Contains($subnet)) 'restore_piwigo_subnet_missing' }
+foreach ($subnet in @('10.245.2.0/24','10.245.3.0/24','10.245.4.0/24')) { Assert-True ($immichOverlay.Contains($subnet)) 'restore_immich_subnet_missing' }
 Assert-True ($immichOverlay.Contains('10.245.0.10')) 'restore_bff_address_missing'
+Assert-True ($piwigoOverlay.Contains('create_host_path: false')) 'restore_nginx_bind_may_autocreate'
 
 foreach ($needle in @(
     "[ValidateSet('qa', 'full', 'restore')]", "`$Runtime -eq 'restore'", "private_relative = '.codex-work/owner-restore'",
@@ -199,7 +205,7 @@ foreach ($browser in @($ownerBrowser,$familyBrowser)) {
         "'.codex-work\owner-restore\runtime", "'.codex-work\owner-restore\screenshots"
     )) { Assert-True ($browser.Contains($needle)) ('restore_browser_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
     Assert-True (-not $browser.Contains("if (`$isRestore) { 'infra/private-full/.env.piwigo.staging'")) 'restore_browser_staging_env_alias_detected'
-    Assert-True (-not $browser.Contains('restoreDockerHost')) 'restore_browser_second_daemon_reference_detected'
+    Assert-True ($browser.Contains("`$restoreDockerHost = 'unix:///var/run/docker.sock'") -and $browser.Contains("@('--host',`$restoreDockerHost)")) 'restore_browser_control_plane_not_explicit'
 }
 foreach ($browserNode in @($ownerBrowserNode,$familyBrowserNode)) {
     foreach ($needle in @("mode === 'restore'", "'OWNER_RESTORE_DRILL'", '/.codex-work/owner-restore/screenshots/')) {

@@ -2,7 +2,7 @@ services:
   immich-server:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     environment:
       DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored restore env}
       DB_USERNAME: ${DB_USERNAME:-postgres}
@@ -17,7 +17,7 @@ services:
   immich-machine-learning:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     logging:
       driver: local
       options:
@@ -27,7 +27,7 @@ services:
   immich-gateway:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     logging:
       driver: local
       options:
@@ -37,12 +37,12 @@ services:
   immich-gateway-secret-stager:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
 
   immich-web-compat:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     environment:
       CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
       CLASS_ARCHIVE_CORE_PUBLIC_PORT: ${CLASS_ARCHIVE_CORE_PUBLIC_PORT:?Set the restore core port}
@@ -60,7 +60,7 @@ services:
   redis:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     logging:
       driver: local
       options:
@@ -70,7 +70,7 @@ services:
   database:
     labels:
       com.classarchive.scope: owner-restore-drill
-      com.classarchive.storage: m-ext4-image
+      com.classarchive.storage: m-ext4-bind
     logging:
       driver: local
       options:
@@ -81,23 +81,36 @@ networks:
   immich_internal:
     labels:
       com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.2.0/24
   immich_ml_internal:
     labels:
       com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.3.0/24
   immich_bridge_internal:
     labels:
       com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.4.0/24
 
 volumes:
   immich_upload:
     labels:
       com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
   immich_model_cache:
     labels:
       com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
   immich_db:
     labels:
       com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
   immich_gateway_secret:
     labels:
       com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind

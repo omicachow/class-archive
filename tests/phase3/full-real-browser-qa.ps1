@@ -27,6 +27,7 @@ $composeFiles = if ($isRestore) {
 } else {
     @('infra/docker-compose.yml','infra/private-full/docker-compose.override.yml')
 }
+$restoreDockerHost = 'unix:///var/run/docker.sock'
 $separator = [IO.Path]::DirectorySeparatorChar
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
@@ -143,7 +144,9 @@ try {
 
     $compose = [Collections.Generic.List[string]]::new()
     foreach ($argument in @('-d','Ubuntu','--cd',$projectRoot,'--exec')) { $compose.Add($argument) }
-    foreach ($argument in @('docker','compose','--env-file',$envRelative)) { $compose.Add($argument) }
+    foreach ($argument in @('docker')) { $compose.Add($argument) }
+    if ($isRestore) { foreach ($argument in @('--host',$restoreDockerHost)) { $compose.Add($argument) } }
+    foreach ($argument in @('compose','--env-file',$envRelative)) { $compose.Add($argument) }
     foreach ($file in $composeFiles) { $compose.Add('-f'); $compose.Add($file) }
     $compose.Add('-p'); $compose.Add($composeProject)
     $adminUsername = if ($isRestore) { Get-RestoreSystemAdminUsername -ComposeBase $compose.ToArray() } else { Get-StrictEnvironmentValue 'PIWIGO_ADMIN_USERNAME' }
