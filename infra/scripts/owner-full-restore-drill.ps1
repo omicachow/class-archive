@@ -404,7 +404,11 @@ function Start-RestoreDaemon([bool]$AllowCreate) {
         $bytes = [uint64]$RuntimeImageSizeGiB * [uint64]1GB
         Assert-Restore ([uint64]$disk.FreeSpace -gt ($bytes + [uint64]10GB)) 'restore_image_space_insufficient'
         [void](Invoke-Ubuntu @('sh','-eu','-c','if ! fallocate -l "$1" "$2"; then truncate -s "$1" "$2"; fi; test "$(stat -c %s "$2")" = "$3"','sh',($RuntimeImageSizeGiB.ToString() + 'G'),$imageWsl,([string]([uint64]$RuntimeImageSizeGiB * [uint64]1GB))) 'restore_image_allocate_failed')
-        [void](Invoke-Ubuntu @('mkfs.ext4','-F','-L','CLASSARCHIVE_OWNER_RESTORE_V1',$imageWsl) 'restore_image_format_failed')
+        # `wsl.exe --exec` does not consistently inherit /usr/sbin in PATH even
+        # though an interactive shell can resolve mkfs.ext4. Resolve it inside
+        # the already-validated shell boundary before formatting this exact,
+        # newly-created restore image.
+        [void](Invoke-Ubuntu @('sh','-eu','-c','tool=$(command -v mkfs.ext4); test -n "$tool"; exec "$tool" -F -L CLASSARCHIVE_OWNER_RESTORE_V1 "$1"','sh',$imageWsl) 'restore_image_format_failed')
     }
     Assert-PlainFile $runtimeImage 'restore_image_untrusted'
     $loopLines = Invoke-Ubuntu @('sh','-eu','-c','existing=$(losetup -j "$1" | sed -n "1s/:.*//p"); if [ -n "$existing" ]; then printf "%s\n" "$existing"; else losetup --find --show --nooverlap "$1"; fi','sh',$imageWsl) 'loop_attach_failed'

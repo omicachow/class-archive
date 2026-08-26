@@ -72,6 +72,8 @@ foreach ($needle in @(
     "'--profile','immich-web-compat','up','-d','immich-web-compat'",
     "`$immichProject + '-immich-web-compat-1'", 'browser_e2e=NOT_RUN', 'ai_results=IMMEDIATE', 'primary_owner_changed_during_restore'
 )) { Assert-True ($runner.Contains($needle)) ('restore_runner_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+Assert-True ($runner.Contains('tool=$(command -v mkfs.ext4)')) 'restore_mkfs_shell_resolution_missing'
+Assert-True (-not $runner.Contains("Invoke-Ubuntu @('mkfs.ext4'")) 'restore_mkfs_direct_wsl_exec_detected'
 Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'")) 'restore_network_must_be_compose_owned'
 Assert-True ($runner.Contains('docker run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
