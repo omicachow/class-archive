@@ -2306,7 +2306,7 @@ SQL);
             'person_photo_rule' => '1cfd7d1394a6ab6cc357ff8492fb2dbd1ab3a8c27c8c2d6b2fbdb461d6192011',
             // Derived by tests/phase3/collections-first-schema-semantics.php
             // against the locked MariaDB 11.8.8 runtime.
-            'album' => 'f50882ab2963eab7f8daf2e1f52d7afa1bceb1a94a0c652fd6a2e702b8ad7eec',
+            'album' => '8a0bf13f7091df3ea4a23e55f1d311c995c7601ada9ada001770b7f2fc6d494e',
             'spotlight' => 'a83686fe1cbfbaa193aafa90e3b0f208e02c5b0feaa0249bb8b7f62d7673e11b',
             'photo_source' => 'ce248992be43a980eea5988e661995e114c37a4cf27e396556c4a3e9cb5024d9',
             'photo_duplicate' => '9f4216b1bf06c4c600807a1e2b193ff77bb15eea442f4076753304622f38ff05',

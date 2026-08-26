@@ -105,6 +105,14 @@ try {
         $source = collectionsFirstIdent($sourceCi . $suffix);
         $target = $ci . $suffix;
         collectionsFirstExecute($db, 'CREATE TABLE ' . collectionsFirstIdent($target) . ' LIKE ' . $source);
+        // CREATE TABLE LIKE intentionally omits foreign keys, and a live v15
+        // source already contains display_alias. Reconstruct the exact v14
+        // migration input explicitly so this fixture remains meaningful after
+        // the production schema has advanced to v15.
+        collectionsFirstExecute(
+            $db,
+            'ALTER TABLE ' . collectionsFirstIdent($target) . ' DROP COLUMN IF EXISTS `display_alias`',
+        );
         $created[] = $target;
     }
     collectionsFirstExecute($db, 'CREATE TABLE ' . collectionsFirstIdent($ci . 'photo') . ' ('
@@ -115,6 +123,14 @@ try {
         . '`id` BIGINT UNSIGNED NOT NULL, PRIMARY KEY (`id`)'
         . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
     $created[] = $ci . 'principal';
+    collectionsFirstExecute(
+        $db,
+        'ALTER TABLE ' . collectionsFirstIdent($ci . 'album')
+            . ' ADD CONSTRAINT `fk_cfs_album_cover` FOREIGN KEY (`manual_cover_class_photo_id`) REFERENCES '
+            . collectionsFirstIdent($ci . 'photo') . ' (`class_photo_id`),'
+            . ' ADD CONSTRAINT `fk_cfs_album_owner` FOREIGN KEY (`owner_principal_id`) REFERENCES '
+            . collectionsFirstIdent($ci . 'principal') . ' (`id`)',
+    );
 
     // Register every migration target before invoking it so a mid-migration
     // failure still cleans up a partially-created disposable fixture.
