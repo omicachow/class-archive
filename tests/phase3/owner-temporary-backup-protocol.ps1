@@ -76,6 +76,7 @@ foreach ($needle in @(
     "'SYSTEM_DRIVE_REQUIRED_FREE_BYTES'",
     "'SYSTEM_DRIVE_CAPACITY_GUARD'",
     "'ARCHIVE_HELPER_MEMORY_BYTES'",
+    "'ARCHIVE_HELPER_LOG_DRIVER'",
     'private_host_path_recorded = $false'
 )) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_wsl_capacity_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
@@ -101,7 +102,7 @@ foreach ($needle in @(
     'class_archive_private_full_v3_immich-immich-server-1',
     'com.classarchive.scope',
     'private-real-full',
-    'docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128',
+    'docker run --rm --log-driver none --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128',
     '--format=posix --numeric-owner --acls --xattrs',
     '--cipher-algo AES256',
     '--s2k-digest-algo SHA512',
@@ -136,9 +137,11 @@ Assert-True (-not $helper.Contains('docker start')) 'owner_temp_backup_must_not_
 $archiveHelperRunCount = [regex]::Matches($helper, 'docker run --rm').Count
 $limitedArchiveHelperRunCount = [regex]::Matches(
     $helper,
-    'docker run --rm --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128'
+    'docker run --rm --log-driver none --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128'
 ).Count
 Assert-True ($archiveHelperRunCount -gt 0 -and $limitedArchiveHelperRunCount -eq $archiveHelperRunCount) 'owner_temp_backup_archive_helper_memcg_incomplete'
+Assert-True ($runner.Contains("`$values['ARCHIVE_HELPER_LOG_DRIVER'] = 'none'")) 'owner_temp_backup_log_driver_evidence_missing'
+Assert-True ($runner.Contains('archive_helper_log_driver = [string]$preflight.ARCHIVE_HELPER_LOG_DRIVER')) 'owner_temp_backup_log_driver_manifest_missing'
 Assert-True ($helper.IndexOf('if [ "$mode" = verify ]; then') -lt $helper.IndexOf('assert_container "$piwigo"')) 'owner_temp_backup_verify_must_precede_source_runtime_assertions'
 Assert-True ($runner.Contains("owner_runtime_reads = 'AVAILABLE_DURING_BACKUP'")) 'owner_temp_backup_read_availability_manifest_missing'
 Assert-True ($runner.Contains('services_stopped = $false')) 'owner_temp_backup_online_manifest_missing'

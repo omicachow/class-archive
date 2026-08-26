@@ -428,6 +428,7 @@ function Get-Preflight([hashtable]$Boundary) {
         'SYSTEM_DRIVE_REQUIRED_FREE_BYTES', 'SYSTEM_DRIVE_CAPACITY_GUARD'
     )) { $values[$name] = $hostGuard[$name] }
     $values['ARCHIVE_HELPER_MEMORY_BYTES'] = [uint64](256MB)
+    $values['ARCHIVE_HELPER_LOG_DRIVER'] = 'none'
     return $values
 }
 
@@ -697,6 +698,7 @@ try {
             ' SYSTEM_DRIVE_REQUIRED_FREE_BYTES=' + $preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES +
             ' SYSTEM_DRIVE_CAPACITY_GUARD=' + $preflight.SYSTEM_DRIVE_CAPACITY_GUARD +
             ' ARCHIVE_HELPER_MEMORY_BYTES=' + $preflight.ARCHIVE_HELPER_MEMORY_BYTES +
+            ' ARCHIVE_HELPER_LOG_DRIVER=' + $preflight.ARCHIVE_HELPER_LOG_DRIVER +
             ' filesystem=exFAT temporary_target=YES independent_disaster_backup=NO')
         exit 0
     }
@@ -820,6 +822,7 @@ try {
                 system_drive_required_free_bytes = [uint64]$preflight.SYSTEM_DRIVE_REQUIRED_FREE_BYTES
                 system_drive_capacity_guard = [string]$preflight.SYSTEM_DRIVE_CAPACITY_GUARD
                 archive_helper_memory_bytes = [uint64]$preflight.ARCHIVE_HELPER_MEMORY_BYTES
+                archive_helper_log_driver = [string]$preflight.ARCHIVE_HELPER_LOG_DRIVER
                 private_host_path_recorded = $false
             }
             consistency_guard = [ordered]@{
