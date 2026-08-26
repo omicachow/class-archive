@@ -430,7 +430,18 @@ try {
         Set-ClassArchiveOwnerOnlyFileAcl -Path $nodeOutputHost
         Assert-IgnoredOwnerOnly $nodeOutputHost 'runtime_output'
         $script:stage = 'ml_runtime_output_read'
-        $runtime = Get-Content -LiteralPath $nodeOutputHost -Raw | ConvertFrom-Json -ErrorAction Stop
+        try {
+            $runtimeBytes = [IO.File]::ReadAllBytes($nodeOutputHost)
+            if ($runtimeBytes.Length -lt 16 -or $runtimeBytes.Length -gt 4MB) { Fail 'runtime_output_size_invalid' }
+            $runtimeJson = [Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)
+            $runtime = $runtimeJson | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            if ([string]$_.Exception.Message -match '^PRIVATE_QA_IMMICH=FAIL ') { throw }
+            Fail 'runtime_output_decode_invalid'
+        } finally {
+            $runtimeBytes = $null
+            $runtimeJson = $null
+        }
         $script:stage = 'ml_runtime_output_contract'
         Assert-Exact ($runtime.version -eq 1 -and $runtime.scope -eq $runtimeScope -and [string]$runtime.catalog_digest -eq [string]$catalog.catalog_digest -and @($runtime.assets).Count -eq [int]$catalog.count) 'runtime_output_invalid'
         Assert-Exact ($runtime.index_evidence.runtime_mode -in @('INITIAL', 'RESUME') `

@@ -58,6 +58,9 @@ Assert-Protocol ($runner.Contains("`$nativeError = [string]`$_.Exception.Message
 foreach ($stage in @('ml_runtime_execute','ml_runtime_marker','ml_runtime_output_copy','ml_runtime_output_acl','ml_runtime_output_read','ml_runtime_output_contract','ml_runtime_access_token')) {
     Assert-Protocol ($runner.Contains("`$script:stage = '$stage'")) ('runtime_safe_stage_missing_' + $stage)
 }
+Assert-Protocol ($runner.Contains('[IO.File]::ReadAllBytes($nodeOutputHost)') `
+    -and $runner.Contains('[Text.UTF8Encoding]::new($false, $true).GetString($runtimeBytes)') `
+    -and $runner.Contains("Fail 'runtime_output_decode_invalid'")) 'runtime_output_must_use_strict_utf8'
 
 foreach ($needle in @(
     "PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'",
