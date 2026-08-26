@@ -208,6 +208,68 @@ try {
     $removed = aiIndexRuntimeOne($db, 'SELECT `face_state`,`search_state`,`indexed_at` FROM ' . aiIndexRuntimeIdent($ci . 'ai_asset_index'));
     $assert(($removed['face_state'] ?? null) === 'REMOVED' && ($removed['search_state'] ?? null) === 'REMOVED' && ($removed['indexed_at'] ?? null) === null, 'delete_state_not_persisted');
 
+    // A terminal failure must outrank an otherwise idle/unavailable worker;
+    // System Health may never call this READY.
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_asset_index')
+            . " SET `face_state`='FAILED',`search_state`='FAILED',`last_error_code`='SYNTHETIC_FAILURE'",
+    );
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_index_job')
+            . " SET `state`='FAILED',`last_error_code`='SYNTHETIC_FAILURE' ORDER BY `created_at` DESC LIMIT 1",
+    );
+    $failedStatus = $service->status();
+    $assert(($failedStatus['state'] ?? null) === 'DEGRADED'
+        && ($failedStatus['review_required'] ?? null) === true
+        && (int) ($failedStatus['failed_assets'] ?? 0) === 1
+        && (int) ($failedStatus['failed_jobs'] ?? 0) >= 1,
+        'failed_terminal_state_reported_ready');
+
+    // A mixed terminal asset pair is also a partial completion requiring
+    // review, even when no explicit FAILED asset state remains.
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_asset_index')
+            . " SET `face_state`='INDEXED',`search_state`='REMOVED',`indexed_at`=UTC_TIMESTAMP(6),`last_error_code`=NULL",
+    );
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_index_job')
+            . " SET `state`='COMPLETE',`last_error_code`=NULL WHERE `state`='FAILED'",
+    );
+    $mixedStatus = $service->status();
+    $assert(($mixedStatus['state'] ?? null) === 'DEGRADED'
+        && (int) ($mixedStatus['terminal_asset_anomalies'] ?? 0) === 1,
+        'mixed_terminal_asset_reported_ready');
+
+    $statement = $db->prepare('UPDATE ' . $photo . ' SET `state`=? WHERE `class_photo_id`=?');
+    if (!$statement instanceof mysqli_stmt || !$statement->execute([\ClassIdentity\ClassArchivePhoto::STATE_ACTIVE, $photoBinary])) {
+        aiIndexRuntimeFail('ai_index_runtime_photo_reactivate_failed');
+    }
+    $statement->close();
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_asset_index')
+            . " SET `face_state`='UNAVAILABLE',`search_state`='UNAVAILABLE',`indexed_at`=NULL",
+    );
+    $unavailableStatus = $service->status();
+    $assert(($unavailableStatus['state'] ?? null) === 'UNAVAILABLE'
+        && (int) ($unavailableStatus['unavailable_assets'] ?? 0) === 1,
+        'terminal_unavailable_asset_reported_ready');
+    aiIndexRuntimeExecute(
+        $db,
+        'UPDATE ' . aiIndexRuntimeIdent($ci . 'ai_asset_index')
+            . " SET `face_state`='PENDING',`search_state`='PENDING'",
+    );
+    $orphanStatus = $service->status();
+    $assert(($orphanStatus['state'] ?? null) === 'DEGRADED'
+        && (int) ($orphanStatus['orphan_incomplete_assets'] ?? 0) === 1,
+        'orphan_pending_asset_reported_ready');
+    $assert(($service->maintenanceReport()['result'] ?? null) === 'REVIEW_REQUIRED',
+        'maintenance_ignored_terminal_anomaly');
+
     fwrite(STDOUT, "AI_INDEX_RUNTIME=PASS assertions={$assertions} run={$run}\n");
 } catch (Throwable $error) {
     fwrite(STDERR, 'AI_INDEX_RUNTIME=FAIL run=' . $run . ' reason=' . $error->getMessage() . "\n");

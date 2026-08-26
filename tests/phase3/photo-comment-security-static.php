@@ -48,6 +48,8 @@ try {
     $controller = photoCommentStaticRead('plugins/ClassIdentity/src/Gateway/GatewayHttpController.php');
     $gateway = photoCommentStaticRead('plugins/ClassIdentity/src/Gateway/GatewayService.php');
     $bff = photoCommentStaticRead('infra/immich-spike/web-compat/server.mjs');
+    $photoUi = photoCommentStaticRead('infra/immich-spike/photo-ui/app.js');
+    $i18n = photoCommentStaticRead('infra/immich-spike/photo-ui/i18n.js');
     $audit = photoCommentStaticRead('plugins/ClassIdentity/src/Audit.php');
 
     $roleMayWrite = photoCommentStaticBetween(
@@ -85,12 +87,27 @@ try {
         'hash_equals((string) $photo[\'class_photo_id\'], (string) $parent[\'class_photo_id\'])',
         'class_archive_comment_parent_invalid',
         "'action' => 'PHOTO_COMMENT_CREATE'",
+        'SELECT `id`,`state` FROM `',
+        'WHERE `id`=? FOR UPDATE',
+        'UTC_TIMESTAMP(6)-INTERVAL 1 MINUTE',
+        'class_archive_comment_rate_limited',
+        'class_archive_comment_capacity_reached',
     ] as $needle) {
         if (!str_contains($create, $needle)) {
             photoCommentStaticFail('comment_create_guard_missing_' . hash('sha256', $needle));
         }
         ++$assertions;
     }
+    foreach (['private const MAX_WRITES_PER_MINUTE = 10;', 'private const MAX_ACTIVE_COMMENTS_PER_PHOTO = 10000;'] as $needle) {
+        if (!str_contains($service, $needle)) {
+            photoCommentStaticFail('comment_write_bound_missing_' . hash('sha256', $needle));
+        }
+        ++$assertions;
+    }
+    if (str_contains($create, 'incrementRateLimitBucket(')) {
+        photoCommentStaticFail('comment_rate_limit_reuses_claim_bucket');
+    }
+    ++$assertions;
     // Text is intentionally not in the structured audit payload.  The word
     // "body" may exist as a local input variable, so check the new_value
     // literal separately rather than relying on a broad substring ban.
@@ -105,20 +122,59 @@ try {
     }
     ++$assertions;
 
-    $publicDto = photoCommentStaticBetween(
+    $listProjection = photoCommentStaticBetween(
         $service,
-        '$items[] = [',
-        "];\n        }\n        return ['total' => count(\$items)",
-        'comment_public_dto',
+        'public function listForVisiblePhoto(',
+        'public function create(',
+        'comment_list_projection',
     );
-    foreach (["'id'", "'parentId'", "'body'", "'author'", "'createdAt'", "'canReply'", "'canDelete'"] as $field) {
-        if (!str_contains($publicDto, $field)) {
+    foreach ([
+        'private const DEFAULT_PAGE_LIMIT = 100;',
+        'private const MAX_PAGE_LIMIT = 200;',
+        '?string $cursor = null',
+        '?int $limit = null',
+        '$limit + 1',
+        "CASE WHEN c.`state`='ACTIVE' THEN c.`body` ELSE NULL END AS `body`",
+        'ORDER BY c.`created_at` ASC,c.`comment_id` ASC LIMIT ?',
+        'c.`created_at`>? OR (c.`created_at`=? AND c.`comment_id`>?)',
+        "'hasMore' => \$hasMore",
+        "'nextCursor' => \$nextCursor",
+    ] as $needle) {
+        if (!str_contains($service, $needle) && !str_contains($listProjection, $needle)) {
+            photoCommentStaticFail('comment_pagination_contract_missing_' . hash('sha256', $needle));
+        }
+        ++$assertions;
+    }
+    $tombstoneDto = photoCommentStaticBetween(
+        $listProjection,
+        "if (\$state === 'DELETED')",
+        'continue;',
+        'comment_deleted_tombstone',
+    );
+    foreach (["'body' => null", "'kind' => 'DELETED'", "'canReply' => false", "'deleted' => true"] as $needle) {
+        if (!str_contains($tombstoneDto, $needle)) {
+            photoCommentStaticFail('comment_tombstone_contract_missing_' . hash('sha256', $needle));
+        }
+        ++$assertions;
+    }
+    if (str_contains($tombstoneDto, "\$row['body']")) {
+        photoCommentStaticFail('comment_tombstone_body_leak');
+    }
+    ++$assertions;
+    $activeDto = photoCommentStaticBetween(
+        $listProjection,
+        '$author = $this->publicAuthor',
+        '$nextCursor = null;',
+        'comment_active_public_dto',
+    );
+    foreach (["'id'", "'parentId'", "'body'", "'author'", "'createdAt'", "'canReply'", "'canDelete'", "'deleted'"] as $field) {
+        if (!str_contains($activeDto, $field)) {
             photoCommentStaticFail('comment_public_dto_field_missing_' . trim($field, "'"));
         }
         ++$assertions;
     }
     foreach (["'principal'", "'account'", "'seat'", "'identity'", "'pseudonym_subject'", "'source_path'"] as $forbiddenField) {
-        if (str_contains($publicDto, $forbiddenField)) {
+        if (str_contains($activeDto, $forbiddenField)) {
             photoCommentStaticFail('comment_public_dto_identifier_leak_' . trim($forbiddenField, "'"));
         }
         ++$assertions;
@@ -169,6 +225,11 @@ try {
         'class_archive_gateway_comment_parent_required',
         'class_archive_gateway_comment_parent_unexpected',
         "str_contains(\$code, '_comment_write_forbidden')",
+        "self::requireExactQuery(['cursor', 'limit'], ['cursor', 'limit'])",
+        'class_archive_gateway_comment_limit_invalid',
+        'if ($limit > 200)',
+        'class_archive_comment_rate_limited',
+        'self::respond(429',
     ] as $needle) {
         if (!str_contains($controller, $needle)) {
             photoCommentStaticFail('gateway_comment_contract_missing_' . hash('sha256', $needle));
@@ -176,7 +237,7 @@ try {
         ++$assertions;
     }
     foreach ([
-        'public function comments(string $classPhotoId): ?array',
+        'public function comments(string $classPhotoId, ?string $cursor = null, ?int $limit = null): ?array',
         'public function createComment(string $classPhotoId, ?string $parentCommentId, string $body): array',
         'public function deleteComment(string $commentId, string $reason): array',
         '$this->commentDomain->listForVisiblePhoto(',
@@ -197,9 +258,27 @@ try {
         "request.method !== 'POST'",
         "const csrf = request.headers['x-class-archive-csrf'];",
         "'X-Class-Archive-CSRF': csrf",
+        "exactQuery(url, new Set(['cursor', 'limit']))",
+        "Number(limit) > 200",
+        "params.set('cursor', assertUuid(query.get('cursor')))",
+        'new Set([400, 403, 404, 409, 429, 503])',
     ] as $needle) {
         if (!str_contains($bff, $needle)) {
             photoCommentStaticFail('bff_comment_contract_missing_' . hash('sha256', $needle));
+        }
+        ++$assertions;
+    }
+    foreach ([
+        "new URLSearchParams({ limit: '100' })",
+        "if (cursor !== null) query.set('cursor', cursor.toLowerCase())",
+        "comments.hasMore && typeof onLoadMore === 'function'",
+        "item.deleted ? t('comments.deletedTombstone') : item.body",
+        "'comments.deletedTombstone': '这条评论已删除。'",
+        "'comments.loadMore': '加载更多评论'",
+    ] as $needle) {
+        $haystack = str_starts_with($needle, "'comments.") ? $i18n : $photoUi;
+        if (!str_contains($haystack, $needle)) {
+            photoCommentStaticFail('comment_ui_pagination_missing_' . hash('sha256', $needle));
         }
         ++$assertions;
     }

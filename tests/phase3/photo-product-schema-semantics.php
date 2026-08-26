@@ -3,7 +3,10 @@
 declare(strict_types=1);
 
 /**
- * Real MariaDB semantic and constraint gate for migration 8.
+ * Real MariaDB semantic and constraint gate for migration 8. Later additive
+ * schema semantics are covered by collections-first-schema-semantics.php;
+ * this fixture retains the exact v8 album digest so its isolated historic
+ * reconstruction remains independently meaningful.
  *
  * The fixture reconstructs the exact v7 person table plus minimal referenced
  * keys under a random prefix, applies only migration 8, fingerprints every
@@ -37,6 +40,10 @@ const PHOTO_PRODUCT_DIGEST_SUFFIXES = [
     'photo_duplicate',
     'batch_operation',
     'batch_operation_item',
+];
+
+const PHOTO_PRODUCT_V8_DIGESTS = [
+    'album' => '5f3a5e5b67c9e6fd534faaf48f3d327cb5b090a5bce9aaaed6001a79021100b6',
 ];
 
 function productSchemaFail(string $message): never
@@ -229,14 +236,16 @@ SQL);
     $derivedDigests = [];
     foreach (PHOTO_PRODUCT_DIGEST_SUFFIXES as $suffix) {
         $actual = $digest->invoke($schema, $suffix);
-        if (!is_string($actual) || (!$derive && !hash_equals((string) ($expected[$suffix] ?? ''), $actual))) {
+        $expectedDigest = PHOTO_PRODUCT_V8_DIGESTS[$suffix] ?? ($expected[$suffix] ?? '');
+        if (!is_string($actual) || (!$derive && !hash_equals((string) $expectedDigest, $actual))) {
             productSchemaFail('photo_product_digest_mismatch_' . $suffix);
         }
         $derivedDigests[$suffix] = $actual;
         ++$assertions;
     }
     if ($derive) {
-        fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=DERIVED photo_source=' . ($derivedDigests['photo_source'] ?? '') . ' run=' . $run . "\n");
+        fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=DERIVED album=' . ($derivedDigests['album'] ?? '')
+            . ' photo_source=' . ($derivedDigests['photo_source'] ?? '') . ' run=' . $run . "\n");
         return;
     }
 
@@ -536,6 +545,7 @@ SQL);
     ++$assertions;
 
     fwrite(STDOUT, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=' . ($derive ? 'DERIVED' : 'PASS') . ' assertions=' . $assertions
+        . ' album=' . ($derivedDigests['album'] ?? '')
         . ' photo_source=' . ($derivedDigests['photo_source'] ?? '') . ' run=' . $run . "\n");
 } catch (Throwable $error) {
     fwrite(STDERR, 'CLASS_ARCHIVE_PHOTO_PRODUCT_SCHEMA=FAIL run=' . $run . ' reason=' . $error->getMessage() . "\n");

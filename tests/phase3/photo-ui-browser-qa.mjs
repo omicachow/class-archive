@@ -11,6 +11,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -89,6 +90,12 @@ let browser = null;
 let screenshots = 0;
 let stage = 'initialization';
 const unexpectedNetwork = new Set();
+// A private-only, short-lived marker makes a real create/reply/delete journey
+// unambiguous without writing credentials, photo ids, or a reusable fixture
+// into stdout, screenshots, or a committed report. The admin cleanup below
+// removes both comments before the classmate browser context closes.
+const commentMarker = `local-comment-${randomUUID()}`;
+const replyMarker = `local-reply-${randomUUID()}`;
 
 function stageAt(value) {
   stage = value;
@@ -436,6 +443,125 @@ async function viewer(page, role, mobile) {
     assert(closeTarget >= 44, `${role}_viewer_close_touch_target`);
   }
   await assertBusinessCopy(page, `${role}_viewer`);
+  const photoId = new URL(page.url()).pathname.split('/').pop()?.toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(photoId ?? ''), `${role}_viewer_photo_id`);
+  return photoId;
+}
+
+async function waitForPhotoMutation(page, expectedPath, code, action) {
+  const responsePromise = page.waitForResponse((response) => {
+    const request = response.request();
+    if (request.method() !== 'POST') return false;
+    try {
+      const target = new URL(response.url());
+      return target.origin === photoOrigin.origin && target.pathname === expectedPath;
+    } catch { return false; }
+  }, { timeout: 30_000 }).catch(() => null);
+  await action();
+  const response = await responsePromise;
+  assert(response !== null && response.status() >= 200 && response.status() < 300, code);
+}
+
+async function familyCommentPostDenied(page, photoId) {
+  const result = await page.evaluate(async (id) => {
+    try {
+      const stateResponse = await fetch('/api/class-archive/product-state', {
+        credentials: 'same-origin', cache: 'no-store',
+      });
+      const state = await stateResponse.json().catch(() => null);
+      if (stateResponse.status !== 200 || !state || typeof state.csrfToken !== 'string') {
+        return { stateStatus: stateResponse.status, status: 0 };
+      }
+      // Family is intentionally issued no mutation token. Submit the exact
+      // read-only state anyway and require the server-side route to return a
+      // uniform 403 rather than relying on the missing composer in the UI.
+      const response = await fetch('/api/class-archive/comments/create', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          csrfToken: state.csrfToken,
+          photoUuid: id,
+          parentId: null,
+          body: 'local-family-readonly-probe',
+        }),
+      });
+      return { stateStatus: stateResponse.status, status: response.status };
+    } catch { return { stateStatus: 0, status: 0 }; }
+  }, photoId);
+  assert(result.stateStatus === 200, 'family_comment_post_state');
+  assert(result.status === 403, 'family_comment_post_denied');
+}
+
+async function classmateCommentJourney(page, fixture) {
+  const composer = page.locator('.viewer-comments > .comment-composer').first();
+  assert(await composer.count() === 1, 'classmate_comment_composer_missing');
+  const rootInput = composer.locator('textarea[name="body"]');
+  await rootInput.fill(commentMarker);
+  await waitForPhotoMutation(page, '/api/class-archive/comments/create', 'classmate_comment_create', async () => {
+    await composer.getByRole('button', { name: '发布', exact: true }).click();
+  });
+  const root = page.locator('.comment-item').filter({ hasText: commentMarker }).last();
+  await root.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await root.count() === 1, 'classmate_comment_created');
+  fixture.rootId = (await root.getAttribute('data-comment-id') ?? '').toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(fixture.rootId), 'classmate_comment_id');
+
+  const reply = root.getByRole('button', { name: '回复', exact: true });
+  assert(await reply.count() === 1, 'classmate_comment_reply_control');
+  await reply.click();
+  const replyForm = root.locator('.comment-reply-form');
+  await replyForm.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
+  assert(await replyForm.count() === 1, 'classmate_comment_reply_form');
+  await replyForm.locator('textarea[name="body"]').fill(replyMarker);
+  await waitForPhotoMutation(page, '/api/class-archive/comments/reply', 'classmate_comment_reply', async () => {
+    await replyForm.getByRole('button', { name: '回复', exact: true }).click();
+  });
+  const replyCard = page.locator('.comment-item[data-reply="true"]').filter({ hasText: replyMarker }).last();
+  await replyCard.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await replyCard.count() === 1, 'classmate_comment_reply_created');
+  fixture.replyId = (await replyCard.getAttribute('data-comment-id') ?? '').toLowerCase();
+  assert(/^[0-9a-f-]{36}$/i.test(fixture.replyId), 'classmate_comment_reply_id');
+}
+
+async function deleteCommentWithAdmin(fixture, recover = false) {
+  if (environment !== 'private' || !credentials.admin || (!fixture.rootId && !fixture.replyId)) return;
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1.25 });
+  try {
+    stageAt('admin_comment_cleanup_login');
+    const page = await login(context, 'admin');
+    await goto(page, photoOrigin, `/photos/${fixture.photoId}`, 'admin_comment_cleanup_viewer');
+    const remove = async (commentId, code) => {
+      if (!commentId) return;
+      const card = page.locator(`.comment-item[data-comment-id="${commentId}"]`);
+      await card.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+      if (recover && await card.count() === 0) return;
+      assert(await card.count() === 1, `${code}_visible`);
+      const button = card.getByRole('button', { name: '删除', exact: true });
+      assert(await button.count() === 1, `${code}_control`);
+      await button.click();
+      const dialog = page.locator('dialog[open]').last();
+      await dialog.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => null);
+      assert(await dialog.count() === 1, `${code}_dialog`);
+      const reason = dialog.getByLabel('操作理由', { exact: true });
+      assert(await reason.count() === 1, `${code}_reason`);
+      await reason.fill('本地受控浏览器验收清理');
+      await waitForPhotoMutation(page, '/api/class-archive/manage/comments/delete', `${code}_mutation`, async () => {
+        await dialog.getByRole('button', { name: '确认', exact: true }).click();
+      });
+      await dialog.waitFor({ state: 'detached', timeout: 30_000 }).catch(() => null);
+      await card.waitFor({ state: 'detached', timeout: 30_000 }).catch(() => null);
+      assert(await dialog.count() === 0, `${code}_dialog_closed`);
+      assert(await card.count() === 0, `${code}_removed`);
+    };
+    // Delete child first: the domain deliberately does not infer a cascading
+    // moderation action from deleting a parent comment.
+    await remove(fixture.replyId, 'admin_comment_reply_delete');
+    fixture.replyId = null;
+    await remove(fixture.rootId, 'admin_comment_root_delete');
+    fixture.rootId = null;
+  } finally {
+    await context.close();
+  }
 }
 
 async function peoplePage(page, role, viewport) {
@@ -482,8 +608,84 @@ async function peoplePage(page, role, viewport) {
   await screenshot(page, role, 'person-detail', viewport);
 }
 
+async function searchSuggestionsJourney(page, role) {
+  const discovery = await page.evaluate(async () => {
+    try {
+      const response = await fetch('/api/class-archive/search/suggestions', {
+        credentials: 'same-origin', cache: 'no-store',
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.status !== 200 || !payload || typeof payload !== 'object') {
+        return { status: response.status, candidate: null };
+      }
+      for (const key of ['people', 'albums', 'events', 'archiveTime']) {
+        const source = payload[key];
+        if (!source || !Array.isArray(source.items)) continue;
+        const item = source.items.find((candidate) => {
+          const label = candidate?.label ?? candidate?.displayAlias ?? candidate?.name ?? candidate?.title;
+          return typeof label === 'string' && label.trim().length > 0 && label.trim().length <= 190 && !label.includes('\0');
+        });
+        if (!item) continue;
+        const label = (item.label ?? item.displayAlias ?? item.name ?? item.title).trim();
+        return { status: response.status, candidate: { key, label } };
+      }
+      return { status: response.status, candidate: null };
+    } catch { return { status: 0, candidate: null }; }
+  });
+  assert(discovery.status === 200, `${role}_search_suggestions_catalog`);
+  assert(discovery.candidate !== null, `${role}_search_suggestions_candidate`);
+  const candidate = discovery.candidate;
+  const input = page.getByRole('searchbox', { name: '搜索照片', exact: true });
+  const responsePromise = page.waitForResponse((response) => {
+    if (response.request().method() !== 'GET') return false;
+    try {
+      const target = new URL(response.url());
+      return target.origin === photoOrigin.origin
+        && target.pathname === '/api/class-archive/search/suggestions'
+        && target.searchParams.get('q') === candidate.label;
+    } catch { return false; }
+  }, { timeout: 30_000 }).catch(() => null);
+  await input.fill(candidate.label);
+  const response = await responsePromise;
+  assert(response !== null && response.status() === 200, `${role}_search_suggestions_typing`);
+  const group = page.locator(`.search-live-suggestion-group[data-suggestion-type="${candidate.key}"]`);
+  await group.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+  assert(await group.count() === 1, `${role}_search_suggestions_group`);
+  const choice = group.locator('.search-live-suggestion').filter({ hasText: candidate.label }).first();
+  assert(await choice.count() === 1, `${role}_search_suggestions_choice`);
+  const href = await choice.getAttribute('href');
+  if (href) {
+    assert(/^\/(?:people|albums)\/[0-9a-f-]{36}$/i.test(href), `${role}_search_suggestions_link`);
+    await Promise.all([
+      page.waitForURL((value) => value.origin === photoOrigin.origin && /^(?:\/people|\/albums)\/[0-9a-f-]{36}$/i.test(value.pathname), { timeout: 30_000 }).catch(() => null),
+      choice.click(),
+    ]);
+    assert(/^(?:\/people|\/albums)\/[0-9a-f-]{36}$/i.test(new URL(page.url()).pathname), `${role}_search_suggestions_navigation`);
+  } else {
+    const searchResponse = page.waitForResponse((item) => {
+      if (item.request().method() !== 'GET') return false;
+      try {
+        const target = new URL(item.url());
+        return target.origin === photoOrigin.origin
+          && target.pathname === '/api/class-archive/search/hybrid'
+          && target.searchParams.get('q') === candidate.label;
+      } catch { return false; }
+    }, { timeout: 30_000 }).catch(() => null);
+    await choice.click();
+    const submitted = await searchResponse;
+    assert(submitted !== null && submitted.status() === 200, `${role}_search_suggestions_submit`);
+    await page.locator('.search-status').waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
+    assert(await page.locator('.search-status').count() === 1, `${role}_search_suggestions_result_status`);
+  }
+  // A suggestion click is deliberately a transient interaction. Return the
+  // suite to the empty search state so its normal role-specific search check
+  // remains independent of suggestion result content.
+  await goto(page, photoOrigin, '/search', `${role}_search_after_suggestions`);
+}
+
 async function searchPage(page, role, mobile) {
   await goto(page, photoOrigin, '/search', `${role}_search`);
+  await searchSuggestionsJourney(page, role);
   const input = page.getByRole('searchbox', { name: '搜索照片', exact: true });
   assert(await input.count() === 1, `${role}_search_input`);
   await input.fill(environment === 'private' ? '教室' : '有人拿着篮球');
@@ -964,6 +1166,7 @@ async function runRole(role, viewport, baseline = null) {
     } catch { unexpectedNetwork.add('invalid'); }
   });
   let page;
+  let commentFixture = null;
   try {
     stageAt(`${role}_${viewport}_login`);
     page = await login(context, role);
@@ -976,8 +1179,20 @@ async function runRole(role, viewport, baseline = null) {
     const smartSearch = await canonicalSearchContract(context, role, timeline);
     await screenshot(page, role, 'photos', viewport);
     stageAt(`${role}_${viewport}_viewer`);
-    await viewer(page, role, mobile);
+    const viewedPhotoId = await viewer(page, role, mobile);
     await screenshot(page, role, 'viewer', viewport);
+    if (role === 'family') {
+      stageAt(`${role}_${viewport}_comment_readonly`);
+      await familyCommentPostDenied(page, viewedPhotoId);
+    }
+    if (role === 'classmate' && environment === 'private' && credentials.admin) {
+      stageAt(`${role}_${viewport}_comments`);
+      commentFixture = { photoId: viewedPhotoId, rootId: null, replyId: null };
+      await classmateCommentJourney(page, commentFixture);
+      stageAt('admin_comment_cleanup');
+      await deleteCommentWithAdmin(commentFixture);
+      commentFixture = null;
+    }
     stageAt(`${role}_${viewport}_people`);
     await peoplePage(page, role, viewport);
     stageAt(`${role}_${viewport}_search`);
@@ -1017,7 +1232,18 @@ async function runRole(role, viewport, baseline = null) {
     }
     return { timelineTotal: timeline.total, timelineIds: timeline.ids.map((id) => id.toLowerCase()), searchCount, peopleCounts, smartSearch };
   } finally {
-    await context.close();
+    try {
+      // If the test was interrupted after a successful write, attempt the
+      // same audited SYSTEM_ADMIN cleanup before this Classmate context is
+      // discarded. Synthetic credentials have no admin session, so they can
+      // never create a persistent comment fixture in the first place.
+      if (commentFixture && (commentFixture.rootId || commentFixture.replyId)) {
+        stageAt('admin_comment_cleanup_recovery');
+        await deleteCommentWithAdmin(commentFixture, true);
+      }
+    } finally {
+      await context.close();
+    }
   }
 }
 

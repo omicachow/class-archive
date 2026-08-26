@@ -171,10 +171,12 @@ try {
         . 'JOIN `' . $prefixeTable . 'image_category` ic ON ic.`image_id`=p.`piwigo_image_id` '
         . 'JOIN `' . $prefixeTable . 'categories` c ON c.`id`=ic.`category_id` '
         . 'LEFT JOIN ' . $archiveTable . ' a ON a.`piwigo_image_id`=p.`piwigo_image_id` '
+        . 'LEFT JOIN ' . $commentTable . ' pc ON pc.`class_photo_id`=p.`class_photo_id` '
         . "WHERE p.`state`='ACTIVE' AND p.`piwigo_image_id` IS NOT NULL AND (a.`era`='HERITAGE' OR a.`era` IS NULL) "
         . 'GROUP BY p.`class_photo_id`,p.`piwigo_image_id` '
         . 'HAVING MAX(CASE WHEN ic.`category_id`=? OR FIND_IN_SET(?,c.`uppercats`)>0 THEN 1 ELSE 0 END)=1 '
         . 'AND MAX(CASE WHEN ic.`category_id`=? OR FIND_IN_SET(?,c.`uppercats`)>0 THEN 1 ELSE 0 END)=0 '
+        . 'AND COUNT(pc.`comment_id`)=0 '
         . 'ORDER BY p.`piwigo_image_id` ASC LIMIT 2',
         [$heritageId, $heritageId, $livingId, $livingId],
     );
@@ -222,6 +224,64 @@ try {
     $anonymousId = (string) ($anonymous['comment_id'] ?? '');
     \ClassIdentity\DomainSupport::idToBinary($anonymousId);
     $fixtureCommentIds[] = $anonymousId;
+    ++$assertions;
+
+    $stage = 'bounded_keyset_pagination';
+    $firstPage = $service->listForVisiblePhoto(
+        $first['class_photo_id'],
+        $first['piwigo_image_id'],
+        \ClassIdentity\Access::ROLE_CLASSMATE,
+        null,
+        2,
+    );
+    photoCommentRuntimeAssert(
+        ($firstPage['total'] ?? null) === 3
+        && count((array) ($firstPage['items'] ?? [])) === 2
+        && ($firstPage['hasMore'] ?? null) === true
+        && is_string($firstPage['nextCursor'] ?? null),
+        'comment_first_page_invalid',
+    );
+    $secondPage = $service->listForVisiblePhoto(
+        $first['class_photo_id'],
+        $first['piwigo_image_id'],
+        \ClassIdentity\Access::ROLE_CLASSMATE,
+        (string) $firstPage['nextCursor'],
+        2,
+    );
+    photoCommentRuntimeAssert(
+        ($secondPage['total'] ?? null) === 3
+        && count((array) ($secondPage['items'] ?? [])) === 1
+        && ($secondPage['hasMore'] ?? null) === false
+        && ($secondPage['nextCursor'] ?? false) === null,
+        'comment_second_page_invalid',
+    );
+    $pagedIds = array_map(static fn (array $item): string => (string) ($item['id'] ?? ''), [
+        ...(array) $firstPage['items'],
+        ...(array) $secondPage['items'],
+    ]);
+    photoCommentRuntimeAssert(count(array_unique($pagedIds)) === 3, 'comment_keyset_page_overlap');
+    photoCommentRuntimeExpect(
+        static fn () => $service->listForVisiblePhoto(
+            $first['class_photo_id'],
+            $first['piwigo_image_id'],
+            \ClassIdentity\Access::ROLE_CLASSMATE,
+            null,
+            201,
+        ),
+        'class_archive_comment_page_limit_invalid',
+        'comment_page_limit',
+    );
+    photoCommentRuntimeExpect(
+        static fn () => $service->listForVisiblePhoto(
+            $second['class_photo_id'],
+            $second['piwigo_image_id'],
+            \ClassIdentity\Access::ROLE_CLASSMATE,
+            (string) $firstPage['nextCursor'],
+            2,
+        ),
+        'class_archive_comment_page_cursor_invalid',
+        'comment_cross_photo_cursor',
+    );
     ++$assertions;
 
     $stage = 'family_write_denial';
@@ -296,9 +356,9 @@ try {
     );
     ++$assertions;
 
-    $stage = 'admin_delete';
+    $stage = 'admin_delete_parent_tombstone';
     $reason = '合成评论审核删除';
-    $deleted = $service->delete($adminUserId, $replyId, $reason);
+    $deleted = $service->delete($adminUserId, $rootId, $reason);
     photoCommentRuntimeAssert(($deleted['deleted'] ?? null) === true, 'admin_comment_delete_failed');
     ++$assertions;
     $afterDelete = $service->listForVisiblePhoto(
@@ -306,7 +366,63 @@ try {
         $first['piwigo_image_id'],
         \ClassIdentity\Access::ROLE_CLASSMATE,
     );
-    photoCommentRuntimeAssert(($afterDelete['total'] ?? null) === 2, 'deleted_comment_visible');
+    photoCommentRuntimeAssert(($afterDelete['total'] ?? null) === 3, 'deleted_parent_thread_count_invalid');
+    $tombstone = null;
+    $survivingReply = null;
+    foreach ((array) ($afterDelete['items'] ?? []) as $item) {
+        if (($item['id'] ?? null) === $rootId) {
+            $tombstone = $item;
+        }
+        if (($item['id'] ?? null) === $replyId) {
+            $survivingReply = $item;
+        }
+    }
+    photoCommentRuntimeAssert(
+        is_array($tombstone)
+        && ($tombstone['deleted'] ?? null) === true
+        && array_key_exists('body', $tombstone)
+        && $tombstone['body'] === null
+        && ($tombstone['author']['kind'] ?? null) === 'DELETED'
+        && ($tombstone['canReply'] ?? null) === false
+        && ($tombstone['canDelete'] ?? null) === false,
+        'deleted_parent_tombstone_invalid',
+    );
+    photoCommentRuntimeAssert(
+        is_array($survivingReply)
+        && ($survivingReply['deleted'] ?? null) === false
+        && ($survivingReply['parentId'] ?? null) === $rootId,
+        'deleted_parent_reply_not_preserved',
+    );
+    photoCommentRuntimeAssert(!str_contains(
+        json_encode($afterDelete, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+        $marker . '-classmate',
+    ), 'deleted_parent_body_leaked');
+    ++$assertions;
+
+    $stage = 'per_principal_burst_limit';
+    for ($index = 0; $index < 9; ++$index) {
+        $burst = $service->create(
+            $users['fixture-classmate'],
+            $second['class_photo_id'],
+            $second['piwigo_image_id'],
+            null,
+            $marker . '-burst-' . $index,
+        );
+        $burstId = (string) ($burst['comment_id'] ?? '');
+        \ClassIdentity\DomainSupport::idToBinary($burstId);
+        $fixtureCommentIds[] = $burstId;
+    }
+    photoCommentRuntimeExpect(
+        static fn () => $service->create(
+            $users['fixture-classmate'],
+            $second['class_photo_id'],
+            $second['piwigo_image_id'],
+            null,
+            $marker . '-burst-rejected',
+        ),
+        'class_archive_comment_rate_limited',
+        'classmate_burst_limit',
+    );
     ++$assertions;
 
     $stage = 'audit_redaction';

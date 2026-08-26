@@ -7,11 +7,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..', '..');
 const read = (path) => readFile(resolve(root, path), 'utf8');
 
-const [schema, controller, gateway, albumService, server, app, css, i18n] = await Promise.all([
+const [schema, controller, gateway, albumService, privateAlbumAliasScript, server, app, css, i18n] = await Promise.all([
   read('plugins/ClassIdentity/src/Schema.php'),
   read('plugins/ClassIdentity/src/Gateway/GatewayHttpController.php'),
   read('plugins/ClassIdentity/src/Gateway/GatewayService.php'),
   read('plugins/ClassIdentity/src/AlbumService.php'),
+  read('infra/scripts/set-private-album-display-alias.php'),
   read('infra/immich-spike/web-compat/server.mjs'),
   read('infra/immich-spike/photo-ui/app.js'),
   read('infra/immich-spike/photo-ui/app.css'),
@@ -24,7 +25,7 @@ function check(condition, message) {
   assertions += 1;
 }
 
-check(schema.includes('public const CURRENT_VERSION = 14;'), 'ClassIdentity schema must include the v14 native-checkpoint recovery while preserving v13 private-library journal, v12 durable native source epoch and v8 productization');
+check(schema.includes('public const CURRENT_VERSION = 15;'), 'ClassIdentity schema must include the v15 Collections-first domain while preserving v14 native checkpoint recovery, v13 private-library journal, v12 durable native source epoch and v8 productization');
 check(schema.includes("'name' => '0008_photo_productization_domain'"), 'v8 migration must have a stable ledger name');
 check(schema.includes("'name' => '0012_durable_native_source_epoch'"), 'v12 migration must have a stable ledger name');
 check(schema.includes("CREATE TABLE IF NOT EXISTS {$epoch}") && schema.includes(') ENGINE=MyISAM'), 'v12 source epoch sentinel must remain durable in the native MyISAM domain');
@@ -32,6 +33,8 @@ check(schema.includes("'source_key', 'generation', 'updated_at'"), 'v12 source e
 check(schema.includes("'name' => '0013_private_full_library_import'"), 'v13 private full-library import migration must have a stable ledger name');
 check(schema.includes("'name' => '0014_private_full_native_checkpoint_recovery'")
   && schema.includes('migrationPrivateFullNativeCheckpointRecovery'), 'v14 must permit a verified native checkpoint before canonical publication');
+check(schema.includes("'name' => '0015_collections_first_comments_ai_index'")
+  && schema.includes('migrationCollectionsFirstCommentsAndAiIndex'), 'v15 must have a stable Collections-first migration ledger');
 check(schema.includes("'PRIVATE_FULL'"), 'full private-library provenance must remain distinct from disposable PRIVATE_QA');
 for (const table of [
   'private_library_collection', 'private_library_folder', 'private_library_import', 'private_library_import_item',
@@ -42,6 +45,7 @@ for (const table of [
 for (const table of [
   'person_merge', 'person_photo_rule', 'album', 'spotlight', 'photo_source',
   'photo_duplicate', 'batch_operation', 'batch_operation_item',
+  'photo_comment', 'auto_collection', 'auto_collection_photo', 'ai_asset_index', 'ai_index_job',
 ]) {
   check(schema.includes(`$this->quotedTable('${table}')`), `v8 must create ${table}`);
   check(schema.includes(`'${table}' => '`), `v8 must lock the ${table} semantic fingerprint`);
@@ -113,7 +117,7 @@ check(!controller.includes('readfile(') && !controller.includes('fpassthru('), '
 check(server.includes('if (upstreamResponse.status === 200 || upstreamResponse.status === 206)')
   && server.includes('Do not silently fall back to user-space media relay'), 'BFF must reject successful media without a validated X-Accel target');
 
-const hybridStart = gateway.indexOf('public function hybridSearch(string $query): array');
+const hybridStart = gateway.indexOf('public function hybridSearch(string $query, ?string $albumId = null): array');
 const visibleStart = gateway.indexOf('$visible = $this->visiblePhotos();', hybridStart);
 const hybridReturn = gateway.indexOf("'people' => ['total' => count($peopleItems)", visibleStart);
 check(hybridStart >= 0 && visibleStart > hybridStart && hybridReturn > visibleStart, 'hybrid search counts must derive from policy-filtered photos');
@@ -121,9 +125,23 @@ check(gateway.includes("$smart = ['available' => false, 'total' => 0, 'items' =>
   && gateway.includes('// Explicit partial degradation: no fallback to a whole library.')
   && gateway.includes("'partial' => ($smart['available'] ?? false) !== true"), 'semantic search failure must degrade independently, report partial results and fail closed');
 check(gateway.includes("self::semanticQuery($query)"), 'hybrid search must use the bounded local bilingual normalization hook');
-check(gateway.includes("'total' => count($members)") && gateway.includes("'coverPhotoId' => $cover"), 'album counts and covers must be chosen from visible members');
+check(gateway.includes("'total' => count($directMembers)") && gateway.includes("'coverPhotoId' => $cover"), 'leaf-album counts and covers must be chosen from policy-visible direct members');
 check(gateway.includes("'sourceRoot' => ($mapping['source_root'] ?? false) === true"), 'a private source-root hint must stay presentation-only and policy-neutral');
-check(albumService.includes('privateSourceRootAlbumIds') && albumService.includes("f.`parent_folder_id` IS NULL"), 'full-library source roots must be derived from the private folder hierarchy rather than a client path');
+check(albumService.includes('privateSourceContextsByAlbum') && albumService.includes("'source_root' => $row['parent_folder_id'] === null"), 'full-library source contexts must be derived from the private folder hierarchy rather than a client path');
+check(albumService.includes('setDisplayAlias') && albumService.includes('ALBUM_DISPLAY_ALIAS_UPDATE'), 'a display alias must be a generic audited presentation override, not a source-folder rename');
+check(privateAlbumAliasScript.includes("['PRIVATE_SOURCE_A', 'PRIVATE_SOURCE_B']")
+  && privateAlbumAliasScript.includes('private_album_alias_root_mapping_invalid')
+  && privateAlbumAliasScript.includes("`depth`=0")
+  && privateAlbumAliasScript.includes("f.`display_name`=?")
+  && privateAlbumAliasScript.includes('setDisplayAlias')
+  && !privateAlbumAliasScript.includes('<private-drive-root>/\\'), 'the private alias applicator must target one allowlisted source root without embedding a workstation path');
+check(gateway.includes('if ($directMembers === [])') && gateway.includes("'directTotal' => count($directMembers)"), 'pure folder containers must be excluded while direct-photo leaf albums retain their own membership');
+check(gateway.includes('public function searchSuggestions(string $query = \'\', ?string $albumId = null): array')
+  && gateway.includes('self::boundedSuggestions($people)')
+  && gateway.includes('same policy/optional-leaf-album filter used by hybrid search'), 'suggestions must be bounded structured projections over policy-filtered photos');
+check(controller.includes("$segments === ['search', 'suggestions']")
+  && controller.includes("requireExactQuery(['q', 'albumId'], ['q', 'albumId'])"), 'search suggestions must accept only bounded optional query and album scope');
+check(controller.includes("str_contains($code, '_comment_write_forbidden')"), 'family comment-write denials must be an actual 403, never a generic 503');
 check(controller.includes('DomainSupport::idToBinary($value)') && controller.includes('return strtolower($value)'), 'product detail routes must require normalized opaque UUIDs');
 
 check(app.includes("const MOBILE_NAVIGATION = new Set(['home', 'photos', 'people', 'search', 'albums', 'my'])"), 'mobile information architecture must include the Collections-first home tab');
@@ -192,7 +210,9 @@ for (const path of [
 ]) {
   check(app.includes(`'${path}'`) && server.includes(`['${path}', `), `comments must use explicit bounded BFF mutation ${path}`);
 }
-check(app.includes('function normalizeComments(payload)') && app.includes('function viewerComments(photoId, role, comments, onRefresh)'), 'comments must be normalized before rendering a viewer panel');
+check(app.includes('function normalizeComments(payload)') && app.includes('function viewerComments(photoId, role, comments, onRefresh, onLoadMore)'), 'comments must be normalized before rendering a viewer panel');
+check(app.includes("new URLSearchParams({ limit: '100' })") && app.includes('comments.hasMore')
+  && server.includes("exactQuery(url, new Set(['cursor', 'limit']))"), 'comment reads must remain bounded and keyset-paginated across UI and BFF');
 check(app.includes("if (canCreateComment(role)) section.append(commentComposer")
   && app.includes("else if (role === 'FAMILY')"), 'Family comment UI must stay read-only while eligible principals can comment');
 check(app.includes("role === 'SYSTEM_ADMIN' && item.canDelete")

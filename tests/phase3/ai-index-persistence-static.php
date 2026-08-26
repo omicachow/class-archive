@@ -101,6 +101,10 @@ foreach (['curl_', 'file_get_contents(', 'fopen(', 'copy(', 'hash_file(', 'exec(
 $assert(str_contains($source['service'], 'CLASS_ARCHIVE_PRIVATE_AI_INDEX_WORKER'), 'private worker must be explicit, not auto-discovered');
 $assert(str_contains($source['service'], 'requirePrivateWorker'), 'job worker actions must reject an unconfigured runtime');
 $assert(str_contains($source['service'], 'UNAVAILABLE'), 'unconfigured worker is not explicit');
+$statusBody = $functionBody($source['service'], 'status');
+$assert(str_contains($statusBody, "'DEGRADED'") && str_contains($statusBody, '$failedAssets')
+    && str_contains($statusBody, '$failedJobs') && str_contains($statusBody, '$terminalAssetAnomalies'),
+    'terminal AI failures may still be reported READY');
 
 $importFinish = strpos($source['importer'], '$library->finishImport');
 $importQueue = strpos($source['importer'], '$aiIndex->enqueueImportedActivePhotos()');

@@ -139,14 +139,14 @@ check(app.includes("event.key === 'ArrowRight'"), 'viewer must support next-phot
 check(app.includes("event.key === 'Escape'"), 'viewer must support Escape');
 check(app.includes('updateZoom'), 'viewer must expose bounded zoom controls');
 check(app.includes("responsivePhotoImage(photo, 'viewer'"), 'viewer must use a responsive MediaGuard-backed preview');
-check(app.includes("loadComments(photoId)") && app.includes("'/api/class-archive/comments/create'")
+check(app.includes("loadComments(photoId, cursor = null)") && app.includes("'/api/class-archive/comments/create'")
   && app.includes("'/api/class-archive/comments/reply'") && app.includes("'/api/class-archive/manage/comments/delete'"), 'viewer comments must use the audited bounded comment contract');
 check(app.includes("if (canCreateComment(role)) section.append(commentComposer")
   && app.includes("else if (role === 'FAMILY')"), 'family must be read-only while eligible member roles can comment');
 check(app.includes("role === 'SYSTEM_ADMIN' && item.canDelete"), 'comment deletion must remain limited to the system-admin product role');
 check(server.includes("'/api/class-archive/manage/comments/delete' && role !== 'SYSTEM_ADMIN'"), 'BFF must enforce actual server-side admin-only comment deletion');
 check(app.includes("const title = context.album || t('viewer.photoContext')") && !app.includes('businessLabel(asset?.originalFileName'), 'viewer must not make original file names its main context');
-check(app.includes("viewerComments(id, state.role, comments, refreshComments)") && app.includes('viewerPhotoInfo(photo, context)'), 'viewer must put comments first and retain photo information behind a details control');
+check(app.includes("viewerComments(id, state.role, comments, refreshComments, loadMoreComments)") && app.includes('viewerPhotoInfo(photo, context)'), 'viewer must put comments first and retain photo information behind a details control');
 check(app.includes("addEventListener('touchstart'"), 'viewer must start mobile touch gesture tracking');
 check(app.includes("addEventListener('touchmove'"), 'viewer must handle two-finger pinch movement');
 check(app.includes("addEventListener('touchend'"), 'viewer must complete horizontal swipe navigation');

@@ -35,6 +35,7 @@ require $root . '/plugins/ClassIdentity/src/Access.php';
 require $root . '/plugins/ClassIdentity/src/ClassArchivePhoto.php';
 require $root . '/plugins/ClassIdentity/src/ClassArchivePerson.php';
 require $root . '/plugins/ClassIdentity/src/DomainSupport.php';
+require $root . '/plugins/ClassIdentity/src/AutoCollectionService.php';
 require $root . '/plugins/ClassIdentity/src/Gateway/Contracts.php';
 require $root . '/plugins/ClassIdentity/src/Gateway/GatewayPolicy.php';
 require $root . '/plugins/ClassIdentity/src/Gateway/GatewayService.php';
@@ -237,6 +238,95 @@ try {
         || ($states['SPOTLIGHT'] ?? null) !== 'ACTIVE'
     ) projectionFail('read_aggregate_status_not_persistent');
     $assertions += 6;
+
+    // A Memory rebuild first commits STALE, then synchronizes AutoCollection
+    // inside the same aggregate publish transaction. Inject an unavailable
+    // candidate through the real service and prove MariaDB rolls back the
+    // sync while MEMORIES remains fail-closed.
+    $autoCollectionTable = '`' . $repository->table('auto_collection') . '`';
+    $autoMemberTable = '`' . $repository->table('auto_collection_photo') . '`';
+    if ($db->query(
+        "CREATE TABLE {$autoCollectionTable} ("
+            . '`auto_collection_id` BINARY(16) NOT NULL,`collection_kind` VARCHAR(16) NOT NULL,'
+            . '`title` VARCHAR(190) NOT NULL,`subtitle` VARCHAR(190) NULL,`source_reason` VARCHAR(64) NOT NULL,'
+            . '`archive_date` DATE NULL,`date_precision` VARCHAR(16) NOT NULL,`cover_class_photo_id` BINARY(16) NOT NULL,'
+            . '`visibility_scope` VARCHAR(24) NOT NULL,`projection_revision` BINARY(32) NOT NULL,`state` VARCHAR(16) NOT NULL,'
+            . '`generated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),'
+            . '`updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),PRIMARY KEY (`auto_collection_id`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    ) === false || $db->query(
+        "CREATE TABLE {$autoMemberTable} ("
+            . '`auto_collection_id` BINARY(16) NOT NULL,`class_photo_id` BINARY(16) NOT NULL,`ordinal` INT UNSIGNED NOT NULL,'
+            . '`created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),'
+            . 'PRIMARY KEY (`auto_collection_id`,`class_photo_id`),UNIQUE KEY (`auto_collection_id`,`ordinal`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    ) === false) {
+        projectionFail('memory_barrier_fixture_create_failed');
+    }
+    $validMemory = ['available' => true, 'total' => 0, 'items' => []];
+    $invalidMemory = ['available' => false, 'total' => 0, 'items' => []];
+    $barrierPayloads = $aggregatePayloads;
+    $barrierPayloads[\ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL][\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES] = $invalidMemory;
+    $barrierPayloads[\ClassIdentity\Gateway\ReadProjectionStore::SCOPE_HERITAGE][\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES] = ['available' => true, 'total' => 0, 'items' => []];
+    $restartStore->invalidate([\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES], 'AUTO_COLLECTION_REBUILD_STARTED', false);
+    $barrierToken = $restartStore->beginAggregateBuild([\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES]);
+    try {
+        $restartStore->rebuildAggregates(
+            $barrierPayloads,
+            [\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES],
+            $barrierToken,
+            false,
+            static fn(\ClassIdentity\Repository $transactionRepository): array =>
+                (new \ClassIdentity\AutoCollectionService($transactionRepository))
+                    ->syncMemoryProjectionInCurrentTransaction($invalidMemory),
+        );
+        projectionFail('memory_barrier_sync_failure_published');
+    } catch (RuntimeException $error) {
+        if ($error->getMessage() !== 'class_archive_auto_collection_projection_unavailable') throw $error;
+    }
+    $memoryState = array_values(array_filter(
+        $restartStore->status(),
+        static fn(array $row): bool => ($row['kind'] ?? null) === \ClassIdentity\Gateway\ReadProjectionStore::MEMORIES,
+    ))[0] ?? null;
+    if (($memoryState['state'] ?? null) !== 'STALE') projectionFail('memory_barrier_failure_not_stale');
+    if ((int) (($repository->fetchOne("SELECT COUNT(*) AS `count` FROM {$autoCollectionTable}")['count'] ?? -1)) !== 0) {
+        projectionFail('memory_barrier_failure_did_not_rollback_auto_collection');
+    }
+    try {
+        $restartStore->aggregate(\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES, \ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL);
+        projectionFail('memory_barrier_stale_payload_readable');
+    } catch (RuntimeException $error) {
+        if ($error->getMessage() !== 'class_archive_read_aggregate_unavailable') throw $error;
+    }
+    $barrierPayloads[\ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL][\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES] = $validMemory;
+    $barrierToken = $restartStore->beginAggregateBuild([\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES]);
+    $barrierRecovered = $restartStore->rebuildAggregates(
+        $barrierPayloads,
+        [\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES],
+        $barrierToken,
+        false,
+        static fn(\ClassIdentity\Repository $transactionRepository): array =>
+            (new \ClassIdentity\AutoCollectionService($transactionRepository))
+                ->syncMemoryProjectionInCurrentTransaction($validMemory),
+    );
+    if (($barrierRecovered['pre_publish_result']['total'] ?? null) !== 0
+        || ($restartStore->aggregate(\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES, \ClassIdentity\Gateway\ReadProjectionStore::SCOPE_FULL)['total'] ?? null) !== 0
+    ) projectionFail('memory_barrier_recovery_failed');
+
+    // Restore the original empty fixture through the same barrier so later
+    // projection semantics remain independent of this fault injection.
+    $restartStore->invalidate([\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES], 'AUTO_COLLECTION_REBUILD_STARTED', false);
+    $restoreMemoryToken = $restartStore->beginAggregateBuild([\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES]);
+    $restartStore->rebuildAggregates(
+        $aggregatePayloads,
+        [\ClassIdentity\Gateway\ReadProjectionStore::MEMORIES],
+        $restoreMemoryToken,
+        false,
+        static fn(\ClassIdentity\Repository $transactionRepository): array =>
+            (new \ClassIdentity\AutoCollectionService($transactionRepository))
+                ->syncMemoryProjectionInCurrentTransaction(['available' => true, 'total' => 0, 'items' => []]),
+    );
+    $assertions += 5;
 
     // Point refreshes must declare which aggregates depend on the changed
     // photo. An empty dependency set could otherwise rebind stale counts to a
@@ -722,7 +812,7 @@ try {
             $db->query('DROP TRIGGER IF EXISTS `' . $triggerName . '`');
         }
     }
-    foreach (['photo', 'read_photo', 'read_projection', 'native_source_epoch'] as $suffix) {
+    foreach (['auto_collection_photo', 'auto_collection', 'photo', 'read_photo', 'read_projection', 'native_source_epoch'] as $suffix) {
         $name = $basePrefix . 'class_identity_' . $suffix;
         if (preg_match('/\A[A-Za-z0-9_]+\z/D', $name) === 1) $db->query('DROP TABLE IF EXISTS `' . $name . '`');
     }
