@@ -61,6 +61,7 @@ final class Audit
         'mime_type',
         'extension',
         'byte_size',
+        'presentation_byte_size',
         'width',
         'height',
         'date_precision',
