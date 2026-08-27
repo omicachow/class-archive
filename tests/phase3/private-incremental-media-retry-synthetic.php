@@ -56,6 +56,50 @@ function incrementalRetryProof(
         && $fullCached + $fullMissing === ($baseline + $delta) * $profiles;
 }
 
+/**
+ * Restore packages deliberately omit rebuildable baseline derivatives.  The
+ * safe proof does not inspect or select that baseline at all. The durable
+ * queue may be an exact subset of the checksum-bound delta only when the
+ * complement is verified by an exact, read-only six-profile check.
+ * `$baselineMissing` is intentionally irrelevant to acceptance and exists to
+ * prove a large restore cache gap cannot expand either selected set.
+ *
+ * @param list<string> $deltaMarkers
+ * @param list<string> $pendingMarkers
+ */
+function incrementalRestoreProof(
+    int $baseline,
+    int $baselineMissing,
+    int $delta,
+    int $profiles,
+    array $deltaMarkers,
+    array $pendingMarkers,
+    int $queueCached,
+    int $queueMissing,
+    int $completedCached,
+    int $completedMissing,
+): bool {
+    if ($baseline < 1 || $baselineMissing < 0 || $delta < 0 || $profiles < 1
+        || $queueCached < 0 || $queueMissing < 0 || $completedCached < 0 || $completedMissing < 0
+        || count($deltaMarkers) !== $delta
+        || count(array_unique($deltaMarkers, SORT_STRING)) !== $delta
+        || count($pendingMarkers) > $delta
+        || count(array_unique($pendingMarkers, SORT_STRING)) !== count($pendingMarkers)) {
+        return false;
+    }
+    $allowed = array_fill_keys($deltaMarkers, true);
+    foreach ($pendingMarkers as $marker) {
+        if (!isset($allowed[$marker])) {
+            return false;
+        }
+    }
+    $pending = count($pendingMarkers);
+    $completed = $delta - $pending;
+    return $queueCached + $queueMissing === $pending * $profiles
+        && $completedCached === $completed * $profiles
+        && $completedMissing === 0;
+}
+
 $delta = [
     '10000000-0000-4000-8000-000000000001:101',
     '10000000-0000-4000-8000-000000000002:102',
@@ -88,6 +132,17 @@ $assert(!incrementalRetryProof($baseline, 3, $profiles, $delta, [$delta[1], $del
 $assert(!incrementalRetryProof($baseline, 3, $profiles, $delta, $remaining, 35, 13, 0, 12), 'baseline_cache_gap_allowed');
 $assert(!incrementalRetryProof($baseline, 3, $profiles, $delta, $remaining, 36, 12, 0, 11), 'unaccounted_generation_allowed');
 $assert(!incrementalRetryProof($baseline, 3, $profiles, [$delta[0], $delta[1]], $remaining, 36, 12, 0, 12), 'delta_marker_count_drift_allowed');
+
+// Restore may have no baseline derivative cache at all. Only the exact three
+// durable delta entries are selected, so 30 missing baseline variants neither
+// block the run nor become generation work.
+$assert(incrementalRestoreProof($baseline, 30, 3, $profiles, $delta, $delta, 0, 18, 0, 0), 'restore_exact_delta_rejected');
+$assert(incrementalRestoreProof($baseline, 17, 0, $profiles, [], [], 0, 0, 0, 0), 'restore_verified_noop_rejected');
+$assert(incrementalRestoreProof($baseline, 30, 3, $profiles, $delta, $remaining, 0, 12, 6, 0), 'restore_partial_retry_rejected');
+$assert(!incrementalRestoreProof($baseline, 30, 3, $profiles, $delta,
+    [$delta[0], $delta[1], '20000000-0000-4000-8000-000000000001:999'], 0, 18, 0, 0), 'restore_foreign_queue_allowed');
+$assert(!incrementalRestoreProof($baseline, 30, 3, $profiles, $delta, $delta, 0, 17, 0, 0), 'restore_unaccounted_generation_allowed');
+$assert(!incrementalRestoreProof($baseline, 30, 3, $profiles, $delta, $remaining, 0, 12, 5, 1), 'restore_completed_corruption_allowed');
 
 $aggregate = json_encode([
     'total' => 8,

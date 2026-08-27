@@ -51,9 +51,28 @@ $assert(str_contains($source['operator'], "[string]\$core[0].HostIp -eq '127.0.0
 $assert(str_contains($source['operator'], 'if ($deltaCount -eq 0)')
     && str_contains($source['operator'], 'no_op=1')
     && str_contains($source['operator'], 'queues_started = 0'), 'verified_noop_missing');
-$assert(str_contains($source['operator'], "Get-Warmup 'all' \$true"), 'baseline_derivative_attestation_missing');
+$assert(str_contains($source['operator'], "\$requireFullDerivativeCache = \$Runtime -eq 'full'")
+    && str_contains($source['operator'], "if (\$requireFullDerivativeCache) { Get-Warmup 'all' \$true } else { \$null }")
+    && str_contains($source['operator'], "if (\$requireFullDerivativeCache) {\n        \$postwarmAll = Get-Warmup 'all' \$true"),
+    'full_runtime_derivative_attestation_not_isolated');
+$assert(str_contains($source['operator'], "Get-Warmup 'exact' \$true '' \$exactManifestDigest ([string]\$plan.delta_digest)")
+    && str_contains($source['operator'], '[int]$completedPrewarm.selected_images -eq $completedDerivativeCount')
+    && str_contains($source['operator'], '[int]$completedPrewarm.cached -eq $completedDerivativeCount * $profiles')
+    && str_contains($source['operator'], '[int]$completedPrewarm.would_generate -eq 0')
+    && str_contains($source['operator'], 'derivative_restore_completed_not_ready'),
+    'restore_completed_delta_exact_verifier_missing');
+$assert(str_contains($source['operator'], 'completed-derivatives.json')
+    && str_contains($source['operator'], '(Get-FileHash -LiteralPath $exactHost -Algorithm SHA256).Hash.ToLowerInvariant()')
+    && str_contains($source['operator'], 'delta_digest = [string]$plan.delta_digest'),
+    'restore_completed_manifest_not_plan_and_sha_bound');
+$assert(str_contains($source['operator'], 'all-delta-derivatives.json')
+    && str_contains($source['operator'], '[int]$postExact.selected_images -eq $deltaCount')
+    && str_contains($source['operator'], '[int]$postExact.cached -eq $deltaCount * $profiles')
+    && str_contains($source['operator'], 'derivative_restore_post_delta_not_ready'),
+    'restore_post_drain_exact_delta_attestation_missing');
 $assert(str_contains($source['operator'], "Get-Warmup 'queue' \$false"), 'delta_derivative_action_missing');
-$assert(str_contains($source['operator'], '[int]$prewarm.cached - [int]$deltaPrewarm.cached -eq ($baselineCount + $completedDerivativeCount) * $profiles'), 'baseline_and_retry_ready_not_proven');
+$assert(str_contains($source['operator'], '[int]$prewarm.cached - [int]$deltaPrewarm.cached -eq ($baselineCount + $completedDerivativeCount) * $profiles')
+    && str_contains($source['operator'], 'derivative_full_cache_delta_mismatch'), 'full_baseline_and_retry_ready_not_proven');
 $assert(str_contains($source['operator'], '[int]$warm.selected_images -eq $pendingDerivativeCount'), 'derivative_delta_not_exact');
 $assert(str_contains($source['operator'], "Get-Warmup 'queue' \$false ([string]\$deltaPrewarm.queue_digest)")
     && str_contains($source['warmer'], 'hash_equals($expectedQueueDigest, $queueDigest)'),
@@ -64,9 +83,13 @@ $derivativeStage = strpos($source['operator'], "\$script:stage = 'derivative_del
 $commitStage = strpos($source['operator'], "\$script:stage = 'index_control_plane_commit'");
 $assert($derivativeStage !== false && $commitStage !== false && $derivativeStage < $commitStage,
     'derivative_failure_not_retryable_before_control_commit');
-$assert(str_contains($source['operator'], "Get-Warmup 'all' \$true")
+$assert(str_contains($source['operator'], 'if ($requireFullDerivativeCache) {')
+    && str_contains($source['operator'], "Get-Warmup 'all' \$true")
     && str_contains($source['operator'], '[int]$postwarmAll.cached -eq $catalogCount * $profiles'),
-    'post_derivative_library_readiness_missing');
+    'full_post_derivative_library_readiness_missing');
+$assert(str_contains($source['operator'], 'cannot select any baseline item')
+    && str_contains($source['operator'], 'ordinary GET cannot perform this action'),
+    'restore_baseline_or_get_nonselection_not_documented');
 $assert(str_contains($source['operator'], 'derivative_old_selected=0'), 'old_derivative_nonexecution_not_reported');
 $assert(str_contains($source['operator'], 'Get-ImmichIndexSnapshot @($plan.baseline) \'baseline-before\'')
     && str_contains($source['operator'], 'Get-ImmichIndexSnapshot @($plan.baseline) \'baseline-after\'')
@@ -129,13 +152,19 @@ $assert(str_contains($completeBody, '$repository->transaction(function')
     && str_contains($completeBody, 'ORDER BY `class_photo_id`,`job_id` FOR UPDATE')
     && str_contains($completeBody, 'AND `immich_asset_id` IS NULL'), 'control_plane_delta_not_atomic');
 
-$assert(substr_count($source['warmer'], "['first-screen', 'covers', 'queue', 'all']") >= 2, 'queue_scope_not_closed');
-$assert(str_contains($source['warmer'], "\$queueOnlyFilter = \$scope === 'queue' ? ' AND 1=0' : ''"), 'queue_scope_base_relation_not_empty');
+$assert(substr_count($source['warmer'], "['first-screen', 'covers', 'queue', 'exact', 'all']") >= 2, 'queue_scope_not_closed');
+$assert(str_contains($source['warmer'], "\$queueOnlyFilter = in_array(\$scope, ['queue', 'exact'], true) ? ' AND 1=0' : ''"), 'queue_and_exact_scope_base_relation_not_empty');
 $assert(str_contains($source['warmer'], "in_array(\$scope, ['queue', 'all'], true)"), 'queue_scope_durable_markers_missing');
 $assert(str_contains($source['warmer'], '\\ClassArchiveDerivativeWarmupQueue::complete('), 'queue_completion_missing');
 $assert(str_contains($source['warmer'], "'queue_entries' => \$queueEntries")
     && !str_contains($source['warmer'], "'queue_entries' => \$rows"), 'queue_retry_evidence_leaks_or_missing');
 $assert(str_contains($source['warmer'], "'queue_digest' => \$queueDigest"), 'queue_apply_digest_missing');
+$assert(str_contains($source['warmer'], 'CLASS_ARCHIVE_PHOTO_CACHE_EXACT_MANIFEST')
+    && str_contains($source['warmer'], 'hash_equals($manifestDigest, hash(\'sha256\', $raw))')
+    && str_contains($source['warmer'], 'hash_equals($deltaDigest, (string) $manifest[\'delta_digest\'])')
+    && str_contains($source['warmer'], "if (!\$dryRun || \$expectedQueueDigest !== null")
+    && str_contains($source['warmer'], 'photo_cache_exact_mapping_unresolved'),
+    'exact_completed_scope_not_bounded_read_only_and_digest_bound');
 
 $assert(str_contains($source['ai'], 'Ordinary GET') || str_contains($source['ai'], 'ordinary photo read path'), 'read_path_separation_not_documented');
 $assert(str_contains($source['ai'], 'requirePrivateWorker'), 'private_worker_gate_missing');

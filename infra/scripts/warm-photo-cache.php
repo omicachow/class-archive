@@ -14,8 +14,9 @@ const CLASS_ARCHIVE_PHOTO_CACHE_ROOT = '/var/www/html/piwigo';
 const CLASS_ARCHIVE_PHOTO_CACHE_FIRST_SCREEN_LIMIT = 48;
 const CLASS_ARCHIVE_PHOTO_CACHE_GENERATOR_TIMEOUT_SECONDS = 30.0;
 const CLASS_ARCHIVE_PHOTO_CACHE_GENERATOR_STDERR_LIMIT = 8192;
+const CLASS_ARCHIVE_PHOTO_CACHE_EXACT_MANIFEST = '/tmp/class-archive-photo-cache-exact.json';
 
-/** @return array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string} */
+/** @return array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string,exact_manifest_digest:?string,exact_delta_digest:?string} */
 function classArchivePhotoCacheArguments(array $argv): array
 {
     $result = [
@@ -24,6 +25,8 @@ function classArchivePhotoCacheArguments(array $argv): array
         'dry_run' => false,
         'json' => false,
         'queue_digest' => null,
+        'exact_manifest_digest' => null,
+        'exact_delta_digest' => null,
     ];
     foreach (array_slice($argv, 1) as $argument) {
         if ($argument === '--dry-run') {
@@ -36,7 +39,7 @@ function classArchivePhotoCacheArguments(array $argv): array
         }
         if (str_starts_with($argument, '--scope=')) {
             $scope = substr($argument, strlen('--scope='));
-            if (!in_array($scope, ['first-screen', 'covers', 'queue', 'all'], true)) {
+            if (!in_array($scope, ['first-screen', 'covers', 'queue', 'exact', 'all'], true)) {
                 throw new InvalidArgumentException('photo_cache_scope_invalid');
             }
             $result['scope'] = $scope;
@@ -68,12 +71,116 @@ function classArchivePhotoCacheArguments(array $argv): array
             $result['queue_digest'] = $digest;
             continue;
         }
+        if (str_starts_with($argument, '--exact-manifest-digest=')) {
+            $digest = substr($argument, strlen('--exact-manifest-digest='));
+            if (preg_match('/\A[0-9a-f]{64}\z/D', $digest) !== 1 || $result['exact_manifest_digest'] !== null) {
+                throw new InvalidArgumentException('photo_cache_exact_manifest_digest_invalid');
+            }
+            $result['exact_manifest_digest'] = $digest;
+            continue;
+        }
+        if (str_starts_with($argument, '--exact-delta-digest=')) {
+            $digest = substr($argument, strlen('--exact-delta-digest='));
+            if (preg_match('/\A[0-9a-f]{64}\z/D', $digest) !== 1 || $result['exact_delta_digest'] !== null) {
+                throw new InvalidArgumentException('photo_cache_exact_delta_digest_invalid');
+            }
+            $result['exact_delta_digest'] = $digest;
+            continue;
+        }
         throw new InvalidArgumentException('photo_cache_argument_invalid');
     }
     if ($result['queue_digest'] !== null && ($result['scope'] !== 'queue' || $result['dry_run'])) {
         throw new InvalidArgumentException('photo_cache_queue_digest_scope_invalid');
     }
+    $hasExactContract = $result['exact_manifest_digest'] !== null || $result['exact_delta_digest'] !== null;
+    if ($result['scope'] === 'exact') {
+        if (!$result['dry_run'] || $result['queue_digest'] !== null
+            || $result['exact_manifest_digest'] === null || $result['exact_delta_digest'] === null) {
+            throw new InvalidArgumentException('photo_cache_exact_scope_contract_invalid');
+        }
+    } elseif ($hasExactContract) {
+        throw new InvalidArgumentException('photo_cache_exact_digest_scope_invalid');
+    }
     return $result;
+}
+
+/**
+ * Read the bounded, operator-created verification set. This scope is
+ * deliberately dry-run-only: it can prove that a partially drained delta is
+ * already cached, but can neither generate a derivative nor widen to the
+ * restored baseline.
+ *
+ * @return list<array{class_photo_id:string,piwigo_image_id:int}>
+ */
+function classArchivePhotoCacheExactEntries(string $manifestDigest, string $deltaDigest): array
+{
+    $path = CLASS_ARCHIVE_PHOTO_CACHE_EXACT_MANIFEST;
+    $pathStat = @lstat($path);
+    if (!is_array($pathStat) || is_link($path)) {
+        throw new RuntimeException('photo_cache_exact_manifest_untrusted');
+    }
+    $handle = @fopen($path, 'rb');
+    if (!is_resource($handle)) {
+        throw new RuntimeException('photo_cache_exact_manifest_untrusted');
+    }
+    try {
+        $stat = fstat($handle);
+        if (!is_array($stat)
+            || (int) ($pathStat['dev'] ?? -1) !== (int) ($stat['dev'] ?? -2)
+            || (int) ($pathStat['ino'] ?? -1) !== (int) ($stat['ino'] ?? -2)
+            || (((int) ($stat['mode'] ?? 0)) & 0170000) !== 0100000
+            || (int) ($stat['nlink'] ?? 0) !== 1
+            || (((int) ($stat['mode'] ?? 0)) & 0777) !== 0600
+            || (function_exists('posix_geteuid') && (int) ($stat['uid'] ?? -1) !== posix_geteuid())
+            || (int) ($stat['size'] ?? 0) < 32 || (int) ($stat['size'] ?? 0) > 131072) {
+            throw new RuntimeException('photo_cache_exact_manifest_untrusted');
+        }
+        $raw = stream_get_contents($handle);
+    } finally {
+        fclose($handle);
+    }
+    if (!is_string($raw) || strlen($raw) !== (int) $stat['size']
+        || !hash_equals($manifestDigest, hash('sha256', $raw))) {
+        throw new RuntimeException('photo_cache_exact_manifest_digest_changed');
+    }
+    try {
+        $manifest = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+    } catch (Throwable) {
+        throw new RuntimeException('photo_cache_exact_manifest_invalid');
+    }
+    if (!is_array($manifest) || array_keys($manifest) !== ['version', 'delta_digest', 'entries']
+        || ($manifest['version'] ?? null) !== 1
+        || !is_string($manifest['delta_digest'] ?? null)
+        || !hash_equals($deltaDigest, (string) $manifest['delta_digest'])
+        || !is_array($manifest['entries'] ?? null)
+        || count($manifest['entries']) < 1 || count($manifest['entries']) > 512) {
+        throw new RuntimeException('photo_cache_exact_manifest_invalid');
+    }
+    $entries = [];
+    $seenClass = [];
+    $seenImage = [];
+    $previous = '';
+    foreach ($manifest['entries'] as $entry) {
+        if (!is_array($entry) || array_keys($entry) !== ['class_photo_id', 'piwigo_image_id']) {
+            throw new RuntimeException('photo_cache_exact_manifest_invalid');
+        }
+        $classPhotoId = strtolower((string) ($entry['class_photo_id'] ?? ''));
+        $imageId = $entry['piwigo_image_id'] ?? null;
+        if (preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/D', $classPhotoId) !== 1
+            || !is_int($imageId) || $imageId < 1 || $imageId > 2147483647
+            || isset($seenClass[$classPhotoId]) || isset($seenImage[$imageId])) {
+            throw new RuntimeException('photo_cache_exact_manifest_invalid');
+        }
+        $key = $classPhotoId . ':' . $imageId;
+        if ($previous !== '' && strcmp($previous, $key) >= 0) {
+            throw new RuntimeException('photo_cache_exact_manifest_not_canonical');
+        }
+        $previous = $key;
+        $seenClass[$classPhotoId] = true;
+        $seenImage[$imageId] = true;
+        $entries[] = ['class_photo_id' => $classPhotoId, 'piwigo_image_id' => $imageId];
+    }
+    return $entries;
 }
 
 /**
@@ -214,12 +321,13 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
         $timelineFilter = ' AND pm.`class_photo_id` IN (' . implode(',', array_fill(0, count($binaryIds), '?')) . ')';
         array_push($parameters, ...$binaryIds);
     }
-    // `queue` is the strict write-side delta scope.  It deliberately starts
-    // with an empty base relation and can receive rows only through the
-    // checksum-independent opaque UUID/image-id markers resolved below.  In
-    // particular it must never turn a 26-photo supplemental import into a
-    // 2k-photo derivative walk merely because the full library is active.
-    $queueOnlyFilter = $scope === 'queue' ? ' AND 1=0' : '';
+    // `queue` is the strict write-side delta scope and `exact` is its read-only
+    // completed-subset verifier. Both deliberately start with an empty base
+    // relation and can receive rows only through opaque UUID/image-id pairs
+    // resolved below. In particular neither may turn a supplemental import
+    // into a 2k-photo derivative walk merely because the full library is
+    // active or the restored derivative cache is intentionally incomplete.
+    $queueOnlyFilter = in_array($scope, ['queue', 'exact'], true) ? ' AND 1=0' : '';
     $rows = $repository->fetchAll(
         'SELECT DISTINCT i.`id`,i.`path`,i.`file`,i.`width`,i.`height`,i.`rotation`,i.`representative_ext`, '
         . 'HEX(pm.`class_photo_id`) AS `class_photo_id_hex`,pm.`media_reference`,pm.`state` AS `mapping_state` '
@@ -286,6 +394,9 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
             . 'AND pm.`state`=\'ACTIVE\' LIMIT 2',
             [$classPhotoId, $imageId],
         );
+        if (count($queued) === 0 && $scope === 'exact') {
+            throw new RuntimeException('photo_cache_exact_mapping_unresolved');
+        }
         if (count($queued) === 0) {
             $mappingRows = $repository->fetchAll(
                 'SELECT `class_photo_id` FROM `' . $photo . '` '
@@ -687,10 +798,26 @@ function classArchivePhotoCacheGenerateIdentity(string $relative, string $source
 }
 
 /** @param list<string> $profiles @return array<string,mixed> */
-function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun, ?string $expectedQueueDigest = null): array
+function classArchivePhotoCacheWarm(
+    string $scope,
+    array $profiles,
+    bool $dryRun,
+    ?string $expectedQueueDigest = null,
+    ?string $exactManifestDigest = null,
+    ?string $exactDeltaDigest = null,
+): array
 {
-    if (!in_array($scope, ['first-screen', 'covers', 'queue', 'all'], true)) {
+    if (!in_array($scope, ['first-screen', 'covers', 'queue', 'exact', 'all'], true)) {
         throw new InvalidArgumentException('photo_cache_scope_invalid');
+    }
+    if ($scope === 'exact') {
+        if (!$dryRun || $expectedQueueDigest !== null
+            || !is_string($exactManifestDigest) || preg_match('/\A[0-9a-f]{64}\z/D', $exactManifestDigest) !== 1
+            || !is_string($exactDeltaDigest) || preg_match('/\A[0-9a-f]{64}\z/D', $exactDeltaDigest) !== 1) {
+            throw new InvalidArgumentException('photo_cache_exact_scope_contract_invalid');
+        }
+    } elseif ($exactManifestDigest !== null || $exactDeltaDigest !== null) {
+        throw new InvalidArgumentException('photo_cache_exact_digest_scope_invalid');
     }
     $canonical = classArchivePhotoCacheCanonicalProfiles();
     foreach ($profiles as $profile) {
@@ -727,7 +854,12 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
         // into a whole-library job just because a large import has queued many
         // active images.  The explicit `all` recovery pass owns queue drain;
         // bounded passes leave every marker intact for that background work.
-        $pendingForScope = in_array($scope, ['queue', 'all'], true) ? $pending : [];
+        $exactEntries = $scope === 'exact'
+            ? classArchivePhotoCacheExactEntries((string) $exactManifestDigest, (string) $exactDeltaDigest)
+            : [];
+        $pendingForScope = $scope === 'exact'
+            ? $exactEntries
+            : (in_array($scope, ['queue', 'all'], true) ? $pending : []);
         $quarantined = [];
         $rows = classArchivePhotoCacheRows($scope, $pendingForScope, $quarantined);
         $quarantinedKeys = [];
@@ -782,6 +914,9 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
             'queue_retained' => count($pending) - count($quarantined),
             'queue_entries' => $queueEntries,
             'queue_digest' => $queueDigest,
+            'exact_entries' => count($exactEntries),
+            'exact_manifest_digest' => $scope === 'exact' ? $exactManifestDigest : null,
+            'exact_delta_digest' => $scope === 'exact' ? $exactDeltaDigest : null,
             'projection_rebuilt' => false,
             'duration_ms' => 0,
         ];
@@ -905,7 +1040,7 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
     }
 }
 
-/** @param array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string} $arguments */
+/** @param array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string,exact_manifest_digest:?string,exact_delta_digest:?string} $arguments */
 function classArchivePhotoCacheMain(array $arguments): int
 {
     try {
@@ -914,6 +1049,8 @@ function classArchivePhotoCacheMain(array $arguments): int
             $arguments['profiles'],
             $arguments['dry_run'],
             $arguments['queue_digest'],
+            $arguments['exact_manifest_digest'],
+            $arguments['exact_delta_digest'],
         );
         if ($arguments['json']) {
             fwrite(STDOUT, json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n");

@@ -57,6 +57,7 @@ $planContainer = '/tmp/class-archive-private-qa-immich-incremental-plan.json'
 $evidenceContainer = '/tmp/class-archive-private-qa-immich-incremental-evidence.json'
 $runtimeContainer = '/tmp/class-archive-private-qa-immich-incremental-runtime.mjs'
 $snapshotContainer = '/tmp/class-archive-private-qa-immich-incremental-snapshot.sql'
+$exactDerivativeContainer = '/tmp/class-archive-photo-cache-exact.json'
 $script:stage = 'initialization'
 $script:assertions = 0
 
@@ -168,12 +169,25 @@ function Get-ModelContract {
     }
 }
 
-function Get-Warmup([string]$Scope, [bool]$DryRun, [string]$QueueDigest = '') {
+function Get-Warmup(
+    [string]$Scope,
+    [bool]$DryRun,
+    [string]$QueueDigest = '',
+    [string]$ExactManifestDigest = '',
+    [string]$ExactDeltaDigest = ''
+) {
     $arguments = @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $warmerScript, ('--scope=' + $Scope), '--json')
     if ($DryRun) { $arguments += '--dry-run' }
     if ($QueueDigest -ne '') {
         Assert-Exact ($Scope -eq 'queue' -and -not $DryRun -and $QueueDigest -match '^[0-9a-f]{64}$') 'warmup_queue_digest_invalid'
         $arguments += ('--queue-digest=' + $QueueDigest)
+    }
+    if ($ExactManifestDigest -ne '' -or $ExactDeltaDigest -ne '') {
+        Assert-Exact ($Scope -eq 'exact' -and $DryRun -and $QueueDigest -eq '' `
+            -and $ExactManifestDigest -match '^[0-9a-f]{64}$' `
+            -and $ExactDeltaDigest -match '^[0-9a-f]{64}$') 'warmup_exact_digest_invalid'
+        $arguments += ('--exact-manifest-digest=' + $ExactManifestDigest)
+        $arguments += ('--exact-delta-digest=' + $ExactDeltaDigest)
     }
     $raw = Invoke-Piwigo $arguments
     try { return $raw | ConvertFrom-Json -ErrorAction Stop } catch { Fail 'warmup_output_invalid' }
@@ -331,7 +345,8 @@ try {
     $evidenceHost = Join-Path $runRoot 'evidence.json'
 
     $script:stage = 'container_temp_clean'
-    [void](Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('test ! -e ' + $planContainer + ' -a ! -e ' + $evidenceContainer)))
+    [void](Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', `
+        ('test ! -e ' + $planContainer + ' -a ! -e ' + $evidenceContainer + ' -a ! -e ' + $exactDerivativeContainer)))
     [void](Invoke-Immich @('exec', '-T', '--user', '65532:65532', 'immich-gateway', 'sh', '-lc', `
         ('test ! -e ' + $planContainer + ' -a ! -e ' + $evidenceContainer + ' -a ! -e ' + $runtimeContainer)))
     [void](Invoke-Immich @('exec', '-T', '--user', 'postgres', 'database', 'sh', '-lc', ('test ! -e ' + $snapshotContainer)))
@@ -348,9 +363,11 @@ try {
     $deltaCount = [int]$plan.delta_count
     Assert-Exact ($catalogCount -eq [int]$planMatch.Groups[1].Value -and $baselineCount -eq [int]$planMatch.Groups[2].Value `
         -and $deltaCount -eq [int]$planMatch.Groups[3].Value -and $baselineCount + $deltaCount -eq $catalogCount `
-        -and $deltaCount -ge 0 -and $deltaCount -le 512) 'delta_plan_contract_invalid'
+        -and $deltaCount -ge 0 -and $deltaCount -le 512 `
+        -and [string]$plan.delta_digest -match '^[0-9a-f]{64}$') 'delta_plan_contract_invalid'
 
     $deltaDerivativeKeys = @{}
+    $deltaDerivativeEntries = [Collections.Generic.List[object]]::new()
     foreach ($delta in @($plan.delta)) {
         $classPhotoId = [string]$delta.class_photo_id
         $piwigoImageId = [int64]$delta.piwigo_image_id
@@ -359,11 +376,26 @@ try {
         $key = $classPhotoId.ToLowerInvariant() + ':' + [string]$piwigoImageId
         Assert-Exact (-not $deltaDerivativeKeys.ContainsKey($key)) 'delta_derivative_marker_duplicate'
         $deltaDerivativeKeys[$key] = $true
+        $deltaDerivativeEntries.Add([ordered]@{
+            class_photo_id = $classPhotoId.ToLowerInvariant()
+            piwigo_image_id = $piwigoImageId
+        })
     }
+    $deltaDerivativeEntries = @($deltaDerivativeEntries | Sort-Object class_photo_id,piwigo_image_id)
     Assert-Exact ($deltaDerivativeKeys.Count -eq $deltaCount) 'delta_derivative_marker_count_invalid'
 
     $script:stage = 'derivative_baseline'
-    $prewarm = Get-Warmup 'all' $true
+    # The owner/full runtime has a precomputed derivative contract and must
+    # continue proving that every baseline profile is present.  Restore
+    # packages intentionally exclude the rebuildable derivative cache.  A
+    # restore delta therefore must never invoke the all-library selector: the
+    # durable queue selects the still-pending subset, while a read-only exact
+    # manifest verifies any already-drained subset. Together they must
+    # partition only the checksum-bound supplemental delta. This keeps missing
+    # baseline derivatives outside the selection/generation set instead of
+    # silently turning recovery validation into a 2k-photo warmup.
+    $requireFullDerivativeCache = $Runtime -eq 'full'
+    $prewarm = if ($requireFullDerivativeCache) { Get-Warmup 'all' $true } else { $null }
     $deltaPrewarm = Get-Warmup 'queue' $true
     $profiles = 6
     $pendingDerivativeKeys = @{}
@@ -381,17 +413,63 @@ try {
     $pendingDerivativeCount = $pendingDerivativeKeys.Count
     $completedDerivativeCount = $deltaCount - $pendingDerivativeCount
     Assert-Exact ($completedDerivativeCount -ge 0 -and [string]$deltaPrewarm.queue_digest -match '^[0-9a-f]{64}$') 'derivative_queue_count_invalid'
-    Assert-Exact ([int]$prewarm.selected_images -eq $catalogCount -and [int]$prewarm.checked -eq $catalogCount * $profiles `
-        -and [int]$prewarm.queued -eq $pendingDerivativeCount -and [int]$prewarm.queue_retained -eq $pendingDerivativeCount `
-        -and [int]$prewarm.queue_quarantined -eq 0 `
-        -and [int]$prewarm.queue_completed -eq 0 `
-        -and [int]$prewarm.would_repair_mode -eq 0 -and [int]$prewarm.would_normalize_metadata -eq 0) 'derivative_baseline_not_ready'
+    $completedDerivativeEntries = [Collections.Generic.List[object]]::new()
+    foreach ($delta in @($plan.delta)) {
+        $classPhotoId = ([string]$delta.class_photo_id).ToLowerInvariant()
+        $piwigoImageId = [int64]$delta.piwigo_image_id
+        $key = $classPhotoId + ':' + [string]$piwigoImageId
+        if (-not $pendingDerivativeKeys.ContainsKey($key)) {
+            $completedDerivativeEntries.Add([ordered]@{
+                class_photo_id = $classPhotoId
+                piwigo_image_id = $piwigoImageId
+            })
+        }
+    }
+    $completedDerivativeEntries = @($completedDerivativeEntries | Sort-Object class_photo_id,piwigo_image_id)
+    Assert-Exact ($completedDerivativeEntries.Count -eq $completedDerivativeCount) 'derivative_completed_set_invalid'
+    if ($requireFullDerivativeCache) {
+        Assert-Exact ([int]$prewarm.selected_images -eq $catalogCount -and [int]$prewarm.checked -eq $catalogCount * $profiles `
+            -and [int]$prewarm.queued -eq $pendingDerivativeCount -and [int]$prewarm.queue_retained -eq $pendingDerivativeCount `
+            -and [int]$prewarm.queue_quarantined -eq 0 `
+            -and [int]$prewarm.queue_completed -eq 0 `
+            -and [int]$prewarm.would_repair_mode -eq 0 -and [int]$prewarm.would_normalize_metadata -eq 0) 'derivative_baseline_not_ready'
+        Assert-Exact ([int]$prewarm.cached - [int]$deltaPrewarm.cached -eq ($baselineCount + $completedDerivativeCount) * $profiles `
+            -and [int]$prewarm.would_generate -eq [int]$deltaPrewarm.would_generate) 'derivative_full_cache_delta_mismatch'
+    } else {
+        # Restore packages intentionally omit the rebuildable baseline cache.
+        # A partially drained retry is accepted only after a second bounded,
+        # dry-run selector proves that every completed delta item has all six
+        # profiles. The exact manifest is SHA-256 and plan-delta bound; it
+        # cannot select any baseline item or generate a missing derivative.
+        if ($completedDerivativeCount -gt 0) {
+            $exactHost = Join-Path $runRoot 'completed-derivatives.json'
+            Write-OwnerOnlyJson $exactHost ([ordered]@{
+                version = 1
+                delta_digest = [string]$plan.delta_digest
+                entries = @($completedDerivativeEntries)
+            })
+            $exactManifestDigest = (Get-FileHash -LiteralPath $exactHost -Algorithm SHA256).Hash.ToLowerInvariant()
+            $exactRelative = $privateRelative + '/runtime/incremental-media/' + $run + '/completed-derivatives.json'
+            [void](Invoke-Piwigo @('cp', $exactRelative, ('piwigo:' + $exactDerivativeContainer)))
+            [void](Invoke-Piwigo @('exec', '-T', '--user', '0:0', 'piwigo', 'sh', '-lc', `
+                ('chown nginx:nginx ' + $exactDerivativeContainer + ' && chmod 0600 ' + $exactDerivativeContainer)))
+            $completedPrewarm = Get-Warmup 'exact' $true '' $exactManifestDigest ([string]$plan.delta_digest)
+            Assert-Exact ([int]$completedPrewarm.selected_images -eq $completedDerivativeCount `
+                -and [int]$completedPrewarm.exact_entries -eq $completedDerivativeCount `
+                -and [int]$completedPrewarm.checked -eq $completedDerivativeCount * $profiles `
+                -and [int]$completedPrewarm.cached -eq $completedDerivativeCount * $profiles `
+                -and [int]$completedPrewarm.would_generate -eq 0 -and [int]$completedPrewarm.generated -eq 0 `
+                -and [int]$completedPrewarm.would_repair_mode -eq 0 `
+                -and [int]$completedPrewarm.would_normalize_metadata -eq 0 `
+                -and [string]$completedPrewarm.exact_manifest_digest -eq $exactManifestDigest `
+                -and [string]$completedPrewarm.exact_delta_digest -eq [string]$plan.delta_digest) `
+                'derivative_restore_completed_not_ready'
+        }
+    }
     Assert-Exact ([int]$deltaPrewarm.selected_images -eq $pendingDerivativeCount -and [int]$deltaPrewarm.checked -eq $pendingDerivativeCount * $profiles `
         -and [int]$deltaPrewarm.queued -eq $pendingDerivativeCount -and [int]$deltaPrewarm.queue_retained -eq $pendingDerivativeCount `
         -and [int]$deltaPrewarm.queue_quarantined -eq 0 `
         -and [int]$deltaPrewarm.queue_completed -eq 0 `
-        -and [int]$prewarm.cached - [int]$deltaPrewarm.cached -eq ($baselineCount + $completedDerivativeCount) * $profiles `
-        -and [int]$prewarm.would_generate -eq [int]$deltaPrewarm.would_generate `
         -and [int]$deltaPrewarm.cached + [int]$deltaPrewarm.would_generate -eq $pendingDerivativeCount * $profiles `
         -and [int]$deltaPrewarm.would_repair_mode -eq 0 -and [int]$deltaPrewarm.would_normalize_metadata -eq 0) 'derivative_delta_preflight_invalid'
 
@@ -412,8 +490,9 @@ try {
 
     if ($deltaCount -eq 0) {
         # A second operator run is a verified no-op, not an excuse to schedule
-        # a whole-library pass.  Baseline AI rows and all product derivatives
-        # were attested above; the durable queue is empty.
+        # a whole-library pass. Baseline AI rows were attested above. The full
+        # runtime additionally proved all product derivatives; restore proved
+        # an exact empty queue without selecting rebuildable baseline cache.
         $script:stage = 'aggregate_noop_report'
         [void][IO.Directory]::CreateDirectory($reportRoot)
         $report = Join-Path $reportRoot (([string]$config.report_prefix) + '-' + $run + '.json')
@@ -478,10 +557,11 @@ try {
         -and [int]$deltaAfterDb.face_embedding_ready -eq [int]$deltaAfterDb.face_embedding_required) 'ai_delta_not_ready'
 
     # Drain only the exact durable marker subset before committing Class AI
-    # state.  If this process dies after one or more marker completions, the AI
-    # delta remains PENDING.  A retry accepts only a marker subset of that same
-    # delta and proves every already-drained item is fully cached via the
-    # all-vs-queue aggregate equality above.  It can never expand to baseline.
+    # state. If this process dies before marker completion, the AI delta remains
+    # PENDING with the same exact queue. The full runtime can accept a marker
+    # subset only after proving every drained item is cached. Restore proves
+    # the same fact through the bounded exact delta manifest rather than the
+    # intentionally absent baseline cache. Neither path can expand to baseline.
     $script:stage = 'derivative_delta'
     $warm = Get-Warmup 'queue' $false ([string]$deltaPrewarm.queue_digest)
     Assert-Exact ([int]$warm.selected_images -eq $pendingDerivativeCount -and [int]$warm.checked -eq $pendingDerivativeCount * $profiles `
@@ -493,11 +573,38 @@ try {
     Assert-Exact ([int]$postwarm.selected_images -eq 0 -and [int]$postwarm.checked -eq 0 `
         -and [int]$postwarm.queued -eq 0 -and [int]$postwarm.queue_quarantined -eq 0 `
         -and [int]$postwarm.would_generate -eq 0 -and @($postwarm.queue_entries).Count -eq 0) 'derivative_delta_not_idempotent'
-    $postwarmAll = Get-Warmup 'all' $true
-    Assert-Exact ([int]$postwarmAll.selected_images -eq $catalogCount -and [int]$postwarmAll.checked -eq $catalogCount * $profiles `
-        -and [int]$postwarmAll.cached -eq $catalogCount * $profiles -and [int]$postwarmAll.would_generate -eq 0 `
-        -and [int]$postwarmAll.queued -eq 0 -and [int]$postwarmAll.queue_quarantined -eq 0 `
-        -and [int]$postwarmAll.would_repair_mode -eq 0 -and [int]$postwarmAll.would_normalize_metadata -eq 0) 'derivative_library_not_ready'
+    if ($requireFullDerivativeCache) {
+        $postwarmAll = Get-Warmup 'all' $true
+        Assert-Exact ([int]$postwarmAll.selected_images -eq $catalogCount -and [int]$postwarmAll.checked -eq $catalogCount * $profiles `
+            -and [int]$postwarmAll.cached -eq $catalogCount * $profiles -and [int]$postwarmAll.would_generate -eq 0 `
+            -and [int]$postwarmAll.queued -eq 0 -and [int]$postwarmAll.queue_quarantined -eq 0 `
+            -and [int]$postwarmAll.would_repair_mode -eq 0 -and [int]$postwarmAll.would_normalize_metadata -eq 0) 'derivative_library_not_ready'
+    } elseif ($deltaCount -gt 0) {
+        # Re-attest the complete delta after draining the pending subset. This
+        # remains bounded to the same plan digest and catches deletion or
+        # corruption between the completed-subset preflight and final commit.
+        $postExactHost = Join-Path $runRoot 'all-delta-derivatives.json'
+        Write-OwnerOnlyJson $postExactHost ([ordered]@{
+            version = 1
+            delta_digest = [string]$plan.delta_digest
+            entries = @($deltaDerivativeEntries)
+        })
+        $postExactDigest = (Get-FileHash -LiteralPath $postExactHost -Algorithm SHA256).Hash.ToLowerInvariant()
+        $postExactRelative = $privateRelative + '/runtime/incremental-media/' + $run + '/all-delta-derivatives.json'
+        [void](Invoke-Piwigo @('cp', $postExactRelative, ('piwigo:' + $exactDerivativeContainer)))
+        [void](Invoke-Piwigo @('exec', '-T', '--user', '0:0', 'piwigo', 'sh', '-lc', `
+            ('chown nginx:nginx ' + $exactDerivativeContainer + ' && chmod 0600 ' + $exactDerivativeContainer)))
+        $postExact = Get-Warmup 'exact' $true '' $postExactDigest ([string]$plan.delta_digest)
+        Assert-Exact ([int]$postExact.selected_images -eq $deltaCount `
+            -and [int]$postExact.exact_entries -eq $deltaCount `
+            -and [int]$postExact.checked -eq $deltaCount * $profiles `
+            -and [int]$postExact.cached -eq $deltaCount * $profiles `
+            -and [int]$postExact.would_generate -eq 0 -and [int]$postExact.generated -eq 0 `
+            -and [int]$postExact.would_repair_mode -eq 0 -and [int]$postExact.would_normalize_metadata -eq 0 `
+            -and [string]$postExact.exact_manifest_digest -eq $postExactDigest `
+            -and [string]$postExact.exact_delta_digest -eq [string]$plan.delta_digest) `
+            'derivative_restore_post_delta_not_ready'
+    }
 
     # This is the final state transition.  Therefore any earlier model or
     # derivative failure remains safely retryable as the same checksum-bound
@@ -539,12 +646,12 @@ try {
     # `validate` is read-only and never creates container temporaries.  Do not
     # turn its cleanup path into a write against either runtime.
     if ($null -ne $runRoot) {
-        try { [void](Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $planContainer, $evidenceContainer)) } catch { }
+        try { [void](Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $planContainer, $evidenceContainer, $exactDerivativeContainer)) } catch { }
         try { [void](Invoke-Immich @('exec', '-T', '--user', '65532:65532', 'immich-gateway', 'rm', '-f', '--', $planContainer, $evidenceContainer, $runtimeContainer)) } catch { }
         try { [void](Invoke-Immich @('exec', '-T', '--user', '0:0', 'database', 'rm', '-f', '--', $snapshotContainer)) } catch { }
     }
     if ($null -ne $runRoot -and (Test-Path -LiteralPath $runRoot)) {
-        foreach ($name in @('plan.json','runtime-input.json','evidence.json','baseline-before.sql','baseline-after.sql','delta-after.sql')) {
+        foreach ($name in @('plan.json','runtime-input.json','evidence.json','completed-derivatives.json','all-delta-derivatives.json','baseline-before.sql','baseline-after.sql','delta-after.sql')) {
             $path = Join-Path $runRoot $name
             if (Test-Path -LiteralPath $path) { try { Remove-Item -LiteralPath $path -Force } catch { } }
         }
