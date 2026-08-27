@@ -45,6 +45,32 @@ pwsh.exe -NoProfile -File .\tests\phase3\full-real-browser-qa.ps1 -Mode restore
 pwsh.exe -NoProfile -File .\tests\phase3\full-real-family-browser-qa.ps1 -Mode restore
 ```
 
+## Forward-only restored schema deployment
+
+When a verified restore bundle contains ClassIdentity schema v15 but the
+current reviewed checkout requires v16, use the dedicated restore endpoint.
+It does not share the retired private-full staging selector even though both
+historically used ports 8290/8291.
+
+```powershell
+# Read-only identity/schema/topology validation.
+pwsh.exe -NoProfile -File .\infra\scripts\deploy-owner-restore-class-plugins.ps1 validate
+
+# Explicit v15 -> v16 migration (v16 is an idempotent no-op deployment).
+pwsh.exe -NoProfile -File .\infra\scripts\deploy-owner-restore-class-plugins.ps1 migrate -ConfirmRestoreMigration
+```
+
+The migration first closes the restore HTTP surface with the persistent
+maintenance marker. Exact v15 receives a database-only rollback snapshot in
+the M:-backed restore backup volume; any version other than exact v15/v16 is
+rejected. The runner then recreates only restore Piwigo from the current clean
+checkout, rebuilds read projections, recreates only the restore compatibility
+BFF, and finalizes maintenance. It fingerprints the 8091 synthetic and 8191
+owner projects before/after, and leaves the restore runtime fail-closed on any
+error. The ignored restore `BuildCommit` HEAD and nginx configuration are
+atomically advanced to the current reviewed checkout before Piwigo is
+recreated, preventing old-source attestation from being paired with new code.
+
 Encrypted archives are never expanded onto exFAT. The DPAPI recovery payload
 is unprotected only by the same Windows user into ignored, owner-only NTFS
 temporary files. GPG decrypts directly to the target database or ext4-backed
