@@ -80,7 +80,11 @@ $compat = Index-OfOrFail $deploy "'--no-deps','immich-web-compat'" 'restore_sche
 $finalize = Index-OfOrFail $deploy "install-class-archive-plugins.php','--finalize-maintenance'" 'restore_schema_finalize_missing' $compat
 Assert-True ($gitPrepare -lt $nginxPrepare -and $nginxPrepare -lt $prepare -and $prepare -lt $probe -and $probe -lt $snapshotCall -and $snapshotCall -lt $recreate -and $recreate -lt $install -and $install -lt $targetProbe -and $targetProbe -lt $projection -and $projection -lt $compat -and $compat -lt $finalize) 'restore_schema_publish_order_invalid'
 Assert-True ($validateBranch -lt $lockRootPrepare -and $lockRootPrepare -lt $lockAcquire -and $lockAcquire -lt $gitPrepare) 'restore_schema_validate_or_lock_order_invalid'
-Assert-True ($deploy.Contains('Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath') -and $deploy.Contains("Test-IgnoredPrivatePath `$lockPath 'restore_deploy_lock_not_private'")) 'restore_schema_lock_privacy_missing'
+Assert-True ($deploy.Contains('[IO.File]::WriteAllBytes($lockPath, [byte[]]::new(0))') `
+    -and $deploy.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $lockPath') `
+    -and $deploy.Contains('Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath') `
+    -and $deploy.Contains("Test-IgnoredPrivatePath `$lockPath 'restore_deploy_lock_not_private'")) 'restore_schema_lock_privacy_missing'
+Assert-True ($deploy.IndexOf('Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath',[StringComparison]::Ordinal) -lt $lockAcquire) 'restore_schema_lock_acl_asserted_after_exclusive_open'
 
 Assert-True ($deploy.Contains("Wait-Maintenance") -and $deploy.Contains("'Class Archive maintenance mode.'") -and $deploy.Contains("'RESTORE_STATUS:503'")) 'restore_schema_fail_closed_maintenance_missing'
 Assert-True ($deploy.Contains("'up','-d','--force-recreate','--no-deps','piwigo'")) 'restore_schema_piwigo_only_recreate_missing'

@@ -433,6 +433,12 @@ function Initialize-RuntimeRootForLock {
     if (-not (Test-Path -LiteralPath $runtimeRoot)) { [void][IO.Directory]::CreateDirectory($runtimeRoot) }
     Assert-PlainDirectory $runtimeRoot 'restore_deploy_runtime_root_invalid'
     Set-OwnerOnlyDirectoryAcl $runtimeRoot
+    if (-not (Test-Path -LiteralPath $lockPath)) {
+        [IO.File]::WriteAllBytes($lockPath, [byte[]]::new(0))
+    }
+    Assert-PlainFile $lockPath 'restore_deploy_lock_file_invalid'
+    Set-ClassArchiveOwnerOnlyFileAcl -Path $lockPath
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath
 }
 
 function Get-RestoreNginxContent {
@@ -597,7 +603,9 @@ try {
     $stage = 'workflow_lock'
     Initialize-RuntimeRootForLock
     $lock = Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
-    Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath
+    # The ACL is asserted before FileShare.None acquisition. Querying it after
+    # acquisition would require opening the same file and fails correctly on
+    # Windows, obscuring a successfully acquired exclusive mutex.
     Test-IgnoredPrivatePath $lockPath 'restore_deploy_lock_not_private'
     # Re-read exact identities after acquiring the migration lock. Validation
     # above is deliberately read-only and does not create a persistent lock.
