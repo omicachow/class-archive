@@ -949,6 +949,7 @@ try {
             ' EST_RESTORE_BYTES=' + $preflight.EST_RESTORE_BYTES +
             ' M_FREE_BYTES=' + $preflight.M_FREE_BYTES +
             ' SAFE_MARGIN_BYTES=' + $preflight.SAFE_MARGIN_BYTES +
+            ' REQUIRED_FREE_BYTES=' + $preflight.REQUIRED_FREE_BYTES +
             ' WSL_SWAP_PLACEMENT=' + $preflight.WSL_SWAP_PLACEMENT +
             ' WSL_SWAP_TARGET_DRIVE_MATCH=' + $preflight.WSL_SWAP_TARGET_DRIVE_MATCH +
             ' WSL_SWAP_ACTIVE=' + $preflight.WSL_SWAP_ACTIVE +
@@ -1035,7 +1036,7 @@ try {
             'CLASS_IDENTITY_SCHEMA_VERSION','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS',
             'PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES','VISIBLE_PEOPLE',
             'PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
-            'AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
+            'AI_INDEX_READY','AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX',
             'OWNER_STATE_SHA256','IMMICH_POSTGRES_STATE_SHA256','IMMICH_UPLOAD_STATE_SHA256','IMMICH_SNAPSHOT_XMAX',
             'MARIADB_IMAGE','PIWIGO_IMAGE','IMMICH_SERVER_IMAGE','IMMICH_ML_IMAGE','POSTGRES_IMAGE'
@@ -1043,6 +1044,13 @@ try {
         foreach ($name in $requiredEvidence) { if (-not $evidence.ContainsKey($name)) { Stop-OwnerBackup 'backup_evidence_missing' } }
         if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(15,16) -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
             [string]$evidence.IMMICH_VERSION -ne '3.1.0') { Stop-OwnerBackup 'backup_schema_version_invalid' }
+        if ([string]$evidence.AI_INDEX_READY -ne 'PASS' -or
+            [uint64]$evidence.AI_JOBS_TOTAL -ne [uint64]$evidence.AI_JOBS_COMPLETE -or
+            [uint64]$evidence.AI_JOBS_PENDING -ne 0 -or [uint64]$evidence.AI_JOBS_RUNNING -ne 0 -or
+            [uint64]$evidence.AI_JOBS_UNAVAILABLE -ne 0 -or [uint64]$evidence.AI_JOBS_FAILED -ne 0 -or
+            [uint64]$evidence.AI_JOBS_CANCELLED -ne 0) {
+            Stop-OwnerBackup 'backup_ai_index_not_ready'
+        }
 
         if ($bundleVersion -eq 2) {
             $script:stage = 'portable_recovery_kit'
@@ -1155,6 +1163,7 @@ try {
                 'runtime_locks', 'web_sessions', 'immich_gateway_secret'
             ) }
             ai_job_state = [ordered]@{
+                ready = ([string]$evidence.AI_INDEX_READY -eq 'PASS')
                 total = [uint64]$evidence.AI_JOBS_TOTAL
                 complete = [uint64]$evidence.AI_JOBS_COMPLETE
                 pending = [uint64]$evidence.AI_JOBS_PENDING

@@ -84,6 +84,7 @@ foreach ($needle in @(
     "'SYSTEM_DRIVE_CAPACITY_GUARD'",
     "'ARCHIVE_HELPER_MEMORY_BYTES'",
     "'ARCHIVE_HELPER_LOG_DRIVER'",
+    "'REQUIRED_FREE_BYTES'",
     'private_host_path_recorded = $false'
 )) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_wsl_capacity_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
@@ -156,6 +157,15 @@ Assert-True (-not $helper.Contains('assert_running "$immich_server"') `
     -and -not $helper.Contains('assert_running "$immich_ml"')) 'owner_temp_backup_optional_immich_runtime_required'
 Assert-True ($helper.Contains('persisted index is complete') `
     -and $helper.Contains('before/after database and media guards')) 'owner_temp_backup_optional_immich_rationale_missing'
+Assert-True ($helper.Contains('assert_ai_index_ready()') `
+    -and $helper.Contains("fail ai_index_jobs_not_complete") `
+    -and $helper.Contains("fail ai_index_asset_coverage_incomplete") `
+    -and $helper.Contains("fail ai_index_job_coverage_incomplete") `
+    -and $helper.Contains('printf ''%s\n'' ''AI_INDEX_READY=PASS''') `
+    -and $helper.IndexOf('assert_ai_index_ready') -lt $helper.IndexOf('owner_state_before=$(owner_state_digest)')) 'owner_temp_backup_ai_completion_gate_missing'
+Assert-True ($runner.Contains("'AI_INDEX_READY','AI_JOBS_TOTAL'") `
+    -and $runner.Contains("Stop-OwnerBackup 'backup_ai_index_not_ready'") `
+    -and $runner.Contains('ready = ([string]$evidence.AI_INDEX_READY -eq ''PASS'')')) 'owner_temp_backup_ai_completion_evidence_missing'
 $archiveHelperRunCount = [regex]::Matches($helper, 'docker run --rm').Count
 $limitedArchiveHelperRunCount = [regex]::Matches(
     $helper,

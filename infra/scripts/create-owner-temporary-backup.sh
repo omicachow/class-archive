@@ -362,6 +362,37 @@ mariadb_query() {
   docker exec "$mariadb" sh -eu -c 'exec mariadb --batch --skip-column-names --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute "$1"' sh "$1" 2>/dev/null
 }
 
+assert_ai_index_ready() {
+  # The Owner restore promise is "people and search are immediately usable".
+  # It is therefore not enough to snapshot a persisted index while there are
+  # unresolved jobs. Immich Server/ML may be intentionally stopped only after
+  # Class Archive has recorded a complete, one-to-one index for the current
+  # canonical library. Do this before opening any logical snapshot so a
+  # rejected run cannot publish a bundle that would require a full re-index.
+  ai_ci_migration=$(mariadb_query "SELECT COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$';" | tr -d '[:space:]')
+  case "$ai_ci_migration" in ''|*[!A-Za-z0-9_]*) fail ai_index_prefix_invalid ;; esac
+  ai_ci_base=${ai_ci_migration%migration}
+  ai_schema_version=$(mariadb_query "SELECT COALESCE(MAX(version),0) FROM ${ai_ci_base}migration;" | tr -d '[:space:]')
+  case "$ai_schema_version" in 16) ;; *) fail ai_index_schema_not_ready ;; esac
+
+  ai_canonical_photos=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}photo;" | tr -d '[:space:]')
+  ai_assets_ready=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}ai_asset_index;" | tr -d '[:space:]')
+  ai_job_table_exists=$(mariadb_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${ai_ci_base}ai_index_job';" | tr -d '[:space:]')
+  case "$ai_job_table_exists" in 1) ;; 0) fail ai_index_job_table_missing ;; *) fail ai_index_job_table_shape_invalid ;; esac
+  ai_jobs_total_ready=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}ai_index_job;" | tr -d '[:space:]')
+  ai_jobs_complete_ready=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}ai_index_job WHERE state='COMPLETE';" | tr -d '[:space:]')
+  ai_jobs_open_ready=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}ai_index_job WHERE state IN ('PENDING','RUNNING','UNAVAILABLE','FAILED','CANCELLED');" | tr -d '[:space:]')
+  for value in "$ai_canonical_photos" "$ai_assets_ready" "$ai_jobs_total_ready" "$ai_jobs_complete_ready" "$ai_jobs_open_ready"; do
+    case "$value" in ''|*[!0-9]*) fail ai_index_count_invalid ;; esac
+  done
+  [ "$ai_canonical_photos" -gt 0 ] || fail ai_index_library_empty
+  [ "$ai_assets_ready" = "$ai_canonical_photos" ] || fail ai_index_asset_coverage_incomplete
+  [ "$ai_jobs_total_ready" = "$ai_canonical_photos" ] || fail ai_index_job_coverage_incomplete
+  [ "$ai_jobs_complete_ready" = "$ai_jobs_total_ready" ] || fail ai_index_jobs_not_complete
+  [ "$ai_jobs_open_ready" = 0 ] || fail ai_index_jobs_not_complete
+  printf '%s\n' 'AI_INDEX_READY=PASS'
+}
+
 owner_state_digest() {
   value=$(docker exec --user nginx "$piwigo" php /workspace/infra/scripts/capture-restore-fixture.php 2>/dev/null \
     | sha256sum | awk '{print $1}') || fail owner_state_capture_failed
@@ -399,6 +430,7 @@ postgres_count() {
 # generation before opening either logical snapshot. If any participating
 # state moves before all payloads are complete, this run is discarded rather
 # than publishing a cross-system point-in-time fiction.
+assert_ai_index_ready
 owner_state_before=$(owner_state_digest)
 postgres_generation_before=$(postgres_generation)
 postgres_state_before=$(postgres_state_digest)
