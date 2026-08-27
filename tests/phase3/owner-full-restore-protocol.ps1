@@ -84,7 +84,7 @@ foreach ($needle in @(
     'resume_private_runtime_file_missing', 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $path', 'resume_passphrase_present',
     'resume_restored_count_mismatch', 'Assert-TargetModelCache $BundleInfo',
     'Ensure-RestoreImmichEnvBinding', 'IMMICH_SPIKE_ENV_FILE=../owner-restore/.env.immich', 'resume_immich_environment_binding_invalid',
-    "'BEFORE_PIWIGO'", "'AFTER_PIWIGO'", 'resume_piwigo_ports_invalid', 'resume_piwigo_http_unhealthy',
+    "'BEFORE_PIWIGO'", "'AFTER_PIWIGO'", 'resume_piwigo_ports_invalid', '$healthStatus = 0', '$_.Exception.Response.StatusCode', 'resume_piwigo_http_unhealthy',
     "a.state='ACTIVE' AND EXISTS (SELECT 1 FROM `${pwg}image_category ic WHERE ic.category_id=a.piwigo_category_id)",
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore', 'pwsh.exe -NoProfile -File',
     'Assert-AiRestoreEvidence', 'reused_existing_indexes -eq $true', 'restore_ai_reindex_detected',

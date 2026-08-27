@@ -900,8 +900,15 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         $ports = @(Invoke-RestoreDocker @('port',($piwigoProject + '-piwigo-1')) | Sort-Object)
         $expectedPorts = @('80/tcp -> 127.0.0.1:8290','8081/tcp -> 127.0.0.1:8291') | Sort-Object
         Assert-Restore (@(Compare-Object $expectedPorts $ports).Count -eq 0) 'resume_piwigo_ports_invalid'
-        $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
-        Assert-Restore ($null -ne $health -and $health.StatusCode -in @(200,301,302,303)) 'resume_piwigo_http_unhealthy'
+        $healthStatus = 0
+        try {
+            $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction Stop
+            $healthStatus = [int]$health.StatusCode
+        }
+        catch {
+            if ($null -ne $_.Exception.Response) { $healthStatus = [int]$_.Exception.Response.StatusCode }
+        }
+        Assert-Restore ($healthStatus -in @(200,301,302,303)) 'resume_piwigo_http_unhealthy'
     }
 
     $expectedNetworks = @($gatewayNetwork,($piwigoProject + '_app'),($immichProject + '_immich_internal')) | Sort-Object
