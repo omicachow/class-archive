@@ -256,7 +256,9 @@ Assert-True ($restoreIdentityBlock.Contains("technical_name = 'Class Archive Pri
 foreach ($needle in @(
     "'recover-transients'", "`$Runtime -eq 'restore'", 'transient_recovery_scope_invalid',
     'aborted_transient_recovery', 'runtime-input.json', 'password-reset-input.txt',
-    'databases=UNTOUCHED media=UNTOUCHED', "Remove-PrivateFile `$path"
+    'databases=UNTOUCHED media=UNTOUCHED', "Remove-PrivateFile `$path",
+    "Invoke-ImmichCompose (@('exec', '-T', 'immich-server', 'rm', '-f', '--') + `$immichTemporary)",
+    "Invoke-PiwigoCompose (@('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + `$piwigoTemporary)"
 )) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_transient_recovery_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 foreach ($browser in @($ownerBrowser,$familyBrowser)) {

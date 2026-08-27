@@ -542,8 +542,8 @@ try {
             $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer
         )
         $piwigoTemporary = @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer, $bridgeTokenContainer)
-        [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'rm', '-f', '--') + $immichTemporary)
-        [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + $piwigoTemporary)
+        [void](Invoke-ImmichCompose (@('exec', '-T', 'immich-server', 'rm', '-f', '--') + $immichTemporary))
+        [void](Invoke-PiwigoCompose (@('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + $piwigoTemporary))
         foreach ($path in $immichTemporary) {
             $probe = Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('test ! -e ' + $path + ' && test ! -L ' + $path + '; echo $?'))
             Assert-Exact ($probe.Trim() -eq '0') 'transient_recovery_container_cleanup_failed'
