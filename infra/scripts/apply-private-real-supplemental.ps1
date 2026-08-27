@@ -364,12 +364,15 @@ try {
 
     $script:stage = 'workflow_lock'
     $lock = Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
-    $script:stage = 'runtime_preflight'
+    $script:stage = 'runtime_preflight_db'
     Assert-ContainerReady $spec 'db'
+    $script:stage = 'runtime_preflight_piwigo'
     Assert-ContainerReady $spec 'piwigo'
+    $script:stage = 'runtime_preflight_schema'
     $schemaLines = Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx',
         '-e', 'CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL=1', '-e', 'CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_APPLY=1',
         'piwigo', 'php', '/workspace/infra/scripts/verify-private-real-supplemental-target.php', 'schema') 'schema_preflight_failed'
+    $script:stage = 'runtime_preflight_schema_evidence'
     Assert-Apply (@($schemaLines | Where-Object { $_ -eq 'PRIVATE_REAL_SUPPLEMENTAL_TARGET=PASS action=schema schema=16 source_paths=NOT_READ' }).Count -eq 1) 'schema_preflight_result_invalid'
 
     $script:stage = 'maintenance_gate'
@@ -410,8 +413,14 @@ try {
         + ' idempotent=PASS ingress=READ_ONLY source_mount=NONE historical_manifest=NOT_MOUNTED assertions=' + $script:assertions)
 }
 catch {
-    $message = [string]$_.Exception.Message
-    $code = if ($message -match '^[a-z0-9_]{1,96}$') { $message } else { 'supplemental_apply_failed' }
+    $messages = [Collections.Generic.List[string]]::new()
+    $exception = $_.Exception
+    while ($null -ne $exception) {
+        [void]$messages.Add([string]$exception.Message)
+        $exception = $exception.InnerException
+    }
+    $safe = @($messages | Where-Object { $_ -match '^[a-z0-9_]{1,96}$' } | Select-Object -First 1)
+    $code = if ($safe.Count -eq 1) { [string]$safe[0] } else { 'supplemental_apply_failed' }
     Stop-SupplementalApply $code
 }
 finally {
