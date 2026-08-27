@@ -178,6 +178,14 @@ try {
     Invoke-TestGit $markdownAbsolute @('add', '--', 'notes.md')
     Assert-Fail (Invoke-BoundaryGate $markdownAbsolute 'Index') 'private_absolute_path' $markdownMarker
 
+    $regexEscape = New-TestRepository 'source-regex-escape'
+    $regexMarker = 'source-regex-escape-marker'
+    $slash = [char]92
+    $regexSource = 'const ' + $regexMarker + ' = new RegExp("[' + $slash + $slash + 's' + $slash + $slash + 'S]");'
+    [IO.File]::WriteAllText((Join-Path $regexEscape 'contract.mjs'), $regexSource, [Text.UTF8Encoding]::new($false))
+    Invoke-TestGit $regexEscape @('add', '--', 'contract.mjs')
+    Assert-Pass (Invoke-BoundaryGate $regexEscape 'Index') 'Index'
+
     $history = New-TestRepository 'outgoing-history'
     $base = Get-TestGitValue $history @('rev-parse', 'HEAD')
     $historyMarker = 'outgoing-private-marker'

@@ -207,7 +207,10 @@ function Test-PrivateAbsolutePath([byte[]]$Bytes) {
     } catch { return $false }
     $backslash = [regex]::Escape([string][char]92)
     $drive = '[A-Za-z]:(?:' + $backslash + '|/)'
-    $unc = $backslash + $backslash + '[A-Za-z0-9._-]+' + $backslash
+    # Require both a non-trivial host and a share component.  Matching only a
+    # leading host fragment mistakes common source-code escapes such as
+    # ``[\\s\\S]`` for a UNC path.
+    $unc = $backslash + $backslash + '[A-Za-z0-9._-]{2,}' + $backslash + '[A-Za-z0-9$._-]+(?:' + $backslash + '|/)?'
     $extended = $backslash + $backslash + '\?' + $backslash + '[A-Za-z]:' + $backslash
     $unixUser = '/(?:Users|home)/[^/\s]+/'
     # A path can be wrapped by Markdown backticks, parentheses, punctuation,
