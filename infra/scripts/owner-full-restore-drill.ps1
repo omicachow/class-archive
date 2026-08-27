@@ -859,11 +859,11 @@ printf 'ai_asset_index=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_asset_index;")
 function Assert-PartialRestoreRuntime([object]$BundleInfo) {
     $script:stage = 'resume_boundary'
 
-    # A resume is deliberately narrower than a second restore attempt.  It is
-    # accepted only at the one known safe checkpoint: all eleven isolated
-    # volumes exist, the restored databases are healthy, Piwigo was created but
-    # never started, and no later Immich/Gateway/Web containers or networks
-    # exist yet.  Nothing in this function creates, imports, copies or repairs.
+    # A resume is deliberately narrower than a second restore attempt. It is
+    # accepted only at explicit fail-closed checkpoints before Piwigo, after
+    # Piwigo, or after the isolated Immich server/ML pair. Gateway, secret
+    # stager and Web must still be absent. Nothing here imports, copies or
+    # repairs restored state.
     Assert-Restore (-not (Test-Path -LiteralPath $statePath)) 'resume_restore_state_present'
     foreach ($path in @($piwigoEnvPath,$immichEnvPath,$restoreNginxPath)) {
         Assert-PlainFile $path 'resume_private_runtime_file_missing'

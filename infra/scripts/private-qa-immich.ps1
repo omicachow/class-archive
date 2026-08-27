@@ -52,8 +52,11 @@ $runtimeConfig = if ($Runtime -eq 'full') {
         compat_port = 8291
         report_name = 'owner-restore-immich-runtime.json'
         index_report_name = 'owner-restore-ai-index-runtime.json'
-        technical_name = 'Class Archive Owner Restore Technical User'
-        library_name = 'Class Archive Owner Restore Library'
+        # A restore must validate the durable Immich identities captured in the
+        # backup. Renaming either object would turn recovery into a mutation and
+        # make the strict RESUME identity contract reject a valid source state.
+        technical_name = 'Class Archive Private Full Technical User'
+        library_name = 'Class Archive Private Full Library'
     }
 } else {
     [ordered]@{

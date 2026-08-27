@@ -246,6 +246,13 @@ foreach ($needle in @(
     "piwigo_project = 'class_archive_owner_restore_v1_piwigo'", "immich_project = 'class_archive_owner_restore_v1_immich'",
     'core_port = 8290', 'compat_port = 8291', "`$Runtime -in @('full', 'restore')"
 )) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_adapter_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+$restoreIdentityBlock = [regex]::Match(
+    $immichRunner,
+    "(?ms)^\s*\} elseif \(\`$Runtime -eq 'restore'\) \{.*?^\s*\} else \{"
+).Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($restoreIdentityBlock)) 'immich_restore_identity_block_missing'
+Assert-True ($restoreIdentityBlock.Contains("technical_name = 'Class Archive Private Full Technical User'") `
+    -and $restoreIdentityBlock.Contains("library_name = 'Class Archive Private Full Library'")) 'immich_restore_durable_identity_not_preserved'
 
 foreach ($browser in @($ownerBrowser,$familyBrowser)) {
     foreach ($needle in @(
