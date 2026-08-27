@@ -679,10 +679,16 @@ try {
     $stage = 'compat_recreate'
     Invoke-Compose 'immich' @('up','-d','--wait','--wait-timeout','60','--force-recreate','--no-deps','immich-web-compat') 'restore_deploy_compat_recreate_failed'
 
+    $stage = 'bounded_post_migration_verify'
+    $postMigration = @(Invoke-ComposeCapture 'piwigo' @(
+        'exec','-T','--user','nginx','-e','CLASS_ARCHIVE_OWNER_RESTORE_VERIFY=1','piwigo',
+        'php','/workspace/infra/scripts/verify-owner-restore-post-migration.php'
+    ) 'restore_deploy_post_migration_verify_failed')
+    Assert-Deployment (@($postMigration | Where-Object { $_ -match '^OWNER_RESTORE_POST_MIGRATION=PASS schema=16 reconciliation=PASS checked_images=[0-9]+ ai=PASS open_jobs=0 derivatives=REBUILDABLE_NOT_REQUIRED$' }).Count -eq 1) 'restore_deploy_post_migration_evidence_invalid'
+
     $stage = 'maintenance_finalize'
     Invoke-Compose 'piwigo' @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--finalize-maintenance') 'restore_deploy_finalize_failed'
     Assert-RestoreEndpointHealthy
-    Invoke-Compose 'piwigo' @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/run-maintenance.php','--json') 'restore_deploy_non_destructive_maintenance_failed'
 
     $stage = 'post_verify'
     Assert-RestoreTopology
@@ -696,7 +702,7 @@ try {
         snapshot=$snapshotEvidence; endpoint='127.0.0.1:8290_8291'; scope='OWNER_RESTORE_ONLY'; protected_8091_8191='UNCHANGED';
         recreated=@('restore-piwigo','restore-immich-web-compat'); generated_at=(Get-Date).ToUniversalTime().ToString('o')
     })
-    Write-Output ('OWNER_RESTORE_CLASS_PLUGINS=PASS action=migrate endpoint=8290_8291 schema_from=15 schema_to=16 snapshot=' + $snapshotEvidence + ' source_head=' + $sourceHead + ' piwigo=RESTORE_ONLY bff=RESTORE_COMPAT_ONLY projection=REBUILT maintenance=FINALIZED protected_8091_8191=UNCHANGED idempotent=YES')
+    Write-Output ('OWNER_RESTORE_CLASS_PLUGINS=PASS action=migrate endpoint=8290_8291 schema_from=15 schema_to=16 snapshot=' + $snapshotEvidence + ' source_head=' + $sourceHead + ' piwigo=RESTORE_ONLY bff=RESTORE_COMPAT_ONLY projection=REBUILT reconciliation=PASS ai=PASS derivatives=REBUILDABLE_NOT_REQUIRED maintenance=FINALIZED protected_8091_8191=UNCHANGED idempotent=YES')
 }
 catch {
     $code = if ([string]$_.Exception.Message -match '\A[a-z0-9_]{1,96}\z') { [string]$_.Exception.Message } else { 'restore_deploy_failed' }

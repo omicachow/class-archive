@@ -12,6 +12,7 @@ $baseComposePath = Join-Path $projectRoot 'infra\docker-compose.yml'
 $restorePiwigoPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.piwigo.override.yml'
 $restoreImmichPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.immich.override.yml'
 $snapshotPath = Join-Path $projectRoot 'infra\scripts\create-pre-migration-db-snapshot.sh'
+$postMigrationPath = Join-Path $projectRoot 'infra\scripts\verify-owner-restore-post-migration.php'
 $readmePath = Join-Path $projectRoot 'infra\owner-restore\README.md'
 $devPath = Join-Path $projectRoot 'infra\scripts\dev.ps1'
 
@@ -35,6 +36,7 @@ $baseCompose = Read-Tracked $baseComposePath 'restore_schema_base_compose_missin
 $restorePiwigo = Read-Tracked $restorePiwigoPath 'restore_schema_piwigo_override_missing'
 $restoreImmich = Read-Tracked $restoreImmichPath 'restore_schema_immich_override_missing'
 $snapshot = Read-Tracked $snapshotPath 'restore_schema_snapshot_helper_missing'
+$postMigration = Read-Tracked $postMigrationPath 'restore_schema_post_migration_verifier_missing'
 $readme = Read-Tracked $readmePath 'restore_schema_readme_missing'
 $dev = Read-Tracked $devPath 'restore_schema_dev_missing'
 
@@ -77,8 +79,9 @@ $install = Index-OfOrFail $deploy "install-class-archive-plugins.php')" 'restore
 $targetProbe = Index-OfOrFail $deploy 'Get-SnapshotRequirement) -eq $migrationCurrentStatus' 'restore_schema_target_probe_missing' $install
 $projection = Index-OfOrFail $deploy 'rebuild-photo-read-projection.php' 'restore_schema_projection_missing' $targetProbe
 $compat = Index-OfOrFail $deploy "'--no-deps','immich-web-compat'" 'restore_schema_compat_missing' $projection
-$finalize = Index-OfOrFail $deploy "install-class-archive-plugins.php','--finalize-maintenance'" 'restore_schema_finalize_missing' $compat
-Assert-True ($gitPrepare -lt $nginxPrepare -and $nginxPrepare -lt $prepare -and $prepare -lt $probe -and $probe -lt $snapshotCall -and $snapshotCall -lt $recreate -and $recreate -lt $install -and $install -lt $targetProbe -and $targetProbe -lt $projection -and $projection -lt $compat -and $compat -lt $finalize) 'restore_schema_publish_order_invalid'
+$boundedVerify = Index-OfOrFail $deploy 'verify-owner-restore-post-migration.php' 'restore_schema_bounded_verify_missing' $compat
+$finalize = Index-OfOrFail $deploy "install-class-archive-plugins.php','--finalize-maintenance'" 'restore_schema_finalize_missing' $boundedVerify
+Assert-True ($gitPrepare -lt $nginxPrepare -and $nginxPrepare -lt $prepare -and $prepare -lt $probe -and $probe -lt $snapshotCall -and $snapshotCall -lt $recreate -and $recreate -lt $install -and $install -lt $targetProbe -and $targetProbe -lt $projection -and $projection -lt $compat -and $compat -lt $boundedVerify -and $boundedVerify -lt $finalize) 'restore_schema_publish_order_invalid'
 Assert-True ($validateBranch -lt $lockRootPrepare -and $lockRootPrepare -lt $lockAcquire -and $lockAcquire -lt $gitPrepare) 'restore_schema_validate_or_lock_order_invalid'
 Assert-True ($deploy.Contains('[IO.File]::WriteAllBytes($lockPath, [byte[]]::new(0))') `
     -and $deploy.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $lockPath') `
@@ -90,7 +93,12 @@ Assert-True ($deploy.Contains("Wait-Maintenance") -and $deploy.Contains("'Class 
 Assert-True ($deploy.Contains("'up','-d','--force-recreate','--no-deps','piwigo'")) 'restore_schema_piwigo_only_recreate_missing'
 Assert-True ($deploy.Contains("'up','-d','--wait','--wait-timeout','60','--force-recreate','--no-deps','immich-web-compat'")) 'restore_schema_bff_only_recreate_missing'
 Assert-True (-not ($deploy -match "Invoke-Compose 'immich'(?s:.*?)'immich-server'|Invoke-Compose 'immich'(?s:.*?)'immich-machine-learning'")) 'restore_schema_restarts_immich_runtime'
-Assert-True ($deploy.Contains('run-maintenance.php') -and -not $deploy.Contains('--apply-rejected-cleanup')) 'restore_schema_maintenance_not_non_destructive'
+Assert-True (-not $deploy.Contains("run-maintenance.php','--json'") -and $deploy.Contains('derivatives=REBUILDABLE_NOT_REQUIRED')) 'restore_schema_full_derivative_maintenance_not_excluded'
+Assert-True ($postMigration.Contains('ReconciliationService::fromPiwigo()->scanAndPersist()') `
+    -and $postMigration.Contains('AiIndexService::fromPiwigo()->maintenanceReport()') `
+    -and $postMigration.Contains('Schema::fromPiwigo(CLASS_IDENTITY_VERSION)->verifyCurrent()') `
+    -and -not $postMigration.Contains('classArchivePhotoCacheWarm') `
+    -and -not $postMigration.Contains('run-maintenance.php')) 'restore_schema_bounded_post_migration_contract_invalid'
 
 Assert-True ($deploy.Contains('Get-ProtectedRuntimeFingerprint') -and $deploy.Contains('protected_runtime_changed_during_restore_deploy')) 'restore_schema_8091_8191_fingerprint_missing'
 Assert-True ($deploy.Contains("'http://127.0.0.1:8091/photos'") -and $deploy.Contains("'http://127.0.0.1:8191/home'")) 'restore_schema_8091_8191_http_guard_missing'
