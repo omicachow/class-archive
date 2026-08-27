@@ -1131,7 +1131,8 @@ catch {
                 message = [string]$_.Exception.Message
                 script_stack = [string]$_.ScriptStackTrace
             }
-            Write-OwnerOnlyText (Join-Path $reportRoot 'last-error.json') (($report | ConvertTo-Json -Depth 4) + "`n")
+            $reportPath = Join-Path $reportRoot ('last-error-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ') + '.json')
+            Write-OwnerOnlyText $reportPath (($report | ConvertTo-Json -Depth 4) + "`n")
         }
         catch { }
     }

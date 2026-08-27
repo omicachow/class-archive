@@ -42,6 +42,7 @@ foreach ($needle in @(
     "`$targetRoot = '<temporary-recovery-target>'", 'CLASS_ARCHIVE_BACKUP_TARGET',
     "`$PSVersionTable.PSEdition -ne 'Core'", 'powershell_7_required',
     '.Replace("`r`n", "`n")', 'ubuntu_argument_carriage_return_invalid', '@nativeArguments',
+    "'last-error-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ') + '.json'",
     "`$mountPoint = '/mnt/classarchive-owner-restore-v1'", "`$restoreVolumeRoot = `$mountPoint + '/volumes'",
     "`$legacyDockerSocket = '/run/classarchive-owner-restore-v1/docker.sock'", "`$dockerHost = 'unix:///var/run/docker.sock'",
     "`$dockerRoot = '/var/lib/docker'", 'fallocate', 'mkfs.ext4', 'command -v blkid', 'CLASSARCHIVE_OWN',
