@@ -39,7 +39,7 @@ $familyBrowserNode = [IO.File]::ReadAllText($familyBrowserNodePath)
 foreach ($needle in @(
     "[ValidateSet('validate', 'prepare-storage', 'restore', 'resume', 'verify', 'cold-restart', 'status')]",
     '[switch]$ConfirmCreateRestoreStorage', '[switch]$ConfirmIsolatedRestore', '[switch]$ConfirmColdRestart',
-    "`$targetRoot = '<temporary-recovery-target>'", 'CLASS_ARCHIVE_BACKUP_TARGET',
+    "`$targetRoot = [IO.Path]::Combine(", "'M:' + [IO.Path]::DirectorySeparatorChar", 'CLASS_ARCHIVE_BACKUP_TARGET',
     "`$PSVersionTable.PSEdition -ne 'Core'", 'powershell_7_required',
     '.Replace("`r`n", "`n")', 'ubuntu_argument_carriage_return_invalid', '@nativeArguments',
     "'last-error-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ') + '.json'",
@@ -204,9 +204,10 @@ foreach ($needle in @(
     'immich-state/immich-upload.tar.gpg'
 )) { Assert-True ($runner.Contains($needle)) ('restore_manifest_payload_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
+$privateSourceRootMarker = 'M:' + [IO.Path]::DirectorySeparatorChar + '图片资源'
 foreach ($forbidden in @(
     'docker compose down', 'docker volume rm', 'docker system prune', 'docker image rm', 'docker rm ',
-    'losetup -d', 'umount ', 'Remove-Item -Recurse', '0.0.0.0:', '[::]:', '<private-source-root>'
+    'losetup -d', 'umount ', 'Remove-Item -Recurse', '0.0.0.0:', '[::]:', $privateSourceRootMarker
 )) { Assert-True (-not $runner.Contains($forbidden)) ('restore_runner_forbidden_' + ($forbidden -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 Assert-True (-not ($runner -match '(?i)Write-(?:Output|Host|Error).*(?:PASSWORD|PASSPHRASE|TOKEN|PEPPER|PSEUDONYM)=')) 'restore_runner_secret_output_detected'
 Assert-True (($runner | Select-String -Pattern 'Remove-Item -LiteralPath' -AllMatches).Matches.Count -eq 1 -and
@@ -243,20 +244,23 @@ Assert-True ($runner.Contains("Invoke-RestoreCompose piwigo @('create','--no-rec
 Assert-True ($runner.Contains("Stop-Restore ('restore_stream_' + [string]`$Matches[1])")) 'restore_stream_failure_code_not_safely_propagated'
 
 foreach ($needle in @(
-    "[ValidateSet('qa', 'full', 'restore')]", "`$Runtime -eq 'restore'", "private_relative = '.codex-work/owner-restore'",
-    "piwigo_env_relative = 'infra/owner-restore/.env.piwigo'", "immich_env_relative = 'infra/owner-restore/.env.immich'",
-    "piwigo_project = 'class_archive_owner_restore_v1_piwigo'", "immich_project = 'class_archive_owner_restore_v1_immich'",
-    'core_port = 8290', 'compat_port = 8291', "`$Runtime -in @('full', 'restore')"
+    "[ValidateSet('qa', 'full', 'restore', 'restore-v2')]", "`$Runtime -in @('restore', 'restore-v2')", "private_relative = `$(if (`$restoreV2) { '.codex-work/owner-restore-v2' } else { '.codex-work/owner-restore' })",
+    "piwigo_env_relative = `$(if (`$restoreV2) { 'infra/owner-restore-v2/.env.piwigo' } else { 'infra/owner-restore/.env.piwigo' })",
+    "immich_env_relative = `$(if (`$restoreV2) { 'infra/owner-restore-v2/.env.immich' } else { 'infra/owner-restore/.env.immich' })",
+    "piwigo_project = `$(if (`$restoreV2) { 'class_archive_owner_restore_v2_piwigo' } else { 'class_archive_owner_restore_v1_piwigo' })",
+    "immich_project = `$(if (`$restoreV2) { 'class_archive_owner_restore_v2_immich' } else { 'class_archive_owner_restore_v1_immich' })",
+    'core_port = $(if ($restoreV2) { 8390 } else { 8290 })', 'compat_port = $(if ($restoreV2) { 8391 } else { 8291 })',
+    "`$Runtime -in @('full', 'restore', 'restore-v2')"
 )) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_adapter_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 $restoreIdentityBlock = [regex]::Match(
     $immichRunner,
-    "(?ms)^\s*\} elseif \(\`$Runtime -eq 'restore'\) \{.*?^\s*\} else \{"
+    "(?ms)^\s*\} elseif \(\`$Runtime -in @\('restore', 'restore-v2'\)\) \{.*?^\s*\} else \{"
 ).Value
 Assert-True (-not [string]::IsNullOrWhiteSpace($restoreIdentityBlock)) 'immich_restore_identity_block_missing'
 Assert-True ($restoreIdentityBlock.Contains("technical_name = 'Class Archive Private Full Technical User'") `
     -and $restoreIdentityBlock.Contains("library_name = 'Class Archive Private Full Library'")) 'immich_restore_durable_identity_not_preserved'
 foreach ($needle in @(
-    "'recover-transients'", "`$Runtime -eq 'restore'", 'transient_recovery_scope_invalid',
+    "'recover-transients'", "`$Runtime -in @('restore', 'restore-v2')", 'transient_recovery_scope_invalid',
     'aborted_transient_recovery', 'runtime-input.json', 'password-reset-input.txt',
     'databases=UNTOUCHED media=UNTOUCHED', "Remove-PrivateFile `$path",
     'orphan_runtime_process_detected', '/proc/[0-9]*/cmdline',

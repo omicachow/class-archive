@@ -4,7 +4,7 @@ param(
     [ValidateSet('validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes', 'recover-transients')]
     [string]$Action = 'validate',
 
-    [ValidateSet('qa', 'full', 'restore')]
+    [ValidateSet('qa', 'full', 'restore', 'restore-v2')]
     [string]$Runtime = 'qa'
 )
 
@@ -36,22 +36,23 @@ $runtimeConfig = if ($Runtime -eq 'full') {
         technical_name = 'Class Archive Private Full Technical User'
         library_name = 'Class Archive Private Full Library'
     }
-} elseif ($Runtime -eq 'restore') {
+} elseif ($Runtime -in @('restore', 'restore-v2')) {
+    $restoreV2 = $Runtime -eq 'restore-v2'
     [ordered]@{
-        private_relative = '.codex-work/owner-restore'
-        piwigo_env_relative = 'infra/owner-restore/.env.piwigo'
-        immich_env_relative = 'infra/owner-restore/.env.immich'
-        piwigo_override = 'infra/owner-restore/docker-compose.piwigo.override.yml'
+        private_relative = $(if ($restoreV2) { '.codex-work/owner-restore-v2' } else { '.codex-work/owner-restore' })
+        piwigo_env_relative = $(if ($restoreV2) { 'infra/owner-restore-v2/.env.piwigo' } else { 'infra/owner-restore/.env.piwigo' })
+        immich_env_relative = $(if ($restoreV2) { 'infra/owner-restore-v2/.env.immich' } else { 'infra/owner-restore/.env.immich' })
+        piwigo_override = $(if ($restoreV2) { 'infra/owner-restore-v2/docker-compose.piwigo.override.yml' } else { 'infra/owner-restore/docker-compose.piwigo.override.yml' })
         piwigo_worker_override = 'infra/private-full/docker-compose.ai-worker.override.yml'
-        immich_override = 'infra/owner-restore/docker-compose.immich.override.yml'
-        piwigo_project = 'class_archive_owner_restore_v1_piwigo'
-        immich_project = 'class_archive_owner_restore_v1_immich'
+        immich_override = $(if ($restoreV2) { 'infra/owner-restore-v2/docker-compose.immich.override.yml' } else { 'infra/owner-restore/docker-compose.immich.override.yml' })
+        piwigo_project = $(if ($restoreV2) { 'class_archive_owner_restore_v2_piwigo' } else { 'class_archive_owner_restore_v1_piwigo' })
+        immich_project = $(if ($restoreV2) { 'class_archive_owner_restore_v2_immich' } else { 'class_archive_owner_restore_v1_immich' })
         scope = 'PRIVATE_REAL_FULL'
         max_assets = 6000
-        core_port = 8290
-        compat_port = 8291
-        report_name = 'owner-restore-immich-runtime.json'
-        index_report_name = 'owner-restore-ai-index-runtime.json'
+        core_port = $(if ($restoreV2) { 8390 } else { 8290 })
+        compat_port = $(if ($restoreV2) { 8391 } else { 8291 })
+        report_name = $(if ($restoreV2) { 'owner-restore-v2-immich-runtime.json' } else { 'owner-restore-immich-runtime.json' })
+        index_report_name = $(if ($restoreV2) { 'owner-restore-v2-ai-index-runtime.json' } else { 'owner-restore-ai-index-runtime.json' })
         # A restore must validate the durable Immich identities captured in the
         # backup. Renaming either object would turn recovery into a mutation and
         # make the strict RESUME identity contract reject a valid source state.
@@ -534,7 +535,7 @@ try {
 
     if ($Action -eq 'recover-transients') {
         $script:stage = 'aborted_transient_recovery'
-        Assert-Exact ($Runtime -eq 'restore') 'transient_recovery_scope_invalid'
+        Assert-Exact ($Runtime -in @('restore', 'restore-v2')) 'transient_recovery_scope_invalid'
         Assert-Exact ($counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le $maxAssets -and $counts.memories -eq 0) 'transient_recovery_state_invalid'
         $immichTemporary = @(
             $runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer,
@@ -586,7 +587,7 @@ printf '%s\n' "$count"
         Assert-Exact ($counts.users -eq 0 -and $counts.libraries -eq 0 -and $counts.assets -eq 0 -and $counts.memories -eq 0) 'immich_pristine_required'
     } else {
         Assert-Exact ($Action -in @('resume', 'finish', 'finalize-indexes') -and $counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le $maxAssets -and $counts.memories -eq 0) 'immich_resume_state_invalid'
-        Assert-Exact ($Action -ne 'finalize-indexes' -or $Runtime -in @('full', 'restore')) 'index_finalize_scope_invalid'
+        Assert-Exact ($Action -ne 'finalize-indexes' -or $Runtime -in @('full', 'restore', 'restore-v2')) 'index_finalize_scope_invalid'
     }
     $immichTemporary = @(
         $runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer,
@@ -860,7 +861,7 @@ printf '%s\n' "$count"
             Assert-Exact ($bindResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=bind count=([0-9]+)$') 'binding_failed'
         }
 
-        if ($Runtime -in @('full', 'restore')) {
+        if ($Runtime -in @('full', 'restore', 'restore-v2')) {
             # The worker capability is intentionally absent during cold start
             # and all expensive runtime work. Enable it only after the direct
             # Immich runner has proved stable-idle Face/Search queues plus
@@ -1032,7 +1033,7 @@ NODE
             catalog_count = [int]$catalog.count
             people_count = [int]$runtimeEvidence.metrics.people_count
             metrics = $runtimeEvidence.metrics
-            ai_index_state = $(if ($Runtime -in @('full', 'restore')) { 'READY' } else { 'EXTERNAL_QA_ONLY' })
+            ai_index_state = $(if ($Runtime -in @('full', 'restore', 'restore-v2')) { 'READY' } else { 'EXTERNAL_QA_ONLY' })
             ai_models = $runtimeEvidence.index_evidence.models
             media_mount = 'PIWIGO_ORIGINALS_READ_ONLY'
             media_delivery = 'MEDIAGUARD_ONLY'

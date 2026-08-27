@@ -1,0 +1,78 @@
+services:
+  immich-server:
+    labels: &v2-service-labels
+      com.classarchive.scope: owner-independent-restore-v2
+      com.classarchive.storage: m-ext4-bind-v2
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v2 restore env}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME:-immich}
+      TZ: ${TZ:-Asia/Shanghai}
+    logging: &v2-logging
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-machine-learning:
+    labels: *v2-service-labels
+    logging: *v2-logging
+
+  immich-gateway:
+    labels: *v2-service-labels
+    logging: *v2-logging
+
+  immich-gateway-secret-stager:
+    labels: *v2-service-labels
+
+  immich-web-compat:
+    labels: *v2-service-labels
+    environment:
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: ${CLASS_ARCHIVE_CORE_PUBLIC_PORT:?Set the v2 restore core port}
+    volumes:
+      - ./photo-ui:/photo-ui:ro
+    networks:
+      class_archive_gateway:
+        ipv4_address: 10.246.0.10
+    logging: *v2-logging
+
+  redis:
+    labels: *v2-service-labels
+    logging: *v2-logging
+
+  database:
+    labels: *v2-service-labels
+    logging: *v2-logging
+
+networks:
+  immich_internal:
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+    ipam:
+      config:
+        - subnet: 10.246.2.0/24
+  immich_ml_internal:
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+    ipam:
+      config:
+        - subnet: 10.246.3.0/24
+  immich_bridge_internal:
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+    ipam:
+      config:
+        - subnet: 10.246.4.0/24
+
+volumes:
+  immich_upload:
+    labels: &v2-volume-labels
+      com.classarchive.scope: owner-independent-restore-v2
+      com.classarchive.storage: m-ext4-bind-v2
+  immich_model_cache:
+    labels: *v2-volume-labels
+  immich_db:
+    labels: *v2-volume-labels
+  immich_gateway_secret:
+    labels: *v2-volume-labels
