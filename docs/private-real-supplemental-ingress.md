@@ -63,14 +63,34 @@ preparation or import has been run. `compose-validate` requires the ignored,
 owner-only owner environment only to resolve the fixed Piwigo image and numeric
 UID/GID; none of its secrets enters the service environment.
 
-## CI and future apply boundary
+## Apply boundary
 
-Public CI remains synthetic-only. It runs source-level protocol checks and the
-synthetic MPO preparation fixture, never looks for a private drive or local
-manifest, and never carries a private artifact as a CI output.
+The separately reviewed `apply-private-real-supplemental.ps1` operator defaults
+to `validate` against the isolated Restore target. A write additionally needs
+`-Action apply -ConfirmSupplementalApply`; selecting the Owner runtime also
+needs `-Target owner -ConfirmOwnerRuntime`. These confirmations are required
+before the operator changes maintenance state.
 
-A future import/apply operator must be a different, explicit command. Before it
-may write, it must prove the restored schema version, bind only the verified
-supplemental ingress, preflight all source identities in one batch, preserve
-transformed-source provenance, and enqueue derivative/AI work only for newly
-applied canonical photos. This document does not authorize that action.
+The one-shot apply container receives only the verified path-free manifest and
+the 26 opaque JPEG presentation objects. It does not receive either source
+root, the source journal, the historical full-import manifest, or the old full
+staging tree. It joins only an internal MariaDB maintenance network and has no
+host port. The normal Piwigo writer must be maintenance-gated and stopped
+before it can run.
+
+The operator requires exact ClassIdentity schema v16, checks all 28 source
+identities as one batch before the first album/media write, and proves the
+terminal `26 APPLIED + 2 DEDUPLICATED + 0 FAILED` journal and presentation
+provenance before reopening Piwigo. An exact rerun is a durable 28-item no-op;
+an interrupted run resumes through the same item and native-media checkpoints.
+Output is aggregate-only and never includes a path or filename.
+
+`validate` is public-safe configuration evidence, not evidence that an apply
+was executed. Restore must be exercised successfully before the independent
+Owner confirmation is used.
+
+## CI
+
+Public CI remains synthetic-only. The apply operator is covered by static
+protocol tests and disposable synthetic schema tests; CI never looks for a
+private artifact, environment, Docker volume, or source drive.
