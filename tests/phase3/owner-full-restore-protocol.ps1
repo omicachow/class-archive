@@ -253,6 +253,11 @@ $restoreIdentityBlock = [regex]::Match(
 Assert-True (-not [string]::IsNullOrWhiteSpace($restoreIdentityBlock)) 'immich_restore_identity_block_missing'
 Assert-True ($restoreIdentityBlock.Contains("technical_name = 'Class Archive Private Full Technical User'") `
     -and $restoreIdentityBlock.Contains("library_name = 'Class Archive Private Full Library'")) 'immich_restore_durable_identity_not_preserved'
+foreach ($needle in @(
+    "'recover-transients'", "`$Runtime -eq 'restore'", 'transient_recovery_scope_invalid',
+    'aborted_transient_recovery', 'runtime-input.json', 'password-reset-input.txt',
+    'databases=UNTOUCHED media=UNTOUCHED', "Remove-PrivateFile `$path"
+)) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_transient_recovery_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 foreach ($browser in @($ownerBrowser,$familyBrowser)) {
     foreach ($needle in @(

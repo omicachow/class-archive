@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes')]
+    [ValidateSet('validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes', 'recover-transients')]
     [string]$Action = 'validate',
 
     [ValidateSet('qa', 'full', 'restore')]
@@ -506,9 +506,17 @@ $mutatingOperationLock = $null
 $rotationStagerCleanupRequired = $false
 $rotationSecretCopyAttempted = $false
 $finalizeOperationVerified = $false
+$nodeInputHost = $null
+$nodeOutputHost = $null
+$bindingHost = $null
+$indexEvidenceHost = $null
+$enableHost = $null
+$bridgeTokenHost = $null
+$bridgeHost = $null
+$passwordResetHost = $null
 try {
     Assert-RuntimeBoundary
-    if ($Action -in @('provision', 'resume', 'finish', 'finalize-indexes')) {
+    if ($Action -in @('provision', 'resume', 'finish', 'finalize-indexes', 'recover-transients')) {
         $mutatingOperationLock = Enter-MutatingOperationLock
     }
     if ($Action -eq 'validate') {
@@ -521,6 +529,42 @@ try {
         $bridge = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-a', '--format', 'json', 'immich-gateway')).Trim()
         $bridgeState = if ($bridge -eq '') { 'ABSENT' } elseif ($bridge -match 'running') { 'RUNNING' } else { 'PRESENT' }
         Write-Output ("PRIVATE_QA_IMMICH=PASS action=status users={0} libraries={1} assets={2} memories={3} bridge={4} assertions={5}" -f $counts.users, $counts.libraries, $counts.assets, $counts.memories, $bridgeState, $script:assertions)
+        exit 0
+    }
+
+    if ($Action -eq 'recover-transients') {
+        $script:stage = 'aborted_transient_recovery'
+        Assert-Exact ($Runtime -eq 'restore') 'transient_recovery_scope_invalid'
+        Assert-Exact ($counts.users -eq 1 -and $counts.libraries -eq 1 -and $counts.assets -ge 1 -and $counts.assets -le $maxAssets -and $counts.memories -eq 0) 'transient_recovery_state_invalid'
+        $immichTemporary = @(
+            $runtimeScriptContainer, $runtimeInputContainer, $runtimeOutputContainer,
+            $runtimeSummaryContainer, $runtimeBindingsContainer, $runtimeIndexEvidenceContainer,
+            $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer
+        )
+        $piwigoTemporary = @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer, $bridgeTokenContainer)
+        [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'rm', '-f', '--') + $immichTemporary)
+        [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + $piwigoTemporary)
+        foreach ($path in $immichTemporary) {
+            $probe = Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('test ! -e ' + $path + ' && test ! -L ' + $path + '; echo $?'))
+            Assert-Exact ($probe.Trim() -eq '0') 'transient_recovery_container_cleanup_failed'
+        }
+        foreach ($path in $piwigoTemporary) {
+            $probe = Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('test ! -e ' + $path + ' && test ! -L ' + $path + '; echo $?'))
+            Assert-Exact ($probe.Trim() -eq '0') 'transient_recovery_container_cleanup_failed'
+        }
+        $hostTransientNames = @(
+            'runtime-input.json', 'runtime-summary.txt', 'bindings.json', 'index-evidence.json',
+            'enable.json', 'bridge-token.json', 'bridge-secret.json', 'password-reset-input.txt'
+        )
+        foreach ($directory in @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -Force -ErrorAction Stop)) {
+            Assert-Exact (-not ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'transient_recovery_host_directory_untrusted'
+            foreach ($name in $hostTransientNames) {
+                $path = Join-Path $directory.FullName $name
+                if (Test-Path -LiteralPath $path) { Remove-PrivateFile $path }
+                Assert-Exact (-not (Test-Path -LiteralPath $path)) 'transient_recovery_host_cleanup_failed'
+            }
+        }
+        Write-Output "PRIVATE_QA_IMMICH=PASS action=recover-transients scope=RESTORE_ONLY databases=UNTOUCHED media=UNTOUCHED assertions=$script:assertions"
         exit 0
     }
 
@@ -992,7 +1036,7 @@ NODE
         $runtimeEvidence = $null
         try { [void](Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', ('rm -f -- ' + $runtimeScriptContainer + ' ' + $runtimeInputContainer + ' ' + $runtimeOutputContainer + ' ' + $runtimeSummaryContainer + ' ' + $runtimeBindingsContainer + ' ' + $runtimeIndexEvidenceContainer + ' ' + $passwordResetScriptContainer + ' ' + $passwordResetInputContainer + ' ' + $passwordResetOutputContainer))) } catch { }
         try { [void](Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'sh', '-lc', ('rm -f -- ' + $catalogContainer + ' ' + $bindingContainer + ' ' + $indexEvidenceContainer + ' ' + $enableContainer + ' ' + $bridgeTokenContainer))) } catch { }
-        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeTokenHost, $bridgeHost, $passwordResetHost)) {
+        foreach ($path in @($nodeInputHost, $nodeOutputHost, $bindingHost, $indexEvidenceHost, $enableHost, $bridgeTokenHost, $bridgeHost, $passwordResetHost) | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) }) {
             try { Remove-PrivateFile $path } catch { }
         }
         if ($null -ne $mutatingOperationLock) {
