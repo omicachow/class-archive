@@ -50,7 +50,9 @@ try {
     Assert-Protocol ($operator.Contains('durable_applied=26 durable_deduplicated=2')) 'supplemental_terminal_contract_missing'
     Assert-Protocol ($operator.Contains('PRIVATE_REAL_SUPPLEMENTAL_TARGET=PASS action=schema schema=16 source_paths=NOT_READ')) 'operator_schema_gate_missing'
     Assert-Protocol ($operator.Contains("'piwigo_writer_not_stopped'")) 'single_writer_gate_missing'
-    Assert-Protocol ($operator.Contains("'apply_network_not_fresh'")) 'fresh_internal_network_gate_missing'
+    Assert-Protocol ($operator.Contains('function Remove-VerifiedEmptyApplyNetwork') `
+        -and $operator.Contains("'true|private-real-supplemental-apply|0'")) 'verified_empty_network_cleanup_missing'
+    Assert-Protocol ($operator.Contains("Remove-VerifiedEmptyApplyNetwork `$NetworkName 'apply_stale_network'")) 'fresh_internal_network_gate_missing'
     Assert-Protocol ($operator.Contains("'docker', 'network', 'connect', '--alias', 'db'")) 'bounded_db_network_connect_missing'
     Assert-Protocol ($operator.Contains("'docker', 'network', 'disconnect', '--force'")) 'bounded_db_network_disconnect_missing'
     Assert-Protocol ($operator.Contains("'docker', 'network', 'rm'")) 'bounded_network_cleanup_missing'
@@ -72,6 +74,8 @@ try {
     $normalRestart = $operator.IndexOf("@('up', '-d', '--no-deps', 'piwigo') 'piwigo_restart_failed'", [StringComparison]::Ordinal)
     $maintenanceHold = $operator.IndexOf("`$script:stage = 'maintenance_hold_verify'", [StringComparison]::Ordinal)
     Assert-Protocol ($normalRestart -gt $run -and $maintenanceHold -gt $normalRestart) 'maintenance_hold_not_verified_after_writer_restart'
+    $postRestartCleanup = $operator.IndexOf("Remove-VerifiedEmptyApplyNetwork `$maintenanceNetwork 'apply_post_restart_network'", [StringComparison]::Ordinal)
+    Assert-Protocol ($postRestartCleanup -gt $maintenanceHold) 'post_restart_empty_network_cleanup_missing'
     Assert-Protocol ($operator.Contains('APPLY_VERIFIED_28_SOURCE_26_PRESENTATION_BATCH')) 'container_confirmation_missing'
     Assert-Protocol ($operator.Contains('historical_manifest=NOT_MOUNTED')) 'legacy_manifest_evidence_missing'
     Assert-Protocol ($operator.Contains('source_mount=NONE')) 'source_mount_evidence_missing'

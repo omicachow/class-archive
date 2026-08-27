@@ -335,8 +335,7 @@ function Wait-PiwigoCli([string[]]$Prefix) {
     throw 'piwigo_cli_not_ready'
 }
 
-function Open-ApplyNetwork([hashtable]$Spec, [string[]]$Prefix, [string]$NetworkName) {
-    $script:stage = 'isolated_apply_network'
+function Remove-VerifiedEmptyApplyNetwork([string]$NetworkName, [string]$FailureCode) {
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -344,7 +343,21 @@ function Open-ApplyNetwork([hashtable]$Spec, [string[]]$Prefix, [string]$Network
         $networkExists = $LASTEXITCODE -eq 0
     }
     finally { $ErrorActionPreference = $previous }
-    Assert-Apply (-not $networkExists) 'apply_network_not_fresh'
+    if (-not $networkExists) { return }
+    $identity = @(Invoke-WslCapture @('docker', 'network', 'inspect', '--format',
+        '{{.Internal}}|{{index .Labels "com.classarchive.scope"}}|{{len .Containers}}', $NetworkName) ($FailureCode + '_inspect_failed'))
+    Assert-Apply ($identity.Count -eq 1 -and $identity[0] -eq 'true|private-real-supplemental-apply|0') ($FailureCode + '_identity_invalid')
+    [void](Invoke-WslCapture @('docker', 'network', 'rm', $NetworkName) ($FailureCode + '_remove_failed'))
+}
+
+function Open-ApplyNetwork([hashtable]$Spec, [string[]]$Prefix, [string]$NetworkName) {
+    $script:stage = 'isolated_apply_network'
+    # `docker compose up piwigo` may materialize every declared project
+    # network even when the selected service is not attached to it.  A prior
+    # successful run can therefore leave an empty, correctly labelled shell.
+    # Remove only that exact zero-member shell before creating a fresh bridge;
+    # any label drift or container membership remains fail closed.
+    Remove-VerifiedEmptyApplyNetwork $NetworkName 'apply_stale_network'
     $script:networkCreated = $true
     [void](Invoke-Compose $Prefix @('create', '--no-build', '--no-recreate', 'supplemental-apply') 'apply_network_create_failed')
     [void](Invoke-Compose $Prefix @('rm', '--force', '--stop', 'supplemental-apply') 'apply_placeholder_remove_failed')
@@ -458,6 +471,8 @@ try {
     Wait-PiwigoCli $prefix
     $script:stage = 'maintenance_hold_verify'
     Wait-Maintenance $spec $prefix
+    $script:stage = 'post_restart_network_cleanup'
+    Remove-VerifiedEmptyApplyNetwork $maintenanceNetwork 'apply_post_restart_network'
 
     Write-Output ('PRIVATE_REAL_SUPPLEMENTAL_APPLY=PASS action=apply target=' + $Target `
         + ' schema=16 sources=28 presentations=26 durable_applied=26 durable_deduplicated=2 failed=0 ' `
