@@ -35,6 +35,7 @@ try {
     Assert-Protocol ($operator.Contains("project = 'class_archive_private_full_v3_piwigo'")) 'owner_project_missing'
     Assert-Protocol ($operator.Contains("env = 'infra/owner-restore/.env.piwigo'")) 'restore_env_missing'
     Assert-Protocol ($operator.Contains("env = 'infra/private-full/.env.piwigo.owner'")) 'owner_env_missing'
+    Assert-Protocol ([regex]::Matches($operator, [regex]::Escape("'infra/private-full/docker-compose.ai-worker.override.yml'")).Count -eq 2) 'ai_worker_overlay_not_preserved_for_both_targets'
     Assert-Protocol ($operator.Contains("`$declaredVolumes = Get-Property `$config 'volumes'")) 'compose_declared_volume_lookup_missing'
     Assert-Protocol ($operator.Contains("`$source -ceq [string]`$expected.key")) 'compose_logical_volume_key_gate_missing'
     Assert-Protocol ($operator.Contains("[string](Get-Property `$declaration 'name') -ceq [string]`$expected.name")) 'compose_runtime_volume_name_gate_missing'

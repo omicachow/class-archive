@@ -65,7 +65,11 @@ $targets = @{
         scope = 'private-real-full'
         http = '8190'
         compat = '8191'
-        compose = @('infra/docker-compose.yml', 'infra/private-full/docker-compose.override.yml', $applyOverlayRelative)
+        # Preserve the already-reviewed private AI worker boundary when the
+        # normal writer is recreated after the isolated one-shot import.  If
+        # this overlay is omitted, the following delta operator correctly
+        # fails closed because CLASS_ARCHIVE_PRIVATE_AI_INDEX_WORKER is absent.
+        compose = @('infra/docker-compose.yml', 'infra/private-full/docker-compose.override.yml', 'infra/private-full/docker-compose.ai-worker.override.yml', $applyOverlayRelative)
         volumes = @{
             piwigo_data = 'class_archive_private_full_v3_control_piwigo_data'
             piwigo_uploads = 'class_archive_private_full_v3_piwigo_uploads'
