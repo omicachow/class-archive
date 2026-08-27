@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('preflight', 'backup', 'verify')]
+    [ValidateSet('preflight', 'backup', 'verify', 'verify-portable')]
     [string]$Action = 'preflight',
 
     [Parameter(Mandatory = $true)]
@@ -13,6 +13,8 @@ param(
 
     [switch]$ConfirmOwnerTemporaryBackup,
     [switch]$AcceptSameDiskTemporaryRecoveryLimitation,
+
+    [switch]$CreatePortableRecoveryEnvelope,
 
     [string]$BackupId,
     [string]$PiwigoOwnerEnvPath
@@ -33,6 +35,9 @@ $helperPath = Join-Path $PSScriptRoot 'create-owner-temporary-backup.sh'
 $mlManifestPath = Join-Path $projectRoot 'infra\immich-spike\ml-artifacts\manifest.json'
 $upstreamLockPath = Join-Path $projectRoot 'infra\immich-spike\immich-upstream.lock.json'
 $secretAclPath = Join-Path $PSScriptRoot 'secret-file-acl.ps1'
+$portableRecoveryPath = Join-Path $PSScriptRoot 'owner-portable-recovery.ps1'
+$portableHelperPath = Join-Path $PSScriptRoot 'owner-portable-recovery-helper.sh'
+$portableKitSource = Join-Path $projectRoot 'infra\recovery-kit'
 $runtimeRoot = Join-Path $projectRoot '.codex-work\private-real-full\runtime\owner-temporary-backup'
 $markerName = 'CLASS_ARCHIVE_BACKUP_TARGET'
 $expectedMarker = "CLASS_ARCHIVE_BACKUP_TARGET`nversion=1`nscope=OWNER_PRIVATE_FULL`n"
@@ -46,6 +51,7 @@ if ([string]::IsNullOrWhiteSpace($PiwigoOwnerEnvPath)) {
 }
 
 . $secretAclPath
+. $portableRecoveryPath
 
 function Stop-OwnerBackup([string]$Code) {
     throw [InvalidOperationException]::new('OWNER_TEMP_BACKUP_STOP:' + $Code)
@@ -467,9 +473,10 @@ This is not an independent disaster backup because the recovery package and
 the original photo sources reside on the same physical disk. Keep it until an
 independent disk or NAS recovery copy has been completed and verified.
 
-The DPAPI recovery envelope also requires the same Windows user profile that
-created it. This temporary package alone does not recover from loss of that
-profile; establish an independently held recovery key before production.
+Legacy v1 bundles have only a DPAPI recovery envelope and therefore require the
+same Windows user profile that created them. A v2 bundle additionally contains
+a GnuPG portable recovery envelope protected by a recovery phrase held only by
+the owner. The phrase is never stored in this target, a manifest, Git, or logs.
 "@
     [IO.File]::WriteAllText($readme, $readmeText, [Text.UTF8Encoding]::new($false))
     return $target
@@ -516,8 +523,13 @@ function Test-FixedAsciiEqual([string]$Left, [string]$Right) {
     return $difference -eq 0
 }
 
-function Get-PayloadSpecs {
-    return @(
+function Test-OwnerBackupId([string]$Value) {
+    return $Value -match '\Aowner-full-(?:v2-)?[0-9]{8}T[0-9]{6}Z\z'
+}
+
+function Get-PayloadSpecs([int]$Version = 1) {
+    if ($Version -notin @(1,2)) { Stop-OwnerBackup 'backup_manifest_version_invalid' }
+    $specs = @(
         @{ id='mariadb'; file='databases/mariadb.sql.gz.gpg'; kind='DATABASE_LOGICAL_GPG'; order=10; posix=$false },
         @{ id='immich_postgres'; file='databases/immich-postgres.dump.gpg'; kind='DATABASE_LOGICAL_GPG'; order=20; posix=$false },
         @{ id='piwigo_data'; file='business-state/piwigo-data.tar.gpg'; kind='POSIX_TAR_GPG'; order=30; posix=$true },
@@ -530,20 +542,45 @@ function Get-PayloadSpecs {
         @{ id='immich_upstream_lock'; file='business-state/immich-upstream.lock.json'; kind='NON_SECRET_CONFIGURATION'; order=2; posix=$false },
         @{ id='ml_artifact_manifest'; file='business-state/ml-artifact-manifest.json'; kind='NON_SECRET_CONFIGURATION'; order=3; posix=$false }
     )
+    if ($Version -eq 2) {
+        $specs += @(
+            @{ id='portable_readme'; file='recovery-kit/README-PORTABLE-RESTORE.txt'; kind='PORTABLE_RECOVERY_DOCUMENTATION'; order=81; posix=$false },
+            @{ id='portable_manifest'; file='recovery-kit/manifest.json'; kind='PORTABLE_RECOVERY_MANIFEST'; order=82; posix=$false },
+            @{ id='portable_checksums'; file='recovery-kit/checksums.sha256'; kind='PORTABLE_RECOVERY_CHECKSUMS'; order=83; posix=$false },
+            @{ id='portable_restore_powershell'; file='recovery-kit/restore.ps1'; kind='PORTABLE_RECOVERY_TOOL'; order=84; posix=$false },
+            @{ id='portable_restore_shell'; file='recovery-kit/restore.sh'; kind='PORTABLE_RECOVERY_TOOL'; order=85; posix=$false },
+            @{ id='portable_container_lock'; file='recovery-kit/container-lock.json'; kind='NON_SECRET_CONFIGURATION'; order=86; posix=$false },
+            @{ id='portable_migration_info'; file='recovery-kit/migration-info.json'; kind='NON_SECRET_CONFIGURATION'; order=87; posix=$false },
+            @{ id='portable_ml_manifest'; file='recovery-kit/ml-artifact-manifest.json'; kind='NON_SECRET_CONFIGURATION'; order=88; posix=$false },
+            @{ id='portable_key_envelope'; file='recovery-kit/portable-key-envelope.gpg'; kind='GPG_PORTABLE_SECRET_ENVELOPE'; order=6; posix=$false }
+        )
+    }
+    return $specs
+}
+
+function Get-BackupManifestVersion([string]$Bundle) {
+    try {
+        $manifest = Get-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { Stop-OwnerBackup 'backup_manifest_invalid' }
+    $version = [int]$manifest.version
+    if ($version -notin @(1,2)) { Stop-OwnerBackup 'backup_manifest_version_invalid' }
+    return $version
 }
 
 function Resolve-BackupBundle([string]$Target, [string]$RequestedId) {
     $bundles = Join-Path $Target 'bundles'
     Assert-PlainDirectory $bundles 'target_bundles_untrusted'
     if (-not [string]::IsNullOrWhiteSpace($RequestedId)) {
-        if ($RequestedId -notmatch '\Aowner-full-[0-9]{8}T[0-9]{6}Z\z') { Stop-OwnerBackup 'backup_id_invalid' }
+        if (-not (Test-OwnerBackupId $RequestedId)) { Stop-OwnerBackup 'backup_id_invalid' }
         $path = Join-Path $bundles $RequestedId
         if (-not (Test-Path -LiteralPath $path -PathType Container)) { Stop-OwnerBackup 'backup_bundle_missing' }
         Assert-PlainDirectory $path 'backup_bundle_untrusted'
         return $path
     }
     $candidates = @(Get-ChildItem -LiteralPath $bundles -Directory -Force | Where-Object {
-        $_.Name -match '\Aowner-full-[0-9]{8}T[0-9]{6}Z\z' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        (Test-OwnerBackupId $_.Name) -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
     } | Sort-Object Name -Descending)
     if ($candidates.Count -lt 1) { Stop-OwnerBackup 'backup_bundle_missing' }
     return $candidates[0].FullName
@@ -560,7 +597,8 @@ function Verify-ChecksumFile([string]$Bundle) {
         if ($expected.ContainsKey($relative)) { Stop-OwnerBackup 'checksum_manifest_duplicate' }
         $expected[$relative] = [string]$Matches[1]
     }
-    $required = @((Get-PayloadSpecs | ForEach-Object { $_.file }) + @('manifest.json', 'COMPLETE')) | Sort-Object
+    $bundleVersion = Get-BackupManifestVersion $Bundle
+    $required = @((Get-PayloadSpecs $bundleVersion | ForEach-Object { $_.file }) + @('manifest.json', 'COMPLETE')) | Sort-Object
     if (@(Compare-Object -ReferenceObject $required -DifferenceObject @($expected.Keys | Sort-Object)).Count -ne 0) {
         Stop-OwnerBackup 'checksum_inventory_invalid'
     }
@@ -588,7 +626,7 @@ function Verify-ChecksumFile([string]$Bundle) {
 }
 
 function Assert-BundleIdentity([string]$Bundle, [string]$ExpectedBackupId, [switch]$Pending) {
-    if ($ExpectedBackupId -notmatch '\Aowner-full-[0-9]{8}T[0-9]{6}Z\z') {
+    if (-not (Test-OwnerBackupId $ExpectedBackupId)) {
         Stop-OwnerBackup 'backup_id_invalid'
     }
     $expectedBundleName = if ($Pending.IsPresent) { '.partial-' + $ExpectedBackupId } else { $ExpectedBackupId }
@@ -625,6 +663,164 @@ function New-PlainPassphraseFile([string]$Directory, [string]$Passphrase) {
     return $path
 }
 
+function Write-PortableRecoveryKit {
+    param(
+        [Parameter(Mandatory = $true)][string]$PartialBundle,
+        [Parameter(Mandatory = $true)][string]$BackupId,
+        [Parameter(Mandatory = $true)][string]$SourceHead,
+        [Parameter(Mandatory = $true)][string]$SourceBranch,
+        [Parameter(Mandatory = $true)][hashtable]$Evidence,
+        [Parameter(Mandatory = $true)]$EnvelopeMetadata
+    )
+    $kit = Join-Path $PartialBundle 'recovery-kit'
+    $kitItem = Get-Item -LiteralPath $kit -Force -ErrorAction Stop
+    if (-not $kitItem.PSIsContainer -or ($kitItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-OwnerBackup 'portable_kit_untrusted'
+    }
+    foreach ($name in @('README-PORTABLE-RESTORE.txt','restore.ps1','restore.sh')) {
+        $source = Join-Path $portableKitSource $name
+        $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+        if ($sourceItem.PSIsContainer -or ($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $sourceItem.Length -le 0) {
+            Stop-OwnerBackup 'portable_kit_source_invalid'
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $kit $name)
+    }
+    Copy-Item -LiteralPath $mlManifestPath -Destination (Join-Path $kit 'ml-artifact-manifest.json')
+    Write-Utf8Json (Join-Path $kit 'container-lock.json') ([ordered]@{
+        format = 'owner-portable-container-lock-v1'
+        version = 1
+        backup_id = $BackupId
+        images = [ordered]@{
+            piwigo = [string]$Evidence.PIWIGO_IMAGE
+            mariadb = [string]$Evidence.MARIADB_IMAGE
+            immich_server = [string]$Evidence.IMMICH_SERVER_IMAGE
+            immich_machine_learning = [string]$Evidence.IMMICH_ML_IMAGE
+            postgres = [string]$Evidence.POSTGRES_IMAGE
+        }
+    })
+    Write-Utf8Json (Join-Path $kit 'migration-info.json') ([ordered]@{
+        format = 'owner-portable-migration-info-v1'
+        version = 1
+        backup_id = $BackupId
+        schema_versions = [ordered]@{
+            class_identity = [uint64]$Evidence.CLASS_IDENTITY_SCHEMA_VERSION
+            piwigo = '16.4.0'
+            immich = '3.1.0'
+        }
+        restore_order = @('MARIADB','PIWIGO_POSIX_STATE','CANONICAL_MEDIA','IMMICH_POSTGRES','IMMICH_UPLOAD','RESTORE_SECRETS','VALIDATE')
+    })
+    Write-Utf8Json (Join-Path $kit 'manifest.json') ([ordered]@{
+        format = 'owner-portable-recovery-kit-v1'
+        version = 1
+        backup_id = $BackupId
+        scope = 'OWNER_PRIVATE_FULL'
+        source_head = $SourceHead
+        source_branch = $SourceBranch
+        envelope = $EnvelopeMetadata
+        dpapi_required = $false
+        recovery_phrase_stored = $false
+        plaintext_secret_payload_stored = $false
+        restore_prerequisites = @('GnuPG 2.2+ with AES256','PowerShell 5.1+ or Bash','fresh isolated restore volumes')
+    })
+    $checksumFiles = @(
+        'README-PORTABLE-RESTORE.txt','container-lock.json','manifest.json','migration-info.json',
+        'ml-artifact-manifest.json','portable-key-envelope.gpg','restore.ps1','restore.sh'
+    ) | Sort-Object
+    $checksumLines = foreach ($name in $checksumFiles) {
+        $path = Join-Path $kit $name
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0) {
+            Stop-OwnerBackup 'portable_kit_payload_invalid'
+        }
+        ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $name)
+    }
+    [IO.File]::WriteAllText((Join-Path $kit 'checksums.sha256'), ($checksumLines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+}
+
+function Assert-PortableRecoveryKit([string]$Bundle, $Manifest) {
+    if ([int]$Manifest.version -ne 2 -or $Manifest.format -ne 'owner-full-recovery-v2' -or
+        $Manifest.encryption.key_protection -ne 'WINDOWS_DPAPI_CURRENT_USER_PLUS_PORTABLE_GPG_ENVELOPE' -or
+        $Manifest.encryption.portable_envelope.payload_format -ne 'owner-portable-recovery-secrets-v1' -or
+        $Manifest.encryption.portable_envelope.dpapi_required -ne $false -or
+        $Manifest.encryption.dpapi_retained -ne $true) {
+        Stop-OwnerBackup 'portable_manifest_contract_invalid'
+    }
+    $kit = Join-Path $Bundle 'recovery-kit'
+    $kitItem = Get-Item -LiteralPath $kit -Force -ErrorAction Stop
+    if (-not $kitItem.PSIsContainer -or ($kitItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-OwnerBackup 'portable_kit_untrusted'
+    }
+    $checksumPath = Join-Path $kit 'checksums.sha256'
+    $expectedNames = @(
+        'README-PORTABLE-RESTORE.txt','container-lock.json','manifest.json','migration-info.json',
+        'ml-artifact-manifest.json','portable-key-envelope.gpg','restore.ps1','restore.sh'
+    ) | Sort-Object
+    $seen = @{}
+    foreach ($line in [IO.File]::ReadAllLines($checksumPath)) {
+        if ($line -notmatch '\A([0-9a-f]{64})  ([A-Za-z0-9._-]+)\z') { Stop-OwnerBackup 'portable_checksums_invalid' }
+        $name = [string]$Matches[2]
+        if ($seen.ContainsKey($name)) { Stop-OwnerBackup 'portable_checksums_duplicate' }
+        $seen[$name] = $true
+        $path = Join-Path $kit $name
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0) {
+            Stop-OwnerBackup 'portable_kit_payload_invalid'
+        }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not (Test-FixedAsciiEqual $actual ([string]$Matches[1]))) { Stop-OwnerBackup 'portable_kit_sha256_mismatch' }
+    }
+    if (@(Compare-Object $expectedNames @($seen.Keys | Sort-Object)).Count -ne 0) {
+        Stop-OwnerBackup 'portable_kit_inventory_invalid'
+    }
+    try { $kitManifest = Get-Content -LiteralPath (Join-Path $kit 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    catch { Stop-OwnerBackup 'portable_kit_manifest_invalid' }
+    if ($kitManifest.format -ne 'owner-portable-recovery-kit-v1' -or [int]$kitManifest.version -ne 1 -or
+        $kitManifest.backup_id -ne [string]$Manifest.backup_id -or $kitManifest.scope -ne 'OWNER_PRIVATE_FULL' -or
+        $kitManifest.envelope.payload_format -ne 'owner-portable-recovery-secrets-v1' -or
+        $kitManifest.dpapi_required -ne $false -or $kitManifest.recovery_phrase_stored -ne $false -or
+        $kitManifest.plaintext_secret_payload_stored -ne $false) {
+        Stop-OwnerBackup 'portable_kit_manifest_invalid'
+    }
+}
+
+function Invoke-VerifyPortableBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$Bundle,
+        [Security.SecureString]$PortablePhrase
+    )
+    $backupId = [IO.Path]::GetFileName($Bundle)
+    Verify-ChecksumFile $Bundle
+    Assert-BundleIdentity $Bundle $backupId
+    try { $manifest = Get-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    catch { Stop-OwnerBackup 'backup_manifest_invalid' }
+    Assert-PortableRecoveryKit $Bundle $manifest
+    $phraseOwned = $false
+    if ($null -eq $PortablePhrase) {
+        $PortablePhrase = Read-ClassArchivePortableRecoveryPhrase
+        $phraseOwned = $true
+    }
+    $verifyRoot = Join-Path $runtimeRoot ($backupId + '-verify')
+    $archivePassphrasePath = $null
+    try {
+        $secrets = Read-ClassArchivePortableRecoveryEnvelope -BackupId $backupId `
+            -EnvelopePath (Join-Path $Bundle 'recovery-kit\portable-key-envelope.gpg') -SecretRoot $verifyRoot `
+            -PortablePhrase $PortablePhrase -Wsl $wsl -HelperPath $portableHelperPath
+        $archivePassphrasePath = New-PlainPassphraseFile $verifyRoot ([string]$secrets.gpg_passphrase)
+        $lines = Invoke-Helper @('verify', '--bundle', (Get-WslPath $Bundle), '--passphrase-file', (Get-WslPath $archivePassphrasePath))
+        [void](Parse-SafeEvidence $lines)
+    }
+    finally {
+        $secrets = $null
+        if ($null -ne $archivePassphrasePath -and (Test-Path -LiteralPath $archivePassphrasePath -PathType Leaf)) {
+            Remove-Item -LiteralPath $archivePassphrasePath -Force
+        }
+        if ((Test-Path -LiteralPath $verifyRoot -PathType Container) -and @(Get-ChildItem -LiteralPath $verifyRoot -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $verifyRoot -Force
+        }
+        if ($phraseOwned -and $PortablePhrase -is [IDisposable]) { $PortablePhrase.Dispose() }
+    }
+}
+
 function Invoke-VerifyBundle([hashtable]$Boundary, [string]$Bundle) {
     $publishedBackupId = [IO.Path]::GetFileName($Bundle)
     Verify-ChecksumFile $Bundle
@@ -632,14 +828,17 @@ function Invoke-VerifyBundle([hashtable]$Boundary, [string]$Bundle) {
     $manifestPath = Join-Path $Bundle 'manifest.json'
     try { $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-OwnerBackup 'backup_manifest_invalid' }
-    if ($manifest.format -ne 'owner-temporary-recovery-v1' -or [int]$manifest.version -ne 1 -or
+    $bundleVersion = [int]$manifest.version
+    $formatValid = ($bundleVersion -eq 1 -and $manifest.format -eq 'owner-temporary-recovery-v1') -or
+        ($bundleVersion -eq 2 -and $manifest.format -eq 'owner-full-recovery-v2')
+    if (-not $formatValid -or $bundleVersion -notin @(1,2) -or
         $manifest.backup_id -ne [IO.Path]::GetFileName($Bundle) -or
         $manifest.scope -ne 'OWNER_PRIVATE_FULL' -or $manifest.temporary_recovery_target -ne $true -or
         $manifest.independent_disaster_backup -ne $false) {
         Stop-OwnerBackup 'backup_manifest_contract_invalid'
     }
     $archiveEntries = @($manifest.archives)
-    $payloadSpecs = @(Get-PayloadSpecs)
+    $payloadSpecs = @(Get-PayloadSpecs $bundleVersion)
     if ($archiveEntries.Count -ne $payloadSpecs.Count) { Stop-OwnerBackup 'backup_manifest_archive_inventory_invalid' }
     $seenArchiveFiles = @{}
     foreach ($spec in $payloadSpecs) {
@@ -659,6 +858,7 @@ function Invoke-VerifyBundle([hashtable]$Boundary, [string]$Bundle) {
             Stop-OwnerBackup 'backup_manifest_archive_contract_invalid'
         }
     }
+    if ($bundleVersion -eq 2) { Assert-PortableRecoveryKit $Bundle $manifest }
     $envelopePath = Join-Path $Bundle 'business-state\recovery-secrets.dpapi.json'
     try { $envelope = Get-Content -LiteralPath $envelopePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-OwnerBackup 'recovery_secret_envelope_invalid' }
@@ -687,7 +887,7 @@ try {
     $script:stage = 'target_boundary'
     $boundary = Get-TargetBoundary
 
-    if ($Action -eq 'verify') {
+    if ($Action -in @('verify','verify-portable')) {
         $script:stage = 'target_open'
         if (-not (Test-Path -LiteralPath $boundary.target -PathType Container)) { Stop-OwnerBackup 'target_not_initialized' }
         Assert-PlainDirectory $boundary.target 'target_directory_untrusted'
@@ -696,11 +896,18 @@ try {
             -not [string]::Equals([IO.File]::ReadAllText($markerPath), $expectedMarker, [StringComparison]::Ordinal)) {
             Stop-OwnerBackup 'target_marker_invalid'
         }
-        $script:stage = 'verify_bundle'
+        $script:stage = if ($Action -eq 'verify-portable') { 'verify_portable_bundle' } else { 'verify_bundle' }
         $bundle = Resolve-BackupBundle $boundary.target $BackupId
-        Invoke-VerifyBundle $boundary $bundle
-        Write-Output ('OWNER_TEMP_BACKUP=PASS action=verify backup_id=' + [IO.Path]::GetFileName($bundle) +
-            ' sha256=PASS gpg=PASS temporary_target=YES independent_disaster_backup=NO')
+        if ($Action -eq 'verify-portable') {
+            Invoke-VerifyPortableBundle -Bundle $bundle
+            Write-Output ('OWNER_TEMP_BACKUP=PASS action=verify-portable backup_id=' + [IO.Path]::GetFileName($bundle) +
+                ' sha256=PASS gpg=PASS portable_envelope=PASS dpapi_used=NO')
+        }
+        else {
+            Invoke-VerifyBundle $boundary $bundle
+            Write-Output ('OWNER_TEMP_BACKUP=PASS action=verify backup_id=' + [IO.Path]::GetFileName($bundle) +
+                ' sha256=PASS gpg=PASS temporary_target=YES independent_disaster_backup=NO')
+        }
         exit 0
     }
 
@@ -743,17 +950,22 @@ try {
     $script:stage = 'target_initialize'
     $target = Initialize-Target $boundary
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ', [Globalization.CultureInfo]::InvariantCulture)
-    $newBackupId = 'owner-full-' + $stamp
+    $bundleVersion = if ($CreatePortableRecoveryEnvelope.IsPresent) { 2 } else { 1 }
+    $newBackupId = if ($bundleVersion -eq 2) { 'owner-full-v2-' + $stamp } else { 'owner-full-' + $stamp }
     $partial = Join-Path (Join-Path $target 'bundles') ('.partial-' + $newBackupId)
     $published = Join-Path (Join-Path $target 'bundles') $newBackupId
     if ((Test-Path -LiteralPath $partial) -or (Test-Path -LiteralPath $published)) { Stop-OwnerBackup 'backup_bundle_collision' }
-    foreach ($relative in @('databases', 'business-state', 'media-archives', 'immich-state')) {
+    $bundleDirectories = @('databases', 'business-state', 'media-archives', 'immich-state')
+    if ($bundleVersion -eq 2) { $bundleDirectories += 'recovery-kit' }
+    foreach ($relative in $bundleDirectories) {
         New-Item -ItemType Directory -Path (Join-Path $partial $relative) -Force | Out-Null
     }
 
     $secretRoot = Join-Path $runtimeRoot $newBackupId
     $passphrasePath = $null
     $archivePassphrase = $null
+    $portablePhrase = $null
+    $portableEnvelopeMetadata = $null
     try {
         $script:stage = 'recovery_secret_envelope'
         $ownerEnv = Assert-IgnoredOwnerFile $PiwigoOwnerEnvPath '.env.piwigo.owner'
@@ -776,6 +988,15 @@ try {
         Write-Utf8Json (Join-Path $partial 'business-state\recovery-secrets.dpapi.json') $secretEnvelope
         Copy-Item -LiteralPath $mlManifestPath -Destination (Join-Path $partial 'business-state\ml-artifact-manifest.json')
         Copy-Item -LiteralPath $upstreamLockPath -Destination (Join-Path $partial 'business-state\immich-upstream.lock.json')
+        if ($bundleVersion -eq 2) {
+            $script:stage = 'portable_recovery_secret_entry'
+            $portablePhrase = Read-ClassArchivePortableRecoveryPhrase
+            $script:stage = 'portable_recovery_envelope'
+            $portableEnvelopeMetadata = New-ClassArchivePortableRecoveryEnvelope -BackupId $newBackupId `
+                -SecretRoot $secretRoot -DestinationPath (Join-Path $partial 'recovery-kit\portable-key-envelope.gpg') `
+                -ArchivePassphrase $archivePassphrase -OwnerSecrets $ownerSecrets -PortablePhrase $portablePhrase `
+                -Wsl $wsl -HelperPath $portableHelperPath
+        }
 
         $script:stage = 'archive_create'
         $helperLines = Invoke-Helper @(
@@ -787,6 +1008,7 @@ try {
             'CLASS_IDENTITY_SCHEMA_VERSION','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS',
             'PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES','VISIBLE_PEOPLE',
             'PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
+            'AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX',
             'OWNER_STATE_SHA256','IMMICH_POSTGRES_STATE_SHA256','IMMICH_UPLOAD_STATE_SHA256','IMMICH_SNAPSHOT_XMAX',
             'MARIADB_IMAGE','PIWIGO_IMAGE','IMMICH_SERVER_IMAGE','IMMICH_ML_IMAGE','POSTGRES_IMAGE'
@@ -795,17 +1017,24 @@ try {
         if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(15,16) -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
             [string]$evidence.IMMICH_VERSION -ne '3.1.0') { Stop-OwnerBackup 'backup_schema_version_invalid' }
 
+        if ($bundleVersion -eq 2) {
+            $script:stage = 'portable_recovery_kit'
+            Write-PortableRecoveryKit -PartialBundle $partial -BackupId $newBackupId -SourceHead $sourceHead `
+                -SourceBranch ([string]$sourceBranch[0]) -Evidence $evidence -EnvelopeMetadata $portableEnvelopeMetadata
+        }
+
         $counts = [ordered]@{}
         foreach ($name in @(
             'SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS','PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES',
             'VISIBLE_PEOPLE','PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
+            'AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX'
         )) { $counts[$name.ToLowerInvariant()] = [uint64]$evidence[$name] }
         Write-Utf8Json (Join-Path $partial 'business-state\runtime-counts.json') $counts
 
         $script:stage = 'payload_hash'
         $archives = @()
-        foreach ($spec in Get-PayloadSpecs) {
+        foreach ($spec in Get-PayloadSpecs $bundleVersion) {
             $path = Join-Path $partial ([string]$spec.file).Replace('/', '\')
             $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
             if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0) {
@@ -824,8 +1053,8 @@ try {
             }
         }
         $manifest = [ordered]@{
-            format = 'owner-temporary-recovery-v1'
-            version = 1
+            format = if ($bundleVersion -eq 2) { 'owner-full-recovery-v2' } else { 'owner-temporary-recovery-v1' }
+            version = $bundleVersion
             backup_id = $newBackupId
             created_at = (Get-Date).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
             source_head = $sourceHead
@@ -879,25 +1108,44 @@ try {
             encryption = [ordered]@{
                 archive = 'GPG_SYMMETRIC_AES256'
                 compression = 'NONE_FOR_TAR_GZIP_FOR_MARIADB_PG_CUSTOM'
-                key_protection = 'WINDOWS_DPAPI_CURRENT_USER'
+                key_protection = if ($bundleVersion -eq 2) { 'WINDOWS_DPAPI_CURRENT_USER_PLUS_PORTABLE_GPG_ENVELOPE' } else { 'WINDOWS_DPAPI_CURRENT_USER' }
+                dpapi_retained = $true
+                portable_envelope = if ($bundleVersion -eq 2) { $portableEnvelopeMetadata } else { $null }
                 plaintext_archive_on_exfat = $false
             }
             archives = $archives
             counts = $counts
-            excluded_rebuildable = @(
+            excluded_rebuildable = if ($bundleVersion -eq 2) { @(
+                [ordered]@{ component='piwigo_derivative_cache'; reason='deterministic_from_originals'; rebuild='maintenance_derivative_warmup'; estimated_rebuild_time='MEASURE_ON_RESTORE' },
+                [ordered]@{ component='immich_model_binaries'; reason='restricted_redistribution_and_manifest_managed'; rebuild='verified_ml_artifact_import'; estimated_rebuild_time='DEPENDENT_ON_LOCAL_ARTIFACT_CACHE' },
+                [ordered]@{ component='browser_cache'; reason='client_transient'; rebuild='automatic'; estimated_rebuild_time='SECONDS' },
+                [ordered]@{ component='temporary_logs'; reason='non_business_transient'; rebuild='not_required'; estimated_rebuild_time='NONE' },
+                [ordered]@{ component='runtime_locks'; reason='must_not_restore_stale_locks'; rebuild='automatic'; estimated_rebuild_time='SECONDS' },
+                [ordered]@{ component='web_sessions'; reason='security_rotation_boundary'; rebuild='users_reauthenticate'; estimated_rebuild_time='USER_DRIVEN' },
+                [ordered]@{ component='immich_gateway_secret'; reason='rotate_and_rebind'; rebuild='secure_restore_provisioning'; estimated_rebuild_time='MINUTES' }
+            ) } else { @(
                 'piwigo_derivative_cache', 'immich_model_binaries', 'browser_cache', 'temporary_logs',
                 'runtime_locks', 'web_sessions', 'immich_gateway_secret'
-            )
+            ) }
+            ai_job_state = [ordered]@{
+                total = [uint64]$evidence.AI_JOBS_TOTAL
+                complete = [uint64]$evidence.AI_JOBS_COMPLETE
+                pending = [uint64]$evidence.AI_JOBS_PENDING
+                running = [uint64]$evidence.AI_JOBS_RUNNING
+                unavailable = [uint64]$evidence.AI_JOBS_UNAVAILABLE
+                failed = [uint64]$evidence.AI_JOBS_FAILED
+                cancelled = [uint64]$evidence.AI_JOBS_CANCELLED
+            }
             secret_policy = [ordered]@{
-                recovery_key_boundary = 'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED'
-                windows_profile_loss = 'NOT_RECOVERABLE_FROM_THIS_TEMPORARY_PACKAGE_ALONE'
-                piwigo_database_password = 'PRESERVED_BY_DPAPI'
+                recovery_key_boundary = if ($bundleVersion -eq 2) { 'DPAPI_OR_OWNER_HELD_PORTABLE_RECOVERY_PHRASE' } else { 'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED' }
+                windows_profile_loss = if ($bundleVersion -eq 2) { 'RECOVERABLE_WITH_PORTABLE_ENVELOPE_AND_OWNER_PHRASE' } else { 'NOT_RECOVERABLE_FROM_THIS_TEMPORARY_PACKAGE_ALONE' }
+                piwigo_database_password = if ($bundleVersion -eq 2) { 'PRESERVED_BY_DPAPI_AND_PORTABLE_ENVELOPE' } else { 'PRESERVED_BY_DPAPI' }
                 database_root_credentials = 'REGENERATE'
                 immich_database_password = 'REGENERATE'
                 piwigo_database_config = 'REGENERATE_FROM_DPAPI_PIWIGO_DATABASE_PASSWORD'
                 immich_gateway_token = 'ROTATE_AND_REBIND'
-                outstanding_claim_tokens = 'PRESERVED_BY_DPAPI_CLAIM_PEPPER'
-                anonymous_pseudonyms = 'PRESERVED_BY_DPAPI_PSEUDONYM_SECRET'
+                outstanding_claim_tokens = if ($bundleVersion -eq 2) { 'PRESERVED_BY_DPAPI_AND_PORTABLE_CLAIM_PEPPER' } else { 'PRESERVED_BY_DPAPI_CLAIM_PEPPER' }
+                anonymous_pseudonyms = if ($bundleVersion -eq 2) { 'PRESERVED_BY_DPAPI_AND_PORTABLE_PSEUDONYM_SECRET' } else { 'PRESERVED_BY_DPAPI_PSEUDONYM_SECRET' }
                 raw_secrets_in_manifest = $false
             }
             restore_runtime = [ordered]@{
@@ -910,7 +1158,7 @@ try {
         Write-Utf8Json (Join-Path $partial 'manifest.json') $manifest
         [IO.File]::WriteAllText((Join-Path $partial 'COMPLETE'), $newBackupId + "`n", [Text.UTF8Encoding]::new($false))
 
-        $checksumFiles = @((Get-PayloadSpecs | ForEach-Object { [string]$_.file }) + @('manifest.json', 'COMPLETE')) | Sort-Object
+        $checksumFiles = @((Get-PayloadSpecs $bundleVersion | ForEach-Object { [string]$_.file }) + @('manifest.json', 'COMPLETE')) | Sort-Object
         $checksumLines = foreach ($relative in $checksumFiles) {
             $path = Join-Path $partial $relative.Replace('/', '\')
             ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $relative)
@@ -931,13 +1179,19 @@ try {
         }
         Move-Item -LiteralPath $partial -Destination $published
         Invoke-VerifyBundle $boundary $published
+        if ($bundleVersion -eq 2) {
+            Invoke-VerifyPortableBundle -Bundle $published -PortablePhrase $portablePhrase
+        }
         $bundleBytes = [uint64](Get-ChildItem -LiteralPath $published -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum
         Write-Output ('OWNER_TEMP_BACKUP=PASS action=backup backup_id=' + $newBackupId +
             ' bundle_bytes=' + $bundleBytes + ' sha256=PASS gpg=PASS source_head=' + $sourceHead +
-            ' temporary_target=YES independent_disaster_backup=NO')
+            ' temporary_target=YES independent_disaster_backup=NO portable_envelope=' + $(if ($bundleVersion -eq 2) { 'PASS' } else { 'NOT_REQUESTED' }))
     }
     finally {
         $archivePassphrase = $null
+        $portableEnvelopeMetadata = $null
+        if ($portablePhrase -is [IDisposable]) { $portablePhrase.Dispose() }
+        $portablePhrase = $null
         if ($null -ne $passphrasePath -and (Test-Path -LiteralPath $passphrasePath -PathType Leaf)) {
             Remove-Item -LiteralPath $passphrasePath -Force
         }
@@ -950,6 +1204,8 @@ catch {
     $code = $null
     if ($_.Exception.Message -match '\AOWNER_TEMP_BACKUP_STOP:([a-z0-9_]{1,128})\z') { $code = [string]$Matches[1] }
     elseif ($_.Exception.Message -match '\AOWNER_TEMP_BACKUP_HELPER=FAIL code=([a-z0-9_]{1,128})\z') { $code = [string]$Matches[1] }
+    elseif ($_.Exception.Message -match '\AOWNER_PORTABLE_RECOVERY_STOP:([a-z0-9_]{1,128})\z') { $code = [string]$Matches[1] }
+    elseif ($_.Exception.Message -match '\AOWNER_PORTABLE_RECOVERY_HELPER=FAIL code=([a-z0-9_]{1,128})\z') { $code = [string]$Matches[1] }
     if ($null -eq $code) { $code = 'unexpected_failure' }
     Write-Error ('OWNER_TEMP_BACKUP=FAIL stage=' + $script:stage + ' code=' + $code)
     exit 1

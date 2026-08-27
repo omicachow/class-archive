@@ -34,7 +34,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 assert_backup_id() {
-  case "$1" in owner-full-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) fail bundle_path_invalid ;; esac
+  case "$1" in
+    owner-full-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    owner-full-v2-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) fail bundle_path_invalid ;;
+  esac
 }
 
 validate_bundle_passphrase_identity() {
@@ -428,7 +432,21 @@ spotlights=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}spotlight;" | tr -d '
 memories=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}auto_collection;" | tr -d '[:space:]')
 audit_events=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}audit_event;" | tr -d '[:space:]')
 ai_assets=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_asset_index;" | tr -d '[:space:]')
-for value in "$source_records" "$source_presentations" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets"; do
+ai_job_table_exists=$(mariadb_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${ci_base}ai_index_job';" | tr -d '[:space:]')
+case "$ai_job_table_exists" in
+  0) ai_jobs_total=0; ai_jobs_complete=0; ai_jobs_pending=0; ai_jobs_running=0; ai_jobs_unavailable=0; ai_jobs_failed=0; ai_jobs_cancelled=0 ;;
+  1)
+    ai_jobs_total=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job;" | tr -d '[:space:]')
+    ai_jobs_complete=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='COMPLETE';" | tr -d '[:space:]')
+    ai_jobs_pending=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='PENDING';" | tr -d '[:space:]')
+    ai_jobs_running=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='RUNNING';" | tr -d '[:space:]')
+    ai_jobs_unavailable=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='UNAVAILABLE';" | tr -d '[:space:]')
+    ai_jobs_failed=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='FAILED';" | tr -d '[:space:]')
+    ai_jobs_cancelled=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_index_job WHERE state='CANCELLED';" | tr -d '[:space:]')
+    ;;
+  *) fail ai_job_table_shape_invalid ;;
+esac
+for value in "$source_records" "$source_presentations" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets" "$ai_jobs_total" "$ai_jobs_complete" "$ai_jobs_pending" "$ai_jobs_running" "$ai_jobs_unavailable" "$ai_jobs_failed" "$ai_jobs_cancelled"; do
   case "$value" in ''|*[!0-9]*) fail mariadb_count_invalid ;; esac
 done
 
@@ -481,6 +499,13 @@ printf '%s\n' "SPOTLIGHTS=$spotlights"
 printf '%s\n' "MEMORIES=$memories"
 printf '%s\n' "AUDIT_EVENTS=$audit_events"
 printf '%s\n' "AI_ASSET_INDEX=$ai_assets"
+printf '%s\n' "AI_JOBS_TOTAL=$ai_jobs_total"
+printf '%s\n' "AI_JOBS_COMPLETE=$ai_jobs_complete"
+printf '%s\n' "AI_JOBS_PENDING=$ai_jobs_pending"
+printf '%s\n' "AI_JOBS_RUNNING=$ai_jobs_running"
+printf '%s\n' "AI_JOBS_UNAVAILABLE=$ai_jobs_unavailable"
+printf '%s\n' "AI_JOBS_FAILED=$ai_jobs_failed"
+printf '%s\n' "AI_JOBS_CANCELLED=$ai_jobs_cancelled"
 printf '%s\n' "IMMICH_ASSETS=$immich_assets"
 printf '%s\n' "IMMICH_FACE_RECORDS=$immich_faces"
 printf '%s\n' "IMMICH_RAW_PERSONS=$immich_people"

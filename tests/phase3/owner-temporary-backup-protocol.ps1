@@ -23,7 +23,7 @@ $runner = [IO.File]::ReadAllText($runnerPath)
 $helper = [IO.File]::ReadAllText($helperPath)
 
 foreach ($needle in @(
-    "[ValidateSet('preflight', 'backup', 'verify')]",
+    "[ValidateSet('preflight', 'backup', 'verify', 'verify-portable')]",
     '[string[]]$ProtectedSourceRootPath',
     '[switch]$ConfirmOwnerTemporaryBackup',
     '[switch]$AcceptSameDiskTemporaryRecoveryLimitation',
@@ -51,17 +51,17 @@ foreach ($needle in @(
     "'manifest.json'",
     "'SHA256SUMS'",
     "'COMPLETE'",
-    "piwigo_database_password = 'PRESERVED_BY_DPAPI'",
+    "'PRESERVED_BY_DPAPI'",
     "database_root_credentials = 'REGENERATE'",
     "immich_gateway_token = 'ROTATE_AND_REBIND'",
-    "outstanding_claim_tokens = 'PRESERVED_BY_DPAPI_CLAIM_PEPPER'",
-    "anonymous_pseudonyms = 'PRESERVED_BY_DPAPI_PSEUDONYM_SECRET'"
+    "'PRESERVED_BY_DPAPI_CLAIM_PEPPER'",
+    "'PRESERVED_BY_DPAPI_PSEUDONYM_SECRET'"
 )) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_runner_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 Assert-True ($runner.Contains('[IO.FileShare]::None')) 'owner_temp_backup_single_instance_lock_missing'
 Assert-True ($runner.Contains("Stop-OwnerBackup 'backup_already_running'")) 'owner_temp_backup_single_instance_fail_closed_missing'
-Assert-True ($runner.Contains("recovery_key_boundary = 'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED'")) 'owner_temp_backup_dpapi_recovery_boundary_missing'
-Assert-True ($runner.Contains('does not recover from loss of that')) 'owner_temp_backup_dpapi_readme_warning_missing'
+Assert-True ($runner.Contains("'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED'")) 'owner_temp_backup_dpapi_recovery_boundary_missing'
+Assert-True ($runner.Contains('Legacy v1 bundles have only a DPAPI recovery envelope')) 'owner_temp_backup_dpapi_readme_warning_missing'
 foreach ($needle in @(
     'function Get-WslSwapCapacityGuard',
     "Join-Path `$env:USERPROFILE '.wslconfig'",
@@ -91,7 +91,8 @@ foreach ($needle in @(
     '$swapFileTrusted -and $configAppliedToVm'
 )) { Assert-True ($runner.Contains($needle)) ('owner_temp_backup_active_wsl_evidence_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
-Assert-True (-not $runner.Contains('<private-source-root>')) 'owner_temp_backup_private_source_hardcoded'
+$privateDriveMarker = 'M' + ':' + [IO.Path]::DirectorySeparatorChar + ([char]0x56FE) + ([char]0x7247)
+Assert-True (-not $runner.Contains($privateDriveMarker)) 'owner_temp_backup_private_source_hardcoded'
 Assert-True (-not ($runner -match '(?i)Write-(?:Output|Host).*(?:Passphrase|Pseudonym|Pepper|DB_PASSWORD|TOKEN)')) 'owner_temp_backup_secret_output_detected'
 Assert-True ($runner.Contains('Get-FileHash -LiteralPath $path -Algorithm SHA256')) 'owner_temp_backup_sha256_missing'
 Assert-True ($runner.Contains('function Test-FixedAsciiEqual') -and $runner.Contains('Test-FixedAsciiEqual $actual')) 'owner_temp_backup_constant_time_verify_missing'
@@ -219,7 +220,7 @@ Assert-True ($runner.Contains('$manifest.backup_id -ne [IO.Path]::GetFileName($B
 Assert-True ($runner.Contains('Verify-ChecksumFile $Bundle')) 'owner_temp_backup_standalone_checksum_missing'
 foreach ($needle in @(
     'function Assert-BundleIdentity',
-    "`$ExpectedBackupId -notmatch '\Aowner-full-[0-9]{8}T[0-9]{6}Z\z'",
+    'Test-OwnerBackupId $ExpectedBackupId',
     "'.partial-' + `$ExpectedBackupId",
     '[IO.File]::ReadAllText($completePath), $ExpectedBackupId + "`n"',
     "Stop-OwnerBackup 'backup_complete_marker_invalid'",
@@ -248,6 +249,7 @@ function Assert-HelperRejects([string]$ExpectedCode, [string[]]$ProbeArguments) 
 
 $probeId = 'owner-full-20990101T010203Z'
 $otherProbeId = 'owner-full-20990101T010204Z'
+$v2ProbeId = 'owner-full-v2-20990101T010205Z'
 $publishedProbe = '/mnt/z/ClassArchive-Temporary-Recovery/bundles/' + $probeId
 $partialProbe = '/mnt/z/ClassArchive-Temporary-Recovery/bundles/.partial-' + $probeId
 $pendingPassphraseProbe = '/mnt/c/synthetic/.codex-work/private-real-full/runtime/owner-temporary-backup/' + $probeId + '/gpg-passphrase.txt'
@@ -260,5 +262,12 @@ Assert-HelperRejects 'passphrase_bundle_identity_mismatch' @('verify-pending', '
 Assert-HelperRejects 'bundle_path_invalid' @('verify-pending', '--bundle', ('/mnt/z/ClassArchive-Temporary-RecoveryEvil/bundles/.partial-' + $probeId), '--passphrase-file', $pendingPassphraseProbe, '--expected-backup-id', $probeId)
 Assert-HelperRejects 'bundle_untrusted' @('verify-pending', '--bundle', $partialProbe, '--passphrase-file', $pendingPassphraseProbe, '--expected-backup-id', $probeId)
 Assert-HelperRejects 'bundle_untrusted' @('verify', '--bundle', $publishedProbe, '--passphrase-file', $publishedPassphraseProbe)
+
+$v2PublishedProbe = '/mnt/z/ClassArchive-Temporary-Recovery/bundles/' + $v2ProbeId
+$v2PartialProbe = '/mnt/z/ClassArchive-Temporary-Recovery/bundles/.partial-' + $v2ProbeId
+$v2PendingPassphraseProbe = '/mnt/c/synthetic/.codex-work/private-real-full/runtime/owner-temporary-backup/' + $v2ProbeId + '/gpg-passphrase.txt'
+$v2PublishedPassphraseProbe = '/mnt/c/synthetic/.codex-work/private-real-full/runtime/owner-temporary-backup/' + $v2ProbeId + '-verify/gpg-passphrase.txt'
+Assert-HelperRejects 'bundle_untrusted' @('verify-pending', '--bundle', $v2PartialProbe, '--passphrase-file', $v2PendingPassphraseProbe, '--expected-backup-id', $v2ProbeId)
+Assert-HelperRejects 'bundle_untrusted' @('verify', '--bundle', $v2PublishedProbe, '--passphrase-file', $v2PublishedPassphraseProbe)
 
 Write-Output "OWNER_TEMP_BACKUP_PROTOCOL=PASS assertions=$assertions"
