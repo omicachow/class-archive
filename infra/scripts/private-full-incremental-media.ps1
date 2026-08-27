@@ -689,6 +689,21 @@ try {
         ('test ! -e ' + $planContainer + ' -a ! -e ' + $evidenceContainer + ' -a ! -e ' + $runtimeContainer)))
     [void](Invoke-Immich @('exec', '-T', '--user', 'postgres', 'database', 'sh', '-lc', ('test ! -e ' + $snapshotContainer)))
 
+    $script:stage = 'photo_catalog_prepare'
+    # The isolated supplemental writer invalidates public read projections as
+    # soon as it creates a canonical mapping.  Delta planning must still use
+    # the policy-aware photo catalog, so rebuild only that catalog while the
+    # durable HTTP maintenance gate is held.  Aggregate/user projections stay
+    # unpublished until the separately confirmed finalize stage below.
+    $preparedRaw = Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=photos', '--json')
+    try { $prepared = $preparedRaw | ConvertFrom-Json -ErrorAction Stop }
+    catch { Fail 'photo_catalog_prepare_output_invalid' }
+    $preparedCatalogCount = [int]($prepared.photos.count)
+    Assert-Exact ([string]$prepared.result -eq 'PASS' `
+        -and $null -ne $prepared.photos -and $preparedCatalogCount -ge 1 -and $preparedCatalogCount -le 5000 `
+        -and $prepared.photos.dry_run -eq $false -and $null -eq $prepared.aggregates) 'photo_catalog_prepare_evidence_invalid'
+
     $script:stage = 'delta_plan'
     $planMarker = Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'export-incremental')
     $planMatch = [regex]::Match($planMarker, '^PRIVATE_QA_IMMICH_CATALOG=PASS action=export-incremental count=([0-9]+) baseline=([0-9]+) delta=([0-9]+)$')
@@ -699,7 +714,8 @@ try {
     $catalogCount = [int]$plan.catalog_count
     $baselineCount = [int]$plan.baseline_count
     $deltaCount = [int]$plan.delta_count
-    Assert-Exact ($catalogCount -eq [int]$planMatch.Groups[1].Value -and $baselineCount -eq [int]$planMatch.Groups[2].Value `
+    Assert-Exact ($catalogCount -eq $preparedCatalogCount `
+        -and $catalogCount -eq [int]$planMatch.Groups[1].Value -and $baselineCount -eq [int]$planMatch.Groups[2].Value `
         -and $deltaCount -eq [int]$planMatch.Groups[3].Value -and $baselineCount + $deltaCount -eq $catalogCount `
         -and $deltaCount -ge 0 -and $deltaCount -le 512 `
         -and [string]$plan.delta_digest -match '^[0-9a-f]{64}$') 'delta_plan_contract_invalid'

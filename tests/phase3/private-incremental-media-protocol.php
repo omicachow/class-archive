@@ -187,6 +187,13 @@ $assert(str_contains($source['operator'], "\$maintenanceExpected = \$Action -in 
     && str_contains($source['operator'], "\$lines[1] -eq 'CLASS_ARCHIVE_STATUS:503'")
     && str_contains($source['operator'], "'maintenance_not_held'"),
     'staged_incremental_maintenance_gate_missing');
+$catalogPrepare = strpos($source['operator'], "\$script:stage = 'photo_catalog_prepare'");
+$deltaPlan = strpos($source['operator'], "\$script:stage = 'delta_plan'");
+$assert($catalogPrepare !== false && $deltaPlan !== false && $catalogPrepare < $deltaPlan
+    && str_contains($source['operator'], "'/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=photos', '--json'")
+    && str_contains($source['operator'], '$null -eq $prepared.aggregates')
+    && str_contains($source['operator'], '$catalogCount -eq $preparedCatalogCount'),
+    'maintenance_catalog_prepare_not_bounded_before_delta');
 $assert(str_contains($source['operator'], 'maintenance=HELD next=DELTA_APPLY_THEN_EXPLICIT_FINALIZE')
     && str_contains($source['operator'], 'maintenance=HELD next=EXPLICIT_FINALIZE'),
     'restore_stage_handoff_evidence_missing');
