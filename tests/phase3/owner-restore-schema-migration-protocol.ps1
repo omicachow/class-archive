@@ -115,6 +115,10 @@ Assert-True ($deploy.Contains("Invoke-Compose 'piwigo' @('rm','--force','--stop'
     -and $deploy.Contains("'name=^/' + `$piwigoProject + '-piwigo-1$'") `
     -and $deploy.IndexOf("Invoke-Compose 'piwigo' @('rm','--force','--stop','piwigo')",[StringComparison]::Ordinal) -lt $evidence) 'restore_schema_bound_evidence_container_not_removed_before_replace'
 Assert-True ($deploy.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $gitEvidenceHead') -and $deploy.Contains('restore_deploy_git_evidence_not_private')) 'restore_schema_git_evidence_privacy_missing'
+Assert-True ($deploy.Contains('[IO.FileOptions]::WriteThrough') `
+    -and $deploy.Contains('[IO.FileShare]::None') `
+    -and $deploy.Contains('$stream.Flush($true)') `
+    -and -not $deploy.Contains('[IO.File]::Replace($temporary, $gitEvidenceHead')) 'restore_schema_git_evidence_drvfs_update_invalid'
 Assert-True ($deploy.Contains('Assert-RestoreGitEvidencePreflight') -and $deploy.Contains('Initialize-RestoreGitEvidenceRoot')) 'restore_schema_git_evidence_late_failure_guard_missing'
 Assert-True ($deploy.Contains('[IO.Directory]::CreateDirectory($runtimeRoot)') -and $deploy.Contains('Set-OwnerOnlyDirectoryAcl $runtimeRoot')) 'restore_schema_runtime_root_prepare_missing'
 Assert-True ($deploy.Contains('Set-OwnerOnlyDirectoryAcl $gitEvidenceRoot') -and $deploy.Contains('Set-OwnerOnlyDirectoryAcl $gitEvidenceRefs')) 'restore_schema_git_evidence_directory_acl_missing'

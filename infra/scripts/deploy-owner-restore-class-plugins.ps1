@@ -515,19 +515,27 @@ function Update-RestoreGitEvidence([string]$Head) {
         Assert-PlainFile $gitEvidenceHead 'restore_deploy_git_evidence_head_invalid'
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $gitEvidenceHead
     }
-    $temporary = Join-Path $gitEvidenceRoot ('HEAD.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    # The restore container has already been removed, so there is no reader of
+    # this single-file bind. DrvFS does not reliably support File.Replace for a
+    # path that Docker previously bind-mounted. Use an exclusive, write-through
+    # handle instead: a crash leaves invalid evidence and the next preflight
+    # remains fail closed until this bounded step repairs it.
+    $stream = $null
     try {
-        [IO.File]::WriteAllText($temporary, $Head + "`n", [Text.UTF8Encoding]::new($false))
-        Set-ClassArchiveOwnerOnlyFileAcl -Path $temporary
-        if (Test-Path -LiteralPath $gitEvidenceHead) {
-            [IO.File]::Replace($temporary, $gitEvidenceHead, $null, $true)
-        }
-        else {
-            Move-Item -LiteralPath $temporary -Destination $gitEvidenceHead
-        }
+        $stream = [IO.FileStream]::new(
+            $gitEvidenceHead,
+            [IO.FileMode]::Create,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        $bytes = [Text.Encoding]::ASCII.GetBytes($Head + "`n")
+        $stream.Write($bytes,0,$bytes.Length)
+        $stream.Flush($true)
     }
     finally {
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+        if ($null -ne $stream) { $stream.Dispose() }
     }
     Set-ClassArchiveOwnerOnlyFileAcl -Path $gitEvidenceHead
     Assert-Deployment ([string]::Equals([IO.File]::ReadAllText($gitEvidenceHead),($Head + "`n"),[StringComparison]::Ordinal)) 'restore_deploy_git_evidence_head_mismatch'
@@ -536,15 +544,14 @@ function Update-RestoreGitEvidence([string]$Head) {
 
 function Recreate-RestorePiwigoUnderMaintenance([string]$Head) {
     # The attested HEAD is a read-only single-file bind. Windows correctly
-    # prevents atomic replacement while the container owns that bind, and an
-    # in-place rewrite would leave the mounted inode ambiguous. Stop only the
+    # prevents replacement while the container owns that bind. Stop only the
     # already maintenance-gated restore writer before advancing evidence.
     Invoke-Compose 'piwigo' @('stop','piwigo') 'restore_deploy_stop_for_evidence_failed'
     Assert-PiwigoStoppedForSnapshot
     # A stopped Docker container still retains the Windows single-file bind.
     # Remove only this stateless restore container (all durable state lives in
-    # the attested volumes) so the host can atomically replace the evidence
-    # inode. Compose recreates the same scoped container immediately below.
+    # the attested volumes) so the host can exclusively update the evidence
+    # path. Compose recreates the same scoped container immediately below.
     Invoke-Compose 'piwigo' @('rm','--force','--stop','piwigo') 'restore_deploy_remove_for_evidence_failed'
     $remaining = @(Invoke-UbuntuCapture @('docker','ps','-a','--filter',('name=^/' + $piwigoProject + '-piwigo-1$'),'--format','{{.Names}}') 'restore_deploy_remove_for_evidence_failed')
     Assert-Deployment ($remaining.Count -eq 0) 'restore_deploy_remove_for_evidence_failed'

@@ -67,9 +67,12 @@ rejected. The runner then recreates only restore Piwigo from the current clean
 checkout, rebuilds read projections, recreates only the restore compatibility
 BFF, and finalizes maintenance. It fingerprints the 8091 synthetic and 8191
 owner projects before/after, and leaves the restore runtime fail-closed on any
-error. The ignored restore `BuildCommit` HEAD and nginx configuration are
-atomically advanced to the current reviewed checkout before Piwigo is
-recreated, preventing old-source attestation from being paired with new code.
+error. The restore Piwigo container is removed before the ignored `BuildCommit`
+HEAD is advanced with an exclusive write-through handle; nginx configuration
+is prepared before maintenance. The container is then recreated from the
+current reviewed checkout, preventing old-source attestation from being paired
+with new code even on DrvFS, where replacing a previously bind-mounted inode
+is not reliable.
 
 Encrypted archives are never expanded onto exFAT. The DPAPI recovery payload
 is unprotected only by the same Windows user into ignored, owner-only NTFS
