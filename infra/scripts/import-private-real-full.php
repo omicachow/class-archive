@@ -613,7 +613,10 @@ function privateFullEnsureArchiveSeed(ClassIdentity\Repository $repository, int 
 function privateFullProvenanceCode(string $sourceCode, string $itemDigest): string
 {
     $letter = $sourceCode === 'PRIVATE_SOURCE_A' ? 'A' : 'B';
-    return 'FULL.' . $letter . '.' . substr($itemDigest, 0, 56);
+    // CanonicalPhotoService normalizes provenance codes to uppercase before
+    // persistence. Build the same canonical representation for strict replay
+    // comparison instead of relying on the database collation.
+    return 'FULL.' . $letter . '.' . strtoupper(substr($itemDigest, 0, 56));
 }
 
 function privateFullSafeItemError(Throwable $error): string

@@ -141,6 +141,10 @@ try {
     $sourceChecksum = hash('sha256', 'runtime-source-mpo');
     $presentationChecksum = hash('sha256', 'runtime-presentation-jpeg');
     $itemDigest = hash('sha256', "PRIVATE_SOURCE_A\0" . $sourceReference);
+    $assert(
+        privateFullProvenanceCode('PRIVATE_SOURCE_A', $itemDigest) === 'FULL.A.' . strtoupper(substr($itemDigest, 0, 56)),
+        'provenance_code_not_canonical_uppercase',
+    );
     $folderDigest = hash('sha256', "PRIVATE_SOURCE_A\0folder");
     $parentDigest = hash('sha256', "PRIVATE_SOURCE_A\0");
     $spec = privateFullNormalizeSupplementalItem([
