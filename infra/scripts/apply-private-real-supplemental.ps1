@@ -450,6 +450,11 @@ try {
     [void](Invoke-Compose $prefix @('up', '-d', '--no-deps', 'piwigo') 'piwigo_restart_failed')
     $piwigoStopped = $false
     Wait-PiwigoCli $prefix
+    $script:stage = 'projection_rebuild'
+    $projection = @(Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx', 'piwigo',
+        'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json') 'projection_rebuild_failed')
+    Assert-Apply (@($projection | Where-Object { $_ -match '^\{"result":"PASS",' }).Count -eq 1) 'projection_rebuild_evidence_invalid'
+    $script:stage = 'maintenance_finalize'
     [void](Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance') 'maintenance_finalize_failed')
     Wait-ContainerReady $spec 'piwigo'
 

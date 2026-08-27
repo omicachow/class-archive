@@ -1056,7 +1056,15 @@ try {
     } else {
         $finished = $library->finishImport($adminUserId, $importId, 'Private full local library import finish');
         if ($imported > 0 || $deduplicated > 0) {
-            \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+            // The supplemental writer is deliberately isolated from the
+            // Immich bridge secret and every non-DB network. Its caller
+            // rebuilds projections from the normal Piwigo runtime, still
+            // behind the durable maintenance gate, after this journal is
+            // terminal. The original full-library bootstrap retains its
+            // in-process rebuild contract.
+            if (!$supplemental) {
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+            }
             invalidate_user_cache();
         }
     }
