@@ -137,19 +137,26 @@ try {
         'deduplicated_count' => 1,
         'failed_count' => 1,
         'source_code' => 'PRIVATE_SOURCE_A',
+        'presentation_kind' => 'MPO_PRIMARY_FRAME_JPEG',
         'source_collection_id' => '123e4567-e89b-42d3-a456-426614174000',
         'depth' => 2,
         'error_code' => 'STAGING_MIME',
         'state' => 'RUNNING',
     ], 'new_value');
     assertSameValue(
-        '{"manifest_version":1,"item_total":3,"applied_count":1,"deduplicated_count":1,"failed_count":1,"source_code":"PRIVATE_SOURCE_A","source_collection_id":"123e4567-e89b-42d3-a456-426614174000","depth":2,"error_code":"STAGING_MIME","state":"RUNNING"}',
+        '{"manifest_version":1,"item_total":3,"applied_count":1,"deduplicated_count":1,"failed_count":1,"source_code":"PRIVATE_SOURCE_A","presentation_kind":"MPO_PRIMARY_FRAME_JPEG","source_collection_id":"123e4567-e89b-42d3-a456-426614174000","depth":2,"error_code":"STAGING_MIME","state":"RUNNING"}',
         $fullImport,
         'private full import audit value',
     );
     try {
         $encoder->invoke($audit, ['relative_source_path' => 'private/source.jpg'], 'new_value');
         $failures[] = 'private full source path audit value: accepted';
+    } catch (InvalidArgumentException) {
+        $passed++;
+    }
+    try {
+        $encoder->invoke($audit, ['presentation_kind' => '../PRIVATE_SOURCE'], 'new_value');
+        $failures[] = 'private presentation kind audit value: accepted';
     } catch (InvalidArgumentException) {
         $passed++;
     }

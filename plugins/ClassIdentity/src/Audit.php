@@ -110,6 +110,7 @@ final class Audit
         'rule',
         'similarity',
         'source_kind',
+        'presentation_kind',
         'provenance_code',
         'canonicalized',
         'item_count',
@@ -386,6 +387,14 @@ final class Audit
                 // Filesystem paths and filenames are intentionally forbidden.
                 if (preg_match('/\A[A-Z0-9][A-Z0-9._:-]{1,63}\z/D', $value) !== 1) {
                     throw new \InvalidArgumentException('class_identity_audit_invalid_provenance_code');
+                }
+                return;
+            }
+            if ($field === 'presentation_kind') {
+                // Presentation surrogates use a closed, enum-like technical
+                // label. Source filenames and paths remain forbidden.
+                if (preg_match('/\A[A-Z0-9][A-Z0-9_]{1,63}\z/D', $value) !== 1) {
+                    throw new \InvalidArgumentException('class_identity_audit_invalid_presentation_kind');
                 }
                 return;
             }
