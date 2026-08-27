@@ -771,7 +771,18 @@ function Invoke-PrivateImmichFinish {
         $env:DOCKER_HOST = $dockerHost
         $env:WSLENV = if ([string]::IsNullOrWhiteSpace($oldWslEnv)) { 'DOCKER_HOST/u' } elseif ($oldWslEnv -match '(^|:)DOCKER_HOST(?:/u)?(:|$)') { $oldWslEnv } else { $oldWslEnv + ':DOCKER_HOST/u' }
         $lines = @(& pwsh.exe -NoProfile -File (Join-Path $PSScriptRoot 'private-qa-immich.ps1') finish -Runtime restore 2>&1)
-        Assert-Restore ($LASTEXITCODE -eq 0 -and @($lines | Where-Object { [string]$_ -match '\APRIVATE_QA_IMMICH=PASS action=finish ' }).Count -eq 1) 'immich_finish_failed'
+        $finishExitCode = $LASTEXITCODE
+        if ($finishExitCode -ne 0) {
+            $safeFailures = @($lines | ForEach-Object {
+                $match = [regex]::Match([string]$_, '\APRIVATE_QA_IMMICH=FAIL stage=([a-z0-9_]+) code=([a-z0-9_]+) assertions=[0-9]+\z')
+                if ($match.Success) { $match }
+            })
+            if ($safeFailures.Count -eq 1) {
+                Stop-Restore ('immich_finish_' + $safeFailures[0].Groups[1].Value + '_' + $safeFailures[0].Groups[2].Value)
+            }
+            Stop-Restore 'immich_finish_failed'
+        }
+        Assert-Restore (@($lines | Where-Object { [string]$_ -match '\APRIVATE_QA_IMMICH=PASS action=finish ' }).Count -eq 1) 'immich_finish_pass_marker_invalid'
     }
     finally { $env:DOCKER_HOST = $oldDockerHost; $env:WSLENV = $oldWslEnv }
 }
@@ -880,21 +891,28 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         @(Compare-Object $expectedVolumes $scopedVolumes).Count -eq 0) 'resume_volume_topology_invalid'
     Assert-AllRestoreVolumeIdentities
 
-    $expectedContainers = @(
+    $baseContainers = @(
         ($piwigoProject + '-db-1'), ($piwigoProject + '-piwigo-1'),
         ($immichProject + '-database-1'), ($immichProject + '-redis-1')
     ) | Sort-Object
     $prefixedContainers = @(Invoke-RestoreDocker @('ps','-a','--format','{{.Names}}') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
     $scopedContainers = @(Invoke-RestoreDocker @('ps','-a','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Names}}') | Sort-Object)
-    Assert-Restore (@(Compare-Object $expectedContainers $prefixedContainers).Count -eq 0 -and
-        @(Compare-Object $expectedContainers $scopedContainers).Count -eq 0) 'resume_container_topology_invalid'
+    $afterImmichContainers = @($baseContainers + @(
+        ($immichProject + '-immich-machine-learning-1'), ($immichProject + '-immich-server-1')
+    ) | Sort-Object)
+    $immichStarted = @(Compare-Object $afterImmichContainers $prefixedContainers).Count -eq 0 -and
+        @(Compare-Object $afterImmichContainers $scopedContainers).Count -eq 0
+    $baseOnly = @(Compare-Object $baseContainers $prefixedContainers).Count -eq 0 -and
+        @(Compare-Object $baseContainers $scopedContainers).Count -eq 0
+    Assert-Restore ($baseOnly -or $immichStarted) 'resume_container_topology_invalid'
+    $expectedContainers = if ($immichStarted) { $afterImmichContainers } else { $baseContainers }
     foreach ($container in @(($piwigoProject + '-db-1'),($immichProject + '-database-1'),($immichProject + '-redis-1'))) {
         $state = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',$container))
         Assert-Restore ($state.Count -eq 1 -and $state[0] -eq 'true|healthy|running') 'resume_database_container_unhealthy'
     }
     $piwigoState = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',($piwigoProject + '-piwigo-1')))
     Assert-Restore ($piwigoState.Count -eq 1 -and $piwigoState[0] -in @('false|none|created','true|healthy|running')) 'resume_piwigo_container_state_invalid'
-    $checkpoint = if ($piwigoState[0] -eq 'false|none|created') { 'BEFORE_PIWIGO' } else { 'AFTER_PIWIGO' }
+    $checkpoint = if ($piwigoState[0] -eq 'false|none|created') { 'BEFORE_PIWIGO' } elseif ($immichStarted) { 'AFTER_IMMICH' } else { 'AFTER_PIWIGO' }
     if ($checkpoint -eq 'BEFORE_PIWIGO') { Assert-PortsFree }
     else {
         $ports = @(Invoke-RestoreDocker @('port',($piwigoProject + '-piwigo-1')) | Sort-Object)
@@ -911,7 +929,14 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         Assert-Restore ($healthStatus -in @(200,301,302,303)) 'resume_piwigo_http_unhealthy'
     }
 
-    $expectedNetworks = @($gatewayNetwork,($piwigoProject + '_app'),($immichProject + '_immich_internal')) | Sort-Object
+    $expectedNetworks = @($gatewayNetwork,($piwigoProject + '_app'),($immichProject + '_immich_internal'))
+    if ($immichStarted) {
+        $expectedNetworks += @(
+            ($immichProject + '_immich_bridge_internal'),
+            ($immichProject + '_immich_ml_internal')
+        )
+    }
+    $expectedNetworks = @($expectedNetworks | Sort-Object)
     $prefixedNetworks = @(Invoke-RestoreDocker @('network','ls','--format','{{.Name}}') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
     $scopedNetworks = @(Invoke-RestoreDocker @('network','ls','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Name}}') | Sort-Object)
     Assert-Restore (@(Compare-Object $expectedNetworks $prefixedNetworks).Count -eq 0 -and
@@ -924,6 +949,20 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         $identity = @(Invoke-RestoreDocker @('network','inspect','--format','{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}|{{index .Labels "com.classarchive.scope"}}|{{.Internal}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}',$networkIdentity[0]))
         $wanted = $networkIdentity[1] + '|' + $networkIdentity[2] + '|owner-restore-drill|' + $networkIdentity[3] + '|' + $networkIdentity[4]
         Assert-Restore ($identity.Count -eq 1 -and $identity[0] -eq $wanted) 'resume_network_identity_invalid'
+    }
+    if ($immichStarted) {
+        foreach ($networkIdentity in @(
+            @(($immichProject + '_immich_bridge_internal'),$immichProject,'immich_bridge_internal','true','10.245.4.0/24'),
+            @(($immichProject + '_immich_ml_internal'),$immichProject,'immich_ml_internal','true','10.245.3.0/24')
+        )) {
+            $identity = @(Invoke-RestoreDocker @('network','inspect','--format','{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}|{{index .Labels "com.classarchive.scope"}}|{{.Internal}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}',$networkIdentity[0]))
+            $wanted = $networkIdentity[1] + '|' + $networkIdentity[2] + '|owner-restore-drill|' + $networkIdentity[3] + '|' + $networkIdentity[4]
+            Assert-Restore ($identity.Count -eq 1 -and $identity[0] -eq $wanted) 'resume_immich_network_identity_invalid'
+        }
+        foreach ($container in @(($immichProject + '-immich-machine-learning-1'),($immichProject + '-immich-server-1'))) {
+            $state = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',$container))
+            Assert-Restore ($state.Count -eq 1 -and $state[0] -eq 'true|healthy|running') 'resume_immich_container_unhealthy'
+        }
     }
     foreach ($network in $expectedNetworks) {
         $members = @(Invoke-RestoreDocker @('network','inspect','--format','{{range $id,$container := .Containers}}{{println $container.Name}}{{end}}',$network) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
