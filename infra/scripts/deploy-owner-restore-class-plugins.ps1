@@ -426,6 +426,15 @@ function Assert-RestoreGitEvidencePreflight {
     }
 }
 
+function Initialize-RuntimeRootForLock {
+    $ownerRestoreRoot = Split-Path -Parent $runtimeRoot
+    Assert-PlainDirectory $ownerRestoreRoot 'restore_deploy_runtime_parent_invalid'
+    Test-IgnoredPrivatePath $lockPath 'restore_deploy_lock_not_private'
+    if (-not (Test-Path -LiteralPath $runtimeRoot)) { [void][IO.Directory]::CreateDirectory($runtimeRoot) }
+    Assert-PlainDirectory $runtimeRoot 'restore_deploy_runtime_root_invalid'
+    Set-OwnerOnlyDirectoryAcl $runtimeRoot
+}
+
 function Get-RestoreNginxContent {
     $sourcePath = Join-Path $projectRoot 'infra\piwigo-nginx\nginx.conf'
     Assert-PlainFile $sourcePath 'restore_deploy_nginx_source_invalid'
@@ -568,7 +577,6 @@ $snapshotEvidence = 'NOT_RUN'
 try {
     Assert-SourceCheckout
     $sourceHead = Get-CheckoutHead
-    $lock = Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
     $stage = 'runtime_identity'
     Assert-RestoreTopology
     Assert-RestoreGitEvidencePreflight
@@ -581,11 +589,21 @@ try {
     if ($Action -eq 'validate') {
         Assert-RestoreEndpointHealthy
         Assert-Deployment ([string]::Equals($protectedBefore,(Get-ProtectedRuntimeFingerprint),[StringComparison]::Ordinal)) 'protected_runtime_changed_during_validate'
-        Write-Output ('OWNER_RESTORE_CLASS_PLUGINS=PASS action=validate endpoint=8290_8291 schema_state=' + $schemaState + ' scope=OWNER_RESTORE_ONLY mutation=NONE')
+        Write-Output ('OWNER_RESTORE_CLASS_PLUGINS=PASS action=validate endpoint=8290_8291 schema_state=' + $schemaState + ' scope=OWNER_RESTORE_ONLY durable_mutation=NONE transient_probe=DB_ONLY')
         exit 0
     }
 
     Assert-Deployment $ConfirmRestoreMigration.IsPresent 'restore_deploy_confirmation_required'
+    $stage = 'workflow_lock'
+    Initialize-RuntimeRootForLock
+    $lock = Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $lockPath
+    Test-IgnoredPrivatePath $lockPath 'restore_deploy_lock_not_private'
+    # Re-read exact identities after acquiring the migration lock. Validation
+    # above is deliberately read-only and does not create a persistent lock.
+    Assert-RestoreTopology
+    Assert-Deployment ([string]::Equals($protectedBefore,(Get-ProtectedRuntimeFingerprint),[StringComparison]::Ordinal)) 'protected_runtime_changed_before_restore_deploy'
+    Assert-Deployment ([string]::Equals($restoreNonTargetBefore,(Get-RestoreNonTargetFingerprint),[StringComparison]::Ordinal)) 'restore_non_target_service_changed'
     $stage = 'git_evidence_prepare'
     Initialize-RestoreGitEvidenceRoot
     Initialize-RestoreNginxConfig
