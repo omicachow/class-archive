@@ -104,7 +104,7 @@ foreach ($needle in @(
     'restored_schema_version_mismatch'
 )) { Assert-True ($runner.Contains($needle)) ('restore_schema_compatibility_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 Assert-True (-not $runner.Contains('[int]$manifest.schema_versions.class_identity -eq 15')) 'restore_manifest_schema_must_not_be_v15_only'
-foreach ($needle in @("'.codex-work\owner-restore\reports'", "'last-error.json'", 'Write-OwnerOnlyText', 'exception_type', 'script_stack')) {
+foreach ($needle in @("'.codex-work\owner-restore\reports'", "'last-error-'", 'Write-OwnerOnlyText', 'exception_type', 'script_stack')) {
     Assert-True ($runner.Contains($needle)) ('restore_local_diagnostic_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
 Assert-True ($runner.Contains('tool=$(command -v mkfs.ext4)')) 'restore_mkfs_shell_resolution_missing'
