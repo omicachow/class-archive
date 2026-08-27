@@ -10,8 +10,9 @@ param(
 
 # Maintenance-gated Class Archive deployment for the isolated private
 # full-library runtime. It deliberately never creates synthetic fixtures. The
-# owner path additionally records a v14 DB-only rollback point before the
-# forward-only v15 migration; no media volume is mounted by that snapshot.
+# current release records a v15 DB-only rollback point before the forward-only
+# v16 migration; no media volume is mounted by that snapshot. The narrow
+# snapshot helper retains the older v14→v15 transition for recovery tooling.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,26 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $lifecycle = Join-Path $PSScriptRoot 'private-full.ps1'
 $lockPath = Join-Path $projectRoot '.codex-work\private-real-full\runtime\class-plugin-workflow.lock'
 . (Join-Path $PSScriptRoot 'class-plugin-workflow-lock.ps1')
+
+# Deliberately update this exact pair with each forward-only ClassIdentity
+# release. A source at any version except this pair's endpoints is rejected
+# before plugin bytes or database state can change.
+$migrationSourceVersion = 15
+$migrationTargetVersion = 16
+$migrationRequiredStatus = 'REQUIRED_CURRENT_V15'
+$migrationCurrentStatus = 'NOT_REQUIRED_CURRENT_V16'
+
+function Assert-DeploymentSchemaContract {
+    $schemaPath = Join-Path $projectRoot 'plugins\ClassIdentity\src\Schema.php'
+    if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
+        throw 'private_full_schema_source_missing'
+    }
+    $source = [IO.File]::ReadAllText($schemaPath)
+    $matches = [regex]::Matches($source, 'public\s+const\s+CURRENT_VERSION\s*=\s*([0-9]+)\s*;')
+    if ($matches.Count -ne 1 -or [int]$matches[0].Groups[1].Value -ne $migrationTargetVersion) {
+        throw 'private_full_schema_target_contract_mismatch'
+    }
+}
 
 $endpointConfig = @{
     staging = @{
@@ -145,37 +166,52 @@ function Assert-PiwigoStoppedForSnapshot {
     }
 }
 
-function Create-OwnerPreMigrationSnapshot {
+function Create-PreMigrationSnapshot {
     # This is intentionally DB-only. The compose service mounts only the local
     # backup volume and the read-only script tree; it has no original,
     # derivative, Piwigo-data, or source-staging mount.
     Invoke-FullCompose @('stop', 'piwigo')
     Assert-PiwigoStoppedForSnapshot
-    Invoke-FullCompose @(
+    $lines = Invoke-FullComposeCapture @(
         'run', '--rm',
+        '-e', ('CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=' + $migrationSourceVersion),
+        '-e', ('CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=' + $migrationTargetVersion),
         '-e', 'CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=snapshot',
         '-e', 'CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM=true',
         'pre-migration-db-backup'
     )
+    $expected = '^PRE_MIGRATION_DB_SNAPSHOT=PASS bundle=pre-migration-db-v' + $migrationSourceVersion + '-to-v' + $migrationTargetVersion + '-[0-9]{8}T[0-9]{6}Z schema_from=' + $migrationSourceVersion + ' schema_to=' + $migrationTargetVersion + ' scope=DB_ONLY media=NOT_INCLUDED$'
+    $records = @($lines | Where-Object { $_ -match $expected })
+    if ($records.Count -ne 1) { throw 'private_full_pre_migration_snapshot_evidence_invalid' }
 }
 
-function Get-OwnerPreMigrationSnapshotRequirement {
+function Get-PreMigrationSnapshotRequirement {
     # Probe the actual DB ledger before stopping the writer.  The service is
     # database-only and probe mode cannot create a bundle.  This makes owner
-    # deployment repeatable after a successful v15 migration while unknown
+    # deployment repeatable after a successful v16 migration while unknown
     # schema states remain fail-closed.
     $lines = Invoke-FullComposeCapture @(
         'run', '--rm',
+        '-e', ('CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=' + $migrationSourceVersion),
+        '-e', ('CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=' + $migrationTargetVersion),
         '-e', 'CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=probe',
         'pre-migration-db-backup'
     )
+    $requiredRecord = 'PRE_MIGRATION_DB_SNAPSHOT=' + $migrationRequiredStatus + ' schema_current=' + $migrationSourceVersion + ' schema_from=' + $migrationSourceVersion + ' schema_to=' + $migrationTargetVersion + ' scope=DB_ONLY media=NOT_INCLUDED'
+    $currentRecord = 'PRE_MIGRATION_DB_SNAPSHOT=' + $migrationCurrentStatus + ' schema_current=' + $migrationTargetVersion + ' schema_from=' + $migrationTargetVersion + ' schema_to=' + $migrationTargetVersion + ' scope=NONE media=NOT_INCLUDED'
     $records = @($lines | Where-Object {
-        $_ -match '^PRE_MIGRATION_DB_SNAPSHOT=(REQUIRED_CURRENT_V14|NOT_REQUIRED_CURRENT_V15) schema_from=[0-9]+ schema_to=[0-9]+ scope=(DB_ONLY|NONE) media=NOT_INCLUDED$'
+        $_ -eq $requiredRecord -or $_ -eq $currentRecord
     })
-    if ($records.Count -ne 1) { throw 'private_full_owner_schema_probe_invalid' }
-    if ($records[0] -match '^PRE_MIGRATION_DB_SNAPSHOT=REQUIRED_CURRENT_V14 ') { return 'REQUIRED_CURRENT_V14' }
-    if ($records[0] -match '^PRE_MIGRATION_DB_SNAPSHOT=NOT_REQUIRED_CURRENT_V15 ') { return 'NOT_REQUIRED_CURRENT_V15' }
-    throw 'private_full_owner_schema_probe_invalid'
+    if ($records.Count -ne 1) { throw 'private_full_schema_probe_invalid' }
+    if ($records[0] -eq $requiredRecord) { return $migrationRequiredStatus }
+    if ($records[0] -eq $currentRecord) { return $migrationCurrentStatus }
+    throw 'private_full_schema_probe_invalid'
+}
+
+function Assert-TargetSchemaCurrent {
+    if ((Get-PreMigrationSnapshotRequirement) -ne $migrationCurrentStatus) {
+        throw 'private_full_target_schema_not_current'
+    }
 }
 
 function RecreatePiwigoUnderMaintenance {
@@ -193,6 +229,7 @@ function RecreatePiwigoUnderMaintenance {
 $lock = $null
 $preMigrationSnapshot = 'NOT_REQUIRED'
 try {
+    Assert-DeploymentSchemaContract
     Invoke-EndpointLifecycle ([string]$target.validation_action)
     $lock = Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
 
@@ -204,23 +241,22 @@ try {
     )
     Wait-Maintenance
 
-    # Owner migration is forward-only from schema 14 to 15. Probe the ledger
-    # first: exact v14 gets a local, integrity-checked DB-only rollback
-    # snapshot before changing plugin bytes, while exact v15 is a safe,
-    # explicit no-op for snapshotting. Unknown versions fail closed.
-    if ($Endpoint -eq 'owner') {
-        $ownerSnapshotRequirement = Get-OwnerPreMigrationSnapshotRequirement
-        if ($ownerSnapshotRequirement -eq 'REQUIRED_CURRENT_V14') {
-            Create-OwnerPreMigrationSnapshot
-            $preMigrationSnapshot = 'PASS'
-            RecreatePiwigoUnderMaintenance
-        }
-        elseif ($ownerSnapshotRequirement -eq 'NOT_REQUIRED_CURRENT_V15') {
-            $preMigrationSnapshot = 'NOT_REQUIRED_CURRENT_V15'
-        }
-        else {
-            throw 'private_full_owner_schema_probe_invalid'
-        }
+    # This code release is forward-only from exact schema 15 to exact schema
+    # 16. Both private endpoint selectors can reach durable owner state, so the
+    # transition check applies to both. Exact v15 gets an integrity-checked
+    # DB-only rollback point; exact v16 is an idempotent no-op. Unknown schema
+    # states fail closed before plugin bytes change.
+    $snapshotRequirement = Get-PreMigrationSnapshotRequirement
+    if ($snapshotRequirement -eq $migrationRequiredStatus) {
+        Create-PreMigrationSnapshot
+        $preMigrationSnapshot = 'PASS_V15_TO_V16'
+        RecreatePiwigoUnderMaintenance
+    }
+    elseif ($snapshotRequirement -eq $migrationCurrentStatus) {
+        $preMigrationSnapshot = $migrationCurrentStatus
+    }
+    else {
+        throw 'private_full_schema_probe_invalid'
     }
 
     # Baseline configuration selects the locked Bootstrap Darkroom theme, so
@@ -232,10 +268,14 @@ try {
     RecreatePiwigoUnderMaintenance
     Invoke-FullCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--verify-runtime')
     Invoke-FullCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', '/workspace/infra/scripts/install-locked-piwigo-extensions.php', '--verify-only')
+    # Do not rely on plugin install success alone. Independently re-read the
+    # migration ledger and require the exact target boundary before projection
+    # rebuild, BFF publication, or maintenance finalization.
+    Assert-TargetSchemaCurrent
 
-    # The v15 migrations add persistent read domains. Build them explicitly;
-    # product reads remain behind the exact maintenance gate until both the
-    # projection and the matching BFF process are ready.
+    # Rebuild persistent read domains after the v16 migration. Product reads
+    # remain behind the exact maintenance gate until both the projection and
+    # the matching BFF process are ready.
     Invoke-FullCompose @(
         'exec', '-T', '--user', 'nginx', 'piwigo',
         'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
@@ -261,7 +301,7 @@ try {
         'php', '/workspace/infra/scripts/run-maintenance.php', '--json'
     )
 
-    Write-Output ('PRIVATE_FULL_CLASS_PLUGINS=PASS endpoint=' + $Endpoint + ' ports=' + $target.http_port + '_' + $target.compat_port + ' fixtures=NONE protocol=MAINTENANCE_SNAPSHOT_RECREATE_VERIFY_FINALIZE_PROJECT_BFF_MAINTENANCE pre_migration_db_snapshot=' + $preMigrationSnapshot + ' bff=COMPAT_ONLY projection=REBUILT maintenance=NON_DESTRUCTIVE backup_restore=NOT_REVALIDATED')
+    Write-Output ('PRIVATE_FULL_CLASS_PLUGINS=PASS endpoint=' + $Endpoint + ' ports=' + $target.http_port + '_' + $target.compat_port + ' fixtures=NONE protocol=MAINTENANCE_SNAPSHOT_RECREATE_VERIFY_FINALIZE_PROJECT_BFF_MAINTENANCE schema_from=' + $migrationSourceVersion + ' schema_to=' + $migrationTargetVersion + ' pre_migration_db_snapshot=' + $preMigrationSnapshot + ' bff=COMPAT_ONLY projection=REBUILT maintenance=NON_DESTRUCTIVE backup_restore=NOT_REVALIDATED')
 }
 catch {
     $code = if ([string]$_.Exception.Message -match '^[a-z0-9_]{1,96}$') { [string]$_.Exception.Message } else { 'private_full_plugin_deploy_failed' }

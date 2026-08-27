@@ -30,7 +30,7 @@ esac
 from_version="${CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION:-}"
 to_version="${CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION:-}"
 case "$from_version:$to_version" in
-  14:15) ;;
+  14:15|15:16) ;;
   *) fail migration_version_invalid ;;
 esac
 
@@ -65,7 +65,8 @@ trap cleanup 0 1 2 15
 mkdir "$lock_dir" 2>/dev/null || fail overlapping_snapshot
 
 # Resolve exactly one ClassIdentity migration ledger without assuming Piwigo's
-# table prefix. A v15 backup cannot stand in for this v14→v15 rollback point.
+# table prefix. A snapshot at the target version cannot stand in for the
+# preceding rollback point.
 set -- $(mariadb --batch --skip-column-names --host=db --user=root "$db_name" \
   -e "SELECT COUNT(*),COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$'")
 [ "$#" = 2 ] && [ "$1" = 1 ] || fail migration_table_ambiguous
@@ -74,19 +75,31 @@ case "$migration_table" in
   ''|*[!A-Za-z0-9_]* ) fail migration_table_invalid ;;
 esac
 
-current_version=$(mariadb --batch --skip-column-names --host=db --user=root "$db_name" \
-  -e "SELECT COALESCE(MAX(version),0) FROM \`$migration_table\`")
+set -- $(mariadb --batch --skip-column-names --host=db --user=root "$db_name" \
+  -e "SELECT COUNT(*),COALESCE(MIN(version),0),COALESCE(MAX(version),0),COUNT(DISTINCT version) FROM \`$migration_table\`")
+[ "$#" = 4 ] || fail migration_ledger_shape_invalid
+migration_count="$1"
+migration_min="$2"
+current_version="$3"
+migration_distinct="$4"
+case "$migration_count:$migration_min:$current_version:$migration_distinct" in
+  *[!0-9:]*) fail migration_ledger_shape_invalid ;;
+esac
+[ "$migration_count" = "$current_version" ] \
+  && [ "$migration_min" = 1 ] \
+  && [ "$migration_distinct" = "$migration_count" ] \
+  || fail migration_ledger_not_contiguous
 
-# A rerun after v15 is legitimate and must not create a misleading second
-# “v14 → v15” rollback bundle.  Any other state is unknown and blocks the
-# deployment before plugin migration can change it.
+# A rerun at the exact target is legitimate and must not create a misleading
+# second rollback bundle. Any other state is unknown and blocks deployment
+# before plugin migration can change it.
 case "$current_version" in
   "$from_version")
     if [ "$mode" = "probe" ]; then
       unset MYSQL_PWD
       rmdir "$lock_dir" || fail lock_release_failed
       trap - 0 1 2 15
-      printf '%s\n' "PRE_MIGRATION_DB_SNAPSHOT=REQUIRED_CURRENT_V14 schema_from=$from_version schema_to=$to_version scope=DB_ONLY media=NOT_INCLUDED"
+      printf '%s\n' "PRE_MIGRATION_DB_SNAPSHOT=REQUIRED_CURRENT_V${from_version} schema_current=$current_version schema_from=$from_version schema_to=$to_version scope=DB_ONLY media=NOT_INCLUDED"
       exit 0
     fi
     [ "${CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM:-}" = "true" ] || fail confirmation_required
@@ -95,10 +108,10 @@ case "$current_version" in
     unset MYSQL_PWD
     rmdir "$lock_dir" || fail lock_release_failed
     trap - 0 1 2 15
-    printf '%s\n' "PRE_MIGRATION_DB_SNAPSHOT=NOT_REQUIRED_CURRENT_V15 schema_from=$current_version schema_to=$current_version scope=NONE media=NOT_INCLUDED"
+    printf '%s\n' "PRE_MIGRATION_DB_SNAPSHOT=NOT_REQUIRED_CURRENT_V${to_version} schema_current=$current_version schema_from=$current_version schema_to=$current_version scope=NONE media=NOT_INCLUDED"
     exit 0
     ;;
-  *) fail source_schema_not_v14_or_v15 ;;
+  *) fail source_schema_not_transition_boundary ;;
 esac
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -123,8 +136,8 @@ case "$dump_bytes:$dump_sha256:$script_sha256" in
   *[!0-9a-f:]*|:*|*::*) fail snapshot_digest_invalid ;;
 esac
 
-printf '{"format":1,"scope":"DB_ONLY_PRE_MIGRATION_ROLLBACK","created_at":"%s","schema_from":%s,"schema_to":%s,"lock_strategy":"MARIADB_DUMP_LOCK_ALL_TABLES","media":"NOT_INCLUDED","dump_file":"database.sql.gz","dump_bytes":%s,"dump_sha256":"%s","snapshot_script_sha256":"%s"}\n' \
-  "$stamp" "$from_version" "$to_version" "$dump_bytes" "$dump_sha256" "$script_sha256" > "$partial_bundle/MANIFEST.json" || fail manifest_write_failed
+printf '{"format":1,"scope":"DB_ONLY_PRE_MIGRATION_ROLLBACK","created_at":"%s","schema_current":%s,"schema_from":%s,"schema_to":%s,"migration_ledger_count":%s,"migration_ledger_min":%s,"migration_ledger_max":%s,"migration_ledger_distinct":%s,"lock_strategy":"MARIADB_DUMP_LOCK_ALL_TABLES","media":"NOT_INCLUDED","dump_file":"database.sql.gz","dump_bytes":%s,"dump_sha256":"%s","snapshot_script_sha256":"%s"}\n' \
+  "$stamp" "$current_version" "$from_version" "$to_version" "$migration_count" "$migration_min" "$current_version" "$migration_distinct" "$dump_bytes" "$dump_sha256" "$script_sha256" > "$partial_bundle/MANIFEST.json" || fail manifest_write_failed
 printf 'completed_at=%s\n' "$stamp" > "$partial_bundle/COMPLETE" || fail complete_write_failed
 (
   cd "$partial_bundle"
