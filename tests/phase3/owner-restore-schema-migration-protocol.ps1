@@ -12,6 +12,8 @@ $baseComposePath = Join-Path $projectRoot 'infra\docker-compose.yml'
 $restorePiwigoPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.piwigo.override.yml'
 $restoreImmichPath = Join-Path $projectRoot 'infra\owner-restore\docker-compose.immich.override.yml'
 $snapshotPath = Join-Path $projectRoot 'infra\scripts\create-pre-migration-db-snapshot.sh'
+$readmePath = Join-Path $projectRoot 'infra\owner-restore\README.md'
+$devPath = Join-Path $projectRoot 'infra\scripts\dev.ps1'
 
 $assertions = 0
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -33,6 +35,8 @@ $baseCompose = Read-Tracked $baseComposePath 'restore_schema_base_compose_missin
 $restorePiwigo = Read-Tracked $restorePiwigoPath 'restore_schema_piwigo_override_missing'
 $restoreImmich = Read-Tracked $restoreImmichPath 'restore_schema_immich_override_missing'
 $snapshot = Read-Tracked $snapshotPath 'restore_schema_snapshot_helper_missing'
+$readme = Read-Tracked $readmePath 'restore_schema_readme_missing'
+$dev = Read-Tracked $devPath 'restore_schema_dev_missing'
 
 $tokens = $null
 $errors = $null
@@ -82,6 +86,9 @@ Assert-True ($deploy.Contains('run-maintenance.php') -and -not $deploy.Contains(
 Assert-True ($deploy.Contains('Get-ProtectedRuntimeFingerprint') -and $deploy.Contains('protected_runtime_changed_during_restore_deploy')) 'restore_schema_8091_8191_fingerprint_missing'
 Assert-True ($deploy.Contains("'http://127.0.0.1:8091/photos'") -and $deploy.Contains("'http://127.0.0.1:8191/home'")) 'restore_schema_8091_8191_http_guard_missing'
 Assert-True ($deploy.Contains('Get-RestoreNonTargetFingerprint') -and $deploy.Contains('restore_non_target_service_changed')) 'restore_schema_non_target_fingerprint_missing'
+Assert-True ($deploy.Contains('$runningIdentity = $Project + ''|'' + $scopeLabel + ''|true|running''') `
+    -and $deploy.Contains('$exitedIdentity = $Project + ''|'' + $scopeLabel + ''|false|exited''') `
+    -and $deploy.Contains('@($runningIdentity, $exitedIdentity)')) 'restore_schema_optional_exited_container_identity_invalid'
 Assert-True ($deploy.Contains('Assert-RestoreVolumeIdentities') -and $deploy.Contains('/mnt/classarchive-owner-restore-v1/volumes')) 'restore_schema_volume_identity_missing'
 Assert-True ($deploy.Contains('com.classarchive.scope') -and $deploy.Contains('owner-restore-drill') -and $deploy.Contains('m-ext4-bind')) 'restore_schema_label_identity_missing'
 Assert-True ($deploy.Contains("'80/tcp -> 127.0.0.1:8290'") -and $deploy.Contains("'8081/tcp -> 127.0.0.1:8291'")) 'restore_schema_loopback_identity_missing'
@@ -115,5 +122,8 @@ Assert-True ($restoreImmich.Contains('com.classarchive.scope: owner-restore-dril
 Assert-True ($snapshot.Contains('mariadb-dump --quick --lock-all-tables') -and $snapshot.Contains('SHA256SUMS') -and $snapshot.Contains('sha256sum -c SHA256SUMS')) 'restore_schema_snapshot_integrity_missing'
 Assert-True ($snapshot.Contains('15:16') -and $snapshot.Contains('migration_ledger_not_contiguous')) 'restore_schema_snapshot_exact_ledger_gate_missing'
 Assert-True (-not $deploy.Contains("infra/private-full/.env.piwigo.owner") -and -not $deploy.Contains("infra/private-full/.env.piwigo.staging")) 'restore_schema_private_full_env_referenced'
+Assert-True ($readme.Contains('deploy-owner-restore-class-plugins.ps1 validate') -and $readme.Contains('migrate -ConfirmRestoreMigration')) 'restore_schema_readme_usage_missing'
+Assert-True ($readme.Contains('database-only rollback snapshot') -and $readme.Contains('fail-closed')) 'restore_schema_readme_safety_missing'
+Assert-True ($dev.Contains('owner-restore-schema-migration-protocol.ps1')) 'restore_schema_protocol_not_wired'
 
 Write-Output "OWNER_RESTORE_SCHEMA_MIGRATION_PROTOCOL=PASS assertions=$assertions"

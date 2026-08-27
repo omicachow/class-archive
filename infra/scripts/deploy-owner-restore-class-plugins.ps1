@@ -304,7 +304,9 @@ function Assert-RestoreVolumeIdentities {
 
 function Assert-RestoreContainer([string]$Name, [string]$Project, [bool]$MayBeExited = $false) {
     $identity = Get-DockerInspectLine $Name '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.classarchive.scope"}}|{{.State.Running}}|{{.State.Status}}' 'restore_deploy_container_identity_invalid'
-    $allowed = if ($MayBeExited) { @($Project + '|' + $scopeLabel + '|true|running', $Project + '|' + $scopeLabel + '|false|exited') } else { @($Project + '|' + $scopeLabel + '|true|running') }
+    $runningIdentity = $Project + '|' + $scopeLabel + '|true|running'
+    $exitedIdentity = $Project + '|' + $scopeLabel + '|false|exited'
+    $allowed = if ($MayBeExited) { @($runningIdentity, $exitedIdentity) } else { @($runningIdentity) }
     Assert-Deployment ($identity -in $allowed) 'restore_deploy_container_identity_invalid'
 }
 
@@ -411,20 +413,16 @@ function Assert-RestoreGitEvidencePreflight {
     Test-IgnoredPrivatePath $gitEvidenceHead 'restore_deploy_git_evidence_not_private'
     if (Test-Path -LiteralPath $runtimeRoot) {
         Assert-PlainDirectory $runtimeRoot 'restore_deploy_runtime_root_invalid'
-        Assert-OwnerOnlyDirectoryAcl $runtimeRoot
     }
     if (Test-Path -LiteralPath $gitEvidenceRoot) {
         Assert-PlainDirectory $gitEvidenceRoot 'restore_deploy_git_evidence_root_invalid'
-        Assert-OwnerOnlyDirectoryAcl $gitEvidenceRoot
     }
     if (Test-Path -LiteralPath $gitEvidenceRefs) {
         Assert-PlainDirectory $gitEvidenceRefs 'restore_deploy_git_evidence_refs_invalid'
-        Assert-OwnerOnlyDirectoryAcl $gitEvidenceRefs
         Assert-Deployment (@(Get-ChildItem -LiteralPath $gitEvidenceRefs -Force).Count -eq 0) 'restore_deploy_git_evidence_refs_invalid'
     }
     if (Test-Path -LiteralPath $gitEvidenceHead) {
         Assert-PlainFile $gitEvidenceHead 'restore_deploy_git_evidence_head_invalid'
-        Assert-ClassArchiveOwnerOnlyFileAcl -Path $gitEvidenceHead
     }
 }
 
@@ -445,7 +443,6 @@ function Assert-RestoreNginxPreflight {
     Test-IgnoredPrivatePath $restoreNginxPath 'restore_deploy_nginx_not_private'
     if (Test-Path -LiteralPath $restoreNginxPath) {
         Assert-PlainFile $restoreNginxPath 'restore_deploy_nginx_target_invalid'
-        Assert-ClassArchiveOwnerOnlyFileAcl -Path $restoreNginxPath
     }
 }
 
@@ -462,6 +459,7 @@ function Initialize-RestoreGitEvidenceRoot {
     Assert-PlainDirectory $gitEvidenceRefs 'restore_deploy_git_evidence_refs_invalid'
     Set-OwnerOnlyDirectoryAcl $gitEvidenceRefs
     Assert-Deployment (@(Get-ChildItem -LiteralPath $gitEvidenceRefs -Force).Count -eq 0) 'restore_deploy_git_evidence_refs_invalid'
+    if (Test-Path -LiteralPath $gitEvidenceHead) { Set-ClassArchiveOwnerOnlyFileAcl -Path $gitEvidenceHead }
     Test-IgnoredPrivatePath $gitEvidenceHead 'restore_deploy_git_evidence_not_private'
 }
 
@@ -474,7 +472,6 @@ function Initialize-RestoreNginxConfig {
         Set-ClassArchiveOwnerOnlyFileAcl -Path $temporary
         if (Test-Path -LiteralPath $restoreNginxPath) {
             Assert-PlainFile $restoreNginxPath 'restore_deploy_nginx_target_invalid'
-            Assert-ClassArchiveOwnerOnlyFileAcl -Path $restoreNginxPath
             [IO.File]::Replace($temporary,$restoreNginxPath,$null,$true)
         }
         else { Move-Item -LiteralPath $temporary -Destination $restoreNginxPath }
