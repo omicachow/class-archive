@@ -85,10 +85,16 @@ function Get-WslPath([string]$Path) {
 }
 
 function Invoke-Ubuntu([string[]]$Arguments, [string]$FailureCode = 'ubuntu_command_failed') {
+    # Git checks this PowerShell file out with CRLF on Windows. Inline shell
+    # here-strings must cross the WSL argv boundary as LF: otherwise dash sees
+    # `set -eu\r` as an illegal option and multi-line pipelines can fail after
+    # successfully writing part of a target volume.
+    $nativeArguments = @($Arguments | ForEach-Object { ([string]$_).Replace("`r`n", "`n") })
+    Assert-Restore (@($nativeArguments | Where-Object { $_.Contains("`r") }).Count -eq 0) 'ubuntu_argument_carriage_return_invalid'
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $result = @(& $wsl -d Ubuntu --exec @Arguments 2>&1)
+        $result = @(& $wsl -d Ubuntu --exec @nativeArguments 2>&1)
         $code = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
