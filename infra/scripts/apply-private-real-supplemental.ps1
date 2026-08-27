@@ -134,6 +134,15 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
         $exit = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
+    if ($exit -ne 0) {
+        # The one-shot importer intentionally emits bounded machine error
+        # codes. Preserve only that non-sensitive code and never forward raw
+        # container output, which may contain a private staging path.
+        foreach ($line in $lines) {
+            $match = [regex]::Match([string]$line, '(?:^|\s)code=(?<code>[a-z0-9_]{1,96})(?:\s|$)')
+            if ($match.Success) { throw [string]$match.Groups['code'].Value }
+        }
+    }
     Assert-Apply ($exit -eq 0) $Code
     return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
 }
