@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 $assertions = 0;
 $transactionStarted = false;
+$exitCode = 0;
 
 function privateFullOwnerMediaHttpFail(string $code): never
 {
@@ -138,6 +139,14 @@ try {
     ob_end_clean();
     require_once PHPWG_ROOT_PATH . 'plugins/ClassArchivePolicy/src/MediaGuard.php';
 
+    // The probe must not leave Piwigo's database-backed CLI session open
+    // while its own READ ONLY transaction is active.  Discarding that
+    // ephemeral session state prevents the session handler from attempting a
+    // write at process shutdown, including when a fail-closed assertion trips.
+    if (session_status() === PHP_SESSION_ACTIVE && !session_abort()) {
+        privateFullOwnerMediaHttpFail('session_abort_failed');
+    }
+
     global $mysqli, $prefixeTable;
     if (!$mysqli instanceof mysqli || !is_string($prefixeTable) || preg_match('/\A[A-Za-z0-9_]+\z/D', $prefixeTable) !== 1) {
         privateFullOwnerMediaHttpFail('database_unavailable');
@@ -152,21 +161,44 @@ try {
     $result = $mysqli->query(
         'SELECT p.`piwigo_image_id` FROM ' . $photoTable . ' p '
         . 'INNER JOIN ' . $archiveTable . ' a ON a.`piwigo_image_id`=p.`piwigo_image_id` '
-        . "WHERE p.`state`='ACTIVE' AND a.`era`='HERITAGE' ORDER BY p.`piwigo_image_id` ASC LIMIT 1"
+        . "WHERE p.`state`='ACTIVE' AND a.`era`='HERITAGE' "
+        . 'ORDER BY a.`archive_date` IS NULL ASC,a.`archive_date` DESC,p.`piwigo_image_id` DESC'
     );
     if (!$result instanceof mysqli_result) {
         privateFullOwnerMediaHttpFail('representative_query_failed');
     }
     try {
-        $row = $result->fetch_assoc();
+        $rows = $result->fetch_all(MYSQLI_ASSOC);
     } finally {
         $result->free();
     }
-    $imageId = is_array($row) ? (int) ($row['piwigo_image_id'] ?? 0) : 0;
-    privateFullOwnerMediaHttpAssert($imageId > 0, 'representative_photo_missing');
+    privateFullOwnerMediaHttpAssert($rows !== [], 'representative_photo_missing');
 
-    $original = ClassArchiveMediaGuard::resolveCanonicalDelivery($imageId, 'original');
-    $thumbnail = ClassArchiveMediaGuard::resolveCanonicalDelivery($imageId, 'thumbnail');
+    // Derivative caches are intentionally rebuildable and are not part of the
+    // owner business backup.  The restore operator performs a bounded warmup
+    // before this probe.  Select one of those real, already-ready derivatives
+    // without ever generating it on the request/probe path.
+    $original = null;
+    $thumbnail = null;
+    foreach ($rows as $row) {
+        $imageId = (int) ($row['piwigo_image_id'] ?? 0);
+        if ($imageId <= 0) {
+            continue;
+        }
+        try {
+            $candidateOriginal = ClassArchiveMediaGuard::resolveCanonicalDelivery($imageId, 'original');
+            $candidateThumbnail = ClassArchiveMediaGuard::resolveCanonicalDelivery($imageId, 'thumbnail');
+            ClassArchiveMediaGuard::assertDeliveryTarget($candidateThumbnail['request']);
+            $original = $candidateOriginal;
+            $thumbnail = $candidateThumbnail;
+            break;
+        } catch (ClassArchiveMediaUnavailable $error) {
+            if ($error->getMessage() !== 'derivative_not_ready') {
+                throw $error;
+            }
+        }
+    }
+    privateFullOwnerMediaHttpAssert(is_array($original) && is_array($thumbnail), 'representative_derivative_missing');
     $sourcePath = (string) ($original['request']->sourcePath ?? '');
     $derivativePath = (string) ($thumbnail['request']->derivativePath ?? '');
     privateFullOwnerMediaHttpAssert(
@@ -174,7 +206,6 @@ try {
         'representative_source_invalid',
     );
     privateFullOwnerMediaHttpAssert($derivativePath !== '', 'representative_derivative_invalid');
-    ClassArchiveMediaGuard::assertDeliveryTarget($thumbnail['request']);
 
     $surfaces = [
         'ORIGINAL' => privateFullOwnerMediaHttpEncodePath($sourcePath),
@@ -201,7 +232,7 @@ try {
         $code = 'unexpected_runtime_failure';
     }
     fwrite(STDOUT, 'PRIVATE_FULL_OWNER_MEDIA_HTTP=FAIL code=' . $code . ' assertions=' . $assertions . "\n");
-    exit(1);
+    $exitCode = 1;
 } finally {
     if (isset($mysqli) && $mysqli instanceof mysqli) {
         if ($transactionStarted) {
@@ -209,3 +240,4 @@ try {
         }
     }
 }
+exit($exitCode);

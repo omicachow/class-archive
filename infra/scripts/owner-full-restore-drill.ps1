@@ -865,6 +865,33 @@ printf 'ai_asset_index=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_asset_index;")
     return $result
 }
 
+function Invoke-RestoreBrowseDerivativeWarmup {
+    $script:stage = 'derivative_warmup'
+    $runs = @(
+        @{ Scope = 'first-screen'; Profiles = 'thumbnail,xsmall,small,medium,large,preview'; MaxImages = 48 },
+        @{ Scope = 'covers'; Profiles = 'thumbnail'; MaxImages = 4096 }
+    )
+    foreach ($run in $runs) {
+        $lines = @(Invoke-RestoreCompose piwigo @(
+            'exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/warm-photo-cache.php',
+            ('--scope=' + $run.Scope),('--profiles=' + $run.Profiles),'--json'
+        ))
+        $jsonLines = @($lines | Where-Object { [string]$_ -match '\A\{.*\}\z' })
+        Assert-Restore ($jsonLines.Count -eq 1) 'restore_derivative_warmup_output_invalid'
+        try { $record = [string]$jsonLines[0] | ConvertFrom-Json -ErrorAction Stop }
+        catch { Stop-Restore 'restore_derivative_warmup_json_invalid' }
+        $profileCount = @(([string]$run.Profiles -split ',')).Count
+        $selected = [int]$record.selected_images
+        $checked = [int]$record.checked
+        $cached = [int]$record.cached
+        $generated = [int]$record.generated
+        Assert-Restore ([string]$record.result -eq 'PASS' -and [string]$record.scope -eq [string]$run.Scope -and
+            [bool]$record.dry_run -eq $false -and $selected -gt 0 -and $selected -le [int]$run.MaxImages -and
+            $checked -eq ($selected * $profileCount) -and ($cached + $generated) -eq $checked -and
+            [int]$record.would_generate -eq 0) 'restore_derivative_warmup_result_invalid'
+    }
+}
+
 function Assert-PartialRestoreRuntime([object]$BundleInfo) {
     $script:stage = 'resume_boundary'
 
@@ -1029,10 +1056,13 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
     $joined = $published -join "`n"
     Assert-Restore ($joined -match '127\.0\.0\.1:8290->80/tcp' -and $joined -match '127\.0\.0\.1:8291->8081/tcp') 'restore_loopback_ports_missing'
     Assert-Restore (-not ($joined -match '0\.0\.0\.0|\[::\]|:2283->|:3000->|:8080->')) 'restore_internal_service_exposed'
+    $script:stage = 'aggregate_verify_file_mode'
     $badMode = @(Invoke-RestoreCompose piwigo @('exec','-T','piwigo','sh','-eu','-c','find /var/www/html/piwigo/upload /var/www/html/piwigo/galleries -type f ! -perm 0660 -print -quit'))
     Assert-Restore ([string]::IsNullOrWhiteSpace(($badMode -join ''))) 'restored_original_mode_invalid'
+    $script:stage = 'aggregate_verify_mediaguard'
     $media = @(Invoke-RestoreCompose piwigo @('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_HTTP=1','piwigo','php','/workspace/tests/phase3/private-full-owner-media-http.php'))
     Assert-Restore (@($media | Where-Object { $_ -match '\APRIVATE_FULL_OWNER_MEDIA_HTTP=PASS .*direct_guest_requests=6 ' }).Count -eq 1) 'restore_mediaguard_probe_failed'
+    $script:stage = 'aggregate_verify_http'
     $health0 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
     $health1 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8291/healthz' -ErrorAction Stop
     Assert-Restore ($null -ne $health0 -and $health0.StatusCode -in @(200,301,302,303) -and $health1.StatusCode -eq 200) 'restore_http_health_failed'
@@ -1109,6 +1139,7 @@ try {
             Wait-RestoreContainer ($immichProject + '-immich-machine-learning-1') 600
             Wait-RestoreContainer ($immichProject + '-immich-server-1') 600
             Invoke-PrivateImmichFinish
+            Invoke-RestoreBrowseDerivativeWarmup
             [void](Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat'))
             Wait-RestoreContainer ($immichProject + '-immich-web-compat-1') 300
             Write-RestoreState $bundleInfo
@@ -1139,6 +1170,7 @@ try {
         Wait-RestoreContainer ($immichProject + '-immich-machine-learning-1') 600
         Wait-RestoreContainer ($immichProject + '-immich-server-1') 600
         Invoke-PrivateImmichFinish
+        Invoke-RestoreBrowseDerivativeWarmup
         [void](Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat'))
         Wait-RestoreContainer ($immichProject + '-immich-web-compat-1') 300
         Write-RestoreState $bundleInfo
