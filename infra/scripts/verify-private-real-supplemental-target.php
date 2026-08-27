@@ -32,7 +32,7 @@ function supplementalTargetHex(mixed $value): string
     return strtolower($value);
 }
 
-/** @return array{digest:string,item_digests:list<string>,presentations:list<string>} */
+/** @return array{digest:string,item_digests:list<string>,presentations:list<string>,item_presentations:array<string,string>} */
 function supplementalTargetManifest(): array
 {
     $manifestPath = PRIVATE_SUPPLEMENTAL_TARGET_MANIFEST;
@@ -82,7 +82,7 @@ function supplementalTargetManifest(): array
         ) {
             throw new RuntimeException('presentation_integrity_invalid');
         }
-        $items[$itemDigest] = true;
+        $items[$itemDigest] = $presentation;
         $presentations[$presentation] = true;
     }
     if (count($items) !== PRIVATE_SUPPLEMENTAL_TARGET_SOURCES
@@ -94,6 +94,7 @@ function supplementalTargetManifest(): array
         'digest' => $digest,
         'item_digests' => array_keys($items),
         'presentations' => array_keys($presentations),
+        'item_presentations' => $items,
     ];
 }
 
@@ -168,13 +169,53 @@ try {
         $canonicalExisting = (int) ($canonicalState['photos'] ?? -1);
         if ($sourceExisting < 0 || $sourceExisting > PRIVATE_SUPPLEMENTAL_TARGET_SOURCES
             || $canonicalExisting < 0 || $canonicalExisting > PRIVATE_SUPPLEMENTAL_TARGET_PRESENTATIONS
-            || ($sourceExisting === 0 && $canonicalExisting !== 0)
             || ($sourceExisting === PRIVATE_SUPPLEMENTAL_TARGET_SOURCES
                 && $canonicalExisting !== PRIVATE_SUPPLEMENTAL_TARGET_PRESENTATIONS)
         ) {
             throw new RuntimeException('supplemental_preflight_26_plus_2_state_invalid');
         }
-        $mode = $sourceExisting === 0 ? 'FRESH'
+        if ($sourceExisting === 0 && $canonicalExisting > 0) {
+            // A crash after the native Piwigo checkpoint and canonical
+            // mapping but before transformed provenance is committed is a
+            // valid resume state only when the exact manifest journal proves
+            // every pre-existing presentation. Never accept a checksum-only
+            // collision from the wider library.
+            $imports = $repository->fetchAll(
+                'SELECT `import_id`,`item_total`,`state` FROM `' . $repository->table('private_library_import') . '` '
+                    . 'WHERE `manifest_digest`=? LIMIT 2',
+                [hex2bin((string) $manifest['digest'])],
+            );
+            if (count($imports) !== 1 || (int) ($imports[0]['item_total'] ?? 0) !== PRIVATE_SUPPLEMENTAL_TARGET_SOURCES
+                || !in_array((string) ($imports[0]['state'] ?? ''), ['RUNNING', 'COMPLETED_WITH_ERRORS'], true)
+                || !is_string($imports[0]['import_id'] ?? null)
+            ) {
+                throw new RuntimeException('supplemental_preflight_journal_resume_invalid');
+            }
+            $resumeRows = $repository->fetchAll(
+                'SELECT HEX(i.`item_digest`) AS `item_digest`,i.`state`,i.`piwigo_image_id`,HEX(p.`media_checksum`) AS `presentation` '
+                    . 'FROM `' . $repository->table('private_library_import_item') . '` i INNER JOIN `'
+                    . $repository->table('photo') . '` p ON p.`piwigo_image_id`=i.`piwigo_image_id` AND p.`state`=\'ACTIVE\' '
+                    . 'WHERE i.`import_id`=? AND i.`item_digest` IN (' . $itemPlaceholders . ')',
+                array_merge([$imports[0]['import_id']], array_map(static fn(string $digest): string => hex2bin($digest), $manifest['item_digests'])),
+            );
+            $journalPresentations = [];
+            foreach ($resumeRows as $row) {
+                $itemDigest = strtolower((string) ($row['item_digest'] ?? ''));
+                $presentation = strtolower((string) ($row['presentation'] ?? ''));
+                if (!isset($manifest['item_presentations'][$itemDigest])
+                    || !hash_equals((string) $manifest['item_presentations'][$itemDigest], $presentation)
+                    || !in_array((string) ($row['state'] ?? ''), ['PROCESSING', 'FAILED'], true)
+                    || (int) ($row['piwigo_image_id'] ?? 0) <= 0
+                ) {
+                    throw new RuntimeException('supplemental_preflight_journal_resume_invalid');
+                }
+                $journalPresentations[$presentation] = true;
+            }
+            if (count($journalPresentations) !== $canonicalExisting) {
+                throw new RuntimeException('supplemental_preflight_journal_resume_invalid');
+            }
+        }
+        $mode = $sourceExisting === 0 && $canonicalExisting === 0 ? 'FRESH'
             : ($sourceExisting === PRIVATE_SUPPLEMENTAL_TARGET_SOURCES ? 'REPLAY' : 'RESUME');
         fwrite(STDOUT, 'PRIVATE_REAL_SUPPLEMENTAL_TARGET=PASS action=preflight schema=16 sources='
             . PRIVATE_SUPPLEMENTAL_TARGET_SOURCES . ' presentations=' . PRIVATE_SUPPLEMENTAL_TARGET_PRESENTATIONS
