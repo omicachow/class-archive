@@ -541,6 +541,13 @@ function Recreate-RestorePiwigoUnderMaintenance([string]$Head) {
     # already maintenance-gated restore writer before advancing evidence.
     Invoke-Compose 'piwigo' @('stop','piwigo') 'restore_deploy_stop_for_evidence_failed'
     Assert-PiwigoStoppedForSnapshot
+    # A stopped Docker container still retains the Windows single-file bind.
+    # Remove only this stateless restore container (all durable state lives in
+    # the attested volumes) so the host can atomically replace the evidence
+    # inode. Compose recreates the same scoped container immediately below.
+    Invoke-Compose 'piwigo' @('rm','--force','--stop','piwigo') 'restore_deploy_remove_for_evidence_failed'
+    $remaining = @(Invoke-UbuntuCapture @('docker','ps','-a','--filter',('name=^/' + $piwigoProject + '-piwigo-1$'),'--format','{{.Names}}') 'restore_deploy_remove_for_evidence_failed')
+    Assert-Deployment ($remaining.Count -eq 0) 'restore_deploy_remove_for_evidence_failed'
     Update-RestoreGitEvidence $Head
     Invoke-Compose 'piwigo' @('up','-d','--force-recreate','--no-deps','piwigo') 'restore_deploy_piwigo_recreate_failed'
     Wait-Maintenance
