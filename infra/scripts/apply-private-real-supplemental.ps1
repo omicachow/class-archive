@@ -264,7 +264,7 @@ function Assert-PiwigoReadyOrMaintenance([hashtable]$Spec) {
     $lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $name) 'target_container_missing')
     Assert-Apply ($lines.Count -eq 1) 'target_container_not_ready_piwigo'
     if ($lines[0] -eq 'running|healthy') { return }
-    Assert-Apply ($lines[0] -eq 'running|unhealthy') 'target_container_not_ready_piwigo'
+    Assert-Apply ($lines[0] -in @('running|starting', 'running|unhealthy')) 'target_container_not_ready_piwigo'
     $maintenance = @(Invoke-WslCapture @('docker', 'exec', $name, 'curl', '--silent', '--show-error',
         '--write-out', 'CLASS_ARCHIVE_STATUS:%{http_code}', 'http://127.0.0.1/') 'maintenance_resume_probe_failed')
     Assert-Apply ($maintenance.Count -eq 2 -and $maintenance[0] -eq 'Class Archive maintenance mode.' `
