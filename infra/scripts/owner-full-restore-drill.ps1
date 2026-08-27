@@ -93,6 +93,25 @@ function Invoke-Ubuntu([string[]]$Arguments, [string]$FailureCode = 'ubuntu_comm
     }
     finally { $ErrorActionPreference = $previous }
     if ($code -ne 0) {
+        if ($FailureCode -eq 'restore_mariadb_verify_failed') {
+            try {
+                $diagnosticRoot = Join-Path $projectRoot '.codex-work\owner-restore\reports'
+                if (-not (Test-Path -LiteralPath $diagnosticRoot -PathType Container)) { [void][IO.Directory]::CreateDirectory($diagnosticRoot) }
+                $safeLines = @($result | ForEach-Object {
+                    [regex]::Replace([string]$_, '(?i)(password|secret|token|pepper)(?:=|:)[^\s]+', '$1=REDACTED')
+                })
+                $diagnostic = [ordered]@{
+                    version = 1
+                    created_at = (Get-Date).ToUniversalTime().ToString('o')
+                    failure_code = $FailureCode
+                    native_exit_code = [int]$code
+                    output = $safeLines
+                }
+                $diagnosticPath = Join-Path $diagnosticRoot ('native-mariadb-error-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ') + '.json')
+                Write-OwnerOnlyText $diagnosticPath (($diagnostic | ConvertTo-Json -Depth 4) + "`n")
+            }
+            catch { }
+        }
         if ($FailureCode -eq 'restore_stream_failed') {
             $streamFailures = @($result | ForEach-Object { [string]$_ } | Where-Object { $_ -match '\AOWNER_RESTORE_STREAM=FAIL code=[a-z0-9_]{1,128}\z' })
             if ($streamFailures.Count -eq 1 -and $streamFailures[0] -match '\AOWNER_RESTORE_STREAM=FAIL code=([a-z0-9_]{1,128})\z') {
