@@ -535,6 +535,12 @@ function Update-RestoreGitEvidence([string]$Head) {
 }
 
 function Recreate-RestorePiwigoUnderMaintenance([string]$Head) {
+    # The attested HEAD is a read-only single-file bind. Windows correctly
+    # prevents atomic replacement while the container owns that bind, and an
+    # in-place rewrite would leave the mounted inode ambiguous. Stop only the
+    # already maintenance-gated restore writer before advancing evidence.
+    Invoke-Compose 'piwigo' @('stop','piwigo') 'restore_deploy_stop_for_evidence_failed'
+    Assert-PiwigoStoppedForSnapshot
     Update-RestoreGitEvidence $Head
     Invoke-Compose 'piwigo' @('up','-d','--force-recreate','--no-deps','piwigo') 'restore_deploy_piwigo_recreate_failed'
     Wait-Maintenance
