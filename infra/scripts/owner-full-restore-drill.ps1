@@ -710,6 +710,11 @@ function Assert-RestoreNetworkIsolation {
     $containers = @(Invoke-RestoreDocker @('ps','-a','--filter','label=com.classarchive.scope=owner-restore-drill','--format','{{.Names}}'))
     Assert-Restore ($containers.Count -gt 0) 'restore_scoped_containers_missing'
     foreach ($container in $containers) {
+        if ($container -eq ($immichProject + '-immich-gateway-secret-stager-1')) {
+            $stager = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Status}}|{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}',$container))
+            Assert-Restore ($stager.Count -eq 1 -and $stager[0] -in @('exited|none|null','exited|none|{}')) 'restore_secret_stager_not_stopped'
+            continue
+        }
         $attached = @(Invoke-RestoreDocker @('inspect','--format','{{range $name,$network := .NetworkSettings.Networks}}{{println $name}}{{end}}',$container) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         Assert-Restore (@($attached | Where-Object { $_ -notin $allowedNetworks }).Count -eq 0) 'restore_container_foreign_network'
     }
@@ -807,9 +812,12 @@ function Read-RestoreState([object]$BundleInfo) {
     try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-Restore 'restore_state_invalid' }
     $nginxDigest = (Get-FileHash -LiteralPath $restoreNginxPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stateToolHead = [string]$state.restore_tool_head
+    Assert-Restore ($stateToolHead -match '\A[0-9a-f]{40}\z') 'restore_state_tool_head_invalid'
+    & git -C $projectRoot merge-base --is-ancestor $stateToolHead ([string]$BundleInfo.restore_tool_head) 2>$null
+    Assert-Restore ($LASTEXITCODE -eq 0) 'restore_state_tool_head_not_ancestor'
     Assert-Restore ([int]$state.version -eq 2 -and [string]$state.backup_id -eq [string]$BundleInfo.manifest.backup_id -and
         [string]$state.source_head -eq [string]$BundleInfo.manifest.source_head -and
-        [string]$state.restore_tool_head -eq [string]$BundleInfo.restore_tool_head -and
         [string]$state.control_plane_id -eq $script:controlPlaneId -and [string]$state.docker_root -eq $dockerRoot -and
         [string]$state.volume_root -eq $restoreVolumeRoot -and [string]$state.storage_kind -eq 'M_EXT4_BIND' -and
         [string]$state.restore_nginx_sha256 -eq $nginxDigest) 'restore_state_identity_invalid'

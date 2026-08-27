@@ -65,14 +65,14 @@ foreach ($needle in @(
     'Get-RestoreToolCommitAllowlist', 'Assert-RestoreCheckout', 'restore_checkout_dirty',
     'merge-base --is-ancestor', 'restore_tool_head_not_source_descendant', 'rev-list --merges', 'restore_tool_history_merge_forbidden',
     'log --format= --name-only --no-renames', 'restore_tool_diff_outside_allowlist',
-    'restore_tool_head=', "`$BundleInfo.restore_tool_head", "`$state.restore_tool_head -eq [string]`$BundleInfo.restore_tool_head",
+    'restore_tool_head=', "`$BundleInfo.restore_tool_head", "git -C `$projectRoot merge-base --is-ancestor `$stateToolHead",
     'class_archive_owner_restore_v1_piwigo', 'class_archive_owner_restore_v1_immich',
     'Assert-RestoreGatewayNetwork', "`$piwigoProject + '|immich_gateway|owner-restore-drill|true|10.245.0.0/24'",
     'Assert-RestoreNetworkRangesFree', 'Assert-RestoreNetworkIsolation', 'restore_network_foreign_member', 'restore_container_foreign_network',
     'Assert-FreshRestoreRuntime', 'Assert-AllRestoreVolumeIdentities', 'restore_volume_backing_mount_invalid',
     'New-RestoreNginxConfiguration', 'set_real_ip_from 10.245.0.10/32;', 'restore_nginx_sha256',
     'Initialize-RestoreGitEvidence', '[string]$BundleInfo.manifest.source_head + "`n"', 'restore_git_evidence_head_mismatch',
-    'restore_git_evidence_refs_untrusted', 'restore_git_evidence_git_visible',
+    'restore_git_evidence_refs_untrusted', 'restore_git_evidence_git_visible', 'restore_state_tool_head_not_ancestor',
     "storage_kind='M_EXT4_BIND'", 'Assert-PrimaryOwnerHttp', 'primary_owner_http_unhealthy',
     'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', "Invoke-RestoreDocker @('image','inspect',`$ref)",
     'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Assert-TargetModelCache', 'Copy-VerifiedModelCache $bundleInfo',
@@ -81,6 +81,7 @@ foreach ($needle in @(
     "@((`$piwigoProject + '_app'),`$piwigoProject,'app','false','10.245.1.0/24')",
     'resume_container_topology_invalid', "'true|healthy|running'", "'false|none|created'", 'resume_piwigo_container_state_invalid',
     'resume_network_topology_invalid', 'resume_network_identity_invalid', 'resume_network_foreign_member', 'resume_container_foreign_network',
+    'restore_secret_stager_not_stopped', "'-immich-gateway-secret-stager-1'",
     'resume_private_runtime_file_missing', 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $path', 'resume_passphrase_present',
     'resume_restored_count_mismatch', 'Assert-TargetModelCache $BundleInfo',
     'Ensure-RestoreImmichEnvBinding', 'IMMICH_SPIKE_ENV_FILE=../owner-restore/.env.immich', 'resume_immich_environment_binding_invalid',
@@ -261,6 +262,9 @@ foreach ($needle in @(
     "Invoke-ImmichCompose (@('exec', '-T', 'immich-server', 'rm', '-f', '--') + `$immichTemporary)",
     "Invoke-PiwigoCompose (@('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + `$piwigoTemporary)"
 )) { Assert-True ($immichRunner.Contains($needle)) ('immich_restore_transient_recovery_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
+foreach ($needle in @('bridge_stager_stop', "'stop', '-t', '5', 'immich-gateway-secret-stager'", 'bridge_stager_stop_failed', 'exited|none|null')) {
+    Assert-True ($immichRunner.Contains($needle)) ('immich_restore_stager_shutdown_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+}
 
 foreach ($browser in @($ownerBrowser,$familyBrowser)) {
     foreach ($needle in @(

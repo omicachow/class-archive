@@ -912,6 +912,12 @@ printf '%s\n' "$count"
         [void](Invoke-PiwigoCompose @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $enableContainer + ' && chmod 0600 ' + $enableContainer)))
         $enableResult = Invoke-PiwigoCompose @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'enable')
         Assert-Exact ($enableResult -match '^PRIVATE_QA_IMMICH_CATALOG=PASS action=enable count=([0-9]+)$') 'bridge_enable_failed'
+        $script:stage = 'bridge_stager_stop'
+        [void](Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'stop', '-t', '5', 'immich-gateway-secret-stager'))
+        $stagerId = (Invoke-ImmichCompose @('--profile', 'immich-spike', '--profile', 'immich-gateway-integration', 'ps', '-a', '-q', 'immich-gateway-secret-stager')).Trim()
+        Assert-Exact ($stagerId -match '^[a-f0-9]{12,64}$') 'bridge_stager_identity_invalid'
+        $stagerState = (Invoke-UbuntuDocker @('inspect', $stagerId, '--format', '{{.State.Status}}|{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}')).Trim()
+        Assert-Exact ($stagerState -eq 'exited|none|null' -or $stagerState -eq 'exited|none|{}') 'bridge_stager_stop_failed'
         } else {
             # Resetting the technical user's password revokes the gateway's
             # prior Immich access token. Preserve the already-bound Piwigo
