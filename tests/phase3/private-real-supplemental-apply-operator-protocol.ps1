@@ -52,6 +52,8 @@ try {
     Assert-Protocol ($operator.Contains("@('create', '--no-build', '--no-recreate', 'supplemental-apply')")) 'network_create_may_recreate_db'
     Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/prepare-class-archive-maintenance.php', '--prepare'")) 'maintenance_prepare_missing'
     Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'")) 'maintenance_finalize_missing'
+    Assert-Protocol ($operator.Contains("`$lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'")) 'single_line_container_probe_not_array_wrapped'
+    Assert-Protocol ($operator.Contains("`$state = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}'")) 'single_line_writer_probe_not_array_wrapped'
     $stop = $operator.IndexOf("@('stop', 'piwigo')", [StringComparison]::Ordinal)
     $run = $operator.IndexOf("'supplemental-apply') 'supplemental_import_failed'", [StringComparison]::Ordinal)
     Assert-Protocol ($stop -gt $maintenance -and $run -gt $stop) 'writer_stop_order_invalid'

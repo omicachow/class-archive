@@ -246,7 +246,7 @@ function Assert-ComposeModel([hashtable]$Spec, [string[]]$Prefix, [string]$Manif
 
 function Assert-ContainerReady([hashtable]$Spec, [string]$Suffix) {
     $name = [string]$Spec.project + '-' + $Suffix + '-1'
-    $lines = Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $name) 'target_container_missing'
+    $lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $name) 'target_container_missing')
     Assert-Apply ($lines.Count -eq 1 -and $lines[0] -eq 'running|healthy') ('target_container_not_ready_' + $Suffix)
 }
 
@@ -296,13 +296,13 @@ function Open-ApplyNetwork([hashtable]$Spec, [string[]]$Prefix, [string]$Network
     $script:networkCreated = $true
     [void](Invoke-Compose $Prefix @('create', '--no-build', '--no-recreate', 'supplemental-apply') 'apply_network_create_failed')
     [void](Invoke-Compose $Prefix @('rm', '--force', '--stop', 'supplemental-apply') 'apply_placeholder_remove_failed')
-    $identity = Invoke-WslCapture @('docker', 'network', 'inspect', '--format',
-        '{{.Internal}}|{{index .Labels "com.classarchive.scope"}}|{{len .Containers}}', $NetworkName) 'apply_network_inspect_failed'
+    $identity = @(Invoke-WslCapture @('docker', 'network', 'inspect', '--format',
+        '{{.Internal}}|{{index .Labels "com.classarchive.scope"}}|{{len .Containers}}', $NetworkName) 'apply_network_inspect_failed')
     Assert-Apply ($identity.Count -eq 1 -and $identity[0] -eq 'true|private-real-supplemental-apply|0') 'apply_network_boundary_invalid'
     $dbContainer = [string]$Spec.project + '-db-1'
     [void](Invoke-WslCapture @('docker', 'network', 'connect', '--alias', 'db', $NetworkName, $dbContainer) 'apply_db_network_connect_failed')
     $script:dbNetworkConnected = $true
-    $membership = Invoke-WslCapture @('docker', 'network', 'inspect', '--format', '{{len .Containers}}', $NetworkName) 'apply_network_membership_failed'
+    $membership = @(Invoke-WslCapture @('docker', 'network', 'inspect', '--format', '{{len .Containers}}', $NetworkName) 'apply_network_membership_failed')
     Assert-Apply ($membership.Count -eq 1 -and $membership[0] -eq '1') 'apply_network_membership_invalid'
 }
 
@@ -317,7 +317,7 @@ function Close-ApplyNetwork([hashtable]$Spec, [string]$NetworkName, [switch]$Str
     }
     if ($script:networkCreated) {
         try {
-            $membership = Invoke-WslCapture @('docker', 'network', 'inspect', '--format', '{{len .Containers}}', $NetworkName) 'apply_network_cleanup_inspect_failed'
+            $membership = @(Invoke-WslCapture @('docker', 'network', 'inspect', '--format', '{{len .Containers}}', $NetworkName) 'apply_network_cleanup_inspect_failed')
             Assert-Apply ($membership.Count -eq 1 -and $membership[0] -eq '0') 'apply_network_cleanup_membership_invalid'
             [void](Invoke-WslCapture @('docker', 'network', 'rm', $NetworkName) 'apply_network_remove_failed')
             $script:networkCreated = $false
@@ -380,7 +380,7 @@ try {
     Wait-Maintenance $spec $prefix
     [void](Invoke-Compose $prefix @('stop', 'piwigo') 'piwigo_stop_failed')
     $piwigoStopped = $true
-    $state = Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}', ([string]$spec.project + '-piwigo-1')) 'piwigo_stop_verify_failed'
+    $state = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}', ([string]$spec.project + '-piwigo-1')) 'piwigo_stop_verify_failed')
     Assert-Apply ($state.Count -eq 1 -and $state[0] -eq 'exited') 'piwigo_writer_not_stopped'
     Open-ApplyNetwork $spec $prefix $maintenanceNetwork
 
