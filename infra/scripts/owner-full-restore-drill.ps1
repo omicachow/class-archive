@@ -187,6 +187,7 @@ function Get-RestoreToolCommitAllowlist {
         'infra/owner-restore/docker-compose.immich.override.yml',
         'infra/owner-restore/docker-compose.piwigo.override.yml',
         'infra/scripts/owner-full-restore-drill.ps1',
+        'infra/scripts/private-qa-immich.ps1',
         'infra/scripts/restore-owner-temporary-backup.sh',
         'tests/phase3/full-real-browser-qa.mjs',
         'tests/phase3/full-real-browser-qa.ps1',
