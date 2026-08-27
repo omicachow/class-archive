@@ -1064,9 +1064,16 @@ function Invoke-AggregateVerify([object]$BundleInfo) {
     $media = @(Invoke-RestoreCompose piwigo @('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_HTTP=1','piwigo','php','/workspace/tests/phase3/private-full-owner-media-http.php'))
     Assert-Restore (@($media | Where-Object { $_ -match '\APRIVATE_FULL_OWNER_MEDIA_HTTP=PASS .*direct_guest_requests=6 ' }).Count -eq 1) 'restore_mediaguard_probe_failed'
     $script:stage = 'aggregate_verify_http'
-    $health0 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
+    $health0Status = 0
+    try {
+        $health0 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction Stop
+        $health0Status = [int]$health0.StatusCode
+    }
+    catch {
+        if ($null -ne $_.Exception.Response) { $health0Status = [int]$_.Exception.Response.StatusCode }
+    }
     $health1 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8291/healthz' -ErrorAction Stop
-    Assert-Restore ($null -ne $health0 -and $health0.StatusCode -in @(200,301,302,303) -and $health1.StatusCode -eq 200) 'restore_http_health_failed'
+    Assert-Restore ($health0Status -in @(200,301,302,303) -and $health1.StatusCode -eq 200) 'restore_http_health_failed'
     Assert-PrimaryOwnerHttp
     Write-Output ('OWNER_RESTORE_VERIFY=PASS backup_id=' + $BundleInfo.manifest.backup_id + ' source_head=' + $BundleInfo.manifest.source_head +
         ' restore_tool_head=' + $BundleInfo.restore_tool_head + ' counts=' + $counts.Count +
