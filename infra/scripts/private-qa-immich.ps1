@@ -542,6 +542,19 @@ try {
             $passwordResetScriptContainer, $passwordResetInputContainer, $passwordResetOutputContainer
         )
         $piwigoTemporary = @($catalogContainer, $bindingContainer, $indexEvidenceContainer, $enableContainer, $bridgeTokenContainer)
+        $orphanProbeScript = @'
+set -eu
+needle=$(printf '/tmp/class-archive-private-qa-immich-runtime%s' '.mjs')
+count=0
+for cmdline in /proc/[0-9]*/cmdline; do
+  [ -r "$cmdline" ] || continue
+  command=$(tr '\000' ' ' < "$cmdline" 2>/dev/null || true)
+  case "$command" in *"$needle"*) count=$((count + 1)) ;; esac
+done
+printf '%s\n' "$count"
+'@
+        $activeRuntime = Invoke-ImmichCompose @('exec', '-T', 'immich-server', 'sh', '-lc', $orphanProbeScript)
+        Assert-Exact ($activeRuntime.Trim() -eq '0') 'orphan_runtime_process_detected'
         [void](Invoke-ImmichCompose (@('exec', '-T', 'immich-server', 'rm', '-f', '--') + $immichTemporary))
         [void](Invoke-PiwigoCompose (@('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--') + $piwigoTemporary))
         foreach ($path in $immichTemporary) {
