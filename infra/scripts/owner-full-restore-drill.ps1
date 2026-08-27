@@ -433,6 +433,31 @@ function New-RestoreNginxConfiguration {
     Write-OwnerOnlyText $restoreNginxPath $generated
 }
 
+function Initialize-RestoreGitEvidence([object]$BundleInfo) {
+    $evidenceRoot = Join-Path $privateRuntimeRoot 'git-evidence'
+    $headPath = Join-Path $evidenceRoot 'HEAD'
+    $refsPath = Join-Path $evidenceRoot 'refs'
+    if (-not (Test-Path -LiteralPath $evidenceRoot -PathType Container)) { [void][IO.Directory]::CreateDirectory($evidenceRoot) }
+    $rootItem = Get-Item -LiteralPath $evidenceRoot -Force -ErrorAction Stop
+    Assert-Restore ($rootItem.PSIsContainer -and -not ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'restore_git_evidence_root_untrusted'
+    if (-not (Test-Path -LiteralPath $refsPath -PathType Container)) { [void][IO.Directory]::CreateDirectory($refsPath) }
+    $refsItem = Get-Item -LiteralPath $refsPath -Force -ErrorAction Stop
+    Assert-Restore ($refsItem.PSIsContainer -and -not ($refsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        @(Get-ChildItem -LiteralPath $refsPath -Force).Count -eq 0) 'restore_git_evidence_refs_untrusted'
+    $expected = [string]$BundleInfo.manifest.source_head + "`n"
+    if (Test-Path -LiteralPath $headPath) {
+        Assert-PlainFile $headPath 'restore_git_evidence_head_untrusted'
+        Assert-ClassArchiveOwnerOnlyFileAcl -Path $headPath
+        Assert-Restore ([string]::Equals([IO.File]::ReadAllText($headPath), $expected, [StringComparison]::Ordinal)) 'restore_git_evidence_head_mismatch'
+    }
+    else { Write-OwnerOnlyText $headPath $expected }
+    foreach ($path in @($evidenceRoot,$refsPath,$headPath)) {
+        $relative = [IO.Path]::GetFullPath($path).Substring($projectRoot.TrimEnd('\').Length + 1).Replace('\','/')
+        & git -C $projectRoot check-ignore --quiet --no-index -- $relative
+        Assert-Restore ($LASTEXITCODE -eq 0 -and @(& git -C $projectRoot ls-files -- $relative 2>$null).Count -eq 0) 'restore_git_evidence_git_visible'
+    }
+}
+
 function Get-Ipv4CidrRange([string]$Cidr) {
     if ($Cidr -notmatch '\A([0-9]{1,3}(?:\.[0-9]{1,3}){3})/([0-9]|[12][0-9]|3[0-2])\z') { return $null }
     try { $bytes = [Net.IPAddress]::Parse($Matches[1]).GetAddressBytes() } catch { return $null }
@@ -975,6 +1000,7 @@ try {
         try {
             New-RestoreNginxConfiguration
             Initialize-RestoreEnvironments $secrets
+            Initialize-RestoreGitEvidence $bundleInfo
             Write-OwnerOnlyText $passphrasePath ([string]$secrets.gpg_passphrase + "`n")
             Copy-PinnedImages $bundleInfo.manifest
             Assert-Restore (@(Invoke-RestoreDocker @('network','ls','--quiet','--filter',('name=^' + $gatewayNetwork + '$'))).Count -eq 0) 'restore_network_not_fresh'
@@ -1021,6 +1047,7 @@ try {
         Assert-PrimaryOwnerHttp
         $ownerBefore = Get-PrimaryOwnerFingerprint
         Assert-PartialRestoreRuntime $bundleInfo
+        Initialize-RestoreGitEvidence $bundleInfo
         [void](Invoke-RestoreCompose piwigo @('up','-d','piwigo'))
         Wait-RestoreContainer ($piwigoProject + '-piwigo-1')
         [void](Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server'))

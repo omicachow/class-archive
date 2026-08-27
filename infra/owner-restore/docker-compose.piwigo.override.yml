@@ -31,6 +31,22 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # A linked Git worktree has a `.git` pointer file rather than a `.git`
+      # directory. Mount a restore-only detached HEAD plus an empty refs
+      # directory so BuildCommit sees the attested source commit without
+      # exposing Git config, objects, remotes or credentials.
+      - type: bind
+        source: ../.codex-work/owner-restore/runtime/git-evidence/HEAD
+        target: /workspace/git/HEAD
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../.codex-work/owner-restore/runtime/git-evidence/refs
+        target: /workspace/git/refs
+        read_only: true
+        bind:
+          create_host_path: false
     logging:
       driver: local
       options:

@@ -70,6 +70,8 @@ foreach ($needle in @(
     'Assert-RestoreNetworkRangesFree', 'Assert-RestoreNetworkIsolation', 'restore_network_foreign_member', 'restore_container_foreign_network',
     'Assert-FreshRestoreRuntime', 'Assert-AllRestoreVolumeIdentities', 'restore_volume_backing_mount_invalid',
     'New-RestoreNginxConfiguration', 'set_real_ip_from 10.245.0.10/32;', 'restore_nginx_sha256',
+    'Initialize-RestoreGitEvidence', '[string]$BundleInfo.manifest.source_head + "`n"', 'restore_git_evidence_head_mismatch',
+    'restore_git_evidence_refs_untrusted', 'restore_git_evidence_git_visible',
     "storage_kind='M_EXT4_BIND'", 'Assert-PrimaryOwnerHttp', 'primary_owner_http_unhealthy',
     'class_archive_owner_restore_v1_immich_model_cache', 'Copy-PinnedImages', "Invoke-RestoreDocker @('image','inspect',`$ref)",
     'source_model_manifest_mismatch', 'target_model_manifest_mismatch', 'Assert-TargetModelCache', 'Copy-VerifiedModelCache $bundleInfo',
@@ -122,6 +124,7 @@ Assert-True (-not [string]::IsNullOrWhiteSpace($resumeBlock)) 'restore_resume_ac
 foreach ($needle in @(
     'resume_confirmation_required', 'Assert-PrimaryOwnerHttp', 'Get-PrimaryOwnerFingerprint',
     'Assert-PartialRestoreRuntime $bundleInfo', "Invoke-RestoreCompose piwigo @('up','-d','piwigo')",
+    'Initialize-RestoreGitEvidence $bundleInfo',
     "Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server')",
     'Invoke-PrivateImmichFinish', "Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat')",
     'Write-RestoreState $bundleInfo', 'primary_owner_changed_during_resume', 'Invoke-AggregateVerify $bundleInfo'
@@ -129,6 +132,10 @@ foreach ($needle in @(
 foreach ($forbidden in @('Assert-FreshRestoreRuntime','New-RestoreVolume','Invoke-StreamHelper','Copy-VerifiedModelCache','Read-RecoverySecrets','Initialize-RestoreEnvironments','Remove-Item')) {
     Assert-True (-not $resumeBlock.Contains($forbidden)) ('restore_resume_destructive_or_reimport_action_detected_' + $forbidden.ToLowerInvariant())
 }
+foreach ($needle in @(
+    'source: ../.codex-work/owner-restore/runtime/git-evidence/HEAD', 'target: /workspace/git/HEAD',
+    'source: ../.codex-work/owner-restore/runtime/git-evidence/refs', 'target: /workspace/git/refs', 'create_host_path: false'
+)) { Assert-True ($piwigoOverlay.Contains($needle)) ('restore_git_evidence_mount_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 
 # Execute the real environment renderer with synthetic in-memory secrets. This
 # catches PowerShell's surprising `string + value, next-item` precedence, which
