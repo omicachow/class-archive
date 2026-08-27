@@ -103,6 +103,7 @@ Assert-True ($postMigration.Contains('ReconciliationService::fromPiwigo()->scanA
 Assert-True ($deploy.Contains('Get-ProtectedRuntimeFingerprint') -and $deploy.Contains('protected_runtime_changed_during_restore_deploy')) 'restore_schema_8091_8191_fingerprint_missing'
 Assert-True ($deploy.Contains("'http://127.0.0.1:8091/photos'") -and $deploy.Contains("'http://127.0.0.1:8191/home'")) 'restore_schema_8091_8191_http_guard_missing'
 Assert-True ($deploy.Contains('Get-RestoreNonTargetFingerprint') -and $deploy.Contains('restore_non_target_service_changed')) 'restore_schema_non_target_fingerprint_missing'
+Assert-True ($deploy.Contains("`$excluded = @((`$piwigoProject + '-piwigo-1'), (`$immichProject + '-immich-web-compat-1'))")) 'restore_schema_non_target_exclusion_array_ambiguous'
 Assert-True ($deploy.Contains('$runningIdentity = $Project + ''|'' + $scopeLabel + ''|true|running''') `
     -and $deploy.Contains('$exitedIdentity = $Project + ''|'' + $scopeLabel + ''|false|exited''') `
     -and $deploy.Contains('@($runningIdentity, $exitedIdentity)')) 'restore_schema_optional_exited_container_identity_invalid'

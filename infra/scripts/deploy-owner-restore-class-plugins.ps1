@@ -243,7 +243,11 @@ function Get-ProtectedRuntimeFingerprint {
 }
 
 function Get-RestoreNonTargetFingerprint {
-    $excluded = @($piwigoProject + '-piwigo-1', $immichProject + '-immich-web-compat-1')
+    # Parenthesize each concatenation. Without the inner parentheses,
+    # PowerShell parses the comma expression as one space-joined string and
+    # the two intentional deployment targets are accidentally fingerprinted
+    # as non-target services.
+    $excluded = @(($piwigoProject + '-piwigo-1'), ($immichProject + '-immich-web-compat-1'))
     $names = @(Invoke-UbuntuCapture @('docker','ps','-a','--filter',('label=com.classarchive.scope=' + $scopeLabel),'--format','{{.Names}}') 'restore_deploy_topology_invalid' |
         Where-Object { $_ -notin $excluded } | Sort-Object -Unique)
     Assert-Deployment ($names.Count -ge 7) 'restore_deploy_topology_invalid'
