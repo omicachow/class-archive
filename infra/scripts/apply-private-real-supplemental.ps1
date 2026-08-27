@@ -259,6 +259,18 @@ function Assert-ContainerReady([hashtable]$Spec, [string]$Suffix) {
     Assert-Apply ($lines.Count -eq 1 -and $lines[0] -eq 'running|healthy') ('target_container_not_ready_' + $Suffix)
 }
 
+function Assert-PiwigoReadyOrMaintenance([hashtable]$Spec) {
+    $name = [string]$Spec.project + '-piwigo-1'
+    $lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $name) 'target_container_missing')
+    Assert-Apply ($lines.Count -eq 1) 'target_container_not_ready_piwigo'
+    if ($lines[0] -eq 'running|healthy') { return }
+    Assert-Apply ($lines[0] -eq 'running|unhealthy') 'target_container_not_ready_piwigo'
+    $maintenance = @(Invoke-WslCapture @('docker', 'exec', $name, 'curl', '--silent', '--show-error',
+        '--write-out', 'CLASS_ARCHIVE_STATUS:%{http_code}', 'http://127.0.0.1/') 'maintenance_resume_probe_failed')
+    Assert-Apply ($maintenance.Count -eq 2 -and $maintenance[0] -eq 'Class Archive maintenance mode.' `
+        -and $maintenance[1] -eq 'CLASS_ARCHIVE_STATUS:503') 'maintenance_resume_state_invalid'
+}
+
 function Wait-ContainerReady([hashtable]$Spec, [string]$Suffix) {
     foreach ($attempt in 1..60) {
         try {
@@ -376,7 +388,7 @@ try {
     $script:stage = 'runtime_preflight_db'
     Assert-ContainerReady $spec 'db'
     $script:stage = 'runtime_preflight_piwigo'
-    Assert-ContainerReady $spec 'piwigo'
+    Assert-PiwigoReadyOrMaintenance $spec
     $script:stage = 'runtime_preflight_schema'
     $schemaLines = Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx',
         '-e', 'CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL=1', '-e', 'CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_APPLY=1',

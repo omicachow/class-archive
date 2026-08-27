@@ -55,6 +55,8 @@ try {
     Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'")) 'maintenance_finalize_missing'
     Assert-Protocol ($operator.Contains("`$lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'")) 'single_line_container_probe_not_array_wrapped'
     Assert-Protocol ($operator.Contains("`$state = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}'")) 'single_line_writer_probe_not_array_wrapped'
+    Assert-Protocol ($operator.Contains('function Assert-PiwigoReadyOrMaintenance') -and $operator.Contains("`$lines[0] -eq 'running|unhealthy'")) 'maintenance_resume_container_gate_missing'
+    Assert-Protocol ($operator.Contains("`$maintenance[0] -eq 'Class Archive maintenance mode.'") -and $operator.Contains("`$maintenance[1] -eq 'CLASS_ARCHIVE_STATUS:503'")) 'maintenance_resume_http_gate_missing'
     $stop = $operator.IndexOf("@('stop', 'piwigo')", [StringComparison]::Ordinal)
     $run = $operator.IndexOf("'supplemental-apply') 'supplemental_import_failed'", [StringComparison]::Ordinal)
     Assert-Protocol ($stop -gt $maintenance -and $run -gt $stop) 'writer_stop_order_invalid'
