@@ -25,6 +25,11 @@ $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $privateRoot = Join-Path $projectRoot '.codex-work\private-real-qa\supplemental'
+$diagnosticRoot = if ($Target -eq 'restore') {
+    Join-Path $projectRoot '.codex-work\owner-restore\runtime'
+} else {
+    Join-Path $projectRoot '.codex-work\private-real-full\runtime'
+}
 if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = $privateRoot }
 if ([string]::IsNullOrWhiteSpace($StagingPath)) { $StagingPath = Join-Path $privateRoot 'staging' }
 $manifestPath = Join-Path $OutputPath 'manifests\supplemental-import-manifest.json'
@@ -128,7 +133,7 @@ function Get-WslPath([string]$Path, [string]$Code) {
 
 function Save-PrivateFailureDiagnostic([string]$Code, [object[]]$Lines) {
     try {
-        $path = Join-Path $privateRoot 'runtime\supplemental-apply-error.json'
+        $path = Join-Path $diagnosticRoot 'supplemental-apply-error.json'
         [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
         $record = [ordered]@{
             generated_at = (Get-Date).ToUniversalTime().ToString('o')
