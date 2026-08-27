@@ -79,6 +79,7 @@ foreach ($needle in @(
     'resume_network_topology_invalid', 'resume_network_identity_invalid', 'resume_network_foreign_member', 'resume_container_foreign_network',
     'resume_private_runtime_file_missing', 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $path', 'resume_passphrase_present',
     'resume_restored_count_mismatch', 'Assert-TargetModelCache $BundleInfo',
+    "a.state='ACTIVE' AND EXISTS (SELECT 1 FROM `${pwg}image_category ic WHERE ic.category_id=a.piwigo_category_id)",
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore', 'pwsh.exe -NoProfile -File',
     'Assert-AiRestoreEvidence', 'reused_existing_indexes -eq $true', 'restore_ai_reindex_detected',
     'metrics.face_jobs -eq 0', 'metrics.recognition_jobs -eq 0', 'metrics.smart_jobs -eq 0',
