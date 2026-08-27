@@ -23,7 +23,10 @@ function Assert-True([bool]$Condition, [string]$Code) {
 }
 function Read-Tracked([string]$Path, [string]$Code) {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) $Code
-    return [IO.File]::ReadAllText($Path)
+    # Source-only contracts run against CRLF Windows worktrees and LF CI
+    # checkouts. Normalize text before matching multi-line protocol fragments;
+    # file line endings are not themselves deployment behavior.
+    return ([IO.File]::ReadAllText($Path)).Replace("`r`n", "`n").Replace("`r", "`n")
 }
 function Index-OfOrFail([string]$Text, [string]$Needle, [string]$Code, [int]$Start = 0) {
     $index = $Text.IndexOf($Needle,$Start,[StringComparison]::Ordinal)

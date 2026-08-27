@@ -164,7 +164,8 @@ assert_volume() {
 }
 
 assert_running() {
-  [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ] || fail runtime_not_running
+  name=$1 role=$2
+  [ "$(docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null)" = true ] || fail "runtime_${role}_not_running"
 }
 
 assert_container "$piwigo" class_archive_private_full_v3_piwigo piwigo
@@ -172,7 +173,15 @@ assert_container "$mariadb" class_archive_private_full_v3_piwigo db
 assert_container "$immich_server" class_archive_private_full_v3_immich immich-server
 assert_container "$immich_ml" class_archive_private_full_v3_immich immich-machine-learning
 assert_container "$postgres" class_archive_private_full_v3_immich database
-for name in "$piwigo" "$mariadb" "$immich_server" "$immich_ml" "$postgres"; do assert_running "$name"; done
+# The current owner browse path intentionally keeps the optional Immich server
+# and ML workers stopped once their persisted index is complete. Their exact
+# scoped containers and image locks are still verified above, but only the
+# services required to take a consistent backup must be running: Piwigo /
+# MariaDB for archive state and PostgreSQL for the persisted AI index. The
+# before/after database and media guards below reject any concurrent change.
+assert_running "$piwigo" piwigo
+assert_running "$mariadb" mariadb
+assert_running "$postgres" immich_postgres
 
 piwigo_data=class_archive_private_full_v3_control_piwigo_data
 piwigo_uploads=class_archive_private_full_v3_piwigo_uploads

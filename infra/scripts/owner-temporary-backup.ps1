@@ -57,6 +57,24 @@ function Stop-OwnerBackup([string]$Code) {
     throw [InvalidOperationException]::new('OWNER_TEMP_BACKUP_STOP:' + $Code)
 }
 
+function Set-OwnerBackupUtf8ConsoleEncoding {
+    # The helper is launched through WSL from a checkout whose path can contain
+    # non-ASCII characters. Keep the process-local native command boundary
+    # UTF-8 before passing that path to WSL. If it cannot be established, the
+    # backup must fail closed rather than invoke an ambiguous helper path.
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding = $utf8
+        $script:OutputEncoding = $utf8
+        if ([Console]::OutputEncoding.CodePage -ne 65001) { Stop-OwnerBackup 'utf8_console_encoding_unavailable' }
+    }
+    catch {
+        Stop-OwnerBackup 'utf8_console_encoding_unavailable'
+    }
+}
+
+Set-OwnerBackupUtf8ConsoleEncoding
+
 function Normalize-DirectoryPath([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) {
         Stop-OwnerBackup 'path_invalid'
@@ -366,11 +384,20 @@ function New-RandomPassphrase {
 }
 
 function Get-WslPath([string]$Path) {
-    $lines = @(& $wsl -d Ubuntu --exec wslpath -a $Path 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or [string]$lines[0] -notmatch '\A/mnt/[a-z]/') {
+    # Avoid `wslpath` stdout round-trips: on a Chinese Windows checkout their
+    # console decoding can differ from the strict UTF-8 configuration reader.
+    # This runner accepts only ordinary local-drive paths, never UNC or paths
+    # with traversal / alternate separators.
+    try { $full = [IO.Path]::GetFullPath($Path) } catch { Stop-OwnerBackup 'wsl_path_conversion_failed' }
+    if ($full -notmatch '^([a-zA-Z]):\\(.+)$') { Stop-OwnerBackup 'wsl_path_conversion_failed' }
+    $drive = $Matches[1].ToLowerInvariant()
+    $segments = @($Matches[2] -split '\\')
+    if ($segments.Count -lt 1 -or @($segments | Where-Object {
+            [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[/\x00:]'
+        }).Count -ne 0) {
         Stop-OwnerBackup 'wsl_path_conversion_failed'
     }
-    return [string]$lines[0]
+    return '/mnt/' + $drive + '/' + ($segments -join '/')
 }
 
 function Invoke-Helper([string[]]$Arguments) {

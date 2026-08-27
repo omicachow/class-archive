@@ -29,7 +29,11 @@ foreach ($paths as $name => $path) {
         fwrite(STDERR, "PRIVATE_INCREMENTAL_MEDIA_PROTOCOL=FAIL missing={$name}\n");
         exit(1);
     }
-    $source[$name] = $value;
+    // Public static contracts run both from Linux CI checkouts (LF) and the
+    // Windows PowerShell working tree (CRLF by .gitattributes). Line endings
+    // are not part of the safety protocol, so normalize them before checking
+    // multi-line source fragments.
+    $source[$name] = str_replace(["\r\n", "\r"], "\n", $value);
 }
 
 $assertions = 0;

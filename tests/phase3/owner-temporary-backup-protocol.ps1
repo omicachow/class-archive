@@ -60,6 +60,12 @@ foreach ($needle in @(
 
 Assert-True ($runner.Contains('[IO.FileShare]::None')) 'owner_temp_backup_single_instance_lock_missing'
 Assert-True ($runner.Contains("Stop-OwnerBackup 'backup_already_running'")) 'owner_temp_backup_single_instance_fail_closed_missing'
+Assert-True ($runner.Contains('function Set-OwnerBackupUtf8ConsoleEncoding') `
+    -and $runner.Contains('[Console]::OutputEncoding = $utf8') `
+    -and $runner.Contains('$script:OutputEncoding = $utf8') `
+    -and $runner.Contains("Stop-OwnerBackup 'utf8_console_encoding_unavailable'")) 'owner_temp_backup_utf8_console_guard_missing'
+Assert-True (-not ($runner -match '(?m)^\s*\$lines\s*=\s*@\(&\s*\$wsl\b.*\bwslpath\s+-a\b')) 'owner_temp_backup_locale_sensitive_wslpath_reintroduced'
+Assert-True ($runner.Contains("if (`$full -notmatch '^([a-zA-Z]):\\(.+)$')")) 'owner_temp_backup_strict_windows_to_wsl_parser_missing'
 Assert-True ($runner.Contains("'SAME_WINDOWS_CURRENTUSER_PROFILE_REQUIRED'")) 'owner_temp_backup_dpapi_recovery_boundary_missing'
 Assert-True ($runner.Contains('Legacy v1 bundles have only a DPAPI recovery envelope')) 'owner_temp_backup_dpapi_readme_warning_missing'
 foreach ($needle in @(
@@ -140,6 +146,16 @@ foreach ($needle in @(
 
 Assert-True (-not $helper.Contains('docker stop')) 'owner_temp_backup_must_not_stop_owner_runtime'
 Assert-True (-not $helper.Contains('docker start')) 'owner_temp_backup_must_not_restart_owner_runtime'
+Assert-True ($helper.Contains('assert_container "$immich_server" class_archive_private_full_v3_immich immich-server') `
+    -and $helper.Contains('assert_container "$immich_ml" class_archive_private_full_v3_immich immich-machine-learning')) 'owner_temp_backup_optional_immich_scope_guard_missing'
+Assert-True ($helper.Contains('assert_running "$piwigo" piwigo') `
+    -and $helper.Contains('assert_running "$mariadb" mariadb') `
+    -and $helper.Contains('assert_running "$postgres" immich_postgres') `
+    -and $helper.Contains('runtime_${role}_not_running')) 'owner_temp_backup_required_runtime_role_guard_missing'
+Assert-True (-not $helper.Contains('assert_running "$immich_server"') `
+    -and -not $helper.Contains('assert_running "$immich_ml"')) 'owner_temp_backup_optional_immich_runtime_required'
+Assert-True ($helper.Contains('persisted index is complete') `
+    -and $helper.Contains('before/after database and media guards')) 'owner_temp_backup_optional_immich_rationale_missing'
 $archiveHelperRunCount = [regex]::Matches($helper, 'docker run --rm').Count
 $limitedArchiveHelperRunCount = [regex]::Matches(
     $helper,

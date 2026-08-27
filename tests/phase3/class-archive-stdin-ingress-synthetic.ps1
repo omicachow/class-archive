@@ -16,6 +16,18 @@ function Assert-Synthetic([bool]$Condition, [string]$Code) {
     if (-not $Condition) { throw "CLASS_ARCHIVE_STDIN_INGRESS_SYNTHETIC=FAIL code=$Code assertions=$script:assertions" }
 }
 
+function Get-SyntheticSha256([string]$Path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('class archive stdin ingress ' + [Guid]::NewGuid().ToString('N'))
 $source = Join-Path $tempRoot 'source.bin'
 $sink = Join-Path $tempRoot 'binary sink.ps1'
@@ -41,7 +53,7 @@ finally { $shaStream.Dispose(); $shaAlgorithm.Dispose() }
 [Console]::Out.Write("SINK=PASS size=$size sha256=$sha")
 '@
     [IO.File]::WriteAllText($sink, $sinkSource, [Text.UTF8Encoding]::new($false))
-    $sha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha256 = Get-SyntheticSha256 $source
     $stream = [IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
     $result = Invoke-ClassArchiveBinaryStdinProcess -Executable $powershell `
@@ -54,7 +66,7 @@ finally { $shaStream.Dispose(); $shaAlgorithm.Dispose() }
     Assert-Synthetic ([string]::IsNullOrWhiteSpace([string]$result.Stderr)) 'sink_stderr'
     Assert-Synthetic (([string]$result.Stdout).Trim() -eq "SINK=PASS size=$($bytes.Length) sha256=$sha256") 'sink_marker'
     Assert-Synthetic ((Get-Item -LiteralPath $destination).Length -eq $bytes.Length) 'sink_size'
-    Assert-Synthetic ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -eq $sha256) 'sink_sha256'
+    Assert-Synthetic ((Get-SyntheticSha256 $destination) -eq $sha256) 'sink_sha256'
     Assert-Synthetic ((ConvertTo-ClassArchiveNativeArgument -Value 'plain') -eq 'plain') 'plain_argument'
     Assert-Synthetic ((ConvertTo-ClassArchiveNativeArgument -Value '') -eq '""') 'empty_argument'
     Assert-Synthetic ((ConvertTo-ClassArchiveNativeArgument -Value 'two words') -eq '"two words"') 'space_argument'

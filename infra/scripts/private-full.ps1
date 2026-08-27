@@ -64,6 +64,27 @@ function Stop-PrivateFull([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_FULL_STOP:' + $Code)
 }
 
+function Set-PrivateFullUtf8ConsoleEncoding {
+    # Docker Compose configuration is emitted by WSL as UTF-8 JSON. Windows
+    # PowerShell can otherwise decode a non-ASCII checkout path using the
+    # legacy console code page, causing a false source-mount mismatch even
+    # when the exact bind mount is read-only. Set the process-local native
+    # command encoding before any WSL/Compose call; inability to establish
+    # this boundary is a validation failure, never a reason to relax mount
+    # comparisons.
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding = $utf8
+        $script:OutputEncoding = $utf8
+        if ([Console]::OutputEncoding.CodePage -ne 65001) { Stop-PrivateFull 'utf8_console_encoding_unavailable' }
+    }
+    catch {
+        Stop-PrivateFull 'utf8_console_encoding_unavailable'
+    }
+}
+
+Set-PrivateFullUtf8ConsoleEncoding
+
 function Get-ProjectRelativePath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     $prefix = $projectRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -131,15 +152,43 @@ function Assert-Volume([hashtable]$Values, [string]$Name, [string]$Expected) {
 }
 
 function Get-WslPath([string]$Path) {
-    $result = @(& $wsl -d Ubuntu --exec wslpath -a $Path 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1 -or [string]$result[0] -notmatch '^/mnt/[a-z]/') { Stop-PrivateFull 'wsl_path_conversion_failed' }
-    return [string]$result[0]
+    # Keep the inverse conversion in-process for the same Unicode reason as
+    # Get-WindowsPath below. The lifecycle accepts only ordinary local drive
+    # paths; UNC, traversal and alternate separators are not valid private
+    # runtime inputs.
+    try { $full = [IO.Path]::GetFullPath($Path) } catch { Stop-PrivateFull 'wsl_path_conversion_failed' }
+    if ($full -notmatch '^([a-zA-Z]):\\(.+)$') { Stop-PrivateFull 'wsl_path_conversion_failed' }
+    $drive = $Matches[1].ToLowerInvariant()
+    $segments = @($Matches[2] -split '\\')
+    if ($segments.Count -lt 1 -or @($segments | Where-Object {
+            [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[/\x00:]'
+        }).Count -ne 0) {
+        Stop-PrivateFull 'wsl_path_conversion_failed'
+    }
+    return '/mnt/' + $drive + '/' + ($segments -join '/')
 }
 
 function Get-WindowsPath([string]$Path) {
-    $result = @(& $wsl -d Ubuntu --exec wslpath -w $Path 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) { Stop-PrivateFull 'wsl_path_conversion_failed' }
-    return [string]$result[0]
+    # `wslpath -w` writes its result through the WSL console boundary. On a
+    # Windows checkout whose path contains non-ASCII characters, that output
+    # can be decoded differently from the UTF-8 value read from the private
+    # environment file. The result is a false "manifest missing" failure
+    # before any runtime or media state is touched. These call sites accept
+    # only canonical DrvFS paths, so convert that narrow form in-process and
+    # reject traversal or Windows path separators instead of relying on a
+    # locale-sensitive round trip.
+    if ($Path -notmatch '^/mnt/([a-zA-Z])/(.+)$') { Stop-PrivateFull 'wsl_path_conversion_failed' }
+    $drive = $Matches[1].ToUpperInvariant()
+    $segments = @($Matches[2].Split('/'))
+    if ($segments.Count -lt 1 -or @($segments | Where-Object {
+            [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[\\\x00:]'
+        }).Count -ne 0) {
+        Stop-PrivateFull 'wsl_path_conversion_failed'
+    }
+    $candidate = $drive + ':\' + ($segments -join '\')
+    try { $full = [IO.Path]::GetFullPath($candidate) } catch { Stop-PrivateFull 'wsl_path_conversion_failed' }
+    if (-not $full.StartsWith($drive + ':\', [StringComparison]::OrdinalIgnoreCase)) { Stop-PrivateFull 'wsl_path_conversion_failed' }
+    return $full
 }
 
 function Invoke-PrivateFullStorage([string]$StorageAction) {

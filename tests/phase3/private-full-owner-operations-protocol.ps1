@@ -48,6 +48,18 @@ $ownerHttpRuntime = Read-Source 'ownerHttpRuntime'
 $ownerMediaRuntime = Read-Source 'ownerMediaRuntime'
 $dev = Read-Source 'dev'
 
+# Both the env reader and Compose configuration use UTF-8 paths. The
+# lifecycle must establish a process-local UTF-8 boundary before it asks WSL
+# for JSON, and must never fall back to the locale-sensitive wslpath round
+# trip for the private owner checkout.
+Assert-True ($lifecycle.Contains('function Set-PrivateFullUtf8ConsoleEncoding')) 'owner_runtime_utf8_console_guard_missing'
+Assert-True ($lifecycle.Contains('[Console]::OutputEncoding = $utf8')) 'owner_runtime_utf8_console_encoding_not_set'
+Assert-True ($lifecycle.Contains('$script:OutputEncoding = $utf8')) 'owner_runtime_native_output_encoding_not_set'
+Assert-True ($lifecycle.Contains("Stop-PrivateFull 'utf8_console_encoding_unavailable'")) 'owner_runtime_utf8_console_not_fail_closed'
+Assert-True (-not ($lifecycle -match '(?m)^\s*\$result\s*=\s*@\(&\s*\$wsl\b.*\bwslpath\s+-[aw]\b')) 'owner_runtime_locale_sensitive_wslpath_reintroduced'
+Assert-True ($lifecycle.Contains("if (`$Path -notmatch '^/mnt/([a-zA-Z])/(.+)$')")) 'owner_runtime_strict_wsl_to_windows_parser_missing'
+Assert-True ($lifecycle.Contains("if (`$full -notmatch '^([a-zA-Z]):\\(.+)$')")) 'owner_runtime_strict_windows_to_wsl_parser_missing'
+
 # 8191 owner backup is a separate, deliberately confirmed action. It may not
 # fall through to staging's default lifecycle behavior.
 Assert-True ($lifecycle.Contains("'backup-owner'")) 'owner_backup_action_missing'
