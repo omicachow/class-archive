@@ -122,6 +122,17 @@ if (getenv('CLASS_ARCHIVE_PRIVATE_REAL_FULL') !== '1'
     fwrite(STDOUT, "PRIVATE_FULL_OWNER_MEDIA_HTTP=FAIL code=private_full_owner_gate_required assertions=0\n");
     exit(1);
 }
+$scope = getenv('CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_SCOPE');
+if ($scope === false || $scope === '') {
+    // Keep the historical owner aggregate verifier backward compatible. The
+    // standalone restore wrapper supplies RESTORE_8290 explicitly so its
+    // compact evidence cannot mislabel the endpoint under test.
+    $scope = 'OWNER_8190';
+}
+if (!in_array($scope, ['OWNER_8190', 'RESTORE_8290'], true)) {
+    fwrite(STDOUT, "PRIVATE_FULL_OWNER_MEDIA_HTTP=FAIL code=runtime_scope_invalid assertions=0\n");
+    exit(1);
+}
 
 try {
     $root = '/var/www/html/piwigo';
@@ -224,7 +235,7 @@ try {
         STDOUT,
         'PRIVATE_FULL_OWNER_MEDIA_HTTP=PASS assertions=' . $assertions
             . ' direct_guest_requests=' . $requestCount
-            . " methods=GET_HEAD_RANGE surfaces=ORIGINAL_DERIVATIVE scope=OWNER_8190\n",
+            . ' methods=GET_HEAD_RANGE surfaces=ORIGINAL_DERIVATIVE scope=' . $scope . "\n",
     );
 } catch (Throwable $error) {
     $code = $error->getMessage();

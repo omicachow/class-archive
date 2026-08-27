@@ -122,12 +122,16 @@ Assert-True ($domain.Contains('default => throw new') -and $domain.Contains('cla
 # real-library identifiers. It makes the direct original/derivative request
 # path part of the owner attestation rather than merely trusting the BFF.
 Assert-True ($ownerHttp.Contains("'infra/private-full/.env.piwigo.owner'")) 'owner_media_http_owner_env_missing'
+Assert-True ($ownerHttp.Contains("[ValidateSet('owner', 'restore')]")) 'owner_media_http_runtime_selector_missing'
+Assert-True ($ownerHttp.Contains("'infra/owner-restore/.env.piwigo'")) 'owner_media_http_restore_env_missing'
+Assert-True ($ownerHttp.Contains("'class_archive_owner_restore_v1_piwigo'")) 'owner_media_http_restore_project_missing'
+Assert-True ($ownerHttp.Contains("'RESTORE_8290'")) 'owner_media_http_restore_scope_missing'
 Assert-True ($ownerHttp.Contains("'-d', 'Ubuntu'")) 'owner_media_http_wsl_boundary_missing'
 Assert-True ($ownerHttpRuntime.Contains('START TRANSACTION READ ONLY')) 'owner_media_http_read_only_missing'
 Assert-True ($ownerHttpRuntime.Contains('tcp://127.0.0.1:80')) 'owner_media_http_loopback_missing'
 Assert-True ($ownerHttpRuntime.Contains("['GET', 'HEAD', 'RANGE']")) 'owner_media_http_method_matrix_missing'
 Assert-True ($ownerHttpRuntime.Contains('status === 403')) 'owner_media_http_guest_deny_missing'
-Assert-True ($ownerHttpRuntime.Contains('direct_guest_requests=') -and $ownerHttpRuntime.Contains('scope=OWNER_8190')) 'owner_media_http_safe_summary_missing'
+Assert-True ($ownerHttpRuntime.Contains('direct_guest_requests=') -and $ownerHttpRuntime.Contains("['OWNER_8190', 'RESTORE_8290']")) 'owner_media_http_safe_summary_missing'
 Assert-True (-not ($ownerHttpRuntime -match '(?i)(?:source_root|staging_path|relative_source_path|original_filename|absolute_path)')) 'owner_media_http_private_field_reference_detected'
 Assert-True ($ownerMediaRuntime.Contains("[ValidateSet('staging', 'owner')]")) 'owner_media_runtime_mode_missing'
 Assert-True ($ownerMediaRuntime.Contains(".env.piwigo.owner")) 'owner_media_runtime_owner_env_missing'

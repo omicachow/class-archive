@@ -1,8 +1,11 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('owner', 'restore')]
+    [string]$Mode = 'owner'
+)
 
-# Owner-only MediaGuard deployment probe. It executes a read-only PHP test in
-# the 8190 private-full Piwigo container and permits only a compact aggregate
+# Owner/restore MediaGuard deployment probe. It executes a read-only PHP test
+# in the selected private Piwigo container and permits only a compact aggregate
 # result through to the terminal. It never opens private source, staging, or
 # import-manifest paths and never emits a media URL, filename, or id.
 
@@ -11,8 +14,20 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$envPath = Join-Path $projectRoot 'infra\private-full\.env.piwigo.owner'
-$envFile = 'infra/private-full/.env.piwigo.owner'
+$isRestore = $Mode -eq 'restore'
+$envFile = if ($isRestore) { 'infra/owner-restore/.env.piwigo' } else { 'infra/private-full/.env.piwigo.owner' }
+$envPath = Join-Path $projectRoot $envFile.Replace('/', '\')
+$composeFiles = if ($isRestore) {
+    @(
+        'infra/docker-compose.yml',
+        'infra/owner-restore/docker-compose.piwigo.override.yml',
+        'infra/private-full/docker-compose.ai-worker.override.yml'
+    )
+} else {
+    @('infra/docker-compose.yml', 'infra/private-full/docker-compose.override.yml')
+}
+$composeProject = if ($isRestore) { 'class_archive_owner_restore_v1_piwigo' } else { 'class_archive_private_full_v3_piwigo' }
+$expectedScope = if ($isRestore) { 'RESTORE_8290' } else { 'OWNER_8190' }
 $runtimePath = Join-Path $PSScriptRoot 'private-full-owner-media-http.php'
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $assertions = 0
@@ -50,17 +65,19 @@ try {
     Assert-PrivateFullOwnerMediaHttp ($runtimeSource.Contains('direct_guest_requests=')) 'runtime_safe_summary_missing'
     Assert-PrivateFullOwnerMediaHttp (-not ($runtimeSource -match '(?i)(?:source_root|staging_path|relative_source_path|original_filename|absolute_path)')) 'runtime_private_field_read_detected'
 
-    $compose = @(
-        '-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose',
-        '--env-file', $envFile,
-        '-f', 'infra/docker-compose.yml',
-        '-f', 'infra/private-full/docker-compose.override.yml',
-        '-p', 'class_archive_private_full_v3_piwigo',
+    $compose = [Collections.Generic.List[string]]::new()
+    foreach ($argument in @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose', '--env-file', $envFile)) {
+        $compose.Add($argument)
+    }
+    foreach ($file in $composeFiles) { $compose.Add('-f'); $compose.Add($file) }
+    foreach ($argument in @(
+        '-p', $composeProject,
         'exec', '-T', '--user', 'nginx',
         '-e', 'CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_HTTP=1',
+        '-e', ('CLASS_ARCHIVE_PRIVATE_FULL_OWNER_MEDIA_SCOPE=' + $expectedScope),
         'piwigo', 'php', '/workspace/tests/phase3/private-full-owner-media-http.php'
-    )
-    $raw = @(& $wsl @compose 2>&1)
+    )) { $compose.Add($argument) }
+    $raw = @(& $wsl @($compose.ToArray()) 2>&1)
     $processExit = $LASTEXITCODE
     $safe = @($raw | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^PRIVATE_FULL_OWNER_MEDIA_HTTP=(?:PASS|FAIL)\b'
@@ -68,7 +85,7 @@ try {
     Assert-PrivateFullOwnerMediaHttp ($processExit -eq 0 -and $safe.Count -eq 1) 'runtime_query_failed'
     $pass = [regex]::Match(
         $safe[0],
-        '^PRIVATE_FULL_OWNER_MEDIA_HTTP=PASS assertions=(?<assertions>\d+) direct_guest_requests=(?<requests>\d+) methods=GET_HEAD_RANGE surfaces=ORIGINAL_DERIVATIVE scope=OWNER_8190$'
+        ('^PRIVATE_FULL_OWNER_MEDIA_HTTP=PASS assertions=(?<assertions>\d+) direct_guest_requests=(?<requests>\d+) methods=GET_HEAD_RANGE surfaces=ORIGINAL_DERIVATIVE scope=' + [regex]::Escape($expectedScope) + '$')
     )
     Assert-PrivateFullOwnerMediaHttp $pass.Success 'runtime_output_invalid'
     Assert-PrivateFullOwnerMediaHttp ([int]$pass.Groups['assertions'].Value -gt 0) 'runtime_assertions_missing'
