@@ -210,7 +210,11 @@ function Test-PrivateAbsolutePath([byte[]]$Bytes) {
     $unc = $backslash + $backslash + '[A-Za-z0-9._-]+' + $backslash
     $extended = $backslash + $backslash + '\?' + $backslash + '[A-Za-z]:' + $backslash
     $unixUser = '/(?:Users|home)/[^/\s]+/'
-    $pattern = '(?i)(?:^|[\s"''=])(?:' + $drive + '|' + $unc + '|' + $extended + '|' + $unixUser + ')'
+    # A path can be wrapped by Markdown backticks, parentheses, punctuation,
+    # or other syntax.  Requiring whitespace/quote/equal before it left those
+    # forms uninspected.  An alphanumeric negative look-behind still avoids
+    # treating the tail of URI schemes such as https:/ as a drive path.
+    $pattern = '(?i)(?<![A-Za-z0-9])(?:' + $drive + '|' + $unc + '|' + $extended + '|' + $unixUser + ')'
     return [regex]::IsMatch($text, $pattern)
 }
 

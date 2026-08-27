@@ -32,7 +32,10 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $wsl = "$env:SystemRoot\System32\wsl.exe"
-$targetRoot = '<temporary-recovery-target>'
+$targetRoot = [IO.Path]::Combine(
+    'M:' + [IO.Path]::DirectorySeparatorChar,
+    'ClassArchive-Temporary-Recovery'
+)
 $markerText = "CLASS_ARCHIVE_BACKUP_TARGET`nversion=1`nscope=OWNER_PRIVATE_FULL`n"
 $runtimeImage = Join-Path $targetRoot 'runtime\classarchive-owner-restore-v1.ext4'
 $mountPoint = '/mnt/classarchive-owner-restore-v1'

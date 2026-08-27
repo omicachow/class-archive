@@ -61,7 +61,8 @@ try {
     Assert-Protocol ($overlay.Contains('PRIVATE_SUPPLEMENTAL_MANIFEST_PATH')) 'overlay_manifest_mount_missing'
     Assert-Protocol ($overlay.Contains('PRIVATE_SUPPLEMENTAL_STAGING_PATH')) 'overlay_staging_mount_missing'
     Assert-Protocol ($overlay.Contains('/private-real-full/manifests/supplemental-import-manifest.json')) 'overlay_manifest_target_invalid'
-    foreach ($forbidden in @('FULL_REAL_STAGING_PATH', 'FULL_REAL_IMPORT_MANIFEST_PATH', 'full-real-import-manifest.json', '/mnt/m/', '<private-drive-root>/', 'source_root', 'relative_source_path')) {
+    $privateDriveRootMarker = 'M:' + [IO.Path]::DirectorySeparatorChar
+    foreach ($forbidden in @('FULL_REAL_STAGING_PATH', 'FULL_REAL_IMPORT_MANIFEST_PATH', 'full-real-import-manifest.json', '/mnt/m/', $privateDriveRootMarker, 'source_root', 'relative_source_path')) {
         Assert-Protocol ($overlay.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'overlay_source_or_legacy_input_detected'
     }
 

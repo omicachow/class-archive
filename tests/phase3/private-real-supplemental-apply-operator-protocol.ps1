@@ -82,7 +82,8 @@ try {
     Assert-Protocol ($operator.Contains("'/opt/class-archive/import-private-real-full.php' = `$ProjectWsl.TrimEnd('/') + '/infra/scripts/import-private-real-full.php'")) 'importer_mount_identity_gate_missing'
     Assert-Protocol ($operator.Contains("'/opt/class-archive/verify-supplemental-target.php' = `$ProjectWsl.TrimEnd('/') + '/infra/scripts/verify-private-real-supplemental-target.php'")) 'target_gate_mount_identity_gate_missing'
     Assert-Protocol (-not ($operator -match 'Write-(?:Output|Host).*(?:ManifestWsl|StagingWsl|OutputPath|StagingPath|envFile)')) 'private_path_output_detected'
-    Assert-Protocol (-not $operator.Contains('<private-drive-root>/')) 'm_source_path_detected'
+    $privateDriveRootMarker = 'M:' + [IO.Path]::DirectorySeparatorChar
+    Assert-Protocol (-not $operator.Contains($privateDriveRootMarker)) 'm_source_path_detected'
     Assert-Protocol (-not ($operator -match '(?i)\bmariadb(?:-dump)?\b')) 'operator_direct_database_access_detected'
 
     Assert-Protocol ($overlay.Contains('supplemental-apply:')) 'apply_service_missing'

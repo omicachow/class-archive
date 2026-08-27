@@ -166,6 +166,18 @@ try {
     Invoke-TestGit $portableAbsolute @('add', '--', 'configuration.txt')
     Assert-Fail (Invoke-BoundaryGate $portableAbsolute 'Index') 'private_absolute_path' $portableMarker
 
+    $markdownAbsolute = New-TestRepository 'private-markdown-absolute-path'
+    $markdownMarker = 'private-markdown-marker'
+    $markdownDrive = 'Q' + ':' + [char]92 + 'Synthetic' + [char]92
+    $markdownFence = [char]96
+    [IO.File]::WriteAllText(
+        (Join-Path $markdownAbsolute 'notes.md'),
+        ('local path: ' + $markdownFence + $markdownDrive + $markdownMarker + $markdownFence),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Invoke-TestGit $markdownAbsolute @('add', '--', 'notes.md')
+    Assert-Fail (Invoke-BoundaryGate $markdownAbsolute 'Index') 'private_absolute_path' $markdownMarker
+
     $history = New-TestRepository 'outgoing-history'
     $base = Get-TestGitValue $history @('rev-parse', 'HEAD')
     $historyMarker = 'outgoing-private-marker'

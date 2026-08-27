@@ -11,7 +11,7 @@ The restore projects and M-backed volume names are all separate from 8091/8191.
 Only `127.0.0.1:8290` and `127.0.0.1:8291` are published. The tool deliberately
 has no volume/image cleanup action; recovery evidence is retained for review.
 
-The runtime image is
+The runtime image is stored below
 `<temporary-recovery-target>/runtime/classarchive-owner-restore-v1.ext4`.
 Its ext4 filesystem is mounted at `/mnt/classarchive-owner-restore-v1`; restore
 volume backing directories live below
