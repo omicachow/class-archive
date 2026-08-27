@@ -732,29 +732,35 @@ function privateFullPreflightSupplementalSources(ClassIdentity\Repository $repos
         }
         $row = $rows[0];
         $sourceId = (int) ($row['id'] ?? 0);
-        if ($sourceId <= 0 || count($provenanceRows) !== 1 || count($referenceRows) !== 1
-            || (int) ($provenanceRows[0]['id'] ?? 0) !== $sourceId
-            || (int) ($referenceRows[0]['id'] ?? 0) !== $sourceId
-            || (string) ($row['source_kind'] ?? '') !== 'PRIVATE_FULL'
-            || (string) ($row['provenance_code'] ?? '') !== $provenance
-            || !hash_equals((string) ($row['source_reference_digest'] ?? ''), $reference)
-            || !hash_equals((string) ($row['original_filename_digest'] ?? ''), $filename)
-            || !hash_equals((string) ($row['source_checksum'] ?? ''), $sourceChecksum)
-            || (int) ($row['byte_size'] ?? 0) !== (int) $item['source_byte_size']
-            || ($row['observed_at'] ?? null) !== null
-            || !hash_equals((string) ($row['presentation_checksum'] ?? ''), $presentationChecksum)
-            || (int) ($row['presentation_byte_size'] ?? 0) !== (int) $item['presentation_byte_size']
-            || (string) ($row['source_format'] ?? '') !== (string) $item['source_format']
-            || (string) ($row['presentation_format'] ?? '') !== (string) $item['presentation_format']
-            || (string) ($row['transform_kind'] ?? '') !== (string) $item['transform_kind']
-            || (string) ($row['transform_tool'] ?? '') !== (string) $item['transform_tool']
-            || (string) ($row['transform_version'] ?? '') !== (string) $item['transform_version']
-            || !hash_equals((string) ($row['transform_recipe_digest'] ?? ''), $recipe)
-            || (string) ($row['photo_state'] ?? '') !== ClassArchivePhoto::STATE_ACTIVE
-            || (int) ($row['piwigo_image_id'] ?? 0) <= 0
-            || !hash_equals((string) ($row['media_checksum'] ?? ''), $presentationChecksum)
-        ) {
-            throw new RuntimeException('supplemental_preflight_existing_source_drift');
+        $driftChecks = [
+            'source_binding' => $sourceId > 0 && count($provenanceRows) === 1 && count($referenceRows) === 1
+                && (int) ($provenanceRows[0]['id'] ?? 0) === $sourceId
+                && (int) ($referenceRows[0]['id'] ?? 0) === $sourceId,
+            'source_kind' => (string) ($row['source_kind'] ?? '') === 'PRIVATE_FULL',
+            'provenance_code' => (string) ($row['provenance_code'] ?? '') === $provenance,
+            'source_reference' => hash_equals((string) ($row['source_reference_digest'] ?? ''), $reference),
+            'original_filename_digest' => hash_equals((string) ($row['original_filename_digest'] ?? ''), $filename),
+            'source_checksum' => hash_equals((string) ($row['source_checksum'] ?? ''), $sourceChecksum),
+            'source_byte_size' => (int) ($row['byte_size'] ?? 0) === (int) $item['source_byte_size'],
+            'observed_at' => ($row['observed_at'] ?? null) === null,
+            'presentation_checksum' => hash_equals((string) ($row['presentation_checksum'] ?? ''), $presentationChecksum),
+            'presentation_byte_size' => (int) ($row['presentation_byte_size'] ?? 0) === (int) $item['presentation_byte_size'],
+            'source_format' => (string) ($row['source_format'] ?? '') === (string) $item['source_format'],
+            'presentation_format' => (string) ($row['presentation_format'] ?? '') === (string) $item['presentation_format'],
+            'transform_kind' => (string) ($row['transform_kind'] ?? '') === (string) $item['transform_kind'],
+            'transform_tool' => (string) ($row['transform_tool'] ?? '') === (string) $item['transform_tool'],
+            'transform_version' => (string) ($row['transform_version'] ?? '') === (string) $item['transform_version'],
+            'transform_recipe' => hash_equals((string) ($row['transform_recipe_digest'] ?? ''), $recipe),
+            'photo_state' => (string) ($row['photo_state'] ?? '') === ClassArchivePhoto::STATE_ACTIVE,
+            'piwigo_image' => (int) ($row['piwigo_image_id'] ?? 0) > 0,
+            'media_checksum' => hash_equals((string) ($row['media_checksum'] ?? ''), $presentationChecksum),
+        ];
+        foreach ($driftChecks as $field => $matches) {
+            if (!$matches) {
+                // Field names are fixed code constants. No source value,
+                // filename or path is reflected into operational output.
+                throw new RuntimeException('supplemental_preflight_existing_source_drift_' . $field);
+            }
         }
         ++$replay;
     }

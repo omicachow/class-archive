@@ -203,7 +203,7 @@ try {
     supplementalRuntimeExec($db, 'UPDATE ' . $presentation . ' SET `presentation_checksum`=UNHEX(REPEAT(\'ab\',32))');
     $expectFailure(
         static fn() => privateFullPreflightSupplementalSources($repository, [$spec]),
-        'supplemental_preflight_existing_source_drift',
+        'supplemental_preflight_existing_source_drift_presentation_checksum',
     );
     supplementalRuntimeExec($db, 'UPDATE ' . $presentation . ' SET `presentation_checksum`=UNHEX(\'' . $presentationChecksum . '\')');
 
