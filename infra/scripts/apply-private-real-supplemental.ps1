@@ -200,11 +200,12 @@ function Assert-ComposeModel([hashtable]$Spec, [string[]]$Prefix, [string]$Manif
     }
     $mounts = @((Get-Property $service 'volumes'))
     Assert-Apply ($mounts.Count -eq 8) 'apply_mount_count_invalid'
+    $declaredVolumes = Get-Property $config 'volumes'
     $expectedVolumes = @{
-        '/var/www/html/piwigo' = [string]$Spec.volumes.piwigo_data
-        '/var/www/html/piwigo/upload' = [string]$Spec.volumes.piwigo_uploads
-        '/var/www/html/piwigo/galleries' = [string]$Spec.volumes.piwigo_galleries
-        '/var/www/html/piwigo/_data/i' = [string]$Spec.volumes.piwigo_derivatives
+        '/var/www/html/piwigo' = @{ key = 'piwigo_data'; name = [string]$Spec.volumes.piwigo_data }
+        '/var/www/html/piwigo/upload' = @{ key = 'piwigo_uploads'; name = [string]$Spec.volumes.piwigo_uploads }
+        '/var/www/html/piwigo/galleries' = @{ key = 'piwigo_galleries'; name = [string]$Spec.volumes.piwigo_galleries }
+        '/var/www/html/piwigo/_data/i' = @{ key = 'piwigo_derivatives'; name = [string]$Spec.volumes.piwigo_derivatives }
     }
     $expectedBinds = @{
         '/private-real-full/manifests/supplemental-import-manifest.json' = $ManifestWsl
@@ -218,7 +219,10 @@ function Assert-ComposeModel([hashtable]$Spec, [string[]]$Prefix, [string]$Manif
         $targetPath = [string](Get-Property $mount 'target')
         $source = [string](Get-Property $mount 'source')
         if ($expectedVolumes.ContainsKey($targetPath)) {
-            Assert-Apply ([string](Get-Property $mount 'type') -ceq 'volume' -and $source -ceq $expectedVolumes[$targetPath] `
+            $expected = $expectedVolumes[$targetPath]
+            $declaration = Get-Property $declaredVolumes ([string]$expected.key)
+            Assert-Apply ([string](Get-Property $mount 'type') -ceq 'volume' -and $source -ceq [string]$expected.key `
+                -and [string](Get-Property $declaration 'name') -ceq [string]$expected.name `
                 -and (Get-Property $mount 'read_only') -ne $true) 'apply_runtime_volume_invalid'
         }
         elseif ($expectedBinds.ContainsKey($targetPath)) {
