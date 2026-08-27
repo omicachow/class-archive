@@ -68,6 +68,23 @@ function Stop-RestoreV2([string]$Code) {
     throw [InvalidOperationException]::new('OWNER_RESTORE_V2_STOP:' + $Code)
 }
 
+function Set-OwnerRestoreV2Utf8ConsoleEncoding {
+    # WSL helpers are launched from this checkout, whose path can contain
+    # non-ASCII characters. Keep native command output decoding process-local
+    # UTF-8 and fail closed rather than accepting an ambiguous helper path.
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding = $utf8
+        $script:OutputEncoding = $utf8
+        if ([Console]::OutputEncoding.CodePage -ne 65001) { Stop-RestoreV2 'utf8_console_encoding_unavailable' }
+    }
+    catch {
+        Stop-RestoreV2 'utf8_console_encoding_unavailable'
+    }
+}
+
+Set-OwnerRestoreV2Utf8ConsoleEncoding
+
 function Assert-RestoreV2([bool]$Condition, [string]$Code) {
     $script:assertions++
     if (-not $Condition) { Stop-RestoreV2 $Code }
@@ -107,9 +124,18 @@ function Assert-DirectoryChain([string]$Root, [string]$Leaf) {
 }
 
 function Get-WslPath([string]$Path) {
-    $result = @(& $wsl -d Ubuntu --exec wslpath -a ([IO.Path]::GetFullPath($Path)) 2>&1)
-    Assert-RestoreV2 ($LASTEXITCODE -eq 0 -and $result.Count -eq 1 -and [string]$result[0] -match '\A/mnt/[a-z]/') 'wsl_path_conversion_failed'
-    return [string]$result[0]
+    # Avoid a locale-sensitive `wslpath` stdout round trip. The restore
+    # protocol accepts only local-drive paths for its source, runtime and
+    # helper inputs; reject UNC, traversal and alternate separators here.
+    try { $full = [IO.Path]::GetFullPath($Path) }
+    catch { Stop-RestoreV2 'wsl_path_conversion_failed' }
+    if ($full -notmatch '^([a-zA-Z]):\\(.+)$') { Stop-RestoreV2 'wsl_path_conversion_failed' }
+    $drive = $Matches[1].ToLowerInvariant()
+    $segments = @($Matches[2] -split '\\')
+    Assert-RestoreV2 ($segments.Count -ge 1 -and @($segments | Where-Object {
+            [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[/\x00:]'
+        }).Count -eq 0) 'wsl_path_conversion_failed'
+    return '/mnt/' + $drive + '/' + ($segments -join '/')
 }
 
 function Invoke-Ubuntu([string[]]$Arguments, [string]$FailureCode = 'ubuntu_command_failed') {

@@ -58,6 +58,14 @@ foreach ($needle in @(
     'Remove-Item -LiteralPath $path -Force'
 )) { Assert-True ($library.Contains($needle)) ('portable_library_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
+Assert-True ($library.Contains('function Set-ClassArchivePortableRecoveryUtf8ConsoleEncoding') `
+    -and $library.Contains('[Console]::OutputEncoding = $utf8') `
+    -and $library.Contains('$script:OutputEncoding = $utf8') `
+    -and $library.Contains("Stop-ClassArchivePortableRecovery 'utf8_console_encoding_unavailable'")) 'portable_utf8_console_guard_missing'
+Assert-True (-not $library.Contains('wslpath -a')) 'portable_locale_sensitive_wslpath_reintroduced'
+Assert-True ($library.Contains("if (`$full -notmatch '^([a-zA-Z]):\\(.+)$')") `
+    -and $library.Contains("return '/mnt/' + `$drive + '/' + (`$segments -join '/')")) 'portable_strict_windows_to_wsl_parser_missing'
+
 foreach ($needle in @(
     '--cipher-algo AES256','--s2k-mode 3','--s2k-digest-algo SHA512','--s2k-count 65011712',
     '--compress-algo none','umask 077','OWNER_PORTABLE_RECOVERY_HELPER=PASS'

@@ -8,6 +8,23 @@ function Stop-ClassArchivePortableRecovery([string]$Code) {
     throw [InvalidOperationException]::new('OWNER_PORTABLE_RECOVERY_STOP:' + $Code)
 }
 
+function Set-ClassArchivePortableRecoveryUtf8ConsoleEncoding {
+    # The GnuPG helper is invoked through WSL from a checkout whose path can
+    # contain non-ASCII characters. Keep the caller's native-command boundary
+    # UTF-8 and fail closed if that process-local setting cannot be established.
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding = $utf8
+        $script:OutputEncoding = $utf8
+        if ([Console]::OutputEncoding.CodePage -ne 65001) {
+            Stop-ClassArchivePortableRecovery 'utf8_console_encoding_unavailable'
+        }
+    }
+    catch {
+        Stop-ClassArchivePortableRecovery 'utf8_console_encoding_unavailable'
+    }
+}
+
 function ConvertFrom-ClassArchiveSecureString([Security.SecureString]$Value) {
     if ($null -eq $Value) { Stop-ClassArchivePortableRecovery 'secure_phrase_missing' }
     $pointer = [IntPtr]::Zero
@@ -119,11 +136,25 @@ function Write-ClassArchiveSecurePhraseFile {
 }
 
 function ConvertTo-ClassArchiveWslPath([string]$Wsl, [string]$Path) {
-    $lines = @(& $Wsl -d Ubuntu --exec wslpath -a $Path 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or [string]$lines[0] -notmatch '\A/(?:mnt/[a-z]|tmp)/') {
+    # Do not round-trip a non-ASCII path through `wslpath` stdout. These
+    # callers accept only ordinary local-drive paths; UNC, traversal and
+    # alternate separators are rejected before the helper receives a path.
+    if ([string]::IsNullOrWhiteSpace($Wsl)) {
         Stop-ClassArchivePortableRecovery 'wsl_path_conversion_failed'
     }
-    return [string]$lines[0]
+    try { $full = [IO.Path]::GetFullPath($Path) }
+    catch { Stop-ClassArchivePortableRecovery 'wsl_path_conversion_failed' }
+    if ($full -notmatch '^([a-zA-Z]):\\(.+)$') {
+        Stop-ClassArchivePortableRecovery 'wsl_path_conversion_failed'
+    }
+    $drive = $Matches[1].ToLowerInvariant()
+    $segments = @($Matches[2] -split '\\')
+    if ($segments.Count -lt 1 -or @($segments | Where-Object {
+            [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[/\x00:]'
+        }).Count -ne 0) {
+        Stop-ClassArchivePortableRecovery 'wsl_path_conversion_failed'
+    }
+    return '/mnt/' + $drive + '/' + ($segments -join '/')
 }
 
 function Invoke-ClassArchivePortableHelper {
@@ -136,6 +167,7 @@ function Invoke-ClassArchivePortableHelper {
         [Parameter(Mandatory = $true)][string]$PassphrasePath,
         [Parameter(Mandatory = $true)][string]$OutputPath
     )
+    Set-ClassArchivePortableRecoveryUtf8ConsoleEncoding
     $helperWsl = ConvertTo-ClassArchiveWslPath $Wsl $HelperPath
     $arguments = @(
         $Action,

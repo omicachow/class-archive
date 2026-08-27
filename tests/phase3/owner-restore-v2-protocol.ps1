@@ -33,6 +33,14 @@ Assert-True ($errors.Count -eq 0) 'runner_parse_failed'
 [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'infra/scripts/private-qa-immich.ps1'),[ref]$tokens,[ref]$errors)
 Assert-True ($errors.Count -eq 0) 'adapter_parse_failed'
 
+Assert-True ($runner.Contains('function Set-OwnerRestoreV2Utf8ConsoleEncoding') `
+    -and $runner.Contains('[Console]::OutputEncoding = $utf8') `
+    -and $runner.Contains('$script:OutputEncoding = $utf8') `
+    -and $runner.Contains("Stop-RestoreV2 'utf8_console_encoding_unavailable'")) 'restore_v2_utf8_console_guard_missing'
+Assert-True (-not $runner.Contains('wslpath -a')) 'restore_v2_locale_sensitive_wslpath_reintroduced'
+Assert-True ($runner.Contains("if (`$full -notmatch '^([a-zA-Z]):\\(.+)$')") `
+    -and $runner.Contains("return '/mnt/' + `$drive + '/' + (`$segments -join '/')")) 'restore_v2_strict_windows_to_wsl_parser_missing'
+
 foreach ($required in @(
     "ValidateSet('validate', 'prepare-storage', 'restore', 'verify', 'cold-restart', 'status')",
     "`$sourceDrive = 'C:'","`$targetDrive = 'M:'",
