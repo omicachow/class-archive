@@ -21,6 +21,8 @@ const PRIVATE_QA_BIND_INPUT = '/tmp/class-archive-private-qa-immich-bindings.jso
 const PRIVATE_QA_INDEX_INPUT = '/tmp/class-archive-private-qa-immich-index-evidence.json';
 const PRIVATE_QA_ENABLE_INPUT = '/tmp/class-archive-private-qa-immich-enable.json';
 const PRIVATE_QA_BRIDGE_TOKEN_OUTPUT = '/tmp/class-archive-private-qa-immich-bridge-token.json';
+const PRIVATE_QA_INCREMENTAL_PLAN_OUTPUT = '/tmp/class-archive-private-qa-immich-incremental-plan.json';
+const PRIVATE_QA_INCREMENTAL_EVIDENCE_INPUT = '/tmp/class-archive-private-qa-immich-incremental-evidence.json';
 const PRIVATE_QA_BRIDGE_SECRET = '_data/.class-archive-immich-bridge.json';
 const PRIVATE_QA_BRIDGE_FLAG = 'class_identity_immich_bridge_enabled';
 
@@ -45,7 +47,10 @@ if (!$privateQaRuntime && !$privateFullRuntime) {
 define('PRIVATE_IMMICH_SCOPE', $runtimeScope);
 define('PRIVATE_IMMICH_MAX_ASSETS', $privateFullRuntime ? 5000 : 500);
 $action = (string) ($_SERVER['argv'][1] ?? '');
-if (!in_array($action, ['export', 'export-bound', 'bind', 'complete-indexes', 'export-bridge-token', 'enable', 'probe'], true) || count($_SERVER['argv']) !== 2) {
+if (!in_array($action, [
+    'export', 'export-bound', 'export-incremental', 'bind', 'complete-indexes', 'complete-incremental',
+    'export-bridge-token', 'enable', 'probe',
+], true) || count($_SERVER['argv']) !== 2) {
     privateQaImmichFail('action_invalid');
 }
 
@@ -148,7 +153,7 @@ function privateQaImmichOriginal(string $reference): array
 /**
  * @return array{version:int,scope:string,count:int,catalog_digest:string,photos:list<array{class_photo_id:string,era:string,media_reference:string,sha256:string}>}
  */
-function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requireUnbound): array
+function privateQaImmichCatalog(ClassIdentity\Repository $repository, ?bool $requireUnbound): array
 {
     global $prefixeTable;
     $candidates = PiwigoGatewayAdapter::fromPiwigo()->photoCandidates();
@@ -187,8 +192,10 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
         if (!is_string($binaryId) || strlen($binaryId) !== 16 || !is_string($binaryChecksum) || strlen($binaryChecksum) !== 32
             || ($row['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE
             || !in_array($era, ['HERITAGE', 'LIVING'], true)
-            || ($requireUnbound && $assetId !== null)
-            || (!$requireUnbound && (!is_string($assetId) || ClassArchivePhoto::normalizeImmichAssetId($assetId) === null))) {
+            || ($requireUnbound === true && $assetId !== null)
+            || ($requireUnbound === false && (!is_string($assetId) || ClassArchivePhoto::normalizeImmichAssetId($assetId) === null))
+            || ($requireUnbound === null && $assetId !== null
+                && (!is_string($assetId) || ClassArchivePhoto::normalizeImmichAssetId($assetId) === null))) {
             throw new RuntimeException('catalog_mapping_invalid');
         }
         $reference = ClassArchivePhoto::normalizeMediaReference((string) ($row['media_reference'] ?? ''));
@@ -214,6 +221,201 @@ function privateQaImmichCatalog(ClassIdentity\Repository $repository, bool $requ
         'catalog_digest' => hash('sha256', $encodedPhotos),
         'photos' => $photos,
     ];
+}
+
+/** @param mixed $value */
+function privateQaImmichStableDigest($value): string
+{
+    return hash('sha256', json_encode($value, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+}
+
+/**
+ * Build an operator-only delta contract from the durable Class Archive AI
+ * queue.  A baseline photo is accepted only when both index states are
+ * INDEXED, its exact current checksum is bound, and it has no open job.  A
+ * delta is accepted only when one checksum-bound NEW_PHOTO or PIXEL_CHANGED
+ * job is still PENDING.  Every other state fails closed.
+ *
+ * The returned media references live only in an ignored, owner-only runtime
+ * file.  The public protocol emits aggregate counts and digests only.
+ *
+ * @return array<string,mixed>
+ */
+function privateQaImmichIncrementalPlan(ClassIdentity\Repository $repository): array
+{
+    if (PRIVATE_IMMICH_SCOPE !== 'PRIVATE_REAL_FULL'
+        || !hash_equals('1', (string) getenv('CLASS_ARCHIVE_PRIVATE_AI_INDEX_WORKER'))
+        || !class_exists(ClassIdentity\AiIndexService::class)) {
+        throw new RuntimeException('incremental_runtime_forbidden');
+    }
+    $catalog = privateQaImmichCatalog($repository, null);
+    $photos = [];
+    foreach ($catalog['photos'] as $photo) {
+        $photos[(string) $photo['class_photo_id']] = $photo;
+    }
+    $rows = $repository->fetchAll(
+        'SELECT p.`class_photo_id`,p.`piwigo_image_id`,p.`immich_asset_id`,p.`media_checksum`,p.`state`,'
+            . 'ai.`source_checksum`,ai.`immich_asset_id` AS `index_asset_id`,ai.`face_state`,ai.`search_state`,'
+            . 'ai.`indexed_at`,ai.`updated_at` FROM `' . $repository->table('photo') . '` p '
+            . 'LEFT JOIN `' . $repository->table('ai_asset_index') . '` ai ON ai.`class_photo_id`=p.`class_photo_id` '
+            . 'ORDER BY p.`class_photo_id` ASC',
+    );
+    $jobRows = $repository->fetchAll(
+        'SELECT `class_photo_id`,`job_kind`,`trigger_kind`,`expected_checksum`,`state`,'
+            . 'CASE WHEN `not_before`<=UTC_TIMESTAMP(6) THEN 1 ELSE 0 END AS `eligible` FROM `'
+            . $repository->table('ai_index_job') . '` WHERE `state` IN (?,?) ORDER BY `class_photo_id`,`created_at`,`job_id`',
+        [ClassIdentity\AiIndexService::JOB_PENDING, ClassIdentity\AiIndexService::JOB_RUNNING],
+    );
+    $jobs = [];
+    foreach ($jobRows as $job) {
+        $binary = $job['class_photo_id'] ?? null;
+        if (!is_string($binary) || strlen($binary) !== 16) {
+            throw new RuntimeException('incremental_job_invalid');
+        }
+        $id = ClassArchivePhoto::binaryToId($binary);
+        $jobs[$id][] = $job;
+    }
+
+    $baseline = [];
+    $delta = [];
+    foreach ($rows as $row) {
+        $binaryId = $row['class_photo_id'] ?? null;
+        $checksum = $row['media_checksum'] ?? null;
+        $indexChecksum = $row['source_checksum'] ?? null;
+        if (!is_string($binaryId) || strlen($binaryId) !== 16
+            || !is_string($checksum) || strlen($checksum) !== 32
+            || !is_string($indexChecksum) || strlen($indexChecksum) !== 32
+            || !hash_equals($checksum, $indexChecksum)
+            || ($row['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE) {
+            throw new RuntimeException('incremental_index_state_invalid');
+        }
+        $id = ClassArchivePhoto::binaryToId($binaryId);
+        $piwigoImageId = (int) ($row['piwigo_image_id'] ?? 0);
+        if (!isset($photos[$id]) || $piwigoImageId < 1) {
+            throw new RuntimeException('incremental_index_state_invalid');
+        }
+        $photoAsset = ClassArchivePhoto::normalizeImmichAssetId(
+            is_string($row['immich_asset_id'] ?? null) ? (string) $row['immich_asset_id'] : null,
+        );
+        $indexAsset = ClassArchivePhoto::normalizeImmichAssetId(
+            is_string($row['index_asset_id'] ?? null) ? (string) $row['index_asset_id'] : null,
+        );
+        $open = $jobs[$id] ?? [];
+        $face = (string) ($row['face_state'] ?? '');
+        $search = (string) ($row['search_state'] ?? '');
+        if ($face === ClassIdentity\AiIndexService::FACE_INDEXED
+            && $search === ClassIdentity\AiIndexService::SEARCH_INDEXED) {
+            if ($photoAsset === null || $indexAsset === null || !hash_equals($photoAsset, $indexAsset)
+                || $open !== [] || !is_string($row['indexed_at'] ?? null) || !is_string($row['updated_at'] ?? null)) {
+                throw new RuntimeException('incremental_baseline_not_ready');
+            }
+            $baseline[] = [
+                'class_photo_id' => $id,
+                'sha256' => bin2hex($checksum),
+                'immich_asset_id' => $photoAsset,
+                'indexed_at' => (string) $row['indexed_at'],
+                'updated_at' => (string) $row['updated_at'],
+            ];
+            continue;
+        }
+        if ($face !== ClassIdentity\AiIndexService::FACE_PENDING
+            || $search !== ClassIdentity\AiIndexService::SEARCH_PENDING
+            || count($open) !== 1) {
+            throw new RuntimeException('incremental_delta_not_pending');
+        }
+        $job = $open[0];
+        $trigger = (string) ($job['trigger_kind'] ?? '');
+        $expected = $job['expected_checksum'] ?? null;
+        if (($job['job_kind'] ?? null) !== ClassIdentity\AiIndexService::JOB_INDEX_ASSET
+            || ($job['state'] ?? null) !== ClassIdentity\AiIndexService::JOB_PENDING
+            || (int) ($job['eligible'] ?? 0) !== 1
+            || !in_array($trigger, [
+                ClassIdentity\AiIndexService::TRIGGER_NEW_PHOTO,
+                ClassIdentity\AiIndexService::TRIGGER_PIXEL_CHANGED,
+            ], true)
+            || !is_string($expected) || strlen($expected) !== 32 || !hash_equals($checksum, $expected)
+            || $indexAsset !== null) {
+            throw new RuntimeException('incremental_job_invalid');
+        }
+        $delta[] = [
+            'class_photo_id' => $id,
+            // The opaque Piwigo row id is carried only in the ignored operator
+            // contract.  It binds the durable derivative marker to this exact
+            // Class Archive delta without exposing a media path or filename.
+            'piwigo_image_id' => $piwigoImageId,
+            'sha256' => bin2hex($checksum),
+            'trigger_kind' => $trigger,
+            'previous_immich_asset_id' => $photoAsset,
+        ];
+    }
+    if (count($baseline) < 1 || count($delta) > 512
+        || count($baseline) + count($delta) !== (int) $catalog['count']
+        || count($jobRows) !== count($delta)) {
+        throw new RuntimeException('incremental_delta_count_invalid');
+    }
+    return [
+        'version' => 1,
+        'scope' => PRIVATE_IMMICH_SCOPE,
+        'catalog_digest' => $catalog['catalog_digest'],
+        'catalog_count' => $catalog['count'],
+        'baseline_count' => count($baseline),
+        'delta_count' => count($delta),
+        'baseline_digest' => privateQaImmichStableDigest($baseline),
+        'delta_digest' => privateQaImmichStableDigest($delta),
+        'photos' => array_values($catalog['photos']),
+        'baseline' => $baseline,
+        'delta' => $delta,
+    ];
+}
+
+/** @param list<array<string,mixed>> $baseline */
+function privateQaImmichBaselineDigest(ClassIdentity\Repository $repository, array $baseline): string
+{
+    $actual = [];
+    foreach ($baseline as $marker) {
+        if (!is_array($marker) || !privateQaImmichExactKeys(
+            $marker,
+            ['class_photo_id', 'sha256', 'immich_asset_id', 'indexed_at', 'updated_at'],
+        )) {
+            throw new RuntimeException('incremental_baseline_invalid');
+        }
+        $id = (string) ($marker['class_photo_id'] ?? '');
+        $row = $repository->fetchOne(
+            'SELECT p.`media_checksum`,p.`immich_asset_id`,p.`state`,ai.`source_checksum`,'
+                . 'ai.`immich_asset_id` AS `index_asset_id`,ai.`face_state`,ai.`search_state`,ai.`indexed_at`,ai.`updated_at` '
+                . 'FROM `' . $repository->table('photo') . '` p INNER JOIN `'
+                . $repository->table('ai_asset_index') . '` ai ON ai.`class_photo_id`=p.`class_photo_id` '
+                . 'WHERE p.`class_photo_id`=? LIMIT 2',
+            [ClassArchivePhoto::idToBinary($id)],
+        );
+        if ($row === null) {
+            throw new RuntimeException('incremental_baseline_changed');
+        }
+        $checksum = $row['media_checksum'] ?? null;
+        $indexChecksum = $row['source_checksum'] ?? null;
+        $photoAsset = ClassArchivePhoto::normalizeImmichAssetId(
+            is_string($row['immich_asset_id'] ?? null) ? (string) $row['immich_asset_id'] : null,
+        );
+        $indexAsset = ClassArchivePhoto::normalizeImmichAssetId(
+            is_string($row['index_asset_id'] ?? null) ? (string) $row['index_asset_id'] : null,
+        );
+        if (!is_string($checksum) || !is_string($indexChecksum)
+            || strlen($checksum) !== 32 || strlen($indexChecksum) !== 32 || !hash_equals($checksum, $indexChecksum)
+            || ($row['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE
+            || ($row['face_state'] ?? null) !== ClassIdentity\AiIndexService::FACE_INDEXED
+            || ($row['search_state'] ?? null) !== ClassIdentity\AiIndexService::SEARCH_INDEXED
+            || $photoAsset === null || $indexAsset === null || !hash_equals($photoAsset, $indexAsset)) {
+            throw new RuntimeException('incremental_baseline_changed');
+        }
+        $actual[] = [
+            'class_photo_id' => $id,
+            'sha256' => bin2hex($checksum),
+            'immich_asset_id' => $photoAsset,
+            'indexed_at' => (string) ($row['indexed_at'] ?? ''),
+            'updated_at' => (string) ($row['updated_at'] ?? ''),
+        ];
+    }
+    return privateQaImmichStableDigest($actual);
 }
 
 function privateQaImmichWriteExclusive(string $path, array $value): void
@@ -362,6 +564,17 @@ try {
         $catalog = privateQaImmichCatalog($repository, false);
         privateQaImmichWriteExclusive(PRIVATE_QA_CATALOG_OUTPUT, $catalog);
         fwrite(STDOUT, 'PRIVATE_QA_IMMICH_CATALOG=PASS action=export-bound count=' . $catalog['count'] . "\n");
+        exit(0);
+    }
+
+    if ($action === 'export-incremental') {
+        $plan = privateQaImmichIncrementalPlan($repository);
+        privateQaImmichWriteExclusive(PRIVATE_QA_INCREMENTAL_PLAN_OUTPUT, $plan);
+        fwrite(
+            STDOUT,
+            'PRIVATE_QA_IMMICH_CATALOG=PASS action=export-incremental count=' . $plan['catalog_count']
+                . ' baseline=' . $plan['baseline_count'] . ' delta=' . $plan['delta_count'] . "\n",
+        );
         exit(0);
     }
 
@@ -580,6 +793,235 @@ try {
         exit(0);
     }
 
+    if ($action === 'complete-incremental') {
+        // This action is intentionally separate from complete-indexes: it
+        // accepts only the exact pre-existing PENDING delta. It neither scans
+        // active photos for new jobs nor invokes model/admin reindex actions.
+        $plan = privateQaImmichIncrementalPlan($repository);
+        $input = privateQaImmichReadJson(PRIVATE_QA_INCREMENTAL_EVIDENCE_INPUT, 1024 * 1024);
+        $keys = [
+            'version', 'scope', 'catalog_digest', 'baseline_digest', 'delta_digest',
+            'runtime_mode', 'asset_count', 'baseline_count', 'delta_count', 'people_count',
+            'face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision',
+            'face_queue_idle', 'recognition_queue_idle', 'search_queue_idle', 'force_full',
+            'library_queue_idle', 'metadata_queue_idle', 'thumbnail_queue_idle',
+            'baseline_runtime_digest_before', 'baseline_runtime_digest_after', 'old_asset_changes', 'assets',
+        ];
+        if (!privateQaImmichExactKeys($input, $keys)
+            || ($input['version'] ?? null) !== 1
+            || ($input['scope'] ?? null) !== PRIVATE_IMMICH_SCOPE
+            || ($input['runtime_mode'] ?? null) !== 'INCREMENTAL'
+            || !is_string($input['catalog_digest'] ?? null)
+            || !hash_equals((string) $plan['catalog_digest'], (string) $input['catalog_digest'])
+            || !is_string($input['baseline_digest'] ?? null)
+            || !hash_equals((string) $plan['baseline_digest'], (string) $input['baseline_digest'])
+            || !is_string($input['delta_digest'] ?? null)
+            || !hash_equals((string) $plan['delta_digest'], (string) $input['delta_digest'])
+            || ($input['asset_count'] ?? null) !== $plan['catalog_count']
+            || ($input['baseline_count'] ?? null) !== $plan['baseline_count']
+            || ($input['delta_count'] ?? null) !== $plan['delta_count']
+            || !is_int($input['people_count'] ?? null) || $input['people_count'] < 1
+            || ($input['face_queue_idle'] ?? null) !== true
+            || ($input['recognition_queue_idle'] ?? null) !== true
+            || ($input['search_queue_idle'] ?? null) !== true
+            || ($input['library_queue_idle'] ?? null) !== true
+            || ($input['metadata_queue_idle'] ?? null) !== true
+            || ($input['thumbnail_queue_idle'] ?? null) !== true
+            || ($input['force_full'] ?? null) !== false
+            || ($input['old_asset_changes'] ?? null) !== 0
+            || !is_string($input['baseline_runtime_digest_before'] ?? null)
+            || !is_string($input['baseline_runtime_digest_after'] ?? null)
+            || preg_match('/\A[0-9a-f]{64}\z/D', (string) $input['baseline_runtime_digest_before']) !== 1
+            || !hash_equals(
+                (string) $input['baseline_runtime_digest_before'],
+                (string) $input['baseline_runtime_digest_after'],
+            )
+            || !is_array($input['assets'] ?? null)
+            || count($input['assets']) !== $plan['catalog_count']) {
+            throw new RuntimeException('incremental_evidence_invalid');
+        }
+        foreach (['face_model_name', 'face_model_revision', 'search_model_name', 'search_model_revision'] as $field) {
+            if (!is_string($input[$field] ?? null)
+                || preg_match('/\A[A-Za-z0-9._:@\/-]{1,190}\z/D', (string) $input[$field]) !== 1) {
+                throw new RuntimeException('incremental_evidence_invalid');
+            }
+        }
+
+        $bindings = [];
+        foreach ($input['assets'] as $asset) {
+            if (!is_array($asset) || !privateQaImmichExactKeys($asset, ['class_photo_id', 'immich_asset_id'])) {
+                throw new RuntimeException('incremental_evidence_invalid');
+            }
+            $id = (string) ($asset['class_photo_id'] ?? '');
+            $assetId = ClassArchivePhoto::normalizeImmichAssetId((string) ($asset['immich_asset_id'] ?? ''));
+            if ($assetId === null || isset($bindings[$id])) {
+                throw new RuntimeException('incremental_evidence_invalid');
+            }
+            $bindings[$id] = $assetId;
+        }
+        if (count(array_unique(array_values($bindings), SORT_STRING)) !== $plan['catalog_count']) {
+            throw new RuntimeException('incremental_evidence_invalid');
+        }
+        foreach ($plan['baseline'] as $marker) {
+            $id = (string) $marker['class_photo_id'];
+            if (!isset($bindings[$id]) || !hash_equals((string) $marker['immich_asset_id'], $bindings[$id])) {
+                throw new RuntimeException('incremental_old_binding_changed');
+            }
+        }
+        if (!hash_equals(
+            (string) $plan['baseline_digest'],
+            privateQaImmichBaselineDigest($repository, $plan['baseline']),
+        )) {
+            throw new RuntimeException('incremental_baseline_changed');
+        }
+
+        $deltaById = [];
+        foreach ($plan['delta'] as $delta) {
+            $deltaById[(string) $delta['class_photo_id']] = $delta;
+        }
+        $completed = 0;
+        $changedBindings = 0;
+        // Publish the trusted runtime result as one database transaction. A
+        // process death can therefore leave either the entire checksum-bound
+        // delta PENDING or the entire delta INDEXED, never a half-committed
+        // mix that would require broad recovery/reindex work.
+        $repository->transaction(function (ClassIdentity\Repository $repository) use (
+            $plan,
+            $deltaById,
+            $bindings,
+            $input,
+            &$completed,
+            &$changedBindings,
+        ): void {
+            $open = $repository->fetchAll(
+                'SELECT `job_id`,`class_photo_id`,`job_kind`,`trigger_kind`,`expected_checksum`,`state`,'
+                    . 'CASE WHEN `not_before`<=UTC_TIMESTAMP(6) THEN 1 ELSE 0 END AS `eligible` FROM `'
+                    . $repository->table('ai_index_job') . '` WHERE `state` IN (?,?) '
+                    . 'ORDER BY `class_photo_id`,`job_id` FOR UPDATE',
+                [ClassIdentity\AiIndexService::JOB_PENDING, ClassIdentity\AiIndexService::JOB_RUNNING],
+            );
+            if (count($open) !== $plan['delta_count']) {
+                throw new RuntimeException('incremental_job_invalid');
+            }
+            $jobById = [];
+            foreach ($open as $job) {
+                $binary = $job['class_photo_id'] ?? null;
+                $checksum = $job['expected_checksum'] ?? null;
+                $id = is_string($binary) && strlen($binary) === 16 ? ClassArchivePhoto::binaryToId($binary) : '';
+                if (!isset($deltaById[$id]) || isset($jobById[$id])
+                    || ($job['job_kind'] ?? null) !== ClassIdentity\AiIndexService::JOB_INDEX_ASSET
+                    || ($job['state'] ?? null) !== ClassIdentity\AiIndexService::JOB_PENDING
+                    || (int) ($job['eligible'] ?? 0) !== 1
+                    || ($job['trigger_kind'] ?? null) !== $deltaById[$id]['trigger_kind']
+                    || !is_string($checksum) || strlen($checksum) !== 32
+                    || !hash_equals((string) $deltaById[$id]['sha256'], bin2hex($checksum))) {
+                    throw new RuntimeException('incremental_job_invalid');
+                }
+                $jobById[$id] = $job;
+            }
+            foreach ($plan['delta'] as $delta) {
+                $id = (string) $delta['class_photo_id'];
+                if (!isset($bindings[$id], $jobById[$id])) {
+                    throw new RuntimeException('incremental_evidence_invalid');
+                }
+                $binary = ClassArchivePhoto::idToBinary($id);
+                $photo = $repository->fetchOne(
+                    'SELECT `immich_asset_id`,`media_checksum`,`state` FROM `'
+                        . $repository->table('photo') . '` WHERE `class_photo_id`=? FOR UPDATE',
+                    [$binary],
+                );
+                $current = ClassArchivePhoto::normalizeImmichAssetId(
+                    is_string($photo['immich_asset_id'] ?? null) ? (string) $photo['immich_asset_id'] : null,
+                );
+                $previous = ClassArchivePhoto::normalizeImmichAssetId(
+                    is_string($delta['previous_immich_asset_id'] ?? null)
+                        ? (string) $delta['previous_immich_asset_id'] : null,
+                );
+                if ($photo === null || ($photo['state'] ?? null) !== ClassArchivePhoto::STATE_ACTIVE
+                    || !is_string($photo['media_checksum'] ?? null)
+                    || !hash_equals((string) $delta['sha256'], bin2hex((string) $photo['media_checksum']))
+                    || (($current === null) !== ($previous === null))
+                    || ($current !== null && !hash_equals($current, (string) $previous))) {
+                    throw new RuntimeException('incremental_binding_race');
+                }
+                if ($current === null || !hash_equals($current, $bindings[$id])) {
+                    if ($repository->execute(
+                        'UPDATE `' . $repository->table('photo')
+                            . '` SET `immich_asset_id`=?,`updated_at`=UTC_TIMESTAMP(6) WHERE `class_photo_id`=?',
+                        [$bindings[$id], $binary],
+                    ) !== 1) {
+                        throw new RuntimeException('incremental_binding_race');
+                    }
+                    ++$changedBindings;
+                }
+                if ($repository->execute(
+                    'UPDATE `' . $repository->table('ai_asset_index') . '` SET `immich_asset_id`=?,`face_state`=?,`search_state`=?,'
+                        . '`face_model_name`=?,`face_model_revision`=?,`search_model_name`=?,`search_model_revision`=?,'
+                        . '`indexed_at`=UTC_TIMESTAMP(6),`last_error_code`=NULL,`updated_at`=UTC_TIMESTAMP(6) '
+                        . 'WHERE `class_photo_id`=? AND `source_checksum`=? AND `face_state`=? AND `search_state`=? AND `immich_asset_id` IS NULL',
+                    [
+                        $bindings[$id], ClassIdentity\AiIndexService::FACE_INDEXED, ClassIdentity\AiIndexService::SEARCH_INDEXED,
+                        (string) $input['face_model_name'], (string) $input['face_model_revision'],
+                        (string) $input['search_model_name'], (string) $input['search_model_revision'],
+                        $binary, hex2bin((string) $delta['sha256']),
+                        ClassIdentity\AiIndexService::FACE_PENDING, ClassIdentity\AiIndexService::SEARCH_PENDING,
+                    ],
+                ) !== 1) {
+                    throw new RuntimeException('incremental_index_state_invalid');
+                }
+                if ($repository->execute(
+                    'UPDATE `' . $repository->table('ai_index_job') . '` SET `state`=?,`attempt_count`=`attempt_count`+1,'
+                        . '`last_error_code`=NULL,`completed_at`=UTC_TIMESTAMP(6),`updated_at`=UTC_TIMESTAMP(6) '
+                        . 'WHERE `job_id`=? AND `state`=?',
+                    [ClassIdentity\AiIndexService::JOB_COMPLETE, (string) $jobById[$id]['job_id'], ClassIdentity\AiIndexService::JOB_PENDING],
+                ) !== 1) {
+                    throw new RuntimeException('incremental_job_invalid');
+                }
+                ++$completed;
+            }
+            if ($changedBindings > 0) {
+                ClassIdentity\ProjectionMutationBoundary::invalidateAggregates(
+                    $repository,
+                    [
+                        ClassIdentity\Gateway\ReadProjectionStore::PEOPLE,
+                        ClassIdentity\Gateway\ReadProjectionStore::MEMORIES,
+                    ],
+                    'IMMICH_INCREMENTAL_BIND',
+                );
+            }
+        });
+        $ai = ClassIdentity\AiIndexService::fromPiwigo();
+        $remainingOpen = $repository->fetchOne(
+            'SELECT COUNT(*) AS `open_count` FROM `' . $repository->table('ai_index_job') . '` WHERE `state` IN (?,?)',
+            [ClassIdentity\AiIndexService::JOB_PENDING, ClassIdentity\AiIndexService::JOB_RUNNING],
+        );
+        if ($completed !== $plan['delta_count'] || (int) ($remainingOpen['open_count'] ?? -1) !== 0
+            || !hash_equals(
+                (string) $plan['baseline_digest'],
+                privateQaImmichBaselineDigest($repository, $plan['baseline']),
+            )) {
+            throw new RuntimeException('incremental_old_index_changed');
+        }
+        $status = $ai->status();
+        $maintenance = $ai->maintenanceReport();
+        if (($status['state'] ?? null) !== 'READY'
+            || ($status['open_jobs'] ?? null) !== 0
+            || ($status['review_required'] ?? null) !== false
+            || (($status['assets']['INDEXED:INDEXED'] ?? null) !== $plan['catalog_count'])
+            || ($maintenance['result'] ?? null) !== 'PASS'
+            || ($maintenance['missing_index_rows'] ?? null) !== 0
+            || ($maintenance['checksum_drift'] ?? null) !== 0) {
+            throw new RuntimeException('incremental_completion_invalid');
+        }
+        fwrite(
+            STDOUT,
+            'PRIVATE_QA_IMMICH_CATALOG=PASS action=complete-incremental count=' . $plan['catalog_count']
+                . ' baseline=' . $plan['baseline_count'] . ' delta=' . $plan['delta_count']
+                . ' completed=' . $completed . ' old_changed=0 state=READY' . "\n",
+        );
+        exit(0);
+    }
+
     if ($action === 'export-bridge-token') {
         if (!$privateFullRuntime) {
             throw new RuntimeException('bridge_export_runtime_forbidden');
@@ -647,7 +1089,11 @@ try {
         'catalog_count_invalid', 'catalog_mapping_invalid', 'catalog_integrity_invalid', 'output_not_clean', 'output_create_failed',
         'output_write_failed', 'binding_input_invalid', 'binding_asset_duplicate', 'binding_race', 'enable_input_invalid',
         'index_runtime_forbidden', 'index_evidence_invalid', 'index_binding_invalid', 'index_job_invalid',
-        'index_completion_invalid',
+        'index_completion_invalid', 'incremental_runtime_forbidden', 'incremental_index_state_invalid',
+        'incremental_baseline_not_ready', 'incremental_delta_not_pending', 'incremental_job_invalid',
+        'incremental_delta_count_invalid', 'incremental_baseline_invalid', 'incremental_baseline_changed',
+        'incremental_evidence_invalid', 'incremental_old_binding_changed', 'incremental_binding_race',
+        'incremental_old_index_changed', 'incremental_completion_invalid',
         'bridge_secret_not_clean', 'bridge_service_identity_invalid', 'bridge_secret_existing_invalid',
         'bridge_export_disabled', 'bridge_export_runtime_forbidden',
         'adapter_unavailable', 'class_archive_immich_bridge_binding_invalid',

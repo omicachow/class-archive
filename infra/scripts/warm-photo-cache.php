@@ -15,7 +15,7 @@ const CLASS_ARCHIVE_PHOTO_CACHE_FIRST_SCREEN_LIMIT = 48;
 const CLASS_ARCHIVE_PHOTO_CACHE_GENERATOR_TIMEOUT_SECONDS = 30.0;
 const CLASS_ARCHIVE_PHOTO_CACHE_GENERATOR_STDERR_LIMIT = 8192;
 
-/** @return array{scope:string,profiles:list<string>,dry_run:bool,json:bool} */
+/** @return array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string} */
 function classArchivePhotoCacheArguments(array $argv): array
 {
     $result = [
@@ -23,6 +23,7 @@ function classArchivePhotoCacheArguments(array $argv): array
         'profiles' => ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'],
         'dry_run' => false,
         'json' => false,
+        'queue_digest' => null,
     ];
     foreach (array_slice($argv, 1) as $argument) {
         if ($argument === '--dry-run') {
@@ -35,7 +36,7 @@ function classArchivePhotoCacheArguments(array $argv): array
         }
         if (str_starts_with($argument, '--scope=')) {
             $scope = substr($argument, strlen('--scope='));
-            if (!in_array($scope, ['first-screen', 'covers', 'all'], true)) {
+            if (!in_array($scope, ['first-screen', 'covers', 'queue', 'all'], true)) {
                 throw new InvalidArgumentException('photo_cache_scope_invalid');
             }
             $result['scope'] = $scope;
@@ -59,7 +60,18 @@ function classArchivePhotoCacheArguments(array $argv): array
             $result['profiles'] = $profiles;
             continue;
         }
+        if (str_starts_with($argument, '--queue-digest=')) {
+            $digest = substr($argument, strlen('--queue-digest='));
+            if (preg_match('/\A[0-9a-f]{64}\z/D', $digest) !== 1 || $result['queue_digest'] !== null) {
+                throw new InvalidArgumentException('photo_cache_queue_digest_invalid');
+            }
+            $result['queue_digest'] = $digest;
+            continue;
+        }
         throw new InvalidArgumentException('photo_cache_argument_invalid');
+    }
+    if ($result['queue_digest'] !== null && ($result['scope'] !== 'queue' || $result['dry_run'])) {
+        throw new InvalidArgumentException('photo_cache_queue_digest_scope_invalid');
     }
     return $result;
 }
@@ -202,6 +214,12 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
         $timelineFilter = ' AND pm.`class_photo_id` IN (' . implode(',', array_fill(0, count($binaryIds), '?')) . ')';
         array_push($parameters, ...$binaryIds);
     }
+    // `queue` is the strict write-side delta scope.  It deliberately starts
+    // with an empty base relation and can receive rows only through the
+    // checksum-independent opaque UUID/image-id markers resolved below.  In
+    // particular it must never turn a 26-photo supplemental import into a
+    // 2k-photo derivative walk merely because the full library is active.
+    $queueOnlyFilter = $scope === 'queue' ? ' AND 1=0' : '';
     $rows = $repository->fetchAll(
         'SELECT DISTINCT i.`id`,i.`path`,i.`file`,i.`width`,i.`height`,i.`rotation`,i.`representative_ext`, '
         . 'HEX(pm.`class_photo_id`) AS `class_photo_id_hex`,pm.`media_reference`,pm.`state` AS `mapping_state` '
@@ -209,7 +227,7 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
         . 'JOIN `' . $photo . '` pm ON pm.`piwigo_image_id` = i.`id` '
         . $coverJoin
         . 'LEFT JOIN `' . $archive . '` ai ON ai.`piwigo_image_id` = i.`id` '
-        . "WHERE pm.`state` = 'ACTIVE' " . $timelineFilter
+        . "WHERE pm.`state` = 'ACTIVE' " . $timelineFilter . $queueOnlyFilter
         . 'ORDER BY ai.`archive_date` IS NULL ASC,ai.`archive_date` DESC,i.`id` DESC'
         ,
         $parameters,
@@ -669,9 +687,9 @@ function classArchivePhotoCacheGenerateIdentity(string $relative, string $source
 }
 
 /** @param list<string> $profiles @return array<string,mixed> */
-function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun): array
+function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun, ?string $expectedQueueDigest = null): array
 {
-    if (!in_array($scope, ['first-screen', 'covers', 'all'], true)) {
+    if (!in_array($scope, ['first-screen', 'covers', 'queue', 'all'], true)) {
         throw new InvalidArgumentException('photo_cache_scope_invalid');
     }
     $canonical = classArchivePhotoCacheCanonicalProfiles();
@@ -709,7 +727,7 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
         // into a whole-library job just because a large import has queued many
         // active images.  The explicit `all` recovery pass owns queue drain;
         // bounded passes leave every marker intact for that background work.
-        $pendingForScope = $scope === 'all' ? $pending : [];
+        $pendingForScope = in_array($scope, ['queue', 'all'], true) ? $pending : [];
         $quarantined = [];
         $rows = classArchivePhotoCacheRows($scope, $pendingForScope, $quarantined);
         $quarantinedKeys = [];
@@ -722,6 +740,20 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
                 continue;
             }
             $pendingByImage[(int) $entry['piwigo_image_id']] = $entry;
+        }
+        // `queue_entries` is operator evidence, not a browser payload.  It
+        // deliberately contains only opaque Class Archive/Piwigo ids: never a
+        // source filename, managed-media reference, or host path.  Keeping the
+        // list in the CLI JSON lets a retry prove that a partially drained
+        // queue is still a subset of the checksum-bound supplemental delta.
+        $queueEntries = $scope === 'queue' ? array_values($pendingByImage) : [];
+        $queueDigest = hash(
+            'sha256',
+            json_encode($queueEntries, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        );
+        if ($expectedQueueDigest !== null
+            && ($scope !== 'queue' || $dryRun || !hash_equals($expectedQueueDigest, $queueDigest))) {
+            throw new RuntimeException('photo_cache_queue_digest_changed');
         }
         // A marker is complete once every product variant exists. A recovery
         // run may additionally warm the Piwigo-only square profile without
@@ -748,6 +780,8 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
             'queue_quarantined' => count($quarantined),
             'queue_completed' => 0,
             'queue_retained' => count($pending) - count($quarantined),
+            'queue_entries' => $queueEntries,
+            'queue_digest' => $queueDigest,
             'projection_rebuilt' => false,
             'duration_ms' => 0,
         ];
@@ -871,11 +905,16 @@ function classArchivePhotoCacheWarm(string $scope, array $profiles, bool $dryRun
     }
 }
 
-/** @param array{scope:string,profiles:list<string>,dry_run:bool,json:bool} $arguments */
+/** @param array{scope:string,profiles:list<string>,dry_run:bool,json:bool,queue_digest:?string} $arguments */
 function classArchivePhotoCacheMain(array $arguments): int
 {
     try {
-        $result = classArchivePhotoCacheWarm($arguments['scope'], $arguments['profiles'], $arguments['dry_run']);
+        $result = classArchivePhotoCacheWarm(
+            $arguments['scope'],
+            $arguments['profiles'],
+            $arguments['dry_run'],
+            $arguments['queue_digest'],
+        );
         if ($arguments['json']) {
             fwrite(STDOUT, json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n");
         } else {

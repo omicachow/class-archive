@@ -43,6 +43,14 @@ $recovery = classArchivePhotoCacheArguments([
 ]);
 $assert($recovery['profiles'][0] === 'square' && count($recovery['profiles']) === 7, 'core_square_recovery_profile_missing');
 $assert(classArchivePhotoCacheCompletesQueuedWarmup($defaults['profiles']), 'product_profiles_must_complete_queue');
+$queueOnly = classArchivePhotoCacheArguments(['warm-photo-cache.php', '--scope=queue', '--json']);
+$assert($queueOnly['scope'] === 'queue' && $queueOnly['json'], 'queue_only_scope_missing');
+$queueContract = classArchivePhotoCacheArguments([
+    'warm-photo-cache.php',
+    '--scope=queue',
+    '--queue-digest=' . str_repeat('a', 64),
+]);
+$assert($queueContract['queue_digest'] === str_repeat('a', 64), 'queue_digest_contract_missing');
 $assert(classArchivePhotoCacheCompletesQueuedWarmup($recovery['profiles']), 'recovery_superset_must_complete_queue');
 $assert(!classArchivePhotoCacheCompletesQueuedWarmup(['square', 'thumbnail', 'xsmall', 'small', 'medium', 'large']), 'incomplete_product_profiles_consumed_queue');
 $expects(
@@ -56,6 +64,14 @@ $expects(
 $expects(
     static fn (): array => classArchivePhotoCacheArguments(['warm-photo-cache.php', '--profiles=xsmall,']),
     'photo_cache_profiles_invalid',
+);
+$expects(
+    static fn (): array => classArchivePhotoCacheArguments(['warm-photo-cache.php', '--scope=all', '--queue-digest=' . str_repeat('a', 64)]),
+    'photo_cache_queue_digest_scope_invalid',
+);
+$expects(
+    static fn (): array => classArchivePhotoCacheArguments(['warm-photo-cache.php', '--scope=queue', '--dry-run', '--queue-digest=' . str_repeat('a', 64)]),
+    'photo_cache_queue_digest_scope_invalid',
 );
 $generatorEnvironment = classArchivePhotoCacheGeneratorEnvironment('upload/synthetic-sm.jpg');
 $allowedGeneratorEnvironment = [
@@ -102,9 +118,15 @@ $assert(str_contains($source, "'square' => 'IMG_SQUARE'")
 $assert(str_contains($source, "clearstatcache(true, \$target['absolute']);")
     && str_contains($immediate, "clearstatcache(true, \$target['absolute']);"), 'child_generator_negative_stat_cache_not_cleared');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
-$assert(str_contains($source, '$pendingForScope = $scope === \'all\' ? $pending : [];')
+$assert(str_contains($source, "\$queueOnlyFilter = \$scope === 'queue' ? ' AND 1=0' : ''"), 'queue_only_base_relation_not_empty');
+$assert(str_contains($source, "in_array(\$scope, ['queue', 'all'], true)"), 'queue_only_scope_does_not_resolve_durable_markers');
+$assert(str_contains($source, '$pendingForScope = in_array($scope, [\'queue\', \'all\'], true) ? $pending : [];')
     && str_contains($source, 'classArchivePhotoCacheRows($scope, $pendingForScope, $quarantined)')
     && str_contains($source, 'foreach ($pendingForScope as $entry)'), 'bounded_warmup_may_drain_full_library_queue');
+$assert(str_contains($source, "\$queueEntries = \$scope === 'queue' ? array_values(\$pendingByImage) : []")
+    && str_contains($source, "'queue_entries' => \$queueEntries"), 'queue_retry_marker_evidence_missing');
+$assert(str_contains($source, 'hash_equals($expectedQueueDigest, $queueDigest)')
+    && str_contains($source, 'photo_cache_queue_digest_changed'), 'queue_apply_race_not_fail_closed');
 $assert(str_contains($source, 'classArchivePhotoCacheTimelineFirstScreenIds')
     && str_contains($source, 'ReadProjectionStore::TIMELINE')
     && str_contains($source, 'ReadProjectionStore::SCOPE_FULL')

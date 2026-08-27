@@ -511,6 +511,16 @@ switch ($Action) {
             'piwigo', 'php', '/workspace/tests/phase3/derivative-warmup-queue-runtime.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/private-incremental-media-protocol.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/private-incremental-media-retry-synthetic.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-ui-static.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-cache-contract.mjs')

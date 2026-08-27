@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('preflight', 'prepare-model-cache', 'up', 'validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes')]
+    [ValidateSet('preflight', 'prepare-model-cache', 'up', 'validate', 'status', 'provision', 'resume', 'finish', 'finalize-indexes', 'sync-incremental')]
     [string]$Action = 'preflight'
 )
 
@@ -297,6 +297,14 @@ try {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $delegate -Action $Action -Runtime full
         if ($LASTEXITCODE -ne 0) { Fail 'delegate_failed' }
         Write-Output "PRIVATE_FULL_IMMICH=PASS action=$Action assertions=$script:assertions evidence=PRIVATE_FULL_RUNTIME"
+        exit 0
+    }
+    if ($Action -eq 'sync-incremental') {
+        $script:stage = 'incremental_delegate'
+        $delegate = Join-Path $PSScriptRoot 'private-full-incremental-media.ps1'
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $delegate -Action apply -Runtime full
+        if ($LASTEXITCODE -ne 0) { Fail 'incremental_delegate_failed' }
+        Write-Output "PRIVATE_FULL_IMMICH=PASS action=sync-incremental assertions=$script:assertions evidence=DELTA_ONLY_RUNTIME"
         exit 0
     }
     Fail 'action_invalid'
