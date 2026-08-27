@@ -117,6 +117,8 @@ Assert-True ($deploy.Contains('Get-ChildItem -LiteralPath $gitEvidenceRefs -Forc
 Assert-True ($deploy.Contains('Assert-RestoreWorkspaceMounts') -and $deploy.Contains("@('infra','plugins','themes','tests')")) 'restore_schema_current_workspace_mount_missing'
 Assert-True ($deploy.Contains('Assert-RestoreNginxPreflight') -and $deploy.Contains('Initialize-RestoreNginxConfig')) 'restore_schema_nginx_late_failure_guard_missing'
 Assert-True ($deploy.Contains('set_real_ip_from 10.245.0.10/32;') -and $deploy.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $restoreNginxPath') -and $deploy.Contains('restore_deploy_nginx_not_private')) 'restore_schema_nginx_private_generation_missing'
+Assert-True ($deploy.Contains("[string]::Equals([IO.File]::ReadAllText(`$restoreNginxPath,[Text.Encoding]::UTF8),`$content,[StringComparison]::Ordinal)") `
+    -and $deploy.Contains("Test-IgnoredPrivatePath `$restoreNginxPath 'restore_deploy_nginx_not_private'`n            return")) 'restore_schema_nginx_exact_content_rewrite_not_avoided'
 
 $snapshotService = [regex]::Match($baseCompose,'(?ms)^  pre-migration-db-backup:\r?\n(?<body>.*?)(?=^  backup-audit:)')
 Assert-True $snapshotService.Success 'restore_schema_snapshot_service_missing'

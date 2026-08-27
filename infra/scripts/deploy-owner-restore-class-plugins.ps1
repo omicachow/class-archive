@@ -481,6 +481,14 @@ function Initialize-RestoreGitEvidenceRoot {
 function Initialize-RestoreNginxConfig {
     Assert-PlainDirectory $runtimeRoot 'restore_deploy_runtime_root_invalid'
     $content = Get-RestoreNginxContent
+    if (Test-Path -LiteralPath $restoreNginxPath) {
+        Assert-PlainFile $restoreNginxPath 'restore_deploy_nginx_target_invalid'
+        if ([string]::Equals([IO.File]::ReadAllText($restoreNginxPath,[Text.Encoding]::UTF8),$content,[StringComparison]::Ordinal)) {
+            Set-ClassArchiveOwnerOnlyFileAcl -Path $restoreNginxPath
+            Test-IgnoredPrivatePath $restoreNginxPath 'restore_deploy_nginx_not_private'
+            return
+        }
+    }
     $temporary = Join-Path $runtimeRoot ('nginx.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         [IO.File]::WriteAllText($temporary,$content,[Text.UTF8Encoding]::new($false))
