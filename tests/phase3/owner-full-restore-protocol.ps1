@@ -82,6 +82,8 @@ foreach ($needle in @(
     'resume_network_topology_invalid', 'resume_network_identity_invalid', 'resume_network_foreign_member', 'resume_container_foreign_network',
     'resume_private_runtime_file_missing', 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $path', 'resume_passphrase_present',
     'resume_restored_count_mismatch', 'Assert-TargetModelCache $BundleInfo',
+    'Ensure-RestoreImmichEnvBinding', 'IMMICH_SPIKE_ENV_FILE=../owner-restore/.env.immich', 'resume_immich_environment_binding_invalid',
+    "'BEFORE_PIWIGO'", "'AFTER_PIWIGO'", 'resume_piwigo_ports_invalid', 'resume_piwigo_http_unhealthy',
     "a.state='ACTIVE' AND EXISTS (SELECT 1 FROM `${pwg}image_category ic WHERE ic.category_id=a.piwigo_category_id)",
     'PRIVATE_QA_IMMICH=PASS action=finish', '-Runtime restore', 'pwsh.exe -NoProfile -File',
     'Assert-AiRestoreEvidence', 'reused_existing_indexes -eq $true', 'restore_ai_reindex_detected',
@@ -119,12 +121,13 @@ Assert-True (-not $runner.Contains("Invoke-RestoreDocker @('network','create'"))
 Assert-True ($runner.Contains('docker --host "$2" run --rm --log-driver none --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH')) 'restore_model_cache_source_log_driver_missing'
 Assert-True (-not $runner.Contains("[string]`$checkoutHead[0] -eq [string]`$manifest.source_head")) 'restore_checkout_must_distinguish_source_and_tool_heads'
 
-$resumeBlock = [regex]::Match($runner, '(?ms)^\s*if \(\$Action -eq ''resume''\) \{.*?^\s*\}').Value
+$resumeBlock = [regex]::Match($runner, '(?ms)^\s*if \(\$Action -eq ''resume''\) \{.*?(?=^\s*if \(\$Action -eq ''cold-restart''\))').Value
 Assert-True (-not [string]::IsNullOrWhiteSpace($resumeBlock)) 'restore_resume_action_missing'
 foreach ($needle in @(
     'resume_confirmation_required', 'Assert-PrimaryOwnerHttp', 'Get-PrimaryOwnerFingerprint',
-    'Assert-PartialRestoreRuntime $bundleInfo', "Invoke-RestoreCompose piwigo @('up','-d','piwigo')",
+    '$resumeCheckpoint = Assert-PartialRestoreRuntime $bundleInfo', "Invoke-RestoreCompose piwigo @('up','-d','piwigo')",
     'Initialize-RestoreGitEvidence $bundleInfo',
+    'Ensure-RestoreImmichEnvBinding', "if (`$resumeCheckpoint -eq 'BEFORE_PIWIGO')",
     "Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server')",
     'Invoke-PrivateImmichFinish', "Invoke-RestoreCompose immich @('--profile','immich-web-compat','up','-d','immich-web-compat')",
     'Write-RestoreState $bundleInfo', 'primary_owner_changed_during_resume', 'Invoke-AggregateVerify $bundleInfo'
@@ -164,7 +167,7 @@ $capturedEnvironment = & {
     return $captured
 }
 Assert-True ($capturedEnvironment.Count -eq 2) 'restore_environment_output_count_invalid'
-$expectedEnvironmentLineCounts = @{ 'piwigo.env' = 31; 'immich.env' = 14 }
+$expectedEnvironmentLineCounts = @{ 'piwigo.env' = 31; 'immich.env' = 15 }
 foreach ($environmentPath in $expectedEnvironmentLineCounts.Keys) {
     $environmentText = [string]$capturedEnvironment[$environmentPath]
     Assert-True ($environmentText.EndsWith("`n", [StringComparison]::Ordinal)) ('restore_environment_final_lf_missing_' + $environmentPath)

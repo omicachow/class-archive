@@ -404,6 +404,7 @@ function Initialize-RestoreEnvironments([hashtable]$Secrets) {
         ) -join "`n"
         $immich = @(
             ('IMMICH_COMPOSE_PROJECT_NAME=' + $immichProject), 'CLASS_ARCHIVE_COMPAT_HTTP_PORT=8291', 'CLASS_ARCHIVE_CORE_PUBLIC_PORT=8290',
+            'IMMICH_SPIKE_ENV_FILE=../owner-restore/.env.immich',
             ('CLASS_ARCHIVE_GATEWAY_NETWORK=' + $gatewayNetwork), 'IMMICH_UPLOAD_VOLUME=class_archive_owner_restore_v1_immich_upload',
             'IMMICH_MODEL_CACHE_VOLUME=class_archive_owner_restore_v1_immich_model_cache', 'IMMICH_DB_VOLUME=class_archive_owner_restore_v1_immich_db',
             'IMMICH_GATEWAY_SECRET_VOLUME=class_archive_owner_restore_v1_immich_gateway_secret',
@@ -456,6 +457,23 @@ function Initialize-RestoreGitEvidence([object]$BundleInfo) {
         & git -C $projectRoot check-ignore --quiet --no-index -- $relative
         Assert-Restore ($LASTEXITCODE -eq 0 -and @(& git -C $projectRoot ls-files -- $relative 2>$null).Count -eq 0) 'restore_git_evidence_git_visible'
     }
+}
+
+function Ensure-RestoreImmichEnvBinding {
+    Assert-PlainFile $immichEnvPath 'resume_immich_environment_missing'
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $immichEnvPath
+    $text = [IO.File]::ReadAllText($immichEnvPath, [Text.Encoding]::UTF8)
+    $required = 'IMMICH_SPIKE_ENV_FILE=../owner-restore/.env.immich'
+    $matches = @([regex]::Matches($text, '(?m)^IMMICH_SPIKE_ENV_FILE=.*$'))
+    if ($matches.Count -eq 0) {
+        $updated = $text.TrimEnd("`r", "`n") + "`n" + $required + "`n"
+        [IO.File]::WriteAllText($immichEnvPath, $updated, [Text.UTF8Encoding]::new($false))
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $immichEnvPath
+        $text = [IO.File]::ReadAllText($immichEnvPath, [Text.Encoding]::UTF8)
+        $matches = @([regex]::Matches($text, '(?m)^IMMICH_SPIKE_ENV_FILE=.*$'))
+    }
+    Assert-Restore ($matches.Count -eq 1 -and [string]$matches[0].Value -ceq $required) 'resume_immich_environment_binding_invalid'
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $immichEnvPath
 }
 
 function Get-Ipv4CidrRange([string]$Cidr) {
@@ -853,7 +871,6 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
 
     $passphrasePath = Join-Path (Join-Path $privateRuntimeRoot ([string]$BundleInfo.manifest.backup_id)) 'gpg-passphrase.txt'
     Assert-Restore (-not (Test-Path -LiteralPath $passphrasePath)) 'resume_passphrase_present'
-    Assert-PortsFree
 
     $expectedVolumes = @(Get-RestoreVolumeSpecs | ForEach-Object { [string]$_[0] } | Sort-Object)
     Assert-Restore ($expectedVolumes.Count -eq 11) 'resume_expected_volume_contract_invalid'
@@ -876,7 +893,16 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         Assert-Restore ($state.Count -eq 1 -and $state[0] -eq 'true|healthy|running') 'resume_database_container_unhealthy'
     }
     $piwigoState = @(Invoke-RestoreDocker @('inspect','--format','{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Status}}',($piwigoProject + '-piwigo-1')))
-    Assert-Restore ($piwigoState.Count -eq 1 -and $piwigoState[0] -eq 'false|none|created') 'resume_piwigo_container_state_invalid'
+    Assert-Restore ($piwigoState.Count -eq 1 -and $piwigoState[0] -in @('false|none|created','true|healthy|running')) 'resume_piwigo_container_state_invalid'
+    $checkpoint = if ($piwigoState[0] -eq 'false|none|created') { 'BEFORE_PIWIGO' } else { 'AFTER_PIWIGO' }
+    if ($checkpoint -eq 'BEFORE_PIWIGO') { Assert-PortsFree }
+    else {
+        $ports = @(Invoke-RestoreDocker @('port',($piwigoProject + '-piwigo-1')) | Sort-Object)
+        $expectedPorts = @('80/tcp -> 127.0.0.1:8290','8081/tcp -> 127.0.0.1:8291') | Sort-Object
+        Assert-Restore (@(Compare-Object $expectedPorts $ports).Count -eq 0) 'resume_piwigo_ports_invalid'
+        $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8290/' -MaximumRedirection 0 -ErrorAction SilentlyContinue
+        Assert-Restore ($null -ne $health -and $health.StatusCode -in @(200,301,302,303)) 'resume_piwigo_http_unhealthy'
+    }
 
     $expectedNetworks = @($gatewayNetwork,($piwigoProject + '_app'),($immichProject + '_immich_internal')) | Sort-Object
     $prefixedNetworks = @(Invoke-RestoreDocker @('network','ls','--format','{{.Name}}') | Where-Object { $_ -like 'class_archive_owner_restore_v1_*' } | Sort-Object)
@@ -906,6 +932,7 @@ function Assert-PartialRestoreRuntime([object]$BundleInfo) {
         Assert-Restore ($counts.ContainsKey($property.Name) -and [uint64]$counts[$property.Name] -eq [uint64]$property.Value) 'resume_restored_count_mismatch'
     }
     Assert-TargetModelCache $BundleInfo
+    return $checkpoint
 }
 
 function Assert-AiRestoreEvidence {
@@ -1046,10 +1073,13 @@ try {
         Assert-Restore $ConfirmIsolatedRestore.IsPresent 'resume_confirmation_required'
         Assert-PrimaryOwnerHttp
         $ownerBefore = Get-PrimaryOwnerFingerprint
-        Assert-PartialRestoreRuntime $bundleInfo
+        $resumeCheckpoint = Assert-PartialRestoreRuntime $bundleInfo
         Initialize-RestoreGitEvidence $bundleInfo
-        [void](Invoke-RestoreCompose piwigo @('up','-d','piwigo'))
-        Wait-RestoreContainer ($piwigoProject + '-piwigo-1')
+        Ensure-RestoreImmichEnvBinding
+        if ($resumeCheckpoint -eq 'BEFORE_PIWIGO') {
+            [void](Invoke-RestoreCompose piwigo @('up','-d','piwigo'))
+            Wait-RestoreContainer ($piwigoProject + '-piwigo-1')
+        }
         [void](Invoke-RestoreCompose immich @('--profile','immich-spike','--profile','immich-ml','up','-d','immich-machine-learning','immich-server'))
         Wait-RestoreContainer ($immichProject + '-immich-machine-learning-1') 600
         Wait-RestoreContainer ($immichProject + '-immich-server-1') 600
