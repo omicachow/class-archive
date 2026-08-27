@@ -149,6 +149,7 @@ $assert(str_contains($source, "clearstatcache(true, \$target['absolute']);")
     && str_contains($immediate, "clearstatcache(true, \$target['absolute']);"), 'child_generator_negative_stat_cache_not_cleared');
 $assert(str_contains($source, '\\ClassArchiveDerivativeWarmupQueue::pending()'), 'durable_approval_queue_not_consumed');
 $assert(str_contains($source, "\$queueOnlyFilter = in_array(\$scope, ['queue', 'exact'], true) ? ' AND 1=0' : ''"), 'queue_and_exact_base_relation_not_empty');
+$assert(str_contains($source, ". ' ORDER BY ai.`archive_date` IS NULL ASC"), 'bounded_scope_order_clause_not_separated');
 $assert(str_contains($source, "in_array(\$scope, ['queue', 'all'], true)"), 'queue_only_scope_does_not_resolve_durable_markers');
 $assert(str_contains($source, "\$pendingForScope = \$scope === 'exact'")
     && str_contains($source, "in_array(\$scope, ['queue', 'all'], true) ? \$pending : []")

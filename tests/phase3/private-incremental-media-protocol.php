@@ -11,6 +11,8 @@ declare(strict_types=1);
 $root = dirname(__DIR__, 2);
 $paths = [
     'operator' => $root . '/infra/scripts/private-full-incremental-media.ps1',
+    'egress_test' => $root . '/tests/phase3/private-incremental-evidence-egress-synthetic.ps1',
+    'stdin_ingress' => $root . '/infra/scripts/class-archive-stdin-ingress.ps1',
     'entrypoint' => $root . '/infra/scripts/private-full-immich.ps1',
     'runtime' => $root . '/infra/scripts/private-qa-immich-incremental-runtime.mjs',
     'catalog' => $root . '/infra/scripts/private-qa-immich-catalog.php',
@@ -42,8 +44,91 @@ $assert = static function (bool $condition, string $code) use (&$assertions, &$f
 $assert(str_contains($source['entrypoint'], "'sync-incremental'"), 'operator_action_missing');
 $assert(str_contains($source['entrypoint'], 'private-full-incremental-media.ps1'), 'operator_delegate_missing');
 $assert(str_contains($source['operator'], "[ValidateSet('full', 'restore')]"), 'runtime_scope_not_closed');
-$assert(str_contains($source['operator'], "[ValidateSet('validate', 'plan', 'apply')]"), 'operator_action_not_closed');
+$assert(str_contains($source['operator'], "[ValidateSet('validate', 'plan', 'apply', 'finalize')]"), 'operator_action_not_closed');
+$assert(str_contains($source['operator'], '[switch]$ConfirmFinalize')
+    && str_contains($source['operator'], "Assert-Exact \$ConfirmFinalize.IsPresent 'finalize_confirmation_required'"),
+    'explicit_finalize_confirmation_missing');
 $assert(str_contains($source['operator'], '[IO.FileShare]::None'), 'single_instance_lock_missing');
+$assert(str_contains($source['operator'], ". (Join-Path \$PSScriptRoot 'class-archive-stdin-ingress.ps1')")
+    && str_contains($source['operator'], "[ValidateSet('piwigo-exact', 'piwigo-evidence', 'immich-gateway-runtime', 'immich-gateway-plan', 'immich-database-snapshot')]")
+    && str_contains($source['operator'], "'exec', '-T', '--user', [string]\$spec.user, [string]\$spec.service, 'sh', '-lc', \$remote"),
+    'fixed_stdin_ingress_boundary_missing');
+$assert(str_contains($source['operator'], "source.Attributes -band [IO.FileAttributes]::ReparsePoint")
+    && str_contains($source['operator'], 'resolvedSource.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)')
+    && str_contains($source['operator'], '$cursor.Attributes -band [IO.FileAttributes]::ReparsePoint')
+    && str_contains($source['operator'], "'completed-derivatives.json', 'all-delta-derivatives.json'")
+    && str_contains($source['operator'], "'baseline-before.sql', 'baseline-after.sql', 'delta-after.sql'")
+    && str_contains($source['operator'], '$stream.Length -gt 16MB'),
+    'stdin_ingress_project_file_boundary_missing');
+$assert(str_contains($source['operator'], "destination = \$exactDerivativeContainer")
+    && str_contains($source['operator'], "destination = \$evidenceContainer")
+    && str_contains($source['operator'], "destination = \$runtimeContainer")
+    && str_contains($source['operator'], "destination = \$planContainer")
+    && str_contains($source['operator'], "destination = \$snapshotContainer"),
+    'stdin_ingress_target_allowlist_missing');
+$assert(str_contains($source['operator'], "part='{1}'")
+    && str_contains($source['operator'], 'cat > "$part"')
+    && substr_count($source['operator'], 'sha256sum "$') >= 2
+    && substr_count($source['operator'], '${{actual_sha%% *}}') === 2
+    && substr_count($source['operator'], 'wc -c < "$') >= 2
+    && str_contains($source['operator'], "trap 'rm -f \"\$part\" \"\$dst\"' 0 1 2 15"),
+    'stdin_ingress_atomic_size_sha_contract_missing');
+$assert(str_contains($source['stdin_ingress'], '[Diagnostics.ProcessStartInfo]::new()')
+    && str_contains($source['stdin_ingress'], '$start.RedirectStandardInput = $true')
+    && str_contains($source['stdin_ingress'], '$process.StandardInput.BaseStream')
+    && str_contains($source['stdin_ingress'], '$InputStream.CopyTo(')
+    && str_contains($source['stdin_ingress'], '$process.WaitForExit($TimeoutSeconds * 1000)'),
+    'binary_bounded_process_transport_missing');
+$assert(!str_contains($source['operator'], "Invoke-Immich @('cp', \$runtimeScriptHost")
+    && !str_contains($source['operator'], "Invoke-Immich @('cp', \$relative, ('database:'")
+    && !str_contains($source['operator'], "Invoke-Piwigo @('cp', \$exactRelative")
+    && !str_contains($source['operator'], "Invoke-Piwigo @('cp', \$postExactRelative")
+    && substr_count($source['operator'], "@('cp'") === 1
+    && str_contains($source['operator'], "Invoke-Piwigo @('cp', ('piwigo:' + \$planContainer)")
+    && !str_contains($source['operator'], "Invoke-Immich @('cp', ('immich-gateway:' + \$evidenceContainer)"),
+    'host_to_container_cp_remains_or_container_export_removed');
+$assert(str_contains($source['runtime'], 'function emitEvidence(value)')
+    && str_contains($source['runtime'], 'CLASS_ARCHIVE_IMMICH_EVIDENCE_V1 bytes=${raw.length} sha256=${sha256} base64=${raw.toString(\'base64\')}')
+    && !str_contains($source['runtime'], 'OUTPUT_PATH')
+    && !str_contains($source['runtime'], 'writePrivateJson(')
+    && !str_contains($source['runtime'], 'writeFileSync'),
+    'fixed_stdout_evidence_runtime_contract_missing');
+$assert(str_contains($source['operator'], 'function Receive-FixedImmichStdoutEvidence')
+    && str_contains($source['operator'], "'runtime_stdout_envelope_size_invalid'")
+    && str_contains($source['operator'], "'runtime_stdout_evidence_size_invalid'")
+    && str_contains($source['operator'], '[Convert]::FromBase64String($encoded)')
+    && str_contains($source['operator'], '[Convert]::ToBase64String($bytes) -eq $encoded')
+    && str_contains($source['operator'], 'SHA256]::Create()')
+    && str_contains($source['operator'], 'UTF8Encoding]::new($false, $true)')
+    && str_contains($source['operator'], 'Write-OwnerOnlyText $Path $raw')
+    && str_contains($source['operator'], 'Receive-FixedImmichStdoutEvidence -Output $runtimeOutput -Path $evidenceHost'),
+    'fixed_stdout_evidence_host_verification_missing');
+$assert(!str_contains($source['operator'], 'Write-Output $runtimeOutput')
+    && !str_contains($source['operator'], 'Write-Host $runtimeOutput'),
+    'private_stdout_evidence_reemitted');
+$assert(str_contains($source['egress_test'], 'digest_tamper_accepted')
+    && str_contains($source['egress_test'], 'prefixed_output_accepted')
+    && str_contains($source['egress_test'], 'invalid_utf8_accepted')
+    && str_contains($source['egress_test'], 'evidence=MEMORY_ONLY'),
+    'fixed_stdout_evidence_synthetic_test_missing');
+$assert(str_contains($source['operator'], 'incremental-media-stdin-ingress-error.json')
+    && str_contains($source['operator'], 'Save-StdinIngressFailureDiagnostic')
+    && str_contains($source['operator'], "Fail 'stdin_ingress_failed'"),
+    'stdin_ingress_private_diagnostic_or_safe_terminal_code_missing');
+$assert(!str_contains($source['operator'], '$host = Join-Path'), 'powershell_readonly_host_variable_shadowed');
+$assert(str_contains($source['operator'], 'function Save-PrivateFailureDiagnostic')
+    && str_contains($source['operator'], "'runtime\\incremental-media-error.json'")
+    && str_contains($source['operator'], 'Write-OwnerOnlyJson $path'),
+    'owner_only_failure_diagnostic_missing');
+$assert(str_contains($source['operator'], 'function Save-ComposeFailureDiagnostic')
+    && str_contains($source['operator'], "'runtime\\incremental-media-compose-error.json'")
+    && str_contains($source['operator'], "Save-ComposeFailureDiagnostic 'immich' \$code \$lines")
+    && str_contains($source['operator'], "Save-ComposeFailureDiagnostic 'piwigo' \$code \$lines"),
+    'owner_only_compose_failure_diagnostic_missing');
+$assert(str_contains($source['operator'], 'Enter-ClassArchivePluginWorkflowLock -LockPath $workflowLockPath')
+    && str_contains($source['operator'], 'Exit-ClassArchivePluginWorkflowLock -Handle $workflowLock')
+    && str_contains($source['operator'], '.codex-work\private-real-full\runtime\supplemental-apply.lock'),
+    'supplemental_and_incremental_shared_lock_missing');
 $assert(str_contains($source['operator'], "[string]\$core[0].HostIp -eq '127.0.0.1'")
     && str_contains($source['operator'], "[string]\$compat[0].HostIp -eq '127.0.0.1'")
     && str_contains($source['operator'], 'ConvertFrom-Json -ErrorAction Stop'),
@@ -91,6 +176,35 @@ $assert(str_contains($source['operator'], 'cannot select any baseline item')
     && str_contains($source['operator'], 'ordinary GET cannot perform this action'),
     'restore_baseline_or_get_nonselection_not_documented');
 $assert(str_contains($source['operator'], 'derivative_old_selected=0'), 'old_derivative_nonexecution_not_reported');
+$assert(str_contains($source['operator'], 'function Sort-DerivativeEntriesOrdinal')
+    && str_contains($source['operator'], '[Array]::Sort($keys, [StringComparer]::Ordinal)')
+    && substr_count($source['operator'], 'Sort-DerivativeEntriesOrdinal @($') === 2
+    && !str_contains($source['operator'], 'Sort-Object class_photo_id,piwigo_image_id'),
+    'exact_derivative_manifest_not_ordinally_sorted');
+$assert(str_contains($source['operator'], "\$maintenanceExpected = \$Action -in @('plan', 'apply', 'finalize')")
+    && str_contains($source['operator'], "if (\$Action -in @('plan', 'apply', 'finalize'))")
+    && str_contains($source['operator'], "\$lines[0] -eq 'Class Archive maintenance mode.'")
+    && str_contains($source['operator'], "\$lines[1] -eq 'CLASS_ARCHIVE_STATUS:503'")
+    && str_contains($source['operator'], "'maintenance_not_held'"),
+    'staged_incremental_maintenance_gate_missing');
+$assert(str_contains($source['operator'], 'maintenance=HELD next=DELTA_APPLY_THEN_EXPLICIT_FINALIZE')
+    && str_contains($source['operator'], 'maintenance=HELD next=EXPLICIT_FINALIZE'),
+    'restore_stage_handoff_evidence_missing');
+$finalizeGate = strpos($source['operator'], "\$script:stage = 'finalize_delta_gate'");
+$projectionFinalize = strpos($source['operator'], "\$script:stage = 'projection_finalize'");
+$maintenanceFinalize = strpos($source['operator'], "\$script:stage = 'maintenance_finalize'");
+$assert($finalizeGate !== false && $projectionFinalize !== false && $maintenanceFinalize !== false
+    && $finalizeGate < $projectionFinalize && $projectionFinalize < $maintenanceFinalize,
+    'finalize_order_not_delta_projection_maintenance');
+$assert(str_contains($source['operator'], "'finalize_delta_not_complete'")
+    && str_contains($source['operator'], "'/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'")
+    && str_contains($source['operator'], "'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'")
+    && str_contains($source['operator'], 'projection=REBUILT maintenance=RELEASED'),
+    'explicit_projection_and_maintenance_finalize_missing');
+$assert(str_contains($source['operator'], '$script:maintenanceReleaseAttempted = $true')
+    && str_contains($source['operator'], 'Restore-MaintenanceAfterFinalizeFailure')
+    && str_contains($source['operator'], "Fail 'maintenance_rehold_failed'"),
+    'finalize_failure_not_reheld_fail_closed');
 $assert(str_contains($source['operator'], 'Get-ImmichIndexSnapshot @($plan.baseline) \'baseline-before\'')
     && str_contains($source['operator'], 'Get-ImmichIndexSnapshot @($plan.baseline) \'baseline-after\'')
     && str_contains($source['operator'], 'Get-ImmichIndexSnapshot $deltaBindings \'delta-after\''),

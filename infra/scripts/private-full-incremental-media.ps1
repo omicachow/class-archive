@@ -1,18 +1,24 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('validate', 'plan', 'apply')]
+    [ValidateSet('validate', 'plan', 'apply', 'finalize')]
     [string]$Action = 'validate',
 
     [ValidateSet('full', 'restore')]
-    [string]$Runtime = 'full'
+    [string]$Runtime = 'full',
+
+    [switch]$ConfirmFinalize
 )
 
 # Explicit post-import delta operator.  It is never sourced by the web app and
 # has no HTTP route.  It accepts only the checksum-bound NEW_PHOTO /
 # PIXEL_CHANGED jobs and derivative queue markers already created at the
 # controlled write boundary.  Any baseline drift, extra job or queue mismatch
-# fails before a model or derivative generator is started.
+# fails before a model or derivative generator is started.  Staged runs form
+# a three-stage publication protocol: the supplemental
+# writer leaves maintenance closed, this operator completes only the exact
+# delta, and a separately confirmed `finalize` action rebuilds projections
+# before it is allowed to release maintenance.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -49,6 +55,7 @@ $privateRelative = [string]$config.private_relative
 $privateRoot = Join-Path $projectRoot ($privateRelative -replace '/', '\')
 $runtimeRoot = Join-Path $privateRoot 'runtime\incremental-media'
 $reportRoot = Join-Path $privateRoot 'reports'
+$workflowLockPath = Join-Path $projectRoot '.codex-work\private-real-full\runtime\supplemental-apply.lock'
 $modelManifest = Join-Path $projectRoot 'infra\immich-spike\ml-artifacts\manifest.json'
 $catalogScript = '/workspace/infra/scripts/private-qa-immich-catalog.php'
 $warmerScript = '/workspace/infra/scripts/warm-photo-cache.php'
@@ -62,6 +69,8 @@ $script:stage = 'initialization'
 $script:assertions = 0
 
 . (Join-Path $PSScriptRoot 'secret-file-acl.ps1')
+. (Join-Path $PSScriptRoot 'class-plugin-workflow-lock.ps1')
+. (Join-Path $PSScriptRoot 'class-archive-stdin-ingress.ps1')
 
 function Fail([string]$Code) {
     throw "PRIVATE_INCREMENTAL_MEDIA=FAIL stage=$script:stage code=$Code assertions=$script:assertions"
@@ -81,7 +90,10 @@ function Invoke-Piwigo([string[]]$Arguments) {
             -f 'infra/private-full/docker-compose.ai-worker.override.yml' -p ([string]$config.piwigo_project) @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previous }
-    if ($code -ne 0) { Fail 'piwigo_compose_failed' }
+    if ($code -ne 0) {
+        Save-ComposeFailureDiagnostic 'piwigo' $code $lines
+        Fail 'piwigo_compose_failed'
+    }
     return [string]::Join("`n", $lines)
 }
 
@@ -95,7 +107,10 @@ function Invoke-Immich([string[]]$Arguments) {
             --profile 'immich-gateway-integration' @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previous }
-    if ($code -ne 0) { Fail 'immich_compose_failed' }
+    if ($code -ne 0) {
+        Save-ComposeFailureDiagnostic 'immich' $code $lines
+        Fail 'immich_compose_failed'
+    }
     return [string]::Join("`n", $lines)
 }
 
@@ -132,6 +147,247 @@ function Write-OwnerOnlyText([string]$Path, [string]$Value) {
     } finally { $Value = $null }
 }
 
+function Receive-FixedImmichStdoutEvidence([string]$Output, [string]$Path) {
+    $script:stage = 'runtime_evidence_egress'
+    Assert-Exact ($Output.Length -ge 128 -and $Output.Length -le 2MB) 'runtime_stdout_envelope_size_invalid'
+    $pattern = '\ACLASS_ARCHIVE_IMMICH_EVIDENCE_V1 bytes=([0-9]{2,7}) sha256=([0-9a-f]{64}) base64=([A-Za-z0-9+/]+={0,2})\n(PRIVATE_QA_IMMICH_INCREMENTAL=PASS assets=[0-9]+ baseline=[0-9]+ delta=[0-9]+ old_changed=0 force_full=0)\z'
+    $match = [regex]::Match($Output, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    Assert-Exact $match.Success 'runtime_stdout_envelope_invalid'
+
+    $declaredBytes = [int64]$match.Groups[1].Value
+    $declaredDigest = [string]$match.Groups[2].Value
+    $encoded = [string]$match.Groups[3].Value
+    Assert-Exact ($declaredBytes -ge 16 -and $declaredBytes -le 1MB) 'runtime_stdout_evidence_size_invalid'
+    Assert-Exact ($encoded.Length -eq 4 * [Math]::Ceiling($declaredBytes / 3.0)) 'runtime_stdout_base64_length_invalid'
+
+    $bytes = $null
+    $sha = $null
+    $raw = $null
+    try {
+        try { $bytes = [Convert]::FromBase64String($encoded) } catch { Fail 'runtime_stdout_base64_invalid' }
+        Assert-Exact ($bytes.Length -eq $declaredBytes) 'runtime_stdout_evidence_length_mismatch'
+        Assert-Exact ([Convert]::ToBase64String($bytes) -eq $encoded) 'runtime_stdout_base64_not_canonical'
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $actualDigest = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        Assert-Exact ([string]::Equals($actualDigest, $declaredDigest, [StringComparison]::Ordinal)) 'runtime_stdout_evidence_sha256_mismatch'
+        try {
+            $raw = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        } catch { Fail 'runtime_stdout_evidence_utf8_invalid' }
+        Write-OwnerOnlyText $Path $raw
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+        $raw = $null
+        $bytes = $null
+        $encoded = $null
+    }
+
+    return [string]$match.Groups[4].Value
+}
+
+function Save-PrivateFailureDiagnostic([System.Exception]$Error) {
+    try {
+        $path = Join-Path $privateRoot 'runtime\incremental-media-error.json'
+        $chain = [Collections.Generic.List[object]]::new()
+        $current = $Error
+        while ($null -ne $current -and $chain.Count -lt 8) {
+            $chain.Add([ordered]@{
+                type = $current.GetType().FullName
+                message = [string]$current.Message
+                stack = [string]$current.StackTrace
+            })
+            $current = $current.InnerException
+        }
+        Write-OwnerOnlyJson $path ([ordered]@{
+            version = 1
+            generated_at = [DateTime]::UtcNow.ToString('o')
+            runtime = $Runtime.ToUpperInvariant()
+            action = $Action.ToUpperInvariant()
+            stage = $script:stage
+            errors = @($chain)
+        })
+    } catch { }
+}
+
+function Save-ComposeFailureDiagnostic([string]$Kind, [int]$ExitCode, [object[]]$Lines) {
+    try {
+        $path = Join-Path $privateRoot 'runtime\incremental-media-compose-error.json'
+        $output = [string]::Join("`n", @($Lines | ForEach-Object { [string]$_ }))
+        if ($output.Length -gt 32768) { $output = $output.Substring(0, 32768) }
+        Write-OwnerOnlyJson $path ([ordered]@{
+            version = 1
+            generated_at = [DateTime]::UtcNow.ToString('o')
+            runtime = $Runtime.ToUpperInvariant()
+            action = $Action.ToUpperInvariant()
+            stage = $script:stage
+            compose = $Kind
+            exit_code = $ExitCode
+            output = $output
+        })
+    } catch { }
+}
+
+function Save-StdinIngressFailureDiagnostic([string]$IngressId, [System.Exception]$Error, [object]$Result) {
+    try {
+        $path = Join-Path $privateRoot 'runtime\incremental-media-stdin-ingress-error.json'
+        $limit = 32768
+        $stdout = if ($null -ne $Result) { [string]$Result.Stdout } else { '' }
+        $stderr = if ($null -ne $Result) { [string]$Result.Stderr } else { '' }
+        if ($stdout.Length -gt $limit) { $stdout = $stdout.Substring(0, $limit) }
+        if ($stderr.Length -gt $limit) { $stderr = $stderr.Substring(0, $limit) }
+        Write-OwnerOnlyJson $path ([ordered]@{
+            version = 1
+            generated_at = [DateTime]::UtcNow.ToString('o')
+            runtime = $Runtime.ToUpperInvariant()
+            action = $Action.ToUpperInvariant()
+            stage = $script:stage
+            ingress_id = $IngressId
+            error_type = $Error.GetType().FullName
+            error_message = [string]$Error.Message
+            exit_code = if ($null -ne $Result) { [int]$Result.ExitCode } else { $null }
+            stdout = $stdout
+            stderr = $stderr
+        })
+    } catch { }
+}
+
+function Send-FixedContainerStdinFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('piwigo-exact', 'piwigo-evidence', 'immich-gateway-runtime', 'immich-gateway-plan', 'immich-database-snapshot')]
+        [string]$IngressId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath
+    )
+
+    $script:stage = 'stdin_ingress_' + ($IngressId -replace '-', '_')
+    $stream = $null
+    $result = $null
+    try {
+        $resolvedSource = (Resolve-Path -LiteralPath $SourcePath -ErrorAction Stop).Path
+        $source = Get-Item -LiteralPath $resolvedSource -Force -ErrorAction Stop
+        $allowedRoot = if ($IngressId -eq 'immich-gateway-runtime') {
+            (Resolve-Path -LiteralPath (Join-Path $projectRoot 'infra\scripts') -ErrorAction Stop).Path
+        } else {
+            (Resolve-Path -LiteralPath $runRoot -ErrorAction Stop).Path
+        }
+        $boundary = $allowedRoot.TrimEnd('\') + '\'
+        if ($source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint) `
+            -or -not $resolvedSource.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)) {
+            throw [InvalidOperationException]::new('Class Archive stdin ingress rejected the source file boundary.')
+        }
+        $cursor = Get-Item -LiteralPath (Split-Path -Parent $resolvedSource) -Force -ErrorAction Stop
+        while ($true) {
+            if (-not $cursor.PSIsContainer -or ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw [InvalidOperationException]::new('Class Archive stdin ingress rejected a reparse directory.')
+            }
+            if ([string]::Equals($cursor.FullName.TrimEnd('\'), $allowedRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $cursor = $cursor.Parent
+            if ($null -eq $cursor -or (-not [string]::Equals($cursor.FullName.TrimEnd('\'), $allowedRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) `
+                -and -not $cursor.FullName.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase))) {
+                throw [InvalidOperationException]::new('Class Archive stdin ingress source ancestry escaped its allowed root.')
+            }
+        }
+        if ($IngressId -eq 'immich-gateway-runtime') {
+            $expectedRuntime = (Resolve-Path -LiteralPath (Join-Path $projectRoot ($runtimeScriptHost -replace '/', '\'))).Path
+            if (-not [string]::Equals($resolvedSource, $expectedRuntime, [StringComparison]::OrdinalIgnoreCase)) {
+                throw [InvalidOperationException]::new('Class Archive stdin ingress rejected the runtime source identity.')
+            }
+        }
+        $sourceNameAllowed = switch ($IngressId) {
+            'piwigo-exact' { $source.Name -in @('completed-derivatives.json', 'all-delta-derivatives.json') }
+            'piwigo-evidence' { $source.Name -eq 'evidence.json' }
+            'immich-gateway-runtime' { $source.Name -eq 'private-qa-immich-incremental-runtime.mjs' }
+            'immich-gateway-plan' { $source.Name -eq 'runtime-input.json' }
+            'immich-database-snapshot' { $source.Name -in @('baseline-before.sql', 'baseline-after.sql', 'delta-after.sql') }
+            default { $false }
+        }
+        if (-not $sourceNameAllowed) {
+            throw [InvalidOperationException]::new('Class Archive stdin ingress rejected the source file identity.')
+        }
+
+        $spec = switch ($IngressId) {
+            'piwigo-exact' { [ordered]@{ compose = 'piwigo'; user = 'nginx'; service = 'piwigo'; destination = $exactDerivativeContainer } }
+            'piwigo-evidence' { [ordered]@{ compose = 'piwigo'; user = 'nginx'; service = 'piwigo'; destination = $evidenceContainer } }
+            'immich-gateway-runtime' { [ordered]@{ compose = 'immich'; user = '65532:65532'; service = 'immich-gateway'; destination = $runtimeContainer } }
+            'immich-gateway-plan' { [ordered]@{ compose = 'immich'; user = '65532:65532'; service = 'immich-gateway'; destination = $planContainer } }
+            'immich-database-snapshot' { [ordered]@{ compose = 'immich'; user = 'postgres'; service = 'database'; destination = $snapshotContainer } }
+            default { throw [InvalidOperationException]::new('Class Archive stdin ingress identity is not allowed.') }
+        }
+
+        $stream = [IO.File]::Open($resolvedSource, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($stream.Length -lt 1 -or $stream.Length -gt 16MB) {
+            throw [InvalidOperationException]::new('Class Archive stdin ingress source size is outside the bounded contract.')
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+        $stream.Position = 0
+        $size = [int64]$stream.Length
+        $destination = [string]$spec.destination
+        $partial = $destination + '.stdin-part'
+        $remote = @'
+set -eu
+dst='{0}'
+part='{1}'
+test ! -e "$dst" && test ! -L "$dst"
+test ! -e "$part" && test ! -L "$part"
+umask 077
+trap 'rm -f "$part" "$dst"' 0 1 2 15
+cat > "$part"
+test -f "$part" && test ! -L "$part"
+actual_size=$(wc -c < "$part" | tr -d '[:space:]')
+actual_sha=$(sha256sum "$part")
+actual_sha=${{actual_sha%% *}}
+test "$actual_size" = '{2}'
+test "$actual_sha" = '{3}'
+chmod 0600 "$part"
+mv "$part" "$dst"
+test -f "$dst" && test ! -L "$dst"
+actual_size=$(wc -c < "$dst" | tr -d '[:space:]')
+actual_sha=$(sha256sum "$dst")
+actual_sha=${{actual_sha%% *}}
+test "$actual_size" = '{2}'
+test "$actual_sha" = '{3}'
+trap - 0 1 2 15
+printf 'CLASS_ARCHIVE_STDIN_INGRESS=PASS size=%s sha256=%s\n' "$actual_size" "$actual_sha"
+'@ -f $destination,$partial,$size,$digest
+
+        $arguments = if ([string]$spec.compose -eq 'piwigo') {
+            @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose',
+                '--env-file', [string]$config.piwigo_env,
+                '-f', 'infra/docker-compose.yml', '-f', [string]$config.piwigo_override,
+                '-f', 'infra/private-full/docker-compose.ai-worker.override.yml',
+                '-p', [string]$config.piwigo_project,
+                'exec', '-T', '--user', [string]$spec.user, [string]$spec.service, 'sh', '-lc', $remote)
+        } else {
+            @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose',
+                '--env-file', [string]$config.immich_env,
+                '-f', 'infra/immich-spike/docker-compose.yml', '-f', [string]$config.immich_override,
+                '-p', [string]$config.immich_project,
+                '--profile', 'immich-spike', '--profile', 'immich-ml', '--profile', 'immich-gateway-integration',
+                'exec', '-T', '--user', [string]$spec.user, [string]$spec.service, 'sh', '-lc', $remote)
+        }
+        $wsl = (Get-Command wsl.exe -ErrorAction Stop).Source
+        $result = Invoke-ClassArchiveBinaryStdinProcess -Executable $wsl -Arguments $arguments `
+            -InputStream $stream -ExpectedSize $size -ExpectedSha256 $digest -TimeoutSeconds 120
+        $expected = "CLASS_ARCHIVE_STDIN_INGRESS=PASS size=$size sha256=$digest"
+        if ($result.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$result.Stderr) `
+            -or ([string]$result.Stdout).Trim() -ne $expected) {
+            throw [InvalidOperationException]::new('Class Archive stdin ingress verification failed.')
+        }
+    } catch {
+        Save-StdinIngressFailureDiagnostic $IngressId $_.Exception $result
+        Fail 'stdin_ingress_failed'
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Get-TextSha256([string]$Value) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try {
@@ -140,6 +396,18 @@ function Get-TextSha256([string]$Value) {
     } finally {
         if ($null -ne $hash) { $hash.Dispose() }
     }
+}
+
+function Sort-DerivativeEntriesOrdinal([object[]]$Entries) {
+    $lookup = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $Entries) {
+        $key = ([string]$entry.class_photo_id).ToLowerInvariant() + ':' + [string][int64]$entry.piwigo_image_id
+        Assert-Exact (-not $lookup.ContainsKey($key)) 'derivative_ordinal_sort_duplicate'
+        $lookup.Add($key, $entry)
+    }
+    [string[]]$keys = @($lookup.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    return @($keys | ForEach-Object { $lookup[$_] })
 }
 
 function Read-StrictJson([string]$Path, [int64]$MaximumBytes) {
@@ -250,13 +518,10 @@ SELECT json_build_object(
 
 function Get-ImmichIndexSnapshot([object[]]$Markers, [string]$Name, [string]$Run) {
     Assert-Exact ($Name -match '^[a-z-]{3,32}$' -and $Run -match '^[0-9a-f]{16}$') 'snapshot_name_invalid'
-    $host = Join-Path $runRoot ($Name + '.sql')
-    Write-OwnerOnlyText $host (New-ImmichIndexSnapshotSql $Markers)
-    $relative = $privateRelative + '/runtime/incremental-media/' + $Run + '/' + $Name + '.sql'
+    $snapshotHostPath = Join-Path $runRoot ($Name + '.sql')
+    Write-OwnerOnlyText $snapshotHostPath (New-ImmichIndexSnapshotSql $Markers)
     try {
-        [void](Invoke-Immich @('cp', $relative, ('database:' + $snapshotContainer)))
-        [void](Invoke-Immich @('exec', '-T', '--user', '0:0', 'database', 'sh', '-lc', `
-            ('chown postgres:postgres ' + $snapshotContainer + ' && chmod 0400 ' + $snapshotContainer)))
+        Send-FixedContainerStdinFile -IngressId 'immich-database-snapshot' -SourcePath $snapshotHostPath
         $raw = Invoke-Immich @('exec', '-T', '--user', 'postgres', 'database', 'sh', '-lc', `
             ('exec psql -X --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --file=' + $snapshotContainer))
         try { $result = $raw | ConvertFrom-Json -ErrorAction Stop } catch { Fail 'snapshot_output_invalid' }
@@ -302,7 +567,14 @@ function Assert-RuntimeBoundary {
         ([string]$config.immich_project + '-immich-gateway-1')
     )) {
         $state = (& wsl.exe -d Ubuntu --exec docker inspect $name --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{json .HostConfig.PortBindings}}' 2>$null)
-        Assert-Exact ($LASTEXITCODE -eq 0 -and [string]$state -match '^running\|(healthy|none)\|') 'runtime_container_unhealthy'
+        $maintenanceExpected = $Action -in @('plan', 'apply', 'finalize')
+        $piwigo = $name -match '-piwigo-1$'
+        $stateValid = if ($piwigo -and $maintenanceExpected) {
+            [string]$state -match '^running\|(healthy|starting|unhealthy|none)\|'
+        } else {
+            [string]$state -match '^running\|(healthy|none)\|'
+        }
+        Assert-Exact ($LASTEXITCODE -eq 0 -and $stateValid) 'runtime_container_unhealthy'
         if ($name -notmatch '-piwigo-1$') {
             Assert-Exact ([string]$state -match '\|(null|\{\})$') 'internal_service_port_published'
         }
@@ -320,10 +592,75 @@ function Assert-RuntimeBoundary {
         'piwigo_loopback_binding_invalid'
 }
 
+function Assert-MaintenanceBoundary {
+    $script:stage = 'maintenance_boundary'
+    $name = [string]$config.piwigo_project + '-piwigo-1'
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& wsl.exe -d Ubuntu --exec docker exec $name curl --silent --show-error `
+            --write-out 'CLASS_ARCHIVE_STATUS:%{http_code}' 'http://127.0.0.1/' 2>&1)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previous }
+    Assert-Exact ($code -eq 0 -and $lines.Count -eq 2 `
+        -and [string]$lines[0] -eq 'Class Archive maintenance mode.' `
+        -and [string]$lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') 'maintenance_not_held'
+}
+
+function Wait-PiwigoHealthy {
+    $script:stage = 'finalize_health'
+    $name = [string]$config.piwigo_project + '-piwigo-1'
+    foreach ($attempt in 1..60) {
+        $state = & wsl.exe -d Ubuntu --exec docker inspect $name --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>$null
+        if ($LASTEXITCODE -eq 0 -and [string]$state -eq 'running|healthy') { return }
+        Start-Sleep -Seconds 1
+    }
+    Fail 'finalize_health_timeout'
+}
+
+function Assert-MaintenanceReleasedBoundary {
+    $script:stage = 'finalize_http_boundary'
+    $name = [string]$config.piwigo_project + '-piwigo-1'
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& wsl.exe -d Ubuntu --exec docker exec $name curl --silent --show-error `
+            --output /dev/null --write-out 'CLASS_ARCHIVE_STATUS:%{http_code}' 'http://127.0.0.1/' 2>&1)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previous }
+    Assert-Exact ($code -eq 0 -and $lines.Count -eq 1 `
+        -and [string]$lines[0] -match '^CLASS_ARCHIVE_STATUS:(200|302|303)$') 'maintenance_release_not_visible'
+}
+
+function Restore-MaintenanceAfterFinalizeFailure {
+    $savedStage = $script:stage
+    try {
+        $script:stage = 'finalize_failure_rehold'
+        [void](Invoke-Piwigo @('exec', '-T', '--user', 'root', 'piwigo', 'php',
+            '/workspace/infra/scripts/prepare-class-archive-maintenance.php', '--prepare'))
+        Assert-MaintenanceBoundary
+        $script:maintenanceReleased = $false
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $script:stage = $savedStage
+    }
+}
+
 $lock = $null
+$workflowLock = $null
 $runRoot = $null
+$script:maintenanceReleased = $false
+$script:maintenanceReleaseAttempted = $false
 try {
     Assert-RuntimeBoundary
+    if ($Action -eq 'finalize') {
+        Assert-Exact $ConfirmFinalize.IsPresent 'finalize_confirmation_required'
+    }
+    if ($Action -in @('plan', 'apply', 'finalize')) {
+        Assert-MaintenanceBoundary
+    }
     if ($Action -eq 'validate') {
         Write-Output "PRIVATE_INCREMENTAL_MEDIA=PASS action=validate runtime=$Runtime assertions=$script:assertions evidence=RUNTIME_BOUNDARY"
         exit 0
@@ -336,6 +673,7 @@ try {
     Set-ClassArchiveOwnerOnlyFileAcl -Path $lockPath
     Assert-IgnoredOwnerOnly $lockPath
     try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } catch { Fail 'already_running' }
+    $workflowLock = Enter-ClassArchivePluginWorkflowLock -LockPath $workflowLockPath
 
     $run = ([Guid]::NewGuid().ToString('N')).Substring(0, 16)
     $runRoot = Join-Path $runtimeRoot $run
@@ -381,7 +719,7 @@ try {
             piwigo_image_id = $piwigoImageId
         })
     }
-    $deltaDerivativeEntries = @($deltaDerivativeEntries | Sort-Object class_photo_id,piwigo_image_id)
+    $deltaDerivativeEntries = @(Sort-DerivativeEntriesOrdinal @($deltaDerivativeEntries))
     Assert-Exact ($deltaDerivativeKeys.Count -eq $deltaCount) 'delta_derivative_marker_count_invalid'
 
     $script:stage = 'derivative_baseline'
@@ -425,7 +763,7 @@ try {
             })
         }
     }
-    $completedDerivativeEntries = @($completedDerivativeEntries | Sort-Object class_photo_id,piwigo_image_id)
+    $completedDerivativeEntries = @(Sort-DerivativeEntriesOrdinal @($completedDerivativeEntries))
     Assert-Exact ($completedDerivativeEntries.Count -eq $completedDerivativeCount) 'derivative_completed_set_invalid'
     if ($requireFullDerivativeCache) {
         Assert-Exact ([int]$prewarm.selected_images -eq $catalogCount -and [int]$prewarm.checked -eq $catalogCount * $profiles `
@@ -449,10 +787,7 @@ try {
                 entries = @($completedDerivativeEntries)
             })
             $exactManifestDigest = (Get-FileHash -LiteralPath $exactHost -Algorithm SHA256).Hash.ToLowerInvariant()
-            $exactRelative = $privateRelative + '/runtime/incremental-media/' + $run + '/completed-derivatives.json'
-            [void](Invoke-Piwigo @('cp', $exactRelative, ('piwigo:' + $exactDerivativeContainer)))
-            [void](Invoke-Piwigo @('exec', '-T', '--user', '0:0', 'piwigo', 'sh', '-lc', `
-                ('chown nginx:nginx ' + $exactDerivativeContainer + ' && chmod 0600 ' + $exactDerivativeContainer)))
+            Send-FixedContainerStdinFile -IngressId 'piwigo-exact' -SourcePath $exactHost
             $completedPrewarm = Get-Warmup 'exact' $true '' $exactManifestDigest ([string]$plan.delta_digest)
             Assert-Exact ([int]$completedPrewarm.selected_images -eq $completedDerivativeCount `
                 -and [int]$completedPrewarm.exact_entries -eq $completedDerivativeCount `
@@ -482,9 +817,46 @@ try {
         -and [int]$baselineBeforeDb.face_embedding_ready -eq [int]$baselineBeforeDb.face_embedding_required) 'ai_baseline_not_ready'
     $baselineBeforeDbDigest = Get-ImmichSnapshotDigest $baselineBeforeDb
 
+    if ($Action -eq 'finalize') {
+        # Finalization is deliberately separate from both the writer and the
+        # delta worker.  A zero catalog delta and an empty derivative queue are
+        # independently re-derived while maintenance is still held.  Only then
+        # may the user-facing read projection be published and the web gate be
+        # removed.
+        $script:stage = 'finalize_delta_gate'
+        Assert-Exact ($deltaCount -eq 0 -and $pendingDerivativeCount -eq 0 `
+            -and $completedDerivativeCount -eq 0 -and @($plan.delta).Count -eq 0) 'finalize_delta_not_complete'
+
+        $script:stage = 'projection_finalize'
+        $projectionRaw = Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+            '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json')
+        try { $projection = $projectionRaw | ConvertFrom-Json -ErrorAction Stop }
+        catch { Fail 'projection_finalize_output_invalid' }
+        Assert-Exact ([string]$projection.result -eq 'PASS' `
+            -and $null -ne $projection.photos -and [int]$projection.photos.count -eq $catalogCount `
+            -and $projection.photos.dry_run -eq $false `
+            -and $null -ne $projection.aggregates -and $projection.aggregates.dry_run -eq $false `
+            -and $null -ne $projection.projections) 'projection_finalize_evidence_invalid'
+
+        $script:stage = 'maintenance_finalize'
+        $script:maintenanceReleaseAttempted = $true
+        $finalizeOutput = Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+            '/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance')
+        Assert-Exact ([regex]::IsMatch($finalizeOutput, '(?m)^MAINTENANCE FINALIZED$')) 'maintenance_finalize_evidence_invalid'
+        $script:maintenanceReleased = $true
+        Wait-PiwigoHealthy
+        Assert-MaintenanceReleasedBoundary
+        $script:maintenanceReleaseAttempted = $false
+
+        Write-Output ("PRIVATE_INCREMENTAL_MEDIA=PASS action=finalize runtime={0} total={1} baseline={2} delta=0 projection=REBUILT maintenance=RELEASED ai_baseline=READY derivative_old_selected=0 assertions={3}" `
+            -f $Runtime,$catalogCount,$baselineCount,$script:assertions)
+        exit 0
+    }
+
     if ($Action -eq 'plan') {
-        Write-Output ("PRIVATE_INCREMENTAL_MEDIA=PASS action=plan runtime={0} total={1} baseline={2} delta={3} ai_baseline=READY old_selected=0 assertions={4}" `
-            -f $Runtime,$catalogCount,$baselineCount,$deltaCount,$script:assertions)
+        $maintenanceEvidence = ' maintenance=HELD next=DELTA_APPLY_THEN_EXPLICIT_FINALIZE'
+        Write-Output (("PRIVATE_INCREMENTAL_MEDIA=PASS action=plan runtime={0} total={1} baseline={2} delta={3} ai_baseline=READY old_selected=0 assertions={4}" `
+            -f $Runtime,$catalogCount,$baselineCount,$deltaCount,$script:assertions) + $maintenanceEvidence)
         exit 0
     }
 
@@ -513,8 +885,9 @@ try {
             private_artifacts = 'OWNER_ONLY_IGNORED'
             media_delivery = 'MEDIAGUARD_ONLY'
         })
-        Write-Output ("PRIVATE_INCREMENTAL_MEDIA=PASS action=apply runtime={0} total={1} baseline={2} delta=0 no_op=1 ai_old_changed=0 derivative_old_selected=0 assertions={3}" `
-            -f $Runtime,$catalogCount,$baselineCount,$script:assertions)
+        $maintenanceEvidence = ' maintenance=HELD next=EXPLICIT_FINALIZE'
+        Write-Output (("PRIVATE_INCREMENTAL_MEDIA=PASS action=apply runtime={0} total={1} baseline={2} delta=0 no_op=1 ai_old_changed=0 derivative_old_selected=0 assertions={3}" `
+            -f $Runtime,$catalogCount,$baselineCount,$script:assertions) + $maintenanceEvidence)
         exit 0
     }
 
@@ -523,18 +896,17 @@ try {
     foreach ($property in $plan.PSObject.Properties) { $input[$property.Name] = $property.Value }
     $input['models'] = Get-ModelContract
     Write-OwnerOnlyJson $inputHost $input
-    [void](Invoke-Immich @('cp', $runtimeScriptHost, ('immich-gateway:' + $runtimeContainer)))
-    [void](Invoke-Immich @('cp', ($privateRelative + '/runtime/incremental-media/' + $run + '/runtime-input.json'), ('immich-gateway:' + $planContainer)))
-    [void](Invoke-Immich @('exec', '-T', '--user', '0:0', 'immich-gateway', 'sh', '-lc', `
-        ('chown 65532:65532 ' + $runtimeContainer + ' ' + $planContainer + ' && chmod 0500 ' + $runtimeContainer + ' && chmod 0600 ' + $planContainer)))
+    Send-FixedContainerStdinFile -IngressId 'immich-gateway-runtime' `
+        -SourcePath (Join-Path $projectRoot ($runtimeScriptHost -replace '/', '\'))
+    Send-FixedContainerStdinFile -IngressId 'immich-gateway-plan' -SourcePath $inputHost
 
     $script:stage = 'runtime_delta'
-    $marker = Invoke-Immich @('exec', '-T', '--user', '65532:65532', 'immich-gateway', 'sh', '-lc', ('exec node ' + $runtimeContainer + ' 2>&1'))
+    $runtimeOutput = Invoke-Immich @('exec', '-T', '--user', '65532:65532', 'immich-gateway', 'sh', '-lc', ('exec node ' + $runtimeContainer + ' 2>&1'))
+    $marker = Receive-FixedImmichStdoutEvidence -Output $runtimeOutput -Path $evidenceHost
+    $runtimeOutput = $null
     $runtimeMatch = [regex]::Match($marker, '^PRIVATE_QA_IMMICH_INCREMENTAL=PASS assets=([0-9]+) baseline=([0-9]+) delta=([0-9]+) old_changed=0 force_full=0$')
     Assert-Exact ($runtimeMatch.Success -and [int]$runtimeMatch.Groups[1].Value -eq $catalogCount `
         -and [int]$runtimeMatch.Groups[2].Value -eq $baselineCount -and [int]$runtimeMatch.Groups[3].Value -eq $deltaCount) 'runtime_delta_failed'
-    [void](Invoke-Immich @('cp', ('immich-gateway:' + $evidenceContainer), ($privateRelative + '/runtime/incremental-media/' + $run + '/evidence.json')))
-    Set-ClassArchiveOwnerOnlyFileAcl -Path $evidenceHost
     $evidence = Read-StrictJson $evidenceHost 1MB
     Assert-Exact ([string]$evidence.runtime_mode -eq 'INCREMENTAL' -and [int]$evidence.asset_count -eq $catalogCount `
         -and [int]$evidence.baseline_count -eq $baselineCount -and [int]$evidence.delta_count -eq $deltaCount `
@@ -590,10 +962,7 @@ try {
             entries = @($deltaDerivativeEntries)
         })
         $postExactDigest = (Get-FileHash -LiteralPath $postExactHost -Algorithm SHA256).Hash.ToLowerInvariant()
-        $postExactRelative = $privateRelative + '/runtime/incremental-media/' + $run + '/all-delta-derivatives.json'
-        [void](Invoke-Piwigo @('cp', $postExactRelative, ('piwigo:' + $exactDerivativeContainer)))
-        [void](Invoke-Piwigo @('exec', '-T', '--user', '0:0', 'piwigo', 'sh', '-lc', `
-            ('chown nginx:nginx ' + $exactDerivativeContainer + ' && chmod 0600 ' + $exactDerivativeContainer)))
+        Send-FixedContainerStdinFile -IngressId 'piwigo-exact' -SourcePath $postExactHost
         $postExact = Get-Warmup 'exact' $true '' $postExactDigest ([string]$plan.delta_digest)
         Assert-Exact ([int]$postExact.selected_images -eq $deltaCount `
             -and [int]$postExact.exact_entries -eq $deltaCount `
@@ -610,8 +979,7 @@ try {
     # derivative failure remains safely retryable as the same checksum-bound
     # PENDING delta; ordinary GET cannot perform this action.
     $script:stage = 'index_control_plane_commit'
-    [void](Invoke-Piwigo @('cp', ($privateRelative + '/runtime/incremental-media/' + $run + '/evidence.json'), ('piwigo:' + $evidenceContainer)))
-    [void](Invoke-Piwigo @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $evidenceContainer + ' && chmod 0600 ' + $evidenceContainer)))
+    Send-FixedContainerStdinFile -IngressId 'piwigo-evidence' -SourcePath $evidenceHost
     $completeMarker = Invoke-Piwigo @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', $catalogScript, 'complete-incremental')
     $completeMatch = [regex]::Match($completeMarker, '^PRIVATE_QA_IMMICH_CATALOG=PASS action=complete-incremental count=([0-9]+) baseline=([0-9]+) delta=([0-9]+) completed=([0-9]+) old_changed=0 state=READY$')
     Assert-Exact ($completeMatch.Success -and [int]$completeMatch.Groups[1].Value -eq $catalogCount `
@@ -637,10 +1005,20 @@ try {
         private_artifacts = 'OWNER_ONLY_IGNORED'
         media_delivery = 'MEDIAGUARD_ONLY'
     })
-    Write-Output ("PRIVATE_INCREMENTAL_MEDIA=PASS action=apply runtime={0} total={1} baseline={2} delta={3} ai_old_changed=0 derivative_old_selected=0 assertions={4}" `
-        -f $Runtime,$catalogCount,$baselineCount,$deltaCount,$script:assertions)
+    $maintenanceEvidence = ' maintenance=HELD next=EXPLICIT_FINALIZE'
+    Write-Output (("PRIVATE_INCREMENTAL_MEDIA=PASS action=apply runtime={0} total={1} baseline={2} delta={3} ai_old_changed=0 derivative_old_selected=0 assertions={4}" `
+        -f $Runtime,$catalogCount,$baselineCount,$deltaCount,$script:assertions) + $maintenanceEvidence)
 } catch {
-    if ([string]$_.Exception.Message -like 'PRIVATE_INCREMENTAL_MEDIA=FAIL*') { throw }
+    $caughtMessage = [string]$_.Exception.Message
+    if ($script:maintenanceReleaseAttempted) {
+        if (-not (Restore-MaintenanceAfterFinalizeFailure)) {
+            $script:stage = 'finalize_failure_rehold'
+            Fail 'maintenance_rehold_failed'
+        }
+        $script:maintenanceReleaseAttempted = $false
+    }
+    if ($caughtMessage -like 'PRIVATE_INCREMENTAL_MEDIA=FAIL*') { throw $caughtMessage }
+    Save-PrivateFailureDiagnostic $_.Exception
     Fail 'unexpected'
 } finally {
     # `validate` is read-only and never creates container temporaries.  Do not
@@ -656,5 +1034,6 @@ try {
             if (Test-Path -LiteralPath $path) { try { Remove-Item -LiteralPath $path -Force } catch { } }
         }
     }
+    Exit-ClassArchivePluginWorkflowLock -Handle $workflowLock
     if ($null -ne $lock) { $lock.Dispose() }
 }

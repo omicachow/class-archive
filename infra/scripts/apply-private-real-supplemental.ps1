@@ -15,9 +15,11 @@ param(
     [string]$StagingPath
 )
 
-# One-shot apply boundary for the reviewed 28-source / 26-presentation batch.
-# It never reads original source roots. The normal Piwigo writer is put behind
-# its durable maintenance gate and stopped before the isolated writer starts.
+# Stage one of the reviewed supplemental workflow. It never reads original
+# source roots. The normal Piwigo writer is put behind its durable maintenance
+# gate and stopped before the isolated writer starts. A successful write keeps
+# that gate closed: delta-only media work and an explicit projection/finalize
+# stage must complete before member traffic can resume.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -450,18 +452,14 @@ try {
     [void](Invoke-Compose $prefix @('up', '-d', '--no-deps', 'piwigo') 'piwigo_restart_failed')
     $piwigoStopped = $false
     Wait-PiwigoCli $prefix
-    $script:stage = 'projection_rebuild'
-    $projection = @(Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx', 'piwigo',
-        'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json') 'projection_rebuild_failed')
-    Assert-Apply (@($projection | Where-Object { $_ -match '^\{"result":"PASS",' }).Count -eq 1) 'projection_rebuild_evidence_invalid'
-    $script:stage = 'maintenance_finalize'
-    [void](Invoke-Compose $prefix @('exec', '-T', '--user', 'nginx', 'piwigo', 'php', '/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance') 'maintenance_finalize_failed')
-    Wait-ContainerReady $spec 'piwigo'
+    $script:stage = 'maintenance_hold_verify'
+    Wait-Maintenance $spec $prefix
 
     Write-Output ('PRIVATE_REAL_SUPPLEMENTAL_APPLY=PASS action=apply target=' + $Target `
         + ' schema=16 sources=28 presentations=26 durable_applied=26 durable_deduplicated=2 failed=0 ' `
         + ' run_imported=' + $runImported + ' run_deduplicated=' + $runDeduplicated + ' run_skipped=' + $runSkipped `
-        + ' idempotent=PASS ingress=READ_ONLY source_mount=NONE historical_manifest=NOT_MOUNTED assertions=' + $script:assertions)
+        + ' idempotent=PASS ingress=READ_ONLY source_mount=NONE historical_manifest=NOT_MOUNTED ' `
+        + ' maintenance=HELD next=INCREMENTAL_MEDIA_THEN_EXPLICIT_FINALIZE assertions=' + $script:assertions)
 }
 catch {
     $messages = [Collections.Generic.List[string]]::new()

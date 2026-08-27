@@ -336,7 +336,7 @@ function classArchivePhotoCacheRows(string $scope, array $pending = [], array &$
         . $coverJoin
         . 'LEFT JOIN `' . $archive . '` ai ON ai.`piwigo_image_id` = i.`id` '
         . "WHERE pm.`state` = 'ACTIVE' " . $timelineFilter . $queueOnlyFilter
-        . 'ORDER BY ai.`archive_date` IS NULL ASC,ai.`archive_date` DESC,i.`id` DESC'
+        . ' ORDER BY ai.`archive_date` IS NULL ASC,ai.`archive_date` DESC,i.`id` DESC'
         ,
         $parameters,
     );

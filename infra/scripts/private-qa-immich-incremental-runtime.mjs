@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 
 // Explicit operator-only Immich delta runner. It executes in the existing
 // metadata gateway container, reads that container's already-published
@@ -7,7 +7,6 @@ import { chmodSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 // original/database mount and ordinary Class Archive GET routes never invoke
 // this file.
 const INPUT_PATH = '/tmp/class-archive-private-qa-immich-incremental-plan.json';
-const OUTPUT_PATH = '/tmp/class-archive-private-qa-immich-incremental-evidence.json';
 const SECRET_PATH = '/run/secrets/bridge.json';
 const API = 'http://immich-server:2283/api';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -51,14 +50,15 @@ function privateJson(path, code, maximum) {
   }
 }
 
-function writePrivateJson(path, value) {
-  const raw = JSON.stringify(value);
-  if (Buffer.byteLength(raw, 'utf8') < 16 || Buffer.byteLength(raw, 'utf8') > 1024 * 1024) fail('output_invalid');
-  writeFileSync(path, raw, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  chmodSync(path, 0o600);
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1
-    || stat.size !== Buffer.byteLength(raw, 'utf8')) fail('output_invalid');
+function emitEvidence(value) {
+  const raw = Buffer.from(JSON.stringify(value), 'utf8');
+  if (raw.length < 16 || raw.length > 1024 * 1024) fail('output_invalid');
+  const sha256 = createHash('sha256').update(raw).digest('hex');
+  // The gateway root filesystem remains read-only and /tmp remains a private
+  // tmpfs.  A single fixed stdout envelope is the only evidence egress.  The
+  // owner operator validates its byte count, digest and canonical Base64
+  // before writing it to an ignored owner-only host path.
+  process.stdout.write(`CLASS_ARCHIVE_IMMICH_EVIDENCE_V1 bytes=${raw.length} sha256=${sha256} base64=${raw.toString('base64')}\n`);
 }
 
 function digest(value) {
@@ -448,8 +448,8 @@ try {
     old_asset_changes: 0,
     assets: bindings,
   };
-  writePrivateJson(OUTPUT_PATH, evidence);
-  console.log(`PRIVATE_QA_IMMICH_INCREMENTAL=PASS assets=${plan.catalog_count} baseline=${plan.baseline_count} delta=${plan.delta_count} old_changed=0 force_full=0`);
+  emitEvidence(evidence);
+  process.stdout.write(`PRIVATE_QA_IMMICH_INCREMENTAL=PASS assets=${plan.catalog_count} baseline=${plan.baseline_count} delta=${plan.delta_count} old_changed=0 force_full=0\n`);
 } catch (error) {
   const safeStage = /^[a-z_]{1,48}$/.test(stage) ? stage : 'unknown';
   const code = error instanceof IncrementalError ? error.code : `unexpected_${safeStage}`;

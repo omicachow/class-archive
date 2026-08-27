@@ -521,6 +521,11 @@ switch ($Action) {
             'php', '/workspace/tests/phase3/private-incremental-media-retry-synthetic.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/tests/phase3/private-supplemental-three-stage-synthetic.php'
+        ))
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-ui-static.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-cache-contract.mjs')
@@ -541,6 +546,12 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase3\private-real-supplemental-apply-operator-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\class-archive-stdin-ingress-synthetic.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\private-incremental-evidence-egress-synthetic.ps1')
         exit $LASTEXITCODE
     }
     'test-phase2-gateway-http' {

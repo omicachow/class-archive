@@ -55,8 +55,12 @@ try {
     Assert-Protocol ($operator.Contains("'docker', 'network', 'rm'")) 'bounded_network_cleanup_missing'
     Assert-Protocol ($operator.Contains("@('create', '--no-build', '--no-recreate', 'supplemental-apply')")) 'network_create_may_recreate_db'
     Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/prepare-class-archive-maintenance.php', '--prepare'")) 'maintenance_prepare_missing'
-    Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'")) 'maintenance_finalize_missing'
-    Assert-Protocol ($operator.Contains("'/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'") -and $operator.Contains('projection_rebuild_evidence_invalid')) 'normal_runtime_projection_rebuild_missing'
+    Assert-Protocol (-not $operator.Contains("'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'")) 'apply_must_not_finalize_maintenance'
+    Assert-Protocol (-not $operator.Contains("'/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'")) 'apply_must_not_publish_projection'
+    Assert-Protocol `
+        ($operator.Contains("`$script:stage = 'maintenance_hold_verify'") `
+            -and $operator.Contains('maintenance=HELD next=INCREMENTAL_MEDIA_THEN_EXPLICIT_FINALIZE')) `
+        'maintenance_hold_handoff_missing'
     Assert-Protocol ($operator.Contains("`$lines = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'")) 'single_line_container_probe_not_array_wrapped'
     Assert-Protocol ($operator.Contains("`$state = @(Invoke-WslCapture @('docker', 'inspect', '--format', '{{.State.Status}}'")) 'single_line_writer_probe_not_array_wrapped'
     Assert-Protocol ($operator.Contains('function Assert-PiwigoReadyOrMaintenance') -and $operator.Contains("`$lines[0] -in @('running|starting', 'running|unhealthy')")) 'maintenance_resume_container_gate_missing'
@@ -64,9 +68,9 @@ try {
     $stop = $operator.IndexOf("@('stop', 'piwigo')", [StringComparison]::Ordinal)
     $run = $operator.IndexOf("'supplemental-apply') 'supplemental_import_failed'", [StringComparison]::Ordinal)
     Assert-Protocol ($stop -gt $maintenance -and $run -gt $stop) 'writer_stop_order_invalid'
-    $normalProjection = $operator.IndexOf("'/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'", [StringComparison]::Ordinal)
-    $finalize = $operator.IndexOf("'/workspace/infra/scripts/install-class-archive-plugins.php', '--finalize-maintenance'", [StringComparison]::Ordinal)
-    Assert-Protocol ($normalProjection -gt $run -and $finalize -gt $normalProjection) 'projection_not_rebuilt_before_finalize'
+    $normalRestart = $operator.IndexOf("@('up', '-d', '--no-deps', 'piwigo') 'piwigo_restart_failed'", [StringComparison]::Ordinal)
+    $maintenanceHold = $operator.IndexOf("`$script:stage = 'maintenance_hold_verify'", [StringComparison]::Ordinal)
+    Assert-Protocol ($normalRestart -gt $run -and $maintenanceHold -gt $normalRestart) 'maintenance_hold_not_verified_after_writer_restart'
     Assert-Protocol ($operator.Contains('APPLY_VERIFIED_28_SOURCE_26_PRESENTATION_BATCH')) 'container_confirmation_missing'
     Assert-Protocol ($operator.Contains('historical_manifest=NOT_MOUNTED')) 'legacy_manifest_evidence_missing'
     Assert-Protocol ($operator.Contains('source_mount=NONE')) 'source_mount_evidence_missing'
