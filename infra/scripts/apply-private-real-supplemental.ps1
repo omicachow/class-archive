@@ -126,6 +126,25 @@ function Get-WslPath([string]$Path, [string]$Code) {
     return [string]$lines[0]
 }
 
+function Save-PrivateFailureDiagnostic([string]$Code, [object[]]$Lines) {
+    try {
+        $path = Join-Path $privateRoot 'runtime\supplemental-apply-error.json'
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+        $record = [ordered]@{
+            generated_at = (Get-Date).ToUniversalTime().ToString('o')
+            stage = $script:stage
+            requested_code = $Code
+            output = @($Lines | ForEach-Object { [string]$_ })
+        }
+        [IO.File]::WriteAllText($path, ($record | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $path
+        $relative = [IO.Path]::GetRelativePath($projectRoot, $path).Replace('\', '/')
+        & git -C $projectRoot check-ignore --quiet --no-index -- $relative
+        if ($LASTEXITCODE -ne 0) { [IO.File]::Delete($path) }
+    }
+    catch { }
+}
+
 function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
     try {
@@ -135,6 +154,7 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     }
     finally { $ErrorActionPreference = $previous }
     if ($exit -ne 0) {
+        Save-PrivateFailureDiagnostic $Code $lines
         # The one-shot importer intentionally emits bounded machine error
         # codes. Preserve only that non-sensitive code and never forward raw
         # container output, which may contain a private staging path.

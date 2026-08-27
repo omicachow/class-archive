@@ -42,6 +42,8 @@ try {
     Assert-Protocol ($operator.Contains('Assert-ClassArchiveOwnerOnlyFileAcl')) 'owner_acl_gate_missing'
     Assert-Protocol ($operator.Contains('Invoke-VerifiedArtifact')) 'verified_artifact_gate_missing'
     Assert-Protocol ($operator.Contains("code=(?<code>[a-z0-9_]{1,96})") -and $operator.Contains('never forward raw')) 'bounded_container_error_code_missing'
+    Assert-Protocol ($operator.Contains('function Save-PrivateFailureDiagnostic') -and $operator.Contains("runtime\supplemental-apply-error.json")) 'private_failure_diagnostic_missing'
+    Assert-Protocol ($operator.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $path') -and $operator.Contains('check-ignore --quiet --no-index')) 'private_failure_diagnostic_boundary_missing'
     Assert-Protocol ($operator.Contains('sources=28 presentations=26')) 'supplemental_input_contract_missing'
     Assert-Protocol ($operator.Contains('durable_applied=26 durable_deduplicated=2')) 'supplemental_terminal_contract_missing'
     Assert-Protocol ($operator.Contains('PRIVATE_REAL_SUPPLEMENTAL_TARGET=PASS action=schema schema=16 source_paths=NOT_READ')) 'operator_schema_gate_missing'
