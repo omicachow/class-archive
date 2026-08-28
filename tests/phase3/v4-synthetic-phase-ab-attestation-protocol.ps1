@@ -38,7 +38,7 @@ Assert-True ($attester.Contains('source_head') -and $attester.Contains('source_d
 Assert-True ($attester.Contains('function Assert-CleanAcceptanceCheckout') -and $attester.Contains('status --porcelain=v1 --untracked-files=all') -and $attester.Contains('acceptance_checkout_not_clean')) 'v4_phase_ab_clean_checkout_requirement_missing'
 Assert-True ([regex]::Matches($attester, '(?m)^\s{4}Assert-CleanAcceptanceCheckout\s*$').Count -eq 1) 'v4_phase_ab_clean_checkout_invocation_missing'
 Assert-True ($attester.Contains("environment = 'SYNTHETIC_8091'") -and $attester.Contains("browser = 'GOOGLE_CHROME_STABLE'")) 'v4_phase_ab_environment_or_browser_contract_missing'
-Assert-True ($attester.Contains('function Get-TrackedPhpSourcePaths') -and $attester.Contains("Get-TrackedPhpSourcePaths 'plugins/ClassIdentity/src'") -and $attester.Contains("Get-TrackedPhpSourcePaths 'plugins/ClassArchivePolicy'")) 'v4_phase_ab_complete_policy_source_tree_binding_missing'
+Assert-True ($attester.Contains('function Get-TrackedPhpSourcePaths') -and $attester.Contains("Get-TrackedPhpSourcePaths 'plugins/ClassIdentity'") -and $attester.Contains("Get-TrackedPhpSourcePaths 'plugins/ClassArchivePolicy'")) 'v4_phase_ab_complete_policy_source_tree_binding_missing'
 Assert-True ($attester.Contains('source_tree_contract_invalid') -and $attester.Contains('source_tree_path_invalid') -and $attester.Contains('git -C $projectRoot ls-files')) 'v4_phase_ab_policy_source_tree_validation_missing'
 
 foreach ($sourcePath in @(

@@ -259,7 +259,7 @@ function Get-SourceDigests {
     # Gateway dependencies such as Access, canonical-photo, collection,
     # adapter and projection services, and makes any future source addition
     # invalidate a prior Phase A/B record by construction.
-    $relativePaths += Get-TrackedPhpSourcePaths 'plugins/ClassIdentity/src'
+    $relativePaths += Get-TrackedPhpSourcePaths 'plugins/ClassIdentity'
     $relativePaths += Get-TrackedPhpSourcePaths 'plugins/ClassArchivePolicy'
     $relativePaths = @($relativePaths | Sort-Object -Unique)
     $digests = [ordered]@{}
