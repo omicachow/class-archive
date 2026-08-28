@@ -42,7 +42,7 @@ for (const table of [
   check(support.includes(`'${table}'`), `domain_support_table_${table}_missing`);
 }
 check(schema.includes("'collection_snapshot' => '") && !schema.includes("'collection_snapshot' => '000000"), 'semantic_digest_placeholder');
-check(snapshot.includes('14:15|15:16|16:17'), 'pre_migration_16_to_17_missing');
+check(snapshot.includes('14:15|15:16|16:17|16:18|17:18'), 'pre_migration_exact_transition_whitelist_missing');
 check(privateDeployment.includes('$migrationSourceVersion = 16') && privateDeployment.includes('$migrationTargetVersion = 17'), 'private_deployment_16_to_17_missing');
 check(supplementalTarget.includes('Schema::CURRENT_VERSION !== 17') && supplementalTarget.includes("['schema_version'] ?? 0) !== 17"), 'supplemental_target_v17_missing');
 check(legacyRestoreVerifier.includes('v16-only') && legacyRestoreVerifier.includes('CURRENT_VERSION !== 16'), 'legacy_restore_verifier_not_versioned');

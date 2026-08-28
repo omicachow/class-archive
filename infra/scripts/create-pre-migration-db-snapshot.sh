@@ -33,7 +33,7 @@ case "$from_version:$to_version" in
   # Each pair is deliberately explicit.  Do not turn this into a broad
   # numeric range: a DB-only rollback bundle is valid only at the exact
   # ledger boundary that the owner deployment adapter has reviewed.
-  14:15|15:16|16:17|17:18) ;;
+  14:15|15:16|16:17|16:18|17:18) ;;
   *) fail migration_version_invalid ;;
 esac
 

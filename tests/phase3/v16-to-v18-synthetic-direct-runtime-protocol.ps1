@@ -1,0 +1,115 @@
+[CmdletBinding()]
+param()
+
+# Static-only contract for the attempt13 orchestration layer.  It opens
+# tracked source text only; no WSL, Docker, database, browser, media volume or
+# private Owner state is contacted.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$runnerPath = Join-Path $projectRoot 'infra\scripts\v16-to-v18-synthetic-direct-runtime.ps1'
+$proofPath = Join-Path $projectRoot 'infra\scripts\v16-to-v18-synthetic-direct-proof.php'
+$baseRunnerPath = Join-Path $projectRoot 'infra\scripts\v18-synthetic-migration.ps1'
+$assertions = 0
+
+function Assert-True([bool]$Condition, [string]$Code) {
+    if (-not $Condition) { throw $Code }
+    $script:assertions++
+}
+
+function Slice-Function([string]$Text, [string]$StartName, [string]$NextName, [string]$Code) {
+    $start = $Text.IndexOf($StartName, [StringComparison]::Ordinal)
+    $next = $Text.IndexOf($NextName, [StringComparison]::Ordinal)
+    Assert-True ($start -ge 0 -and $next -gt $start) $Code
+    return $Text.Substring($start, $next - $start)
+}
+
+Assert-True (Test-Path -LiteralPath $runnerPath -PathType Leaf) 'direct_runtime_runner_missing'
+Assert-True (Test-Path -LiteralPath $proofPath -PathType Leaf) 'direct_runtime_proof_missing'
+Assert-True (Test-Path -LiteralPath $baseRunnerPath -PathType Leaf) 'direct_runtime_base_runner_missing'
+
+$tokens = $null
+$parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'direct_runtime_runner_parse_error'
+
+$runner = [IO.File]::ReadAllText($runnerPath)
+$enginePipeFunction = Slice-Function $runner 'function Assert-DockerDesktopEnginePipe' 'function Invoke-BaseRunner' 'direct_runtime_engine_pipe_function_boundary_missing'
+$baseRunnerFunction = Slice-Function $runner 'function Invoke-BaseRunner' 'function Get-SandboxValues' 'direct_runtime_base_runner_function_boundary_missing'
+$directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 'function Get-DirectSchemaVersion' 'direct_runtime_direct_compose_function_boundary_missing'
+
+# There is exactly one allowable laboratory identity.  The orchestration
+# surface has no user-selectable attempt, port, project, owner, or source path.
+Assert-True ($runner.Contains("`$attempt = 'attempt13'") -and $runner.Contains("`$httpPort = '9790'") -and $runner.Contains("`$compatPort = '9791'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt13'")) 'direct_runtime_attempt13_identity_not_fixed'
+Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
+$privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
+$recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
+foreach ($forbiddenTarget in @('8091','8191','8291','private-real','runtime-owner',$privateSourceMarker,$recoveryTargetMarker,'sailor-ingest')) {
+    Assert-True (-not $runner.Contains($forbiddenTarget)) ('direct_runtime_non_synthetic_target_forbidden_' + ($forbiddenTarget -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+
+# The direct laboratory must not start a WSL/Docker client if Docker Desktop's
+# Windows engine pipe has disappeared. Both state-changing paths delegate to
+# this fail-closed guard before path conversion or native process startup.
+Assert-True ($enginePipeFunction.Contains('dockerDesktopLinuxEngine') -and $enginePipeFunction.Contains('docker_engine') -and $enginePipeFunction.Contains('Test-Path -LiteralPath $_') -and $enginePipeFunction.Contains("Stop-V16ToV18DirectRuntime 'docker_engine_pipe_unavailable'")) 'direct_runtime_engine_pipe_fail_closed_contract_missing'
+Assert-True (-not $enginePipeFunction.Contains('Invoke-NativeCapture') -and -not $enginePipeFunction.Contains('Get-WslPath') -and -not $enginePipeFunction.Contains('docker compose')) 'direct_runtime_engine_pipe_guard_must_not_probe_runtime'
+$basePipeIndex = $baseRunnerFunction.IndexOf('Assert-DockerDesktopEnginePipe', [StringComparison]::Ordinal)
+$baseNativeIndex = $baseRunnerFunction.IndexOf('Invoke-NativeCapture', [StringComparison]::Ordinal)
+$composePipeIndex = $directComposeFunction.IndexOf('Assert-DockerDesktopEnginePipe', [StringComparison]::Ordinal)
+$composeWslPathIndex = $directComposeFunction.IndexOf('Get-WslPath', [StringComparison]::Ordinal)
+Assert-True ($basePipeIndex -ge 0 -and $baseNativeIndex -gt $basePipeIndex) 'direct_runtime_engine_pipe_must_precede_base_runner'
+Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeIndex) 'direct_runtime_engine_pipe_must_precede_direct_compose'
+
+# Initialisation/restore are delegated to the existing guarded V16 DB-only
+# lab runner.  The direct orchestrator cannot invoke historical bootstrap or
+# its V17->V18 migration action.
+Assert-True ($runner.Contains('function Invoke-BaseRunner') -and $runner.Contains("@('initialize','restore')") -and $runner.Contains("Invoke-BaseRunner 'initialize'") -and $runner.Contains("Invoke-BaseRunner 'restore' -RestoreConfirmation")) 'direct_runtime_base_restore_reuse_missing'
+foreach ($forbiddenBaseInvocation in @("Invoke-BaseRunner\s+'bootstrap-v17'", "Invoke-BaseRunner\s+'migrate'", "Invoke-BaseRunner\s+'recover'", 'Invoke-BootstrapV17', 'Invoke-MigrateV18')) {
+    Assert-True ($runner -notmatch $forbiddenBaseInvocation) ('direct_runtime_historical_base_action_forbidden_' + ($forbiddenBaseInvocation -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+Assert-True ($runner.Contains('source=V16_DB_ONLY') -and $runner.Contains('media=NOT_MOUNTED') -and $runner.Contains('direct_restore_not_v16')) 'direct_runtime_v16_restore_boundary_missing'
+
+# The current proof must run as nginx with both runtime gates.  The result is
+# strict: first migration, replay, read-only verification, and unknown-ledger
+# fail closed each have a fixed evidence contract.
+Assert-True ($runner.Contains("'--user','nginx'") -and $runner.Contains("'CLASS_ARCHIVE_V16_TO_V18_DIRECT_PROOF=1'") -and $runner.Contains("'CLASS_ARCHIVE_RUNTIME_SCOPE=SYNTHETIC_V4_MIGRATION'") -and $runner.Contains('/workspace/infra/scripts/v16-to-v18-synthetic-direct-proof.php')) 'direct_runtime_nginx_scope_gate_missing'
+Assert-True ($runner.Contains("Invoke-DirectProof '--migrate-current-source'") -and $runner.Contains("Invoke-DirectProof '--verify-current-source'") -and $runner.Contains("Invoke-DirectProof '--fail-closed'")) 'direct_runtime_current_source_proof_modes_missing'
+Assert-True ($runner.Contains('schema_from=16 schema_to=18 sequential=17_18 replay=NOT_APPLICABLE') -and $runner.Contains('legacy_tables_preserved=PASS') -and $runner.Contains('new_table_count=7')) 'direct_runtime_first_migration_evidence_missing'
+Assert-True ($runner.Contains('schema_from=18 schema_to=18 sequential=NOT_APPLICABLE replay=PASS') -and $runner.Contains('stage=verify_current_source schema=18 ledger=18') -and $runner.Contains('unknown_schema=DENY scratch=DISPOSED')) 'direct_runtime_replay_verify_fail_closed_evidence_missing'
+Assert-True ($runner.Contains('direct_proof_requires_fresh_v16_lab') -and $runner.Contains('direct_proof_report_exists_preserved_lab') -and $runner.Contains('No cleanup action exists')) 'direct_runtime_failed_lab_preservation_missing'
+
+# A proof report must be evidence for the exact reviewed source closure which
+# actually ran.  Recording only a post-hoc attestation would let a later
+# source revision bless an older runtime result.  The runner therefore pins a
+# clean tracked closure before the proof, rechecks it after the proof, and
+# persists both commit and digest in the ignored report.
+Assert-True ($runner.Contains('function Get-ProofSourceClosure') -and $runner.Contains('function Assert-ProofSourceClosure') -and $runner.Contains('proof_source_worktree_not_head_bound') -and $runner.Contains('proof_source_index_not_head_bound')) 'direct_runtime_proof_source_clean_closure_missing'
+foreach ($proofClosurePath in @('infra/docker-compose.yml', 'infra/v18-synthetic-migration/docker-compose.override.yml', 'infra/scripts/v18-synthetic-db-probe.sh', 'infra/scripts/v18-synthetic-migration.ps1', 'infra/scripts/restore-v4-synthetic-pre-migration-db.sh', 'infra/scripts/v16-to-v18-synthetic-direct-proof.php', 'infra/scripts/v16-to-v18-synthetic-direct-runtime.ps1', 'plugins/ClassIdentity/src/Schema.php')) {
+    Assert-True ($runner.Contains("'$proofClosurePath'")) ('direct_runtime_proof_source_closure_path_missing_' + ($proofClosurePath -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+Assert-True ($runner.Contains('$sourceClosure = Get-ProofSourceClosure') -and $runner.Contains("Assert-ProofSourceClosure `$sourceClosure 'direct_proof_source_changed_during_run'") -and $runner.Contains("Assert-ProofSourceClosure `$sourceClosure 'direct_verify_source_changed_during_run'")) 'direct_runtime_proof_source_closure_before_after_missing'
+
+# Runtime output must be non-secret by construction.  The ignored report is
+# bound to the fixed lab and contains only evidence strings and an opaque
+# schema fingerprint; native stderr is never forwarded into logs.
+Assert-True ($runner.Contains('v16-to-v18-direct-proof.json') -and $runner.Contains('Assert-IgnoredUntracked $reportPath') -and $runner.Contains('format = 2') -and $runner.Contains("source_commit = `$SourceClosure.Commit") -and $runner.Contains("source_digest = `$SourceClosure.SourceDigest") -and $runner.Contains("legacy_fingerprint = `$Fingerprint") -and $runner.Contains("media = 'NOT_MOUNTED'")) 'direct_runtime_ignored_evidence_report_missing'
+Assert-True ($runner.Contains('$record.format -ne 2') -and $runner.Contains('direct_proof_source_closure_stale') -and $runner.Contains('source_commit) -notmatch') -and $runner.Contains('source_digest) -notmatch')) 'direct_runtime_proof_report_source_binding_missing'
+Assert-True ($runner.Contains('Deliberately never echo stderr') -and -not $runner.Contains('Write-Output $stderr') -and -not $runner.Contains('Write-Error $stderr')) 'direct_runtime_stderr_secret_boundary_missing'
+foreach ($forbiddenDestructive in @('docker compose down','docker volume rm','docker rm ','Remove-Item','Move-Item','Copy-Item','Clear-Content','Set-Content')) {
+    Assert-True (-not $runner.Contains($forbiddenDestructive)) ('direct_runtime_destructive_operation_forbidden_' + ($forbiddenDestructive -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+
+# The direct proof remains independent from a historical source bridge; that
+# assertion is duplicated here so the orchestration test cannot hide a later
+# regression in the PHP helper.
+$proof = [IO.File]::ReadAllText($proofPath)
+foreach ($requiredProof in @('Schema::CURRENT_VERSION !== 18','--migrate-current-source','--verify-current-source','--fail-closed','schema_from=16 schema_to=18 sequential=17_18','media=NOT_TOUCHED')) {
+    Assert-True ($proof.Contains($requiredProof)) ('direct_runtime_proof_contract_missing_' + ($requiredProof -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+foreach ($forbiddenProof in @('V18_SYNTHETIC_V17_SCHEMA','LoadHistoricalSchema','bootstrap-v17','historical_commit')) {
+    Assert-True (-not $proof.Contains($forbiddenProof)) ('direct_runtime_proof_historical_bridge_forbidden_' + ($forbiddenProof -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+
+Write-Output "V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_PROTOCOL=PASS assertions=$assertions"

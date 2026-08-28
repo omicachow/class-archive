@@ -1,0 +1,448 @@
+<#
+.SYNOPSIS
+Runs one isolated, direct-current-source synthetic V16 -> V18 migration proof.
+
+.DESCRIPTION
+This is deliberately narrower than v18-synthetic-migration.ps1.  It has one
+hard-coded laboratory identity: attempt13 on loopback ports 9790/9791.  The
+runner may ask the existing runner to initialise and DB-only restore that
+fresh laboratory, but it never calls its historical V17 bootstrap or migrate
+actions.  The proof itself is always the current checked-out
+v16-to-v18-synthetic-direct-proof.php script, executed as the image's nginx
+account with its explicit synthetic scope gates.
+
+No cleanup action exists.  Any failed attempt13 state is retained for
+forensics; create neither a replacement lab nor a destructive retry.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]
+    [string]$Action = 'status',
+    [switch]$ConfirmSyntheticRestore,
+    [switch]$ConfirmSyntheticMigration
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$wsl = "$env:SystemRoot\System32\wsl.exe"
+$windowsPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$attempt = 'attempt13'
+$httpPort = '9790'
+$compatPort = '9791'
+$composeProject = 'class_archive_v18_synthetic_migration_attempt13'
+$baseRunner = Join-Path $PSScriptRoot 'v18-synthetic-migration.ps1'
+$proofPath = Join-Path $PSScriptRoot 'v16-to-v18-synthetic-direct-proof.php'
+$sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
+$configRoot = Join-Path $sandboxRoot 'config'
+$reportRoot = Join-Path $sandboxRoot 'reports'
+$envPath = Join-Path $configRoot '.env.piwigo'
+$reportPath = Join-Path $reportRoot 'v16-to-v18-direct-proof.json'
+$composePath = 'infra/docker-compose.yml'
+$overridePath = 'infra/v18-synthetic-migration/docker-compose.override.yml'
+$proofSourcePaths = @(
+    'infra/docker-compose.yml',
+    'infra/v18-synthetic-migration/docker-compose.override.yml',
+    'infra/scripts/v18-synthetic-db-probe.sh',
+    'infra/scripts/v18-synthetic-migration.ps1',
+    'infra/scripts/restore-v4-synthetic-pre-migration-db.sh',
+    'infra/scripts/v16-to-v18-synthetic-direct-proof.php',
+    'infra/scripts/v16-to-v18-synthetic-direct-runtime.ps1',
+    'plugins/ClassIdentity/src/Schema.php'
+)
+$script:stage = 'initialization'
+
+function Stop-V16ToV18DirectRuntime([string]$Code) {
+    throw [InvalidOperationException]::new('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_STOP:' + $Code)
+}
+
+function Write-V16ToV18DirectRuntime([string]$State, [string]$Stage, [string]$Extra = '') {
+    $suffix = if ([string]::IsNullOrWhiteSpace($Extra)) { '' } else { ' ' + $Extra }
+    Write-Output ("V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME={0} stage={1}{2}" -f $State, $Stage, $suffix)
+}
+
+function Assert-PathInside([string]$Path, [string]$Root, [bool]$MustExist = $true) {
+    $full = [IO.Path]::GetFullPath($Path)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not (($full + [IO.Path]::DirectorySeparatorChar).StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase))) {
+        Stop-V16ToV18DirectRuntime 'path_outside_allowed_root'
+    }
+    if ($MustExist -and -not (Test-Path -LiteralPath $full)) { Stop-V16ToV18DirectRuntime 'required_path_missing' }
+    $cursor = if (Test-Path -LiteralPath $full) { Get-Item -LiteralPath $full -Force } else { Get-Item -LiteralPath (Split-Path -Parent $full) -Force }
+    while ($null -ne $cursor) {
+        if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { Stop-V16ToV18DirectRuntime 'reparse_point_forbidden' }
+        $cursor = if ($cursor -is [IO.DirectoryInfo]) { $cursor.Parent } else { $cursor.Directory }
+    }
+    return $full
+}
+
+function Assert-IgnoredUntracked([string]$Path, [bool]$Directory, [bool]$MustExist = $true) {
+    $full = Assert-PathInside $Path $projectRoot $MustExist
+    if ($MustExist) {
+        $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+        if (($Directory -and -not $item.PSIsContainer) -or (-not $Directory -and $item.PSIsContainer)) {
+            Stop-V16ToV18DirectRuntime 'ignored_path_type_invalid'
+        }
+    }
+    $relative = $full.Substring($projectRoot.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\','/')
+    & git -C $projectRoot check-ignore --quiet --no-index -- $relative
+    if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'sandbox_path_not_ignored' }
+    $tracked = @(& git -C $projectRoot ls-files -- $relative 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $tracked.Count -ne 0) { Stop-V16ToV18DirectRuntime 'sandbox_path_tracked' }
+    return $full
+}
+
+function Assert-TrackedLeaf([string]$Path) {
+    $full = Assert-PathInside $Path $projectRoot $true
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { Stop-V16ToV18DirectRuntime 'tracked_path_not_leaf' }
+    $relative = $full.Substring($projectRoot.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\','/')
+    $tracked = @(& git -C $projectRoot ls-files --error-unmatch -- $relative 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $tracked.Count -ne 1) { Stop-V16ToV18DirectRuntime 'required_tracked_source_missing' }
+    return $full
+}
+
+function Get-Head {
+    $head = @(& git -C $projectRoot rev-parse --verify HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or ([string]$head[0]).Trim() -notmatch '^[a-f0-9]{40}$') {
+        Stop-V16ToV18DirectRuntime 'git_head_invalid'
+    }
+    return ([string]$head[0]).Trim()
+}
+
+function Get-ProofSourceClosure {
+    # A runtime proof is evidence for exact executable sources, not merely the
+    # attempt13 database state. Require a clean, tracked source closure before
+    # it mutates the synthetic lab and record its deterministic digest.
+    $head = Get-Head
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($relative in $proofSourcePaths) {
+        if ($relative -notmatch '^[A-Za-z0-9_./-]+$' -or $relative.Contains('..')) {
+            Stop-V16ToV18DirectRuntime 'proof_source_path_invalid'
+        }
+        $full = Assert-TrackedLeaf (Join-Path $projectRoot $relative)
+        & git -C $projectRoot diff --quiet -- $relative
+        if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'proof_source_worktree_not_head_bound' }
+        & git -C $projectRoot diff --cached --quiet -- $relative
+        if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'proof_source_index_not_head_bound' }
+        [void]$records.Add([ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() })
+    }
+    $ordered = @($records | Sort-Object -Property path)
+    $material = [string]::Join("`n", @($ordered | ForEach-Object { $_.path + "`0" + $_.sha256 })) + "`n"
+    $bytes = [Text.Encoding]::UTF8.GetBytes($material)
+    $digest = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','').ToLowerInvariant()
+    if ($head -ne (Get-Head)) { Stop-V16ToV18DirectRuntime 'proof_source_head_changed_during_capture' }
+    return [ordered]@{ Commit = $head; SourceDigest = $digest }
+}
+
+function Assert-ProofSourceClosure([hashtable]$Expected, [string]$Code) {
+    if ($null -eq $Expected -or [string]$Expected.Commit -notmatch '^[a-f0-9]{40}$' -or [string]$Expected.SourceDigest -notmatch '^[a-f0-9]{64}$') {
+        Stop-V16ToV18DirectRuntime ($Code + '_reference_invalid')
+    }
+    $actual = Get-ProofSourceClosure
+    if (-not [string]::Equals([string]$Expected.Commit,[string]$actual.Commit,[StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$Expected.SourceDigest,[string]$actual.SourceDigest,[StringComparison]::Ordinal)) {
+        Stop-V16ToV18DirectRuntime $Code
+    }
+    return $actual
+}
+
+function Invoke-NativeCapture([string]$FileName, [string[]]$Arguments, [string]$FailureCode) {
+    # Every argument is fixed by this runner or an independently validated
+    # local path.  Keep the native command-line surface intentionally simple:
+    # paths with whitespace or quotes are rejected rather than re-quoted.
+    foreach ($argument in $Arguments) {
+        $value = [string]$argument
+        if ($value -match '[\s\"]' -or $value.Contains("`0")) { Stop-V16ToV18DirectRuntime 'native_argument_invalid' }
+    }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $FileName
+    $info.Arguments = $Arguments -join ' '
+    $info.WorkingDirectory = $projectRoot
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V16ToV18DirectRuntime ($FailureCode + '_start_failed') }
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    # Deliberately never echo stderr: an engine error can include ignored
+    # synthetic credentials created by the base runner.
+    if ($exitCode -ne 0) { Stop-V16ToV18DirectRuntime $FailureCode }
+    return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
+}
+
+function Get-WslPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    $result = @(Invoke-NativeCapture $wsl @('-d','Ubuntu','--exec','wslpath','-a',$full) 'wsl_path_conversion_failed')
+    if ($result.Count -ne 1) { Stop-V16ToV18DirectRuntime 'wsl_path_conversion_invalid' }
+    $value = ([string]$result[0]).Trim()
+    if ($value -notmatch '^/mnt/[a-z]/' -or $value.Contains('..') -or $value.Contains('//') -or $value -match '\s') {
+        Stop-V16ToV18DirectRuntime 'wsl_path_invalid'
+    }
+    return $value
+}
+
+function Assert-DockerDesktopEnginePipe {
+    # The direct synthetic lab is a Windows/WSL runner. Fail before invoking
+    # the base runner or Docker compose when the Desktop Linux engine cannot
+    # accept commands, preserving the forensic lab and avoiding hung probes.
+    $pipes = @('\\.\pipe\dockerDesktopLinuxEngine','\\.\pipe\docker_engine')
+    if (@($pipes | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) {
+        Stop-V16ToV18DirectRuntime 'docker_engine_pipe_unavailable'
+    }
+}
+
+function Invoke-BaseRunner([string]$BaseAction, [switch]$RestoreConfirmation) {
+    if ($BaseAction -notin @('initialize','restore')) { Stop-V16ToV18DirectRuntime 'base_action_forbidden' }
+    Assert-DockerDesktopEnginePipe
+    Assert-TrackedLeaf $baseRunner | Out-Null
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { Stop-V16ToV18DirectRuntime 'windows_powershell_missing' }
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($part in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$baseRunner,'-Action',$BaseAction,'-Attempt',$attempt)) {
+        [void]$arguments.Add([string]$part)
+    }
+    if ($RestoreConfirmation) { [void]$arguments.Add('-ConfirmSyntheticRestore') }
+    return @(Invoke-NativeCapture $windowsPowerShell $arguments.ToArray() ('base_runner_' + $BaseAction + '_failed'))
+}
+
+function Get-SandboxValues {
+    Assert-IgnoredUntracked $sandboxRoot $true | Out-Null
+    Assert-IgnoredUntracked $configRoot $true | Out-Null
+    Assert-IgnoredUntracked $reportRoot $true | Out-Null
+    Assert-IgnoredUntracked $envPath $false | Out-Null
+    $contents = [IO.File]::ReadAllText($envPath, [Text.UTF8Encoding]::new($false))
+    if ($contents.Contains("`0")) { Stop-V16ToV18DirectRuntime 'sandbox_env_invalid' }
+    $values = @{}
+    foreach ($line in ($contents -split "`r?`n")) {
+        if ($line -eq '') { continue }
+        if ($line -notmatch '^([A-Z][A-Z0-9_]*)=(.*)$') { Stop-V16ToV18DirectRuntime 'sandbox_env_line_invalid' }
+        $key = [string]$Matches[1]
+        if ($values.ContainsKey($key)) { Stop-V16ToV18DirectRuntime 'sandbox_env_duplicate_key' }
+        $values[$key] = [string]$Matches[2]
+    }
+    foreach ($expected in @{
+        COMPOSE_PROJECT_NAME = $composeProject
+        CLASS_ARCHIVE_HTTP_PORT = $httpPort
+        CLASS_ARCHIVE_COMPAT_HTTP_PORT = $compatPort
+        CLASS_ARCHIVE_CORE_PUBLIC_PORT = $httpPort
+        CLASS_ARCHIVE_BASE_URL = ('http://127.0.0.1:' + $httpPort)
+        CLASS_ARCHIVE_V18_SANDBOX_APP_NETWORK = ($composeProject + '_app')
+        CLASS_ARCHIVE_V18_GATEWAY_NETWORK = ($composeProject + '_gateway')
+    }.GetEnumerator()) {
+        if (-not $values.ContainsKey($expected.Key) -or -not [string]::Equals([string]$values[$expected.Key], [string]$expected.Value, [StringComparison]::Ordinal)) {
+            Stop-V16ToV18DirectRuntime ('sandbox_env_contract_invalid_' + $expected.Key.ToLowerInvariant())
+        }
+    }
+    return $values
+}
+
+function Assert-DirectRuntimeSources {
+    Assert-TrackedLeaf $baseRunner | Out-Null
+    Assert-TrackedLeaf $proofPath | Out-Null
+    $proof = [IO.File]::ReadAllText($proofPath)
+    foreach ($required in @('CLASS_ARCHIVE_V16_TO_V18_DIRECT_PROOF','CLASS_ARCHIVE_RUNTIME_SCOPE','SYNTHETIC_V4_MIGRATION','--migrate-current-source','--verify-current-source','--fail-closed')) {
+        if (-not $proof.Contains($required)) { Stop-V16ToV18DirectRuntime 'direct_proof_source_contract_invalid' }
+    }
+    foreach ($forbidden in @('bootstrap-v17','V18_SYNTHETIC_V17_SCHEMA','LoadHistoricalSchema')) {
+        if ($proof.Contains($forbidden)) { Stop-V16ToV18DirectRuntime 'direct_proof_historical_bridge_detected' }
+    }
+}
+
+function Invoke-DirectCompose([string[]]$ComposeArguments) {
+    Assert-DockerDesktopEnginePipe
+    $wslRoot = Get-WslPath $projectRoot
+    $wslEnv = Get-WslPath $envPath
+    $all = @('-d','Ubuntu','--cd',$wslRoot,'--exec','docker','compose','--env-file',$wslEnv,'-f',$composePath,'-f',$overridePath) + $ComposeArguments
+    return @(Invoke-NativeCapture $wsl $all ('direct_compose_failed_' + $script:stage))
+}
+
+function Get-DirectSchemaVersion {
+    $lines = @(Invoke-DirectCompose @('exec','-T','db','sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','schema'))
+    if ($lines.Count -ne 1 -or $lines[0] -notmatch '^(16|18)$') { Stop-V16ToV18DirectRuntime 'direct_schema_probe_invalid' }
+    return [int]$lines[0]
+}
+
+function Invoke-DirectProof([string]$Mode) {
+    if ($Mode -notin @('--migrate-current-source','--verify-current-source','--fail-closed')) { Stop-V16ToV18DirectRuntime 'direct_proof_mode_invalid' }
+    $script:stage = $Mode.TrimStart('-')
+    $lines = @(Invoke-DirectCompose @(
+        'exec','-T','--user','nginx',
+        '-e','CLASS_ARCHIVE_V16_TO_V18_DIRECT_PROOF=1',
+        '-e','CLASS_ARCHIVE_RUNTIME_SCOPE=SYNTHETIC_V4_MIGRATION',
+        'piwigo','php','/workspace/infra/scripts/v16-to-v18-synthetic-direct-proof.php',$Mode
+    ))
+    $records = @($lines | Where-Object { $_ -match '^V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS ' })
+    if ($records.Count -ne 1) { Stop-V16ToV18DirectRuntime ('direct_proof_evidence_invalid_' + $script:stage) }
+    return [string]$records[0]
+}
+
+function Get-RecordField([string]$Record, [string]$Name) {
+    $match = [regex]::Match($Record, ('(?:^|\s)' + [regex]::Escape($Name) + '=([^\s]+)'))
+    if (-not $match.Success) { Stop-V16ToV18DirectRuntime ('direct_proof_field_missing_' + $Name) }
+    return $match.Groups[1].Value
+}
+
+function Assert-FirstMigrationRecord([string]$Record) {
+    if ($Record -notmatch '^V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS stage=migrate_current_source schema_from=16 schema_to=18 sequential=17_18 replay=NOT_APPLICABLE legacy_tables_preserved=PASS new_tables=EMPTY new_table_count=7 legacy_fingerprint=[a-f0-9]{64} media=NOT_TOUCHED$') {
+        Stop-V16ToV18DirectRuntime 'direct_first_migration_evidence_invalid'
+    }
+    return Get-RecordField $Record 'legacy_fingerprint'
+}
+
+function Assert-ReplayRecord([string]$Record, [string]$Fingerprint) {
+    if ($Record -notmatch '^V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS stage=migrate_current_source schema_from=18 schema_to=18 sequential=NOT_APPLICABLE replay=PASS new_tables=EMPTY legacy_fingerprint=[a-f0-9]{64} media=NOT_TOUCHED$' -or (Get-RecordField $Record 'legacy_fingerprint') -ne $Fingerprint) {
+        Stop-V16ToV18DirectRuntime 'direct_replay_evidence_invalid'
+    }
+}
+
+function Assert-VerifyRecord([string]$Record, [string]$Fingerprint) {
+    if ($Record -notmatch '^V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS stage=verify_current_source schema=18 ledger=18 new_tables=EMPTY legacy_fingerprint=[a-f0-9]{64} media=NOT_TOUCHED$' -or (Get-RecordField $Record 'legacy_fingerprint') -ne $Fingerprint) {
+        Stop-V16ToV18DirectRuntime 'direct_verify_evidence_invalid'
+    }
+}
+
+function Assert-FailClosedRecord([string]$Record) {
+    if ($Record -ne 'V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS stage=fail_closed unknown_schema=DENY scratch=DISPOSED') {
+        Stop-V16ToV18DirectRuntime 'direct_fail_closed_evidence_invalid'
+    }
+}
+
+function Write-ProofReport([hashtable]$SourceClosure, [string]$Fingerprint, [string]$First, [string]$Replay, [string]$Verify, [string]$FailClosed) {
+    if (Test-Path -LiteralPath $reportPath) { Stop-V16ToV18DirectRuntime 'direct_proof_report_already_exists' }
+    if ($null -eq $SourceClosure -or [string]$SourceClosure.Commit -notmatch '^[a-f0-9]{40}$' -or [string]$SourceClosure.SourceDigest -notmatch '^[a-f0-9]{64}$') {
+        Stop-V16ToV18DirectRuntime 'direct_proof_source_closure_invalid'
+    }
+    $record = [ordered]@{
+        format = 2
+        attempt = $attempt
+        scope = 'SYNTHETIC_V4_MIGRATION'
+        ports = ('127.0.0.1:' + $httpPort + '_' + $compatPort)
+        created_at_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        source_schema = 16
+        target_schema = 18
+        migration = 'CURRENT_SOURCE_DIRECT_17_18'
+        source_commit = $SourceClosure.Commit
+        source_digest = $SourceClosure.SourceDigest
+        legacy_fingerprint = $Fingerprint
+        first_migration = $First
+        replay = $Replay
+        verify = $Verify
+        fail_closed = $FailClosed
+        media = 'NOT_MOUNTED'
+    }
+    $json = $record | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($reportPath, ($json + "`n"), [Text.UTF8Encoding]::new($false))
+    Assert-IgnoredUntracked $reportPath $false | Out-Null
+}
+
+function Read-ProofReport {
+    Assert-IgnoredUntracked $reportPath $false | Out-Null
+    $record = [IO.File]::ReadAllText($reportPath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json -ErrorAction Stop
+    if ($record.format -ne 2 -or $record.attempt -ne $attempt -or $record.scope -ne 'SYNTHETIC_V4_MIGRATION' -or
+        $record.ports -ne ('127.0.0.1:' + $httpPort + '_' + $compatPort) -or $record.source_schema -ne 16 -or $record.target_schema -ne 18 -or
+        $record.migration -ne 'CURRENT_SOURCE_DIRECT_17_18' -or ([string]$record.legacy_fingerprint) -notmatch '^[a-f0-9]{64}$' -or
+        ([string]$record.source_commit) -notmatch '^[a-f0-9]{40}$' -or ([string]$record.source_digest) -notmatch '^[a-f0-9]{64}$' -or
+        $record.media -ne 'NOT_MOUNTED') {
+        Stop-V16ToV18DirectRuntime 'direct_proof_report_invalid'
+    }
+    Assert-FirstMigrationRecord ([string]$record.first_migration) | Out-Null
+    Assert-ReplayRecord ([string]$record.replay) ([string]$record.legacy_fingerprint)
+    Assert-VerifyRecord ([string]$record.verify) ([string]$record.legacy_fingerprint)
+    Assert-FailClosedRecord ([string]$record.fail_closed)
+    Assert-ProofSourceClosure @{ Commit = [string]$record.source_commit; SourceDigest = [string]$record.source_digest } 'direct_proof_source_closure_stale' | Out-Null
+    return $record
+}
+
+function Invoke-Initialize {
+    Assert-DirectRuntimeSources
+    $script:stage = 'initialize'
+    $lines = @(Invoke-BaseRunner 'initialize')
+    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt13 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
+    if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_initialize_evidence_invalid' }
+    Get-SandboxValues | Out-Null
+    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt13 ports=127.0.0.1:9790_9791 source=V16_DB_ONLY media=NOT_MOUNTED'
+}
+
+function Invoke-Restore {
+    if (-not $ConfirmSyntheticRestore) { Stop-V16ToV18DirectRuntime 'synthetic_restore_confirmation_required' }
+    Assert-DirectRuntimeSources
+    Get-SandboxValues | Out-Null
+    $script:stage = 'restore'
+    $lines = @(Invoke-BaseRunner 'restore' -RestoreConfirmation)
+    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt13 media=NOT_MOUNTED$' })
+    if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_restore_evidence_invalid' }
+    if ((Get-DirectSchemaVersion) -ne 16) { Stop-V16ToV18DirectRuntime 'direct_restore_not_v16' }
+    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt13 schema=16 target=ISOLATED media=NOT_MOUNTED'
+}
+
+function Invoke-Prove {
+    if (-not $ConfirmSyntheticMigration) { Stop-V16ToV18DirectRuntime 'synthetic_migration_confirmation_required' }
+    Assert-DirectRuntimeSources
+    $sourceClosure = Get-ProofSourceClosure
+    Get-SandboxValues | Out-Null
+    if (Test-Path -LiteralPath $reportPath) { Stop-V16ToV18DirectRuntime 'direct_proof_report_exists_preserved_lab' }
+    if ((Get-DirectSchemaVersion) -ne 16) { Stop-V16ToV18DirectRuntime 'direct_proof_requires_fresh_v16_lab' }
+    $first = Invoke-DirectProof '--migrate-current-source'
+    $fingerprint = Assert-FirstMigrationRecord $first
+    if ((Get-DirectSchemaVersion) -ne 18) { Stop-V16ToV18DirectRuntime 'direct_first_migration_not_v18' }
+    $replay = Invoke-DirectProof '--migrate-current-source'
+    Assert-ReplayRecord $replay $fingerprint
+    $verify = Invoke-DirectProof '--verify-current-source'
+    Assert-VerifyRecord $verify $fingerprint
+    $failClosed = Invoke-DirectProof '--fail-closed'
+    Assert-FailClosedRecord $failClosed
+    Assert-ProofSourceClosure $sourceClosure 'direct_proof_source_changed_during_run' | Out-Null
+    Write-ProofReport $sourceClosure $fingerprint $first $replay $verify $failClosed
+    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt13 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+}
+
+function Invoke-Verify {
+    Assert-DirectRuntimeSources
+    Get-SandboxValues | Out-Null
+    $proof = Read-ProofReport
+    $sourceClosure = @{ Commit = [string]$proof.source_commit; SourceDigest = [string]$proof.source_digest }
+    if ((Get-DirectSchemaVersion) -ne 18) { Stop-V16ToV18DirectRuntime 'direct_verify_not_v18' }
+    $fingerprint = [string]$proof.legacy_fingerprint
+    $replay = Invoke-DirectProof '--migrate-current-source'
+    Assert-ReplayRecord $replay $fingerprint
+    $verify = Invoke-DirectProof '--verify-current-source'
+    Assert-VerifyRecord $verify $fingerprint
+    $failClosed = Invoke-DirectProof '--fail-closed'
+    Assert-FailClosedRecord $failClosed
+    Assert-ProofSourceClosure $sourceClosure 'direct_verify_source_changed_during_run' | Out-Null
+    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt13 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+}
+
+try {
+    switch ($Action) {
+        'initialize' { Invoke-Initialize }
+        'restore' { Invoke-Restore }
+        'prove' { Invoke-Prove }
+        'verify' { Invoke-Verify }
+        'status' {
+            $initialized = (Test-Path -LiteralPath $envPath)
+            $proof = (Test-Path -LiteralPath $reportPath)
+            if ($initialized) { Get-SandboxValues | Out-Null }
+            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt13 ports=127.0.0.1:9790_9791 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
+        }
+    }
+} catch {
+    $message = $_.Exception.Message
+    $safe = [regex]::Replace($message, '[^A-Za-z0-9_:-]', '_')
+    $line = [string]$_.InvocationInfo.ScriptLineNumber
+    Write-Error ('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME=FAIL stage=' + $script:stage + ' code=' + $safe + ' line=' + $line)
+    exit 1
+}

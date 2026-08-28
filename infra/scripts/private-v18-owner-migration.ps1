@@ -146,15 +146,24 @@ function Invoke-EndpointLifecycle([string]$LifecycleAction) {
 }
 
 function Assert-OwnerLoopbackEndpoints {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path -LiteralPath $curl -PathType Leaf)) { Stop-V18OwnerMigration 'owner_loopback_curl_missing' }
     foreach ($uri in @('http://127.0.0.1:8190', 'http://127.0.0.1:8191')) {
         $previous = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -MaximumRedirection 0 -TimeoutSec 15 -ErrorAction Stop
-            $status = [int]$response.StatusCode
+            # Curl is used deliberately rather than Invoke-WebRequest here.
+            # Piwigo's unauthenticated root can produce a redirect whose
+            # representation differs across Windows PowerShell and PowerShell
+            # 7; this is a bounded local status probe, not an authorization
+            # decision.  Any malformed marker or transport error remains 0.
+            $lines = @(& $curl --noproxy '*' --silent --show-error --max-time 15 --output NUL --write-out 'CLASS_ARCHIVE_STATUS:%{http_code}' $uri 2>&1)
+            $exitCode = $LASTEXITCODE
+            $marker = [regex]::Match(([string]::Join("`n", @($lines | ForEach-Object { [string]$_ }))), 'CLASS_ARCHIVE_STATUS:(?<status>\d{3})\z')
+            $status = if ($exitCode -eq 0 -and $marker.Success) { [int]$marker.Groups['status'].Value } else { 0 }
         }
         catch {
-            $status = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            $status = 0
         }
         finally { $ErrorActionPreference = $previous }
         if ($status -notin @(200,301,302,303)) { Stop-V18OwnerMigration 'owner_loopback_endpoint_unhealthy' }
@@ -629,6 +638,18 @@ catch {
     # Never restore a V17 database below V18 plugin bytes from a catch/finally
     # block. Keep the maintenance boundary for an explicitly reviewed manual
     # recovery procedure documented in docs/private-v18-owner-migration.md.
+    # Never echo an arbitrary exception message here: the workflow reads
+    # private runtime configuration, and a provider error can include a host
+    # path or an environment value.  Keep the public protocol diagnosable
+    # without weakening that boundary by emitting only a bounded exception
+    # type and source line for otherwise-unclassified failures.
+    if ($code -eq 'private_v18_owner_migration_failed') {
+        $exceptionType = $_.Exception.GetType().Name
+        if ($exceptionType -notmatch '^[A-Za-z0-9]{1,64}$') { $exceptionType = 'Exception' }
+        $line = [int]$_.InvocationInfo.ScriptLineNumber
+        if ($line -lt 1 -or $line -gt 99999) { $line = 0 }
+        $code = ('unexpected_' + $exceptionType + '_line_' + $line)
+    }
     Write-Output "PRIVATE_V18_OWNER_MIGRATION=FAIL action=$Action endpoint=$Endpoint code=$code manual_rollback_required"
     exit 2
 }

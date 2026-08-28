@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -78,6 +78,16 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '9690'; CompatPort = '9691'
             AppSubnet = '10.255.7.0/24'; GatewaySubnet = '10.238.0.0/16'
             BffGatewayIp = '10.238.0.10'
+        }
+    }
+    'attempt13' {
+        # Attempts 8-12 remain preserved forensic labs. attempt13 is a fresh,
+        # database-only V16 laboratory reserved for the direct current-source
+        # V16 -> V18 proof. It does not bootstrap historical V17 code.
+        @{
+            HttpPort = '9790'; CompatPort = '9791'
+            AppSubnet = '10.255.8.0/24'; GatewaySubnet = '10.236.0.0/16'
+            BffGatewayIp = '10.236.0.10'
         }
     }
 }
