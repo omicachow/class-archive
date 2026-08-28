@@ -163,6 +163,7 @@ Assert-True ($attester.Contains('$CompletionPattern') -and $attester.Contains('$
 Assert-True ($attester.Contains('people_required=yes') -and -not $attester.Contains('people_required=(yes|no)')) 'v4_phase_ab_people_scope_required'
 Assert-True ($attester.Contains("Where-Object { `$_ -match '=FAIL\b' }") -and $attester.Contains('gate_required_evidence_missing')) 'v4_phase_ab_failure_record_rejection_missing'
 Assert-True ($attester.Contains('evidence_allowlist_invalid') -and $attester.Contains('$AllowedPatterns') -and $attester.Contains('accepted line must be a narrow, redaction-safe protocol record')) 'v4_phase_ab_transcript_redaction_allowlist_missing'
+Assert-True ($attester.Contains('$requestedGateName = $Name') -and $attester.Contains('foreach ($evidenceName in $expectedEvidence)') -and $attester.Contains('name = $requestedGateName')) 'v4_phase_ab_verify_gate_name_shadowing_prevented'
 
 # Recording an attestation must validate every transcript before writing the
 # gate; verifying one must bind the report back to the checked-out source.

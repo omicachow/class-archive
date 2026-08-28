@@ -343,7 +343,10 @@ function Write-Attestation([string]$Path, [hashtable]$Evidence) {
 }
 
 function Read-Attestation([string]$Name) {
-    $path = Assert-PlainPrivateFile (Get-GatePath $Name) 'gate_missing'
+    # Preserve the requested immutable leaf.  A local loop variable must never
+    # overwrite the gate name returned to the owner migration verifier.
+    $requestedGateName = $Name
+    $path = Assert-PlainPrivateFile (Get-GatePath $requestedGateName) 'gate_missing'
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $path
     try { $record = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-V4SyntheticAcceptance 'gate_json_invalid' }
@@ -370,8 +373,8 @@ function Read-Attestation([string]$Name) {
     if (@($gates.PSObject.Properties).Count -ne $expectedGates.Count) { Stop-V4SyntheticAcceptance 'gate_shape_invalid' }
     $evidence = Get-Property $record 'evidence'
     $expectedEvidence = @('chrome-main','chrome-deep','scope','upload','restart')
-    foreach ($name in $expectedEvidence) {
-        $entry = Get-Property $evidence $name
+    foreach ($evidenceName in $expectedEvidence) {
+        $entry = Get-Property $evidence $evidenceName
         if ([string](Get-Property $entry 'leaf') -notmatch '^[a-z0-9-]{3,64}\.out$' -or [string](Get-Property $entry 'sha256') -notmatch '^[a-f0-9]{64}$') {
             Stop-V4SyntheticAcceptance 'gate_evidence_shape_invalid'
         }
@@ -379,7 +382,7 @@ function Read-Attestation([string]$Name) {
     if (@($evidence.PSObject.Properties).Count -ne $expectedEvidence.Count) { Stop-V4SyntheticAcceptance 'gate_evidence_shape_invalid' }
     $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($sha256 -notmatch '^[a-f0-9]{64}$') { Stop-V4SyntheticAcceptance 'gate_sha256_invalid' }
-    return @{ name = $Name; sha256 = $sha256; record = $record }
+    return @{ name = $requestedGateName; sha256 = $sha256; record = $record }
 }
 
 try {
