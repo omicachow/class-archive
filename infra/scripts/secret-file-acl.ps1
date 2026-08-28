@@ -1,5 +1,65 @@
 Set-StrictMode -Version Latest
 
+# Windows PowerShell 5.1 exposes the file ACL API through System.IO.File.
+# Prefer that API because explicitly importing Microsoft.PowerShell.Security
+# in a redirected NoProfile child can fail on duplicate ObjectSecurity type
+# data before Get-Acl / Set-Acl become callable. PowerShell 7 does not expose
+# those static methods, so it uses the normal Security module cmdlets instead.
+# Both paths fail closed when neither supported ACL backend is available.
+function Test-ClassArchiveStaticAclApiAvailable {
+    $getMethod = [System.IO.File].GetMethod(
+        'GetAccessControl',
+        [type[]]@([string])
+    )
+    $setMethod = [System.IO.File].GetMethod(
+        'SetAccessControl',
+        [type[]]@([string], [Security.AccessControl.FileSecurity])
+    )
+    return $null -ne $getMethod -and $null -ne $setMethod
+}
+
+function Test-ClassArchiveAclCmdletsAvailable {
+    $setAcl = Get-Command Set-Acl -CommandType Cmdlet -ErrorAction SilentlyContinue
+    $getAcl = Get-Command Get-Acl -CommandType Cmdlet -ErrorAction SilentlyContinue
+    return $null -ne $setAcl -and $null -ne $getAcl
+}
+
+if (-not (Test-ClassArchiveStaticAclApiAvailable) -and -not (Test-ClassArchiveAclCmdletsAvailable)) {
+    try {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+    }
+    catch {
+        if (-not (Test-ClassArchiveAclCmdletsAvailable)) {
+            throw
+        }
+    }
+}
+if (-not (Test-ClassArchiveStaticAclApiAvailable) -and -not (Test-ClassArchiveAclCmdletsAvailable)) {
+    throw 'No supported Windows file ACL backend is available.'
+}
+
+function Get-ClassArchiveFileSecurity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (Test-ClassArchiveStaticAclApiAvailable) {
+        return [System.IO.File]::GetAccessControl($Path)
+    }
+    return Get-Acl -LiteralPath $Path
+}
+
+function Set-ClassArchiveFileSecurity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][Security.AccessControl.FileSecurity]$AclObject
+    )
+
+    if (Test-ClassArchiveStaticAclApiAvailable) {
+        [System.IO.File]::SetAccessControl($Path, $AclObject)
+        return
+    }
+    Set-Acl -LiteralPath $Path -AclObject $AclObject
+}
+
 function Set-ClassArchiveOwnerOnlyFileAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -32,7 +92,7 @@ function Set-ClassArchiveOwnerOnlyFileAcl {
         )
         [void]$acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $resolved -AclObject $acl
+    Set-ClassArchiveFileSecurity -Path $resolved -AclObject $acl
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
 }
 
@@ -43,7 +103,7 @@ function Assert-ClassArchiveOwnerOnlyFileAcl {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    $acl = Get-Acl -LiteralPath $resolved
+    $acl = Get-ClassArchiveFileSecurity -Path $resolved
     $ownerSid = try {
         ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier])
     }

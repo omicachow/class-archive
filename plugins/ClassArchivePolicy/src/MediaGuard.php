@@ -16,6 +16,16 @@ final class ClassArchiveMediaDecision
     }
 }
 
+/**
+ * Authorization succeeded far enough to identify a canonical presentation,
+ * but its derivative cache file is not ready for nginx delivery. Member HTTP
+ * reads must never turn this condition into an expensive resize; explicit
+ * maintenance/import warmup is the only recovery path.
+ */
+final class ClassArchiveMediaUnavailable extends RuntimeException
+{
+}
+
 final class ClassArchiveMediaRequest
 {
     public function __construct(
@@ -56,6 +66,43 @@ final class ClassArchiveMediaGuard
             'derivative_script' => self::resolveDerivativeScript((string) ($_SERVER['QUERY_STRING'] ?? '')),
             'action' => self::resolveAction(self::parseActionQuery((string) ($_SERVER['QUERY_STRING'] ?? ''))),
             default => throw new DomainException('unsupported_request_kind'),
+        };
+    }
+
+    /**
+     * Resolve a server-side canonical photo mapping into the same guarded
+     * delivery request used by Piwigo's public media URLs. The numeric Piwigo
+     * id never reaches the browser: callers must first establish visibility
+     * from a ClassArchivePhoto UUID, then pass the private mapping here.
+     *
+     * @return array{request: ClassArchiveMediaRequest, image: array<string, mixed>}
+     */
+    public static function resolveCanonicalDelivery(int $imageId, string $variant): array
+    {
+        if ($imageId <= 0 || !in_array($variant, ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview', 'original'], true)) {
+            throw new DomainException('canonical_delivery_invalid');
+        }
+
+        $image = self::findImageById($imageId);
+        $source = self::databasePathToRelative((string) $image['path']);
+
+        return match ($variant) {
+            'thumbnail' => self::resolveDerivativeForType($image, $source, self::thumbnailDerivativeType()),
+            'xsmall', 'small', 'medium', 'large' => self::resolveDerivativeForType(
+                $image,
+                $source,
+                self::responsiveDerivativeType($variant),
+            ),
+            'preview' => self::resolveSafePreview($image, $source),
+            'original' => [
+                'request' => new ClassArchiveMediaRequest(
+                    $imageId,
+                    'original',
+                    $source,
+                    '/_class_archive_internal/source/' . self::encodePath($source),
+                ),
+                'image' => $image,
+            ],
         };
     }
 
@@ -129,7 +176,6 @@ final class ClassArchiveMediaGuard
     {
         $sourcePrefix = '/_class_archive_internal/source/';
         $derivativePrefix = '/_class_archive_internal/derivative/';
-        $generationPrefix = '/_class_archive_internal/generate/';
         if (str_starts_with($request->internalUri, $sourcePrefix)) {
             self::assertExistingFileWithinRoot(
                 rawurldecode(substr($request->internalUri, strlen($sourcePrefix))),
@@ -139,24 +185,11 @@ final class ClassArchiveMediaGuard
             return;
         }
         if (str_starts_with($request->internalUri, $derivativePrefix)) {
-            self::assertExistingFileWithinRoot(
+            self::assertDerivativeReady(
                 rawurldecode(substr($request->internalUri, strlen($derivativePrefix))),
-                ['upload', 'galleries'],
-                PHPWG_ROOT_PATH . '_data/i/',
             );
             return;
         }
-        if (str_starts_with($request->internalUri, $generationPrefix)) {
-            // The source was already resolved by exact DB path and checked
-            // below. Piwigo owns creation under its dedicated derivative root.
-            self::assertExistingFileWithinRoot(
-                $request->sourcePath,
-                ['upload', 'galleries'],
-                PHPWG_ROOT_PATH,
-            );
-            return;
-        }
-
         throw new DomainException('invalid_internal_target');
     }
 
@@ -184,17 +217,12 @@ final class ClassArchiveMediaGuard
         $relativeDerivative = self::normalizeDerivativePath($value, $prefix);
         $sourcePath = self::sourcePathFromDerivative($relativeDerivative);
         $image = self::findImageBySourcePath($sourcePath);
-        $derivativeFile = PHPWG_ROOT_PATH . '_data/i/' . $relativeDerivative;
-        $internalPrefix = is_file($derivativeFile)
-            ? '/_class_archive_internal/derivative/'
-            : '/_class_archive_internal/generate/';
-
         return [
             'request' => new ClassArchiveMediaRequest(
                 (int) $image['id'],
                 'derivative',
                 $sourcePath,
-                $internalPrefix . self::encodePath($relativeDerivative),
+                '/_class_archive_internal/derivative/' . self::encodePath($relativeDerivative),
                 null,
                 $relativeDerivative,
             ),
@@ -305,32 +333,120 @@ final class ClassArchiveMediaGuard
         global $conf;
 
         $type = (string) ($conf['class_archive_safe_preview_type'] ?? IMG_XLARGE);
+        return self::resolveDerivativeForType($image, $source, $type);
+    }
+
+    /**
+     * @param array<string, mixed> $image
+     * @return array{request: ClassArchiveMediaRequest, image: array<string, mixed>}
+     */
+    private static function resolveDerivativeForType(array $image, string $source, string $type): array
+    {
         $definedTypes = ImageStdParams::get_defined_type_map();
         if (!isset($definedTypes[$type])) {
-            throw new DomainException('safe_preview_type_unavailable');
+            throw new DomainException('canonical_derivative_type_unavailable');
         }
-        $token = derivative_to_url($type);
-        if (!is_string($token) || !preg_match('/\A[A-Za-z0-9_]+\z/D', $token)) {
-            throw new DomainException('safe_preview_token_invalid');
+        if (!class_exists('SrcImage') || !class_exists('DerivativeImage')) {
+            throw new DomainException('canonical_derivative_pipeline_unavailable');
         }
 
-        $relativeDerivative = self::derivativePathFromSource($source, $token);
-        $derivativeFile = PHPWG_ROOT_PATH . '_data/i/' . $relativeDerivative;
-        $internalPrefix = is_file($derivativeFile)
-            ? '/_class_archive_internal/derivative/'
-            : '/_class_archive_internal/generate/';
+        // Do not reconstruct a derivative filename from the requested profile.
+        // Piwigo may safely select a smaller effective profile when the source
+        // image does not need the requested transform. Its DerivativeImage
+        // object is the one authoritative mapping between that source and the
+        // already-warmed cache entry. Reconstructing a requested `-xl` path
+        // while Core selected `-la`, for example, makes a valid cache look
+        // missing and turns a normal preview into a fail-closed 503.
+        //
+        // Identity transforms remain special: Piwigo intentionally points
+        // them at the original, which Class Archive must never expose as a
+        // preview. The maintenance warmer writes a metadata-stripped cache
+        // entry at the requested profile token instead; resolve that same
+        // forced-safe location here. Neither path can trigger generation on a
+        // member request.
+        $derivative = DerivativeImage::get_one($type, new SrcImage($image));
+        if (!$derivative instanceof DerivativeImage) {
+            throw new DomainException('canonical_derivative_type_unavailable');
+        }
+
+        if ($derivative->same_as_source()) {
+            $token = derivative_to_url($type);
+            if (!is_string($token) || !preg_match('/\A[A-Za-z0-9_]+\z/D', $token)) {
+                throw new DomainException('canonical_derivative_token_invalid');
+            }
+            $relativeDerivative = self::derivativePathFromSource($source, $token);
+        } else {
+            $relativeDerivative = self::derivativePathFromPiwigo($derivative, $source);
+        }
 
         return [
             'request' => new ClassArchiveMediaRequest(
                 (int) $image['id'],
                 'derivative',
                 $source,
-                $internalPrefix . self::encodePath($relativeDerivative),
+                '/_class_archive_internal/derivative/' . self::encodePath($relativeDerivative),
                 null,
                 $relativeDerivative,
             ),
             'image' => $image,
         ];
+    }
+
+    /**
+     * Convert a Piwigo Core derivative cache location back into the strictly
+     * relative name understood by the guarded nginx internal location.
+     *
+     * @param DerivativeImage $derivative
+     */
+    private static function derivativePathFromPiwigo(DerivativeImage $derivative, string $source): string
+    {
+        $path = str_replace('\\', '/', $derivative->get_path());
+        $root = rtrim(str_replace('\\', '/', PHPWG_ROOT_PATH), '/') . '/_data/i/';
+        if (
+            $path === ''
+            || str_contains($path, "\0")
+            || !str_starts_with($path, $root)
+        ) {
+            throw new DomainException('canonical_derivative_path_invalid');
+        }
+
+        $relative = self::normalizeDerivativePath(substr($path, strlen($root)));
+        // The Core-calculated target must still describe exactly this original
+        // and a currently enabled derivative token. This is a fail-closed
+        // guard against an unexpected Core/plugin path shape; it also keeps
+        // the canonical route as strict as public derivative URLs.
+        if (self::sourcePathFromDerivative($relative) !== $source) {
+            throw new DomainException('canonical_derivative_path_invalid');
+        }
+
+        return $relative;
+    }
+
+    private static function thumbnailDerivativeType(): string
+    {
+        if (!defined('IMG_THUMB') || !is_string(IMG_THUMB) || IMG_THUMB === '') {
+            throw new DomainException('canonical_thumbnail_type_unavailable');
+        }
+        return IMG_THUMB;
+    }
+
+    private static function responsiveDerivativeType(string $variant): string
+    {
+        $constant = match ($variant) {
+            'xsmall' => 'IMG_XSMALL',
+            'small' => 'IMG_SMALL',
+            'medium' => 'IMG_MEDIUM',
+            'large' => 'IMG_LARGE',
+            default => throw new DomainException('canonical_derivative_variant_invalid'),
+        };
+        if (!defined($constant)) {
+            throw new DomainException('canonical_derivative_type_unavailable');
+        }
+        $type = constant($constant);
+        if (!is_string($type) || $type === '') {
+            throw new DomainException('canonical_derivative_type_unavailable');
+        }
+        return $type;
     }
 
     private static function derivativePathFromSource(string $source, string $token): string
@@ -341,6 +457,22 @@ final class ClassArchiveMediaGuard
         }
 
         return substr($source, 0, $dot) . '-' . $token . substr($source, $dot);
+    }
+
+    private static function assertDerivativeReady(string $relativeDerivative): void
+    {
+        try {
+            self::assertExistingFileWithinRoot(
+                $relativeDerivative,
+                ['upload', 'galleries'],
+                PHPWG_ROOT_PATH . '_data/i/',
+            );
+        } catch (DomainException $error) {
+            // Do not disclose whether a candidate was absent, a symlink or
+            // outside the trusted cache root. All are an unavailable
+            // presentation and none may enter a request-time generator.
+            throw new ClassArchiveMediaUnavailable('derivative_not_ready', 0, $error);
+        }
     }
 
     private static function resolveRole(array $user): ?string
@@ -714,16 +846,39 @@ final class ClassArchiveMediaGuard
             throw new DomainException('filesystem_root_denied');
         }
 
-        $allowedRoot = realpath(rtrim($base, '/') . '/' . $segments[0]);
-        $candidate = realpath(rtrim($base, '/') . '/' . $relative);
+        $base = rtrim($base, '/');
+        $allowedRootPath = $base . '/' . $segments[0];
+        $candidatePath = $base . '/' . $relative;
+        $allowedRoot = realpath($allowedRootPath);
+        $candidate = realpath($candidatePath);
+        $stat = @lstat($candidatePath);
+        $rootStat = @lstat($allowedRootPath);
+        $effectiveUid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        $ownerUid = is_array($stat) ? (int) ($stat['uid'] ?? -1) : -1;
+        $rootOwnerUid = is_array($rootStat) ? (int) ($rootStat['uid'] ?? -2) : -2;
         if (
             $allowedRoot === false
             || $candidate === false
+            || !is_array($stat)
+            || !is_array($rootStat)
+            || (($stat['mode'] ?? 0) & 0170000) !== 0100000
+            || (($rootStat['mode'] ?? 0) & 0170000) !== 0040000
+            || (($stat['mode'] ?? 0) & 0777) !== 0660
+            || (int) ($stat['nlink'] ?? 0) !== 1
+            || ($ownerUid !== $rootOwnerUid && ($effectiveUid === null || $ownerUid !== $effectiveUid))
             || !is_file($candidate)
-            || is_link(rtrim($base, '/') . '/' . $relative)
+            || is_link($candidatePath)
+            || is_link($allowedRootPath)
             || !str_starts_with($candidate, rtrim($allowedRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)
         ) {
             throw new DomainException('media_file_outside_root');
+        }
+        $cursor = $allowedRootPath;
+        foreach (array_slice($segments, 1, -1) as $segment) {
+            $cursor .= '/' . $segment;
+            if (is_link($cursor)) {
+                throw new DomainException('media_file_outside_root');
+            }
         }
     }
 }

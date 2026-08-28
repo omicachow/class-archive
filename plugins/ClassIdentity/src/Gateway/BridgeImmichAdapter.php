@@ -1,0 +1,415 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ClassIdentity\Gateway;
+
+use ClassIdentity\ClassArchivePhoto;
+use ClassIdentity\ClassArchivePhotoMappingService;
+use ClassIdentity\ClassArchivePerson;
+use ClassIdentity\ClassArchivePersonMappingService;
+
+defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
+
+/**
+ * Narrow metadata-only connection to the isolated Immich bridge.
+ *
+ * The adapter is disabled unless the exact ClassIdentity configuration flag is
+ * enabled and a private owner-mode bridge credential is present. It never
+ * accepts a caller-supplied URL, it only sends policy-filtered canonical IDs,
+ * and it accepts only People/Memory candidate memberships. No path can return
+ * an Immich asset URL, original, thumbnail, user, API key or authoritative
+ * count to the Class Archive public API.
+ */
+final class BridgeImmichAdapter implements ImmichAdapter
+{
+    private const BRIDGE_BASE_URL = 'http://class-archive-immich-gateway:8080/v1';
+    private const SECRET_PATH = '_data/.class-archive-immich-bridge.json';
+    private const MAX_RESPONSE_BYTES = 1048576;
+
+    private function __construct(
+        private readonly ClassArchivePhotoMappingService $mapping,
+        private readonly ClassArchivePersonMappingService $personMapping,
+        private readonly string $token,
+    ) {
+    }
+
+    public static function configuredOrNull(): ImmichAdapter
+    {
+        global $conf;
+
+        $value = is_array($conf ?? null) ? ($conf['class_identity_immich_bridge_enabled'] ?? null) : null;
+        if ($value === null || $value === false || $value === 0 || $value === '0' || $value === 'false') {
+            return new NullImmichAdapter();
+        }
+        if (!($value === true || $value === 1 || $value === '1')) {
+            throw new \RuntimeException('class_archive_immich_bridge_enablement_invalid');
+        }
+
+        return new self(
+            ClassArchivePhotoMappingService::fromPiwigo(),
+            ClassArchivePersonMappingService::fromPiwigo(),
+            self::loadToken(),
+        );
+    }
+
+    public function availability(): string
+    {
+        return 'AVAILABLE';
+    }
+
+    /** @param list<string> $visibleClassPhotoIds @return list<GatewayPersonCandidate> */
+    public function peopleForVisiblePhotos(array $visibleClassPhotoIds): array
+    {
+        $items = $this->requestCandidates('/people', $visibleClassPhotoIds);
+        /** @var array<string,array{class_photo_ids:array<string,true>,cover_class_photo_id:string,portrait_focus:?array{x:float,y:float,zoom:float}}> $clusters */
+        $clusters = [];
+        $totalMemberships = 0;
+        foreach ($items as $item) {
+            $immichPersonId = $item['immich_person_id'] ?? null;
+            $coverPhotoId = $item['cover_class_photo_id'] ?? null;
+            if (!is_string($immichPersonId) || !is_string($coverPhotoId)) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $immichPersonId = ClassArchivePerson::normalizeImmichPersonId($immichPersonId);
+            if (!isset($clusters[$immichPersonId])) {
+                $clusters[$immichPersonId] = [
+                    'class_photo_ids' => [],
+                    'cover_class_photo_id' => $coverPhotoId,
+                    'portrait_focus' => $item['portrait_focus'] ?? null,
+                ];
+            } elseif ($clusters[$immichPersonId]['portrait_focus'] === null && ($item['portrait_focus'] ?? null) !== null) {
+                // Keep cover and focus coupled; both were already authorized
+                // against the same policy-scoped batch by requestCandidates.
+                $clusters[$immichPersonId]['cover_class_photo_id'] = $coverPhotoId;
+                $clusters[$immichPersonId]['portrait_focus'] = $item['portrait_focus'];
+            }
+            foreach ($item['class_photo_ids'] as $classPhotoId) {
+                if (!isset($clusters[$immichPersonId]['class_photo_ids'][$classPhotoId])) {
+                    $clusters[$immichPersonId]['class_photo_ids'][$classPhotoId] = true;
+                    ++$totalMemberships;
+                    if ($totalMemberships > 50000) {
+                        throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
+                    }
+                }
+            }
+        }
+        if (count($clusters) > 5000) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
+        }
+        ksort($clusters, SORT_STRING);
+        $result = [];
+        foreach ($clusters as $immichPersonId => $cluster) {
+            $photoIds = array_keys($cluster['class_photo_ids']);
+            $coverPhotoId = $cluster['cover_class_photo_id'];
+            if (!in_array($coverPhotoId, $photoIds, true)) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $mapped = $this->personMapping->ensureImmichCluster($immichPersonId);
+            $result[] = new GatewayPersonCandidate(
+                (string) $mapped['class_person_id'],
+                $mapped['display_name'] ?? null,
+                $photoIds,
+                $coverPhotoId,
+                $cluster['portrait_focus'],
+            );
+        }
+        return $result;
+    }
+
+    /** @param list<string> $visibleClassPhotoIds @return list<GatewayMemoryCandidate> */
+    public function memoriesForVisiblePhotos(array $visibleClassPhotoIds): array
+    {
+        $items = $this->requestCandidates('/memories', $visibleClassPhotoIds);
+        $result = [];
+        foreach ($items as $item) {
+            $result[] = new GatewayMemoryCandidate($item['label'], $item['class_photo_ids']);
+        }
+        return $result;
+    }
+
+    /** @param list<string> $visibleClassPhotoIds @return list<string> */
+    public function smartSearchForVisiblePhotos(array $visibleClassPhotoIds, string $query): array
+    {
+        $query = trim($query);
+        if ($query === '' || strlen($query) > 190 || str_contains($query, "\0")) {
+            throw new \InvalidArgumentException('class_archive_immich_bridge_search_invalid');
+        }
+        $result = [];
+        foreach ($this->boundAssetBatches($visibleClassPhotoIds) as $batch) {
+            $decoded = $this->post('/search', ['query' => $query, 'assets' => $batch]);
+            $ids = $decoded['class_photo_ids'] ?? null;
+            if (!is_array($ids) || count($ids) > 500) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            $allowed = [];
+            foreach ($batch as $asset) {
+                $allowed[(string) $asset['class_photo_id']] = true;
+            }
+            foreach ($ids as $classPhotoId) {
+                if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId])) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                ClassArchivePhoto::idToBinary($classPhotoId);
+                $result[] = $classPhotoId;
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * @param list<string> $visibleClassPhotoIds
+     * @return list<array{label?:string,immich_person_id?:string,class_photo_ids:list<string>,cover_class_photo_id?:string,portrait_focus?:array{x:float,y:float,zoom:float}|null}>
+     */
+    private function requestCandidates(string $endpoint, array $visibleClassPhotoIds): array
+    {
+        if (!in_array($endpoint, ['/people', '/memories'], true)) {
+            throw new \RuntimeException('class_archive_immich_bridge_endpoint_invalid');
+        }
+        if ($visibleClassPhotoIds === []) {
+            return [];
+        }
+        $result = [];
+        foreach ($this->boundAssetBatches($visibleClassPhotoIds) as $assets) {
+            $allowed = [];
+            foreach ($assets as $asset) {
+                $allowed[(string) $asset['class_photo_id']] = true;
+            }
+            $decoded = $this->post($endpoint, ['assets' => $assets]);
+            $items = $decoded['items'] ?? null;
+            if (!is_array($items) || count($items) > 5000) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            foreach ($items as $item) {
+                if (!is_array($item)) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                $ids = $item['class_photo_ids'] ?? null;
+                if (!is_array($ids)) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                $normalized = $this->normalizeCandidateIds($ids, $allowed);
+                if ($endpoint === '/people') {
+                    $immichPersonId = $item['immich_person_id'] ?? null;
+                    $coverPhotoId = $item['cover_class_photo_id'] ?? null;
+                    $portraitFocus = $item['portrait_focus'] ?? null;
+                    if (!is_string($immichPersonId) || !is_string($coverPhotoId) || !isset($allowed[$coverPhotoId])
+                        || !in_array($coverPhotoId, $normalized, true)) {
+                        throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                    }
+                    ClassArchivePhoto::idToBinary($coverPhotoId);
+                    if ($portraitFocus !== null) {
+                        if (!is_array($portraitFocus)) {
+                            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                        }
+                        $focusKeys = array_keys($portraitFocus);
+                        sort($focusKeys, SORT_STRING);
+                        if ($focusKeys !== ['x', 'y', 'zoom']) {
+                            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                        }
+                        foreach (['x', 'y', 'zoom'] as $focusKey) {
+                            if (!is_int($portraitFocus[$focusKey]) && !is_float($portraitFocus[$focusKey])) {
+                                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                            }
+                        }
+                    }
+                    $result[] = [
+                        'immich_person_id' => ClassArchivePerson::normalizeImmichPersonId($immichPersonId),
+                        'class_photo_ids' => $normalized,
+                        'cover_class_photo_id' => $coverPhotoId,
+                        'portrait_focus' => $portraitFocus,
+                    ];
+                    continue;
+                }
+                $label = $item['label'] ?? null;
+                if (!is_string($label) || $label === '' || strlen($label) > 190 || str_contains($label, "\0")) {
+                    throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+                }
+                $result[] = ['label' => $label, 'class_photo_ids' => $normalized];
+            }
+        }
+        if (count($result) > 5000) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_too_large');
+        }
+
+        return $result;
+    }
+
+    /** @param list<string> $visibleClassPhotoIds @return list<list<array{class_photo_id:string,immich_asset_id:string}>> */
+    private function boundAssetBatches(array $visibleClassPhotoIds): array
+    {
+        if (count($visibleClassPhotoIds) > 20000) {
+            throw new \InvalidArgumentException('class_archive_immich_bridge_batch_too_large');
+        }
+        $seen = [];
+        $batches = [];
+        foreach (array_chunk($visibleClassPhotoIds, 500) as $ids) {
+            $bindings = $this->mapping->activeImmichAssetBindings($ids);
+            $assets = [];
+            foreach ($ids as $classPhotoId) {
+                if (!is_string($classPhotoId) || isset($seen[$classPhotoId]) || !isset($bindings[$classPhotoId])) {
+                    throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
+                }
+                ClassArchivePhoto::idToBinary($classPhotoId);
+                $assetId = ClassArchivePhoto::normalizeImmichAssetId($bindings[$classPhotoId]);
+                if ($assetId === null) {
+                    throw new \RuntimeException('class_archive_immich_bridge_binding_invalid');
+                }
+                $seen[$classPhotoId] = true;
+                $assets[] = ['class_photo_id' => $classPhotoId, 'immich_asset_id' => $assetId];
+            }
+            if ($assets !== []) {
+                $batches[] = $assets;
+            }
+        }
+        return $batches;
+    }
+
+    /** @param list<mixed> $ids @param array<string,true> $allowed @return list<string> */
+    private function normalizeCandidateIds(array $ids, array $allowed): array
+    {
+        $seen = [];
+        $normalized = [];
+        foreach ($ids as $classPhotoId) {
+            if (!is_string($classPhotoId) || !isset($allowed[$classPhotoId]) || isset($seen[$classPhotoId])) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            ClassArchivePhoto::idToBinary($classPhotoId);
+            $seen[$classPhotoId] = true;
+            $normalized[] = $classPhotoId;
+        }
+        if ($normalized === []) {
+            throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+        }
+        return $normalized;
+    }
+
+    /** @return array<string,mixed> */
+    private function post(string $endpoint, array $payload): array
+    {
+        if (!function_exists('curl_init')) {
+            throw new \RuntimeException('class_archive_immich_bridge_transport_unavailable');
+        }
+        $encoded = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        $handle = curl_init(self::BRIDGE_BASE_URL . $endpoint);
+        if ($handle === false) {
+            throw new \RuntimeException('class_archive_immich_bridge_transport_unavailable');
+        }
+        try {
+            curl_setopt_array($handle, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $encoded,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => false,
+                CURLOPT_CONNECTTIMEOUT => 3,
+                CURLOPT_TIMEOUT => 8,
+                CURLOPT_HTTPHEADER => [
+                    'Content-Type: application/json',
+                    'Accept: application/json',
+                    'Authorization: Bearer ' . $this->token,
+                ],
+            ]);
+            $body = curl_exec($handle);
+            $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+            if (!is_string($body) || strlen($body) > self::MAX_RESPONSE_BYTES || $status !== 200) {
+                throw new \RuntimeException('class_archive_immich_bridge_unavailable');
+            }
+            $decoded = json_decode($body, true, 64, JSON_THROW_ON_ERROR);
+            if (!is_array($decoded)) {
+                throw new \RuntimeException('class_archive_immich_bridge_response_invalid');
+            }
+            return $decoded;
+        } catch (\RuntimeException $error) {
+            throw $error;
+        } catch (\Throwable $error) {
+            throw new \RuntimeException('class_archive_immich_bridge_unavailable', 0, $error);
+        } finally {
+            curl_close($handle);
+            unset($encoded);
+        }
+    }
+
+    private static function loadToken(): string
+    {
+        $path = PHPWG_ROOT_PATH . self::SECRET_PATH;
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
+        $mode = is_array($stat) ? ((int) ($stat['mode'] ?? 0) & 0777) : 0;
+        $ownerOnly = $mode === 0600
+            && (!function_exists('posix_geteuid') || (int) ($stat['uid'] ?? -1) === posix_geteuid());
+        $trustedServiceShared = self::isTrustedServiceSharedSecret($path, $stat, $mode);
+        if (
+            !is_array($stat)
+            || is_link($path)
+            || (($stat['mode'] ?? 0) & 0170000) !== 0100000
+            || !($ownerOnly || $trustedServiceShared)
+            || (int) ($stat['nlink'] ?? 0) !== 1
+            || (int) ($stat['size'] ?? 0) < 48
+            || (int) ($stat['size'] ?? 0) > 512
+        ) {
+            throw new \RuntimeException('class_archive_immich_bridge_secret_unavailable');
+        }
+        $raw = file_get_contents($path);
+        try {
+            $decoded = is_string($raw) ? json_decode($raw, true, 8, JSON_THROW_ON_ERROR) : null;
+        } catch (\Throwable) {
+            $decoded = null;
+        }
+        if (!is_array($decoded) || array_keys($decoded) !== ['version', 'token'] || $decoded['version'] !== 1 || !is_string($decoded['token'])) {
+            throw new \RuntimeException('class_archive_immich_bridge_secret_unavailable');
+        }
+        $token = $decoded['token'];
+        if (preg_match('/\A[A-Za-z0-9_-]{32,128}\z/D', $token) !== 1) {
+            throw new \RuntimeException('class_archive_immich_bridge_secret_unavailable');
+        }
+        return $token;
+    }
+
+    /**
+     * The Piwigo container deliberately normalizes durable private files to
+     * 0660 and grants the nginx worker an ACL, rather than making the whole
+     * archive world-readable. A container restart can therefore turn an
+     * otherwise valid bridge secret from 0600 into that documented service
+     * mode. Accept it only when both owner and group are the configured
+     * Piwigo durable service identity, its parent is private, and the current
+     * request account can actually read the file. Any missing identity,
+     * malformed parent, group mismatch, or inaccessible ACL fails closed.
+     *
+     * @param array<string,mixed>|false $stat
+     */
+    private static function isTrustedServiceSharedSecret(string $path, array|false $stat, int $mode): bool
+    {
+        if (!is_array($stat) || $mode !== 0660 || !is_file($path) || !is_readable($path)) {
+            return false;
+        }
+        $uid = self::configuredServiceId('PIWIGO_UID');
+        $gid = self::configuredServiceId('PIWIGO_GID');
+        if ($uid === null || $gid === null || (int) ($stat['uid'] ?? -1) !== $uid || (int) ($stat['gid'] ?? -1) !== $gid) {
+            return false;
+        }
+        $parent = dirname($path);
+        clearstatcache(true, $parent);
+        $parentStat = @lstat($parent);
+        if (
+            !is_array($parentStat)
+            || is_link($parent)
+            || (($parentStat['mode'] ?? 0) & 0170000) !== 0040000
+            || (((int) ($parentStat['mode'] ?? 0) & 0007) !== 0)
+            || (int) ($parentStat['uid'] ?? -1) !== $uid
+            || (int) ($parentStat['gid'] ?? -1) !== $gid
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    private static function configuredServiceId(string $name): ?int
+    {
+        $raw = getenv($name);
+        if (!is_string($raw) || preg_match('/\A[1-9][0-9]{0,8}\z/D', $raw) !== 1) {
+            return null;
+        }
+        $value = (int) $raw;
+        return $value > 0 ? $value : null;
+    }
+}

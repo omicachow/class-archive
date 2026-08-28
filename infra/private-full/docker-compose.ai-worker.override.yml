@@ -1,0 +1,7 @@
+services:
+  piwigo:
+    environment:
+      # This override is applied only after the isolated private-full Immich
+      # server and offline ML container have passed their runtime checks.
+      # Ordinary GET paths still never invoke or retry model work.
+      CLASS_ARCHIVE_PRIVATE_AI_INDEX_WORKER: "1"

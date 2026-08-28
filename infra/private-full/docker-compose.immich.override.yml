@@ -1,0 +1,113 @@
+services:
+  immich-server:
+    labels:
+      com.classarchive.scope: private-real-full
+    # The base spike loads its synthetic `.env` for the server process.  The
+    # private-full database already receives the selected owner/staging env
+    # through Compose interpolation, so explicitly override the three DB
+    # values here as well. Environment entries have higher precedence than
+    # env_file and prevent the private server from ever using synthetic DB
+    # credentials against the isolated private Postgres volume.
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored private-full env file}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME:-immich}
+      TZ: ${TZ:-Asia/Shanghai}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-machine-learning:
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-gateway:
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-gateway-secret-stager:
+    labels:
+      com.classarchive.scope: private-real-full
+
+  immich-web-compat:
+    labels:
+      com.classarchive.scope: private-real-full
+    environment:
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
+      # Both values are supplied by the chosen, owner-only endpoint env file.
+      # Staging is 8290/8291; after an approved cutover the exact same private
+      # volumes run at 8190/8191 without ever reusing the old private-QA ones.
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: ${CLASS_ARCHIVE_CORE_PUBLIC_PORT:?Set CLASS_ARCHIVE_CORE_PUBLIC_PORT in the ignored private-full env file}
+    volumes:
+      - ./photo-ui:/photo-ui:ro
+    networks:
+      class_archive_gateway:
+        ipv4_address: 10.241.0.10
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  redis:
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  database:
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  immich_internal:
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_ml_internal:
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_bridge_internal:
+    labels:
+      com.classarchive.scope: private-real-full
+
+volumes:
+  immich_upload:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_model_cache:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_db:
+    # Postgres control-plane data remains in a private Docker C: volume rather
+    # than the ext4 media payload or its exFAT backing image.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_gateway_secret:
+    # The bridge credential remains in a Docker C: control volume, never in
+    # the managed media payload or its exFAT backing image.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full

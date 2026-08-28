@@ -1,0 +1,122 @@
+services:
+  # This overlay is consumed only by owner-full-restore-drill.ps1. Projects,
+  # network identities and M-backed bind volumes are all distinct from 8091
+  # and 8191 even though the local Docker control plane is shared.
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+    environment:
+      # The restored data is the same PRIVATE_REAL_FULL business scope.  This
+      # allows the existing fail-closed catalog/AI verifier to prove the
+      # restored snapshot without making the restore project an ACL identity.
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+    volumes:
+      - type: bind
+        source: ${CLASS_ARCHIVE_RESTORE_NGINX_CONFIG:?Set the generated restore nginx config}
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      # A linked Git worktree has a `.git` pointer file rather than a `.git`
+      # directory. Mount a restore-only detached HEAD plus an empty refs
+      # directory so BuildCommit sees the attested source commit without
+      # exposing Git config, objects, remotes or credentials.
+      - type: bind
+        source: ../.codex-work/owner-restore/runtime/git-evidence/HEAD
+        target: /workspace/git/HEAD
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../.codex-work/owner-restore/runtime/git-evidence/refs
+        target: /workspace/git/refs
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  pre-migration-db-backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+  restore:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-restore-drill
+
+networks:
+  app:
+    # This bridge belongs only to the restore project. Its only published ports
+    # are the two explicit 127.0.0.1 listeners in the base compose file.
+    internal: false
+    labels:
+      com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.1.0/24
+  immich_gateway:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+    ipam:
+      config:
+        - subnet: 10.245.0.0/24
+
+volumes:
+  piwigo_data:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  piwigo_uploads:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  piwigo_galleries:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  piwigo_derivatives:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  piwigo_db:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  piwigo_scripts:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind
+  backups:
+    labels:
+      com.classarchive.scope: owner-restore-drill
+      com.classarchive.storage: m-ext4-bind

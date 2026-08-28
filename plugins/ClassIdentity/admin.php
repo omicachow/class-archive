@@ -13,23 +13,32 @@ require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
 require_once CLASS_IDENTITY_PATH . 'src/Http.php';
 require_once CLASS_IDENTITY_PATH . 'src/AdminService.php';
+require_once CLASS_IDENTITY_PATH . 'src/SubmissionService.php';
+require_once CLASS_IDENTITY_PATH . 'src/ArchiveService.php';
+require_once CLASS_IDENTITY_PATH . 'src/AnonymousGovernanceService.php';
 
 check_status(ACCESS_ADMINISTRATOR);
 ClassIdentityHttp::noStore();
 ClassIdentityHttp::requireSystemAdmin();
 
-$allowedTabs = ['dashboard', 'identities', 'teachers', 'invitations', 'audit', 'system'];
+$allowedTabs = ['dashboard', 'identities', 'teachers', 'invitations', 'submissions', 'anonymous', 'archive', 'audit', 'system'];
 $tab = ClassIdentityHttp::requestedTab($allowedTabs);
 $service = ClassIdentityAdminService::fromPiwigo();
+$submissionService = ClassIdentitySubmissionService::fromPiwigo();
+$archiveService = ClassIdentityArchiveService::fromPiwigo();
+$anonymousService = ClassIdentityAnonymousGovernanceService::fromPiwigo();
 $actorUserId = (int) ($user['id'] ?? 0);
 $baseUrl = get_root_url() . 'admin.php?page=plugin-ClassIdentity-';
 $navigation = [
-    ['id' => 'dashboard', 'label' => '概览'],
-    ['id' => 'identities', 'label' => '同学身份'],
-    ['id' => 'teachers', 'label' => '老师身份'],
-    ['id' => 'invitations', 'label' => '认领码 / 邀请'],
-    ['id' => 'audit', 'label' => '审计记录'],
-    ['id' => 'system', 'label' => '系统健康'],
+    ['id' => 'dashboard', 'label' => '仪表盘'],
+    ['id' => 'identities', 'label' => '班级成员'],
+    ['id' => 'teachers', 'label' => '教师'],
+    ['id' => 'invitations', 'label' => '邀请与认领'],
+    ['id' => 'submissions', 'label' => '投稿审核'],
+    ['id' => 'anonymous', 'label' => '匿名管理'],
+    ['id' => 'archive', 'label' => '班级档案'],
+    ['id' => 'audit', 'label' => '操作审计'],
+    ['id' => 'system', 'label' => '系统状态'],
 ];
 $headerTemplate = realpath(CLASS_IDENTITY_PATH . 'template/admin/_header.tpl');
 if ($headerTemplate === false) {
@@ -134,6 +143,111 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 ClassIdentityHttp::flash('success', $action === 'freeze_identity' ? '身份已冻结。' : '身份已解除冻结。');
                 ClassIdentityHttp::redirectTo($tab, ['identity_id' => $identityId]);
 
+            case 'approve_submission':
+                $albumId = null;
+                if (isset($_POST['album_id']) && is_scalar($_POST['album_id']) && ctype_digit((string) $_POST['album_id'])) {
+                    $albumId = (int) $_POST['album_id'];
+                }
+                $approved = $submissionService->review(
+                    ClassIdentityHttp::postPositiveInt('submission_id'),
+                    $actorUserId,
+                    true,
+                    ClassIdentityHttp::requireReason(),
+                    $albumId,
+                    isset($_POST['archive_date']) && is_string($_POST['archive_date']) ? trim($_POST['archive_date']) : null,
+                    isset($_POST['date_precision']) && is_string($_POST['date_precision']) ? $_POST['date_precision'] : 'UNKNOWN',
+                    isset($_POST['event_label']) && is_string($_POST['event_label']) ? $_POST['event_label'] : '',
+                );
+                if ($approved === null) {
+                    throw new RuntimeException('submission_approval_projection_missing');
+                }
+                // Approval creates a new native Piwigo image/category row, so
+                // the current catalog generation has no row for this UUID and
+                // its native-source epoch has advanced. A point refresh is
+                // valid only for an already-published photo. Publish a complete
+                // catalog generation here on the explicit administrator write
+                // path; member GETs remain projection-only and fail closed.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+                ClassIdentityHttp::flash('success', '投稿已通过并收录到班级历史。');
+                ClassIdentityHttp::redirectTo('submissions');
+
+            case 'reject_submission':
+                $submissionService->review(
+                    ClassIdentityHttp::postPositiveInt('submission_id'),
+                    $actorUserId,
+                    false,
+                    ClassIdentityHttp::requireReason(),
+                );
+                ClassIdentityHttp::flash('success', '投稿已拒绝，原文件仍仅管理员可见。');
+                ClassIdentityHttp::redirectTo('submissions');
+
+            case 'save_archive_metadata':
+                $albumId = null;
+                if (isset($_POST['album_id']) && is_scalar($_POST['album_id']) && ctype_digit((string) $_POST['album_id'])) {
+                    $albumId = (int) $_POST['album_id'];
+                }
+                $projection = $archiveService->saveMetadata(
+                    $actorUserId,
+                    ClassIdentityHttp::postPositiveInt('image_id'),
+                    ClassIdentityHttp::postString('era', 16, true),
+                    isset($_POST['archive_date']) && is_string($_POST['archive_date']) ? trim($_POST['archive_date']) : null,
+                    isset($_POST['date_precision']) && is_string($_POST['date_precision']) ? $_POST['date_precision'] : 'UNKNOWN',
+                    isset($_POST['date_confidence']) && is_string($_POST['date_confidence']) ? $_POST['date_confidence'] : 'UNKNOWN',
+                    isset($_POST['date_source']) && is_string($_POST['date_source']) ? $_POST['date_source'] : 'UNKNOWN',
+                    isset($_POST['event_label']) && is_string($_POST['event_label']) ? $_POST['event_label'] : null,
+                    isset($_POST['official']) && (string) $_POST['official'] === '1',
+                    $albumId,
+                    ClassIdentityHttp::requireReason(),
+                );
+                if (($projection['projection_rebuild_mode'] ?? null) === 'FULL_NATIVE_SOURCE') {
+                    \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+                } elseif (($projection['projection_rebuild_mode'] ?? null) === 'BOUNDED') {
+                    \ClassIdentity\Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
+                        [(string) $projection['class_photo_id']],
+                        (array) $projection['projection_kinds'],
+                    );
+                } else {
+                    throw new RuntimeException('archive_projection_rebuild_mode_invalid');
+                }
+                ClassIdentityHttp::flash('success', '档案信息已保存，原图仍保持单份。');
+                ClassIdentityHttp::redirectTo('archive');
+
+            case 'create_archive_album':
+                $archiveService->createOfficialAlbum(
+                    $actorUserId,
+                    ClassIdentityHttp::postString('era', 16, true),
+                    ClassIdentityHttp::postString('album_name', 190, true),
+                    isset($_POST['album_comment']) && is_string($_POST['album_comment']) ? $_POST['album_comment'] : null,
+                    ClassIdentityHttp::requireReason(),
+                );
+                // Piwigo category INSERT is protected by the v11 native guard,
+                // which rotates the catalog generation before the MyISAM row
+                // exists. Publish a fresh catalog and its aggregates together.
+                \ClassIdentity\Gateway\ReadProjectionBuilder::rebuild();
+                ClassIdentityHttp::flash('success', '正式档案相册已建立。');
+                ClassIdentityHttp::redirectTo('archive');
+
+            case 'disable_anonymous':
+            case 'enable_anonymous':
+                $anonymousService->setSeatState(
+                    $actorUserId,
+                    ClassIdentityHttp::postPositiveInt('seat_id'),
+                    $action === 'enable_anonymous',
+                    ClassIdentityHttp::requireReason(),
+                );
+                ClassIdentityHttp::flash('success', $action === 'enable_anonymous' ? '匿名席位已恢复。' : '匿名席位已禁用，现有会话已撤销。');
+                ClassIdentityHttp::redirectTo('anonymous');
+
+            case 'resolve_anonymous':
+                $mapping = $anonymousService->resolve(
+                    $actorUserId,
+                    ClassIdentityHttp::postString('context_type', 16, true),
+                    ClassIdentityHttp::postPositiveInt('context_id'),
+                    ClassIdentityHttp::postString('alias', 128, true),
+                    ClassIdentityHttp::requireReason(),
+                );
+                ClassIdentityHttp::renderAnonymousResolution($mapping, $baseUrl . 'anonymous');
+
             default:
                 ClassIdentityHttp::abort(400, '未知操作');
         }
@@ -145,6 +259,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         ClassIdentityHttp::flash('error', '操作未完成。系统已按默认拒绝处理，请检查系统健康与服务日志。');
         ClassIdentityHttp::redirectTo($tab);
     }
+}
+
+$streamAction = isset($_GET['action']) && is_string($_GET['action']) ? $_GET['action'] : '';
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && in_array($streamAction, ['submission_thumbnail', 'submission_original'], true)) {
+    $submissionId = ClassIdentityHttp::queryPositiveInt('submission_id');
+    if ($submissionId === null) {
+        ClassIdentityHttp::abort(404, '资源不存在');
+    }
+    $submissionService->stream($submissionId, $streamAction === 'submission_thumbnail' ? 'thumbnail' : 'original');
 }
 
 $view = [
@@ -178,6 +301,20 @@ try {
 
         case 'invitations':
             $view['CA_INVITATIONS'] = $service->invitations();
+            break;
+
+        case 'submissions':
+            $view['CA_SUBMISSIONS'] = $submissionService->adminList();
+            $view['CA_ARCHIVE_ALBUMS'] = $archiveService->albums();
+            break;
+
+        case 'anonymous':
+            $view['CA_ANONYMOUS'] = $anonymousService->list();
+            break;
+
+        case 'archive':
+            $view['CA_ARCHIVE_IMAGES'] = $archiveService->images();
+            $view['CA_ARCHIVE_ALBUMS'] = $archiveService->albums();
             break;
 
         case 'audit':

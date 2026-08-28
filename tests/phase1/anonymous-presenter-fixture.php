@@ -462,7 +462,7 @@ function ciAnonResolve(string $runId, string $alias): array
 }
 
 /** @return array<string, mixed> */
-function ciAnonCleanup(string $runId): array
+function ciAnonCleanup(string $runId, bool $preserveValidatedPresenterGate = false): array
 {
     global $conf;
 
@@ -519,7 +519,14 @@ function ciAnonCleanup(string $runId): array
         ) {
             ciAnonFail('test configuration rollback state invalid');
         }
-        if ($saved['exists'] === true) {
+        // A successful full presenter regression is the only caller allowed
+        // to retain readiness. The source installer resets this key whenever
+        // ClassIdentity bytes change; ordinary failure cleanup always restores
+        // the saved value (and the runner explicitly drives it false first).
+        if ($preserveValidatedPresenterGate && $param === 'class_identity_anon_presenter_ready') {
+            conf_update_param($param, true, true);
+            $conf[$param] = true;
+        } elseif ($saved['exists'] === true) {
             $value = $saved['value'] ?? null;
             if (!is_string($value) || strlen($value) > 100) {
                 ciAnonFail('test configuration rollback value invalid');
@@ -631,7 +638,7 @@ function ciAnonRecoverOrphan(string $runId): array
 
 $action = $argv[1] ?? '';
 $runId = strtolower($argv[2] ?? '');
-if (!in_array($action, ['setup', 'resolve', 'gate', 'assert-posted', 'cleanup', 'recover-orphan'], true)
+if (!in_array($action, ['setup', 'resolve', 'gate', 'assert-posted', 'cleanup', 'cleanup-ready', 'recover-orphan'], true)
     || preg_match('/\A[a-f0-9]{12}\z/D', $runId) !== 1
 ) {
     ciAnonFail('usage: anonymous-presenter-fixture.php ACTION RUN_ID [VALUE]');
@@ -661,6 +668,7 @@ try {
         'gate' => ciAnonSetGate($runId, (string) ($argv[3] ?? '')),
         'assert-posted' => ciAnonAssertPosted($runId),
         'cleanup' => ciAnonCleanup($runId),
+        'cleanup-ready' => ciAnonCleanup($runId, true),
         'recover-orphan' => ciAnonRecoverOrphan($runId),
     };
     fwrite(STDOUT, json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n");

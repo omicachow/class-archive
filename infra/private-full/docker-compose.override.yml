@@ -1,0 +1,148 @@
+services:
+  # This compose overlay is intentionally separate from private-qa. It is the
+  # blue/green candidate for a complete *local* real-photo library and must
+  # never share a project, volume, or bridge with either the 8091 synthetic
+  # baseline or the existing 8191 sample QA runtime.
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+    volumes:
+      # The full importer is given only an ignored managed staging copy and
+      # its ignored local manifest. It never receives either owner source
+      # directory, and both inputs are immutable from inside the container.
+      - type: bind
+        source: ${FULL_REAL_STAGING_PATH:?Set FULL_REAL_STAGING_PATH in the ignored private-full env file}
+        target: /private-real-full/staging
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FULL_REAL_IMPORT_MANIFEST_PATH:?Set FULL_REAL_IMPORT_MANIFEST_PATH in the ignored private-full env file}
+        target: /private-real-full/manifests/full-real-import-manifest.json
+        read_only: true
+        bind:
+          create_host_path: false
+      # Optional locked upstream archive cache. It is mounted read-only and
+      # every archive is still checked against the committed SHA-256 lock.
+      # This cache contains no private media or credentials.
+      - type: bind
+        source: ${PRIVATE_FULL_EXTENSION_CACHE_PATH:?Set PRIVATE_FULL_EXTENSION_CACHE_PATH in the ignored private-full env file}
+        target: /class-archive-extension-cache
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  pre-migration-db-backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  restore:
+    restart: "no"
+    labels:
+      com.classarchive.scope: private-real-full
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  app:
+    # Docker needs a non-internal bridge only to publish the two explicit
+    # loopback listeners. SMTP is disabled and no other service publishes a
+    # host port; the compatibility bridge stays internal.
+    internal: false
+    labels:
+      com.classarchive.scope: private-real-full
+  immich_gateway:
+    labels:
+      com.classarchive.scope: private-real-full
+    ipam:
+      config:
+        # This range is private-full v3 only. It is distinct from the
+        # preserved prior candidate and the private sample-QA bridge.
+        - subnet: 10.241.0.0/16
+
+volumes:
+  piwigo_data:
+    # Piwigo configuration remains in a Docker-managed control volume. No
+    # private originals or import provenance live here.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  piwigo_uploads:
+    # All writable media volumes are Docker-managed POSIX volumes. Raw host
+    # filesystems are never used as Piwigo runtime storage.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  piwigo_galleries:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  piwigo_derivatives:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  piwigo_db:
+    # MariaDB credentials remain in a local Docker control volume, never in a
+    # host-bound media path.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  piwigo_scripts:
+    # Container lifecycle scripts remain in the C: control plane rather than
+    # the managed media payload.
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+  backups:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full

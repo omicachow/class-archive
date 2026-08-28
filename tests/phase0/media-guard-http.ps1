@@ -656,10 +656,20 @@ function Resolve-FixtureMedia {
     }
 
     $mainTag = [regex]::Match($picture.Content, '<img(?=[^>]*\bid="theMainImage")[^>]*>', 'IgnoreCase')
-    $previewMatch = if ($mainTag.Success) {
-        [regex]::Match($mainTag.Value, '\bsrc="([^"]+)"', 'IgnoreCase')
+    # Bootstrap Darkroom uses a transparent placeholder in `src` while a
+    # derivative is cold, and places the real guarded target in data-src.
+    # Test the latter first so a cold-cache run proves authorization for media
+    # bytes rather than accidentally treating a theme asset as the preview.
+    $previewMatch = $null
+    if ($mainTag.Success) {
+        foreach ($attribute in @('data-src', 'data-lazy', 'src')) {
+            $candidate = [regex]::Match($mainTag.Value, ("\b" + [regex]::Escape($attribute) + '="([^"]+)"'), 'IgnoreCase')
+            if ($candidate.Success) {
+                $previewMatch = $candidate
+                break
+            }
+        }
     }
-    else { $null }
     $activeThumbnailBlock = [regex]::Match(
         $picture.Content,
         '<a(?=[^>]*\bid="thumbnail-active")[^>]*>[\s\S]{0,2000}?</a>',

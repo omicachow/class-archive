@@ -1,0 +1,2872 @@
+/**
+ * Class Archive's deliberately small Immich Web compatibility boundary.
+ *
+ * It serves the owned Class Archive photo surface, with the verified and
+ * unmodified upstream Immich Web build retained as a compatibility fallback,
+ * on the loopback-bound spike port. It never exposes the internal Immich
+ * server, PostgreSQL, Valkey, Piwigo database, Piwigo paths, Piwigo image ids,
+ * Immich asset ids, or an original-file mount. Browser requests are mapped to
+ * Class Archive's canonical UUID gateway and each request revalidates the
+ * browser's existing Piwigo session. A compatible Immich "user" is only a
+ * presentation object; it is never an authorization source.
+ */
+
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { createServer, request as createHttpRequest } from 'node:http';
+import { lstat, readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
+import { extname, resolve, sep } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+
+const port = parsePort(process.env.CLASS_ARCHIVE_WEB_COMPAT_PORT ?? '3000');
+const publicPort = parsePort(process.env.CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT ?? '8091');
+const webRoot = resolve(process.env.CLASS_ARCHIVE_WEB_ROOT ?? '/web');
+// The owned Class Archive photo surface is a separate, reviewable static tree.
+// In the isolated container it is mounted read-only at /photo-ui; keeping the
+// root configurable also lets the contract suite point at the checkout without
+// granting the BFF access to any host media directory.
+const photoUiRoot = resolve(process.env.CLASS_ARCHIVE_PHOTO_UI_ROOT ?? '/photo-ui');
+// Core navigation leaves the BFF only through a bounded redirect allowlist.
+// There is deliberately no guessed/default core port: private QA and future
+// deployments can choose their own loopback mapping without rebuilding UI.
+const corePublicPort = process.env.CLASS_ARCHIVE_CORE_PUBLIC_PORT === undefined
+  ? null
+  : parsePort(process.env.CLASS_ARCHIVE_CORE_PUBLIC_PORT);
+const gatewayOrigin = process.env.CLASS_ARCHIVE_GATEWAY_ORIGIN ?? 'http://piwigo:8088';
+const expectedGatewayOrigin = 'http://piwigo:8088';
+
+if (gatewayOrigin !== expectedGatewayOrigin) {
+  throw new Error('class_archive_web_compat_gateway_origin_invalid');
+}
+
+const publicOrigin = `http://127.0.0.1:${publicPort}`;
+const allowedHost = `127.0.0.1:${publicPort}`;
+const knownRoles = new Set(['CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS', 'SYSTEM_ADMIN']);
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const staticTypes = new Map([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.ttf', 'font/ttf'],
+  ['.webmanifest', 'application/manifest+json; charset=utf-8'],
+  ['.webp', 'image/webp'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+]);
+const photoUiStaticManifest = Object.freeze([
+  ['/photo-ui/app.css', 'app.css'],
+  ['/photo-ui/app.js', 'app.js'],
+  ['/photo-ui/i18n.js', 'i18n.js'],
+  ['/photo-ui/ui-dom.js', 'ui-dom.js'],
+  ['/photo-ui/ui-era-upload.js', 'ui-era-upload.js'],
+  ['/photo-ui/ui-search-overlay.js', 'ui-search-overlay.js'],
+]);
+const photoUiStaticPaths = new Map(photoUiStaticManifest);
+const photoUiAssetNames = Object.freeze(photoUiStaticManifest.map(([, fileName]) => fileName));
+const photoUiRootRoutes = new Set(['/home', '/photos', '/people', '/search', '/albums', '/memories', '/my']);
+// This is an explicit public API boundary for the owned Photo UI.  Keep the
+// mapping here, rather than accepting a caller-provided upstream path: the
+// Web compatibility process must not become a general Piwigo/Gateway proxy.
+const photoUiGatewayReadRoutes = new Map([
+  ['/api/class-archive/product-state', '/api/product-state'],
+  // Upload target choices are a separate, role-gated projection. The browser
+  // never infers an era or Piwigo category from the ordinary album browser.
+  ['/api/class-archive/member-upload/options', '/api/member-upload/options'],
+  ['/api/class-archive/albums', '/api/albums'],
+  ['/api/class-archive/home', '/api/home'],
+  // Versioned Collections snapshots are the V4 product-read surface. They
+  // remain an explicit, query-free allowlist entry rather than a caller
+  // supplied Gateway path, so a browser cannot turn the BFF into a general
+  // projection relay.
+  ['/api/class-archive/collections/home', '/api/collections/home'],
+  ['/api/class-archive/collections/state', '/api/collections/state'],
+  ['/api/class-archive/collections/pins', '/api/collections/pins'],
+  ['/api/class-archive/spotlight', '/api/spotlight'],
+  ['/api/class-archive/manage/people', '/api/manage/people'],
+  ['/api/class-archive/manage/options', '/api/manage/options'],
+  ['/api/class-archive/manage/duplicates', '/api/manage/duplicates'],
+]);
+const photoUiGatewayMutationRoutes = new Map([
+  ['/api/class-archive/manage/people/create', '/api/manage/people/create'],
+  ['/api/class-archive/manage/people/update', '/api/manage/people/update'],
+  ['/api/class-archive/manage/people/merge', '/api/manage/people/merge'],
+  ['/api/class-archive/manage/people/visibility', '/api/manage/people/visibility'],
+  ['/api/class-archive/manage/people/revert-merge', '/api/manage/people/revert-merge'],
+  ['/api/class-archive/manage/people/move-photos', '/api/manage/people/move-photos'],
+  ['/api/class-archive/manage/archive/bulk', '/api/manage/archive/bulk'],
+  ['/api/class-archive/manage/albums/cover', '/api/manage/albums/cover'],
+  ['/api/class-archive/manage/duplicates/consolidate', '/api/manage/duplicates/consolidate'],
+  ['/api/class-archive/spotlight/create', '/api/spotlight/create'],
+  ['/api/class-archive/spotlight/cancel', '/api/spotlight/cancel'],
+  ['/api/class-archive/collections/pins/create', '/api/collections/pins/create'],
+  ['/api/class-archive/collections/pins/remove', '/api/collections/pins/remove'],
+  ['/api/class-archive/collections/pins/reorder', '/api/collections/pins/reorder'],
+  ['/api/class-archive/collections/feedback/set', '/api/collections/feedback/set'],
+  ['/api/class-archive/collections/feedback/clear', '/api/collections/feedback/clear'],
+  // Memory curation remains a narrow, CSRF-protected Gateway mutation. The
+  // browser never receives a source reason, full durable membership, Piwigo
+  // category id, or an Immich/Piwigo media route from this bridge.
+  ['/api/class-archive/collections/memories/save-as-album', '/api/collections/memories/save-as-album'],
+  ['/api/class-archive/collections/albums/cover', '/api/collections/albums/cover'],
+  ['/api/class-archive/comments/create', '/api/comments/create'],
+  ['/api/class-archive/comments/reply', '/api/comments/reply'],
+  ['/api/class-archive/manage/comments/delete', '/api/manage/comments/delete'],
+]);
+const timelineCursorPattern = /^[A-Za-z0-9_-]{48}$/;
+const timelinePageDefault = 120;
+const timelinePageMaximum = 240;
+const groupedSearchContextTypes = new Set(['ALL', 'ALBUM', 'PERSON', 'MEMORY', 'COLLECTION']);
+const groupedSearchMemoryContextPattern = /^memory-[a-f0-9]{56}$/;
+const groupedSearchCollectionContextPattern = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,95}$/;
+const groupedSearchPageMaximum = 120;
+// A member upload has one fixed public route and one fixed private Piwigo
+// route. Do not add this to either generic Gateway map: multipart bytes must
+// pass through a bounded streaming bridge, never a JSON or generic proxy.
+const memberEraUploadPublicPath = '/api/class-archive/member-upload';
+const memberEraUploadInternalPath = '/member-upload';
+const memberEraUploadMaxFileBytes = 20 * 1024 * 1024;
+const memberEraUploadMaxRequestBytes = memberEraUploadMaxFileBytes + 64 * 1024;
+const memberEraUploadMaxResponseBytes = 64 * 1024;
+const memberEraUploadRoles = new Set(['CLASSMATE', 'TEACHER']);
+// The legacy upstream timeline compatibility endpoints are not used by the
+// owned Photo UI, but remain bounded for the pinned Immich Web spike.  A
+// sequence of individually small Gateway pages must never become an unbounded
+// BFF accumulator or a multi-megabyte browser response.
+const timelineCompatibilityMaximumAssets = 20_000;
+const timelineCompatibilityMaximumPages = Math.ceil(timelineCompatibilityMaximumAssets / timelinePageMaximum);
+const timelineCompatibilityBucketMaximum = timelinePageMaximum;
+const coreRedirectTargets = new Map([
+  // Piwigo permits only same-origin post-login targets.  The double-encoded
+  // value survives its form round trip as the exact authenticated bridge
+  // route, which then performs the bounded loopback redirect to this UI.
+  // The Piwigo nginx origin does not rewrite arbitrary pretty paths into
+  // index.php.  Keep the bridge on Piwigo's canonical query route so the
+  // ClassIdentity hook actually runs after login instead of landing on an
+  // nginx-level 404 at /class-archive-photo-app.
+  ['/class-archive-core/login', '/identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app'],
+  ['/class-archive-core/home', '/'],
+  ['/class-archive-core/identity', '/index.php?/class-identity/my'],
+  ['/class-archive-core/admin', '/admin.php?page=plugin-ClassIdentity'],
+  ['/class-archive-core/logout', '/logout.php'],
+]);
+
+const compatiblePreferences = Object.freeze({
+  albums: { defaultAssetOrder: 'desc' },
+  folders: { enabled: false, sidebarWeb: false },
+  memories: { enabled: true, duration: 5 },
+  people: { enabled: true, sidebarWeb: true },
+  sharedLinks: { enabled: false, sidebarWeb: false },
+  ratings: { enabled: false },
+  tags: { enabled: false, sidebarWeb: false },
+  emailNotifications: { enabled: false, albumInvite: false, albumUpdate: false },
+  download: { archiveSize: 0, includeEmbeddedVideos: false },
+  purchase: { showSupportBadge: false, hideBuyButtonUntil: '2100-01-01T00:00:00.000Z' },
+  cast: { gCastEnabled: false },
+  recentlyAdded: { sidebarWeb: false },
+});
+
+const webCompatCss = `
+/* Class Archive presentation skin for the unmodified upstream Web build. */
+#dashboard-navbar a[href="/photos"] svg { display: none !important; }
+#dashboard-navbar a[href="/photos"]::after {
+  content: "班级相册";
+  color: var(--immich-primary, #4257d6);
+  font-size: 1.125rem;
+  font-weight: 650;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+/* This read-only spike has no Immich sharing, utilities, archive, trash,
+   locked-folder, upload, account-management or purchase surface. */
+a[href="/sharing"],
+a[href="/favorites"],
+a[href="/utilities"],
+a[href="/archive"],
+a[href="/locked"],
+a[href="/trash"],
+a[href="/map"],
+a[href="/user-settings"],
+a[href="/partners"],
+a[href="/api-keys"],
+a[href="/admin"],
+a[href="/purchase"],
+a[href="/billing"] { display: none !important; }
+a[href="/photos"] img[alt="Immich logo"] { display: none !important; }
+`;
+
+// The official Web bundle deliberately remains byte-for-byte upstream. This
+// compatibility-only bootstrap removes UI affordances whose write/account
+// semantics do not exist in the Class Archive gateway. The server separately
+// denies every corresponding API mutation; this is a usability and disclosure
+// layer, not the authorization boundary.
+const webCompatBootstrap = `<script>
+(() => {
+  const originalFetch = window.fetch.bind(window);
+  // A Piwigo session can be revoked or expire while the single-page Web shell
+  // is open. Upstream would render a technical 401 stack trace. Return the
+  // member to the real Class Archive sign-in route instead; API authorization
+  // itself remains server-side and unchanged.
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    if (response.status === 401 && location.pathname !== '/auth/login') {
+      location.replace('/auth/login');
+    }
+    return response;
+  };
+  const blockedPaths = new Set([
+    '/sharing', '/favorites', '/utilities', '/archive', '/locked', '/trash',
+    '/map', '/user-settings', '/partners', '/api-keys', '/admin', '/purchase', '/billing',
+  ]);
+  const blockedLabels = new Set([
+    '上传', 'Upload', '通知', 'Notifications', '收藏夹', 'Favorites', '共享', 'Shared',
+    '实用工具', 'Utilities', '归档', 'Archive', '锁定文件夹', 'Locked Folder',
+    '显示和隐藏人物', 'Show and Hide People', '显示人物选项', 'Show person options',
+    '隐藏人物', 'Hide person', '合并人物', 'Merge people', '添加到收藏夹', 'Add to favorites',
+    '从收藏夹移除', 'Remove from favorites',
+  ]);
+  const normalized = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+  const suppress = (element) => {
+    element.setAttribute('hidden', '');
+    element.setAttribute('aria-hidden', 'true');
+    element.style.setProperty('display', 'none', 'important');
+  };
+  const applyBranding = () => {
+    // The verified upstream bundle updates document.title during navigation.
+    // Keep the visible local product name without modifying upstream assets.
+    if (document.title.includes('Immich')) document.title = document.title.replace(/Immich/g, '班级相册');
+  };
+  const ensureLegalNotice = () => {
+    const navbar = document.querySelector('#dashboard-navbar');
+    if (!navbar) return;
+    if (!document.getElementById('class-archive-timeline-link')) {
+      const timeline = document.createElement('a');
+      timeline.id = 'class-archive-timeline-link';
+      timeline.href = '/class-archive-timeline';
+      timeline.textContent = '档案时间轴';
+      timeline.style.cssText = 'margin-left:auto;margin-right:.75rem;font-size:.875rem;color:var(--immich-primary,#4257d6);white-space:nowrap';
+      navbar.append(timeline);
+    }
+    if (document.getElementById('class-archive-legal-notice')) return;
+    const link = document.createElement('a');
+    link.id = 'class-archive-legal-notice';
+    link.href = '/class-archive-about';
+    link.textContent = '开源许可';
+    link.style.cssText = 'margin-right:1rem;font-size:.75rem;color:var(--immich-primary,#4257d6);white-space:nowrap';
+    navbar.append(link);
+  };
+  const applyReadOnlySurfaces = () => {
+    document.querySelectorAll('a[href]').forEach((anchor) => {
+      try {
+        if (blockedPaths.has(new URL(anchor.href, location.origin).pathname)) suppress(anchor);
+      } catch { suppress(anchor); }
+      const label = normalized(anchor.getAttribute('aria-label') || anchor.getAttribute('title') || anchor.textContent);
+      if (blockedLabels.has(label)) suppress(anchor);
+    });
+    document.querySelectorAll('button').forEach((button) => {
+      const label = normalized(button.getAttribute('aria-label') || button.getAttribute('title') || button.textContent);
+      if (blockedLabels.has(label) || label.includes('class-archive@local.invalid')) suppress(button);
+    });
+    document.querySelectorAll('meter[aria-label="存储空间"]').forEach((meter) => {
+      suppress(meter.parentElement || meter);
+    });
+    document.querySelectorAll('p,span,div').forEach((element) => {
+      const label = normalized(element.textContent);
+      if (label === '服务器离线' || /^存储空间\\s+已用[:：]\\s*0 B\\s*\\/\\s*0 B$/.test(label)) suppress(element.parentElement || element);
+    });
+    applyBranding();
+    ensureLegalNotice();
+  };
+  const archivePersonIdFromImage = (image) => {
+    if (!image) return null;
+    try {
+      const match = /^\\/api\\/people\\/([0-9a-f-]{36})\\/thumbnail$/i.exec(new URL(image.src, location.origin).pathname);
+      return match ? match[1].toLowerCase() : null;
+    } catch { return null; }
+  };
+  const applyArchivePersonRoutes = () => {
+    if (!location.pathname.startsWith('/people')) return;
+    document.querySelectorAll('img[src*="/api/people/"]').forEach((image) => {
+      const id = archivePersonIdFromImage(image);
+      const anchor = image.closest('a');
+      if (!id || !anchor) return;
+      // The public People API exposes the ClassArchivePerson UUID. Rewriting
+      // this navigation target keeps keyboard and pointer activation in the
+      // archive-aware projection without touching Immich's own route source.
+      const destination = '/class-archive-person/' + encodeURIComponent(id);
+      if (anchor.getAttribute('href') !== destination) anchor.setAttribute('href', destination);
+      anchor.setAttribute('data-class-archive-person-route', 'true');
+      if (anchor.dataset.classArchivePersonBound !== '1') {
+        anchor.dataset.classArchivePersonBound = '1';
+        // SvelteKit's link interceptor is attached in the bubble phase. A
+        // narrow capture handler on this one generated Person card therefore
+        // keeps ordinary pointer and keyboard activation on the protected
+        // archive route instead of its generic fileCreatedAt page.
+        anchor.addEventListener('click', (event) => {
+          if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          event.stopPropagation();
+          location.assign(destination);
+        }, true);
+      }
+    });
+  };
+  // Immich's generic Person page serializes all assets through file-created
+  // timestamps. Class Archive intentionally refuses to invent those values
+  // for month/year/event/unknown archive dates, so route the click to the
+  // narrow archive-aware projection instead. It still fetches every item
+  // through the same BFF -> Gateway -> MediaGuard media chain.
+  const routeArchivePerson = (event) => {
+    // A click generated by a keyboard or browser automation may not carry a
+    // MouseEvent.button value. Modifier keys still retain normal new-tab
+    // semantics; unmodified activation always follows the archive route.
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const pointTarget = Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? document.elementFromPoint(event.clientX, event.clientY)
+      : null;
+    // A Svelte card can receive the pointer on its overlay instead of the
+    // nested image. Resolve the nearest interactive card first so normal
+    // pointer and keyboard activation take the identical archive route.
+    const source = target || pointTarget;
+    const card = source?.closest('button,a,[role="button"],[role="link"]');
+    const image = source?.closest('img[src*="/api/people/"]') || card?.querySelector('img[src*="/api/people/"]');
+    if (!image || !location.pathname.startsWith('/people')) return;
+    const id = archivePersonIdFromImage(image);
+    if (!id) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+    location.assign('/class-archive-person/' + encodeURIComponent(id));
+  };
+  // The upstream card may navigate during its pointer handler, before a
+  // later click listener runs. Capture pointer activation first, and retain
+  // click for keyboard activation.
+  window.addEventListener('pointerdown', routeArchivePerson, true);
+  window.addEventListener('click', routeArchivePerson, true);
+  const applyCompatibilityShell = () => {
+    applyReadOnlySurfaces();
+    applyArchivePersonRoutes();
+  };
+  new MutationObserver(applyCompatibilityShell).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src', 'href'],
+  });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyCompatibilityShell, { once: true });
+  else applyCompatibilityShell();
+})();
+</script>`;
+
+const legalNoticeHtml = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>开源许可 | 班级相册</title></head><body>
+<main><h1>开源许可</h1><p>本地“班级相册”照片前端 Spike 使用了未经修改构建的 Immich Web v3.1.0。</p>
+<p>上游：<a href="https://github.com/immich-app/immich" rel="noopener noreferrer">immich-app/immich</a>；许可证：GNU AGPL-3.0-only。</p>
+<p>固定上游提交：<code>8aa95c67470a02a8ddedf03c2e52963af33065ff</code>。</p>
+<p>本页面不表示 Immich 是班级档案馆的身份、权限或媒体授权来源。</p></main>
+</body></html>`;
+
+// This is deliberately a small, separate projection rather than an attempt to
+// force archive semantics into Immich's fileCreatedAt model. It is populated
+// exclusively from /api/timeline, whose groups come from Class Archive's
+// evidence-aware archive date fields. The DOM renderer uses textContent for
+// all persisted labels; an archive event name never becomes HTML.
+const archiveTimelineHtml = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>档案时间轴 | 班级相册</title><style>
+body{margin:0;background:#f7f8fb;color:#1f2937;font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:28px 20px 56px}header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}h1{margin:0;font-size:26px}.back{color:#3656c5;text-decoration:none}.note{margin:8px 0 28px;color:#596579}.group{margin:30px 0}.group h2{font-size:18px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:14px}.card{border:0;background:transparent;text-align:left;padding:0;color:inherit;cursor:pointer}.thumb{display:block;width:100%;aspect-ratio:1.35;object-fit:cover;border-radius:10px;background:#e5e7eb}.title{display:block;margin-top:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}.meta{display:block;margin-top:2px;color:#667085;font-size:12px}.empty,.error{border:1px solid #d8deea;border-radius:10px;padding:18px;background:#fff}.error{color:#a12b2b}@media(max-width:460px){main{padding:20px 14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}
+</style></head><body><main><header><h1>档案时间轴</h1><a class="back" href="/photos">返回照片</a></header><p class="note">按已确认的档案日期、活动和日期精度整理；不会把上传时间当作拍摄时间。</p><section id="timeline" aria-live="polite"><p class="empty">正在载入档案时间轴…</p></section></main><script>
+(() => {
+  const root = document.getElementById('timeline');
+  const text = (tag, value, className) => { const node = document.createElement(tag); node.textContent = value; if (className) node.className = className; return node; };
+  const mediaUrl = (id) => '/api/assets/' + encodeURIComponent(id) + '/thumbnail?size=thumbnail';
+  const render = (payload) => {
+    root.replaceChildren();
+    if (!payload || !Array.isArray(payload.groups) || payload.groups.length === 0) { root.append(text('p', '暂无可查看的档案照片。', 'empty')); return; }
+    for (const group of payload.groups) {
+      const section = document.createElement('section'); section.className = 'group';
+      section.append(text('h2', group.label + '（' + group.total + ' 张）'));
+      const grid = document.createElement('div'); grid.className = 'grid';
+      for (const photo of group.items) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'card';
+        button.addEventListener('click', () => { location.assign('/class-archive-photo/' + encodeURIComponent(photo.id)); });
+        const image = document.createElement('img'); image.className = 'thumb'; image.loading = 'lazy'; image.src = mediaUrl(photo.id); image.alt = photo.title || '班级照片';
+        button.append(image, text('span', photo.title || '班级照片', 'title'), text('span', photo.archive_date.label, 'meta'));
+        grid.append(button);
+      }
+      section.append(grid); root.append(section);
+    }
+  };
+  fetch('/api/class-archive/timeline', { credentials: 'same-origin' }).then(async (response) => {
+    if (!response.ok) throw new Error('timeline_unavailable'); return response.json();
+  }).then(render).catch(() => { root.replaceChildren(text('p', '档案时间轴暂时无法安全确认，请稍后重试。', 'error')); });
+})();
+</script></body></html>`;
+
+function archivePersonHtml(personId) {
+  // This archive-aware Person page is intentionally separate from Immich's
+  // fileCreatedAt-oriented timeline. It preserves each Class Archive date
+  // precision in the visible label and never turns upload/import time into a
+  // claimed capture day. `personId` has passed assertUuid() before it is
+  // interpolated; all persisted labels are assigned through textContent.
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>人物 | 班级相册</title><style>
+body{margin:0;background:#f7f8fb;color:#1f2937;font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif}main{max-width:1180px;margin:0 auto;padding:28px 20px 56px}.back{color:#3656c5;text-decoration:none}.head{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.head h1{margin:0;font-size:26px}.count{color:#667085}.note{margin:8px 0 26px;color:#596579}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:14px}.card{border:0;background:transparent;text-align:left;padding:0;color:inherit;cursor:pointer}.thumb{display:block;width:100%;aspect-ratio:1.35;object-fit:cover;border-radius:10px;background:#e5e7eb}.title{display:block;margin-top:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}.meta{display:block;margin-top:2px;color:#667085;font-size:12px}.empty,.error{border:1px solid #d8deea;border-radius:10px;padding:18px;background:#fff}.error{color:#a12b2b}@media(max-width:460px){main{padding:20px 14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}
+</style></head><body><main><a class="back" href="/people">返回人物</a><section class="head"><h1 id="name">人物</h1><span id="count" class="count"></span></section><p class="note">照片按班级档案日期展示；日期精度不足时会如实标记，不会补写不存在的拍摄时间。</p><section id="person-grid" aria-live="polite"><p class="empty">正在载入人物照片…</p></section></main><script>
+(() => {
+  const personId = '${personId}';
+  const root = document.getElementById('person-grid');
+  const text = (tag, value, className) => { const node=document.createElement(tag); node.textContent=value; if(className) node.className=className; return node; };
+  const mediaUrl = (id) => '/api/assets/' + encodeURIComponent(id) + '/thumbnail?size=thumbnail';
+  const render = (payload) => {
+    if (!payload || !Array.isArray(payload.items) || !Number.isInteger(payload.photo_count) || payload.items.length !== payload.photo_count) throw new Error('person_invalid');
+    document.getElementById('name').textContent = payload.label || '人物';
+    document.getElementById('count').textContent = payload.photo_count + ' 张照片';
+    root.replaceChildren();
+    if (payload.items.length === 0) { root.append(text('p', '暂无可查看的照片。', 'empty')); return; }
+    const grid=document.createElement('div'); grid.className='grid';
+    for (const photo of payload.items) {
+      if (!photo || typeof photo.id !== 'string') throw new Error('person_item_invalid');
+      const button=document.createElement('button'); button.type='button'; button.className='card';
+      button.addEventListener('click', () => { location.assign('/class-archive-photo/' + encodeURIComponent(photo.id)); });
+      const image=document.createElement('img'); image.className='thumb'; image.loading='lazy'; image.src=mediaUrl(photo.id); image.alt=photo.title || '班级照片';
+      const label=photo.archive_date && typeof photo.archive_date.label === 'string' ? photo.archive_date.label : '日期未知';
+      button.append(image, text('span', photo.title || '班级照片', 'title'), text('span', label, 'meta'));
+      grid.append(button);
+    }
+    root.append(grid);
+  };
+  fetch('/api/class-archive/people/' + encodeURIComponent(personId), {credentials:'same-origin',cache:'no-store'})
+    .then(async (response) => { if (!response.ok) throw new Error('person_unavailable'); return response.json(); })
+    .then(render).catch(() => { root.replaceChildren(text('p', '人物照片暂时无法安全确认，请返回后重试。', 'error')); });
+})();
+</script></body></html>`;
+}
+
+function archivePhotoHtml(photoId) {
+  // `photoId` has already passed assertUuid() before interpolation. This
+  // deliberately small viewer does not ask the upstream Immich SPA to infer a
+  // capture date from technical fields; it reads the same archive projection
+  // as the timeline and asks the canonical BFF media endpoint for a preview.
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>查看照片 | 班级相册</title><style>
+body{margin:0;background:#111827;color:#f8fafc;font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif}main{max-width:1180px;margin:0 auto;padding:22px 18px 40px}.back{color:#c7d2fe;text-decoration:none}.layout{margin-top:18px;display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,320px);gap:22px}.image-wrap{min-height:300px;display:grid;place-items:center;background:#0b1220;border-radius:12px;overflow:hidden}.image-wrap img{display:block;max-width:100%;max-height:78vh;object-fit:contain}.meta{background:#1f2937;border-radius:12px;padding:18px}.meta h1{font-size:20px;margin:0 0 12px}.meta p{margin:7px 0;color:#d1d5db}.label{color:#9ca3af}.error{background:#7f1d1d;padding:14px;border-radius:10px}@media(max-width:700px){main{padding:16px 12px}.layout{grid-template-columns:1fr;gap:12px}.image-wrap{min-height:220px}.image-wrap img{max-height:62vh}}
+</style></head><body><main><a class="back" href="/class-archive-timeline">返回档案时间轴</a><div class="layout"><section class="image-wrap" id="image-wrap" aria-live="polite"><p>正在载入照片…</p></section><aside class="meta"><h1 id="title">班级照片</h1><p><span class="label">档案时间：</span><span id="date">正在载入…</span></p><p><span class="label">日期精度：</span><span id="precision">正在载入…</span></p><p><span class="label">日期来源：</span><span id="source">正在载入…</span></p></aside></div></main><script>
+(() => {
+  const photoId = '${photoId}';
+  const error = (message) => { const root=document.getElementById('image-wrap'); root.replaceChildren(); const p=document.createElement('p');p.className='error';p.textContent=message;root.append(p); };
+  const set = (id, value) => { document.getElementById(id).textContent=value; };
+  const archiveItem = async () => {
+    const response = await fetch('/api/class-archive/timeline', {credentials:'same-origin',cache:'no-store'});
+    if (!response.ok) throw new Error('timeline_unavailable');
+    const timeline = await response.json();
+    for (const group of timeline.groups || []) for (const item of group.items || []) if (item.id === photoId) return item;
+    throw new Error('photo_not_visible');
+  };
+  Promise.all([
+    fetch('/api/assets/' + encodeURIComponent(photoId), {credentials:'same-origin',cache:'no-store'}), archiveItem(),
+  ]).then(async ([assetResponse, archive]) => {
+    if (!assetResponse.ok) throw new Error('photo_unavailable');
+    const asset = await assetResponse.json();
+    set('title', asset.originalFileName || archive.title || '班级照片');
+    set('date', archive.archive_date.label);
+    set('precision', archive.archive_date.precision);
+    set('source', archive.archive_date.source);
+    const image = document.createElement('img'); image.alt=asset.originalFileName || archive.title || '班级照片';
+    image.addEventListener('error', () => error('照片预览暂时无法安全确认，请稍后重试。'), {once:true});
+    image.src='/api/assets/' + encodeURIComponent(photoId) + '/thumbnail?size=preview';
+    const root=document.getElementById('image-wrap');root.replaceChildren(image);
+  }).catch(() => error('照片暂时无法安全确认，请返回后重试。'));
+})();
+</script></body></html>`;
+}
+
+function parsePort(value) {
+  if (!/^[1-9][0-9]{0,4}$/.test(value)) {
+    throw new Error('class_archive_web_compat_port_invalid');
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 65_535) {
+    throw new Error('class_archive_web_compat_port_invalid');
+  }
+  return parsed;
+}
+
+function setSecurityHeaders(response, options = {}) {
+  const { html = false, media = false, metadata = false, immutable = false, deferCache = false, photoUi = false } = options;
+  if (!deferCache) {
+    if (immutable) {
+      // These files are presentation-only and contain no account data. Their
+      // URL carries a content digest, so a shared browser cache is safe.
+      response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (media || metadata) {
+      // Every reuse must revalidate against the current authenticated session.
+      // This preserves logout/freeze/account-switch semantics while allowing
+      // an unchanged private derivative to complete as 304 with zero bytes.
+      response.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate, no-transform');
+      response.setHeader('Pragma', 'no-cache');
+      response.setHeader('Expires', '0');
+    } else {
+      response.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+      response.setHeader('Pragma', 'no-cache');
+      response.setHeader('Expires', '0');
+    }
+  }
+  response.setHeader('Referrer-Policy', 'no-referrer');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  if (html) {
+    // The owned Photo UI is an explicit external-module document.  It must not
+    // inherit the broader compatibility policy required by the unmodified
+    // upstream Immich shell (whose bootstrap still uses inline script/WASM).
+    // Keep inline styles for the owned UI's small runtime layout variables, but
+    // do not permit inline script or WebAssembly evaluation on product routes.
+    if (photoUi) {
+      response.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
+          "connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; " +
+          "style-src 'self' 'unsafe-inline'; script-src 'self'",
+      );
+      return;
+    }
+    // The verified upstream static build has an inline bootstrap script.
+    response.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
+        "connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; " +
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+    );
+  }
+  if (media || metadata) {
+    response.setHeader('Vary', 'Cookie', false);
+  }
+}
+
+function noBody(method) {
+  return method === 'HEAD';
+}
+
+function responseIsWritable(response) {
+  return !response.destroyed && !response.writableEnded;
+}
+
+function respond(response, method, status, contentType, body = '', options = {}) {
+  // A browser can cancel an image/navigation fetch while the isolated BFF is
+  // still awaiting the policy Gateway. Never let a write to that already-gone
+  // socket surface as an unhandled Node error or affect another session.
+  if (!responseIsWritable(response)) {
+    return;
+  }
+  try {
+    setSecurityHeaders(response, options);
+    response.statusCode = status;
+    response.setHeader('Content-Type', contentType);
+    if (noBody(method)) {
+      response.end();
+      return;
+    }
+    response.end(body);
+  } catch {
+    if (!response.destroyed) {
+      response.destroy();
+    }
+  }
+}
+
+function respondJson(response, method, status, payload, options = {}) {
+  let body = '{"error":"请求暂时无法安全确认"}';
+  try {
+    body = JSON.stringify(payload);
+    if (Buffer.byteLength(body, 'utf8') > 1024 * 1024) {
+      status = 503;
+      body = '{"error":"数据暂时无法安全确认"}';
+    }
+  } catch {
+    status = 503;
+  }
+  respond(response, method, status, 'application/json; charset=utf-8', body, options);
+}
+
+function rejectHost(request, response) {
+  const host = request.headers.host;
+  if (host !== allowedHost) {
+    respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid host.');
+    return true;
+  }
+  return false;
+}
+
+function rejectForeignRequest(request, response, url) {
+  // Browsers normally omit Origin for same-origin GET/HEAD, but send it for
+  // the read-only search POST. Do not let a caller on another origin use a
+  // loopback cookie as a cross-origin read oracle.
+  const origin = request.headers.origin;
+  if (typeof origin === 'string' && origin !== publicOrigin) {
+    respond(response, request.method, 403, 'text/plain; charset=utf-8', 'Request source denied.');
+    return true;
+  }
+  const fetchSite = request.headers['sec-fetch-site'];
+  // Piwigo and the Photo UI deliberately use adjacent loopback ports, so the
+  // successful login return is `same-site`, not `same-origin`. Permit only
+  // the exact read-only top-level document landing. API, media,
+  // iframe/subresource, query-bearing and Origin-bearing requests remain
+  // same-origin-only and cannot use this transition.
+  const isPiwigoLoginReturn = fetchSite === 'same-site'
+    && (request.method === 'GET' || request.method === 'HEAD')
+    && (url.pathname === '/photos' || url.pathname === '/home')
+    && url.search === ''
+    && request.headers.origin === undefined
+    && request.headers['sec-fetch-mode'] === 'navigate'
+    && request.headers['sec-fetch-dest'] === 'document';
+  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none' && !isPiwigoLoginReturn) {
+    respond(response, request.method, 403, 'text/plain; charset=utf-8', 'Request source denied.');
+    return true;
+  }
+  return false;
+}
+
+function rejectUnsafePath(request, response) {
+  // Validate the raw request target before URL normalisation can erase a
+  // dot-segment or an encoded slash. SPA fallbacks are only for ordinary
+  // application routes, never for an ambiguous filesystem-shaped target.
+  const rawTarget = request.url ?? '/';
+  const rawPath = rawTarget.split(/[?#]/, 1)[0];
+  let decoded;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid path.');
+    return true;
+  }
+  if (!decoded.startsWith('/') || decoded.includes('\\') || decoded.includes('\0') || decoded.includes('//')
+    || decoded.split('/').some((piece) => piece === '..')) {
+    respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid path.');
+    return true;
+  }
+  return false;
+}
+
+function trustedClientAddress(request, response) {
+  // The public listener is Piwigo nginx on loopback, not this container. That
+  // listener overwrites both headers from its own socket state. Requiring the
+  // proxy marker here prevents any other internal peer from using this Web
+  // process as a raw Piwigo-cookie relay.
+  const marker = request.headers['x-class-archive-web-compat-proxy'];
+  const forwarded = request.headers['x-forwarded-for'];
+  if (
+    marker !== '1'
+    || typeof forwarded !== 'string'
+    || forwarded.length === 0
+    || forwarded.length > 45
+    || forwarded !== forwarded.trim()
+    || forwarded.includes(',')
+    || isIP(forwarded) === 0
+  ) {
+    respond(response, request.method, 403, 'text/plain; charset=utf-8', 'Request source denied.');
+    return null;
+  }
+  return forwarded;
+}
+
+function onlyReadMethod(request, response) {
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    return false;
+  }
+  response.setHeader('Allow', 'GET, HEAD');
+  respond(response, request.method, 405, 'text/plain; charset=utf-8', 'Read-only endpoint.');
+  return true;
+}
+
+function safeStaticPath(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (!decoded.startsWith('/') || decoded.includes('\\') || decoded.includes('\0')) {
+    return null;
+  }
+  const pieces = decoded.split('/');
+  if (pieces.some((piece) => piece === '..')) {
+    return null;
+  }
+  const candidate = resolve(webRoot, `.${decoded}`);
+  if (candidate !== webRoot && !candidate.startsWith(`${webRoot}${sep}`)) {
+    return null;
+  }
+  return candidate;
+}
+
+async function readStatic(pathname) {
+  const candidate = safeStaticPath(pathname);
+  if (!candidate) {
+    return null;
+  }
+  try {
+    const entry = await lstat(candidate);
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      return null;
+    }
+    return {
+      body: await readFile(candidate),
+      type: staticTypes.get(extname(candidate).toLowerCase()) ?? 'application/octet-stream',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readPhotoUiFile(fileName) {
+  if (!/^[a-z0-9.-]{1,64}$/i.test(fileName)) {
+    return null;
+  }
+  const candidate = resolve(photoUiRoot, fileName);
+  if (candidate === photoUiRoot || !candidate.startsWith(`${photoUiRoot}${sep}`)) {
+    return null;
+  }
+  try {
+    const entry = await lstat(candidate);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 2_000_000) {
+      return null;
+    }
+    return {
+      body: await readFile(candidate),
+      type: staticTypes.get(extname(candidate).toLowerCase()) ?? 'application/octet-stream',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function photoUiAssetRevision() {
+  const names = photoUiAssetNames;
+  const assets = await Promise.all(names.map((name) => readPhotoUiFile(name)));
+  if (assets.some((asset) => asset === null)) {
+    return null;
+  }
+  const digest = createHash('sha256');
+  for (let index = 0; index < names.length; index += 1) {
+    digest.update(names[index]);
+    digest.update('\0');
+    digest.update(assets[index].body);
+    digest.update('\0');
+  }
+  return digest.digest('hex').slice(0, 32);
+}
+
+function versionPhotoUiBody(asset, revision) {
+  if (!asset || !/^[a-f0-9]{32}$/.test(revision)) return null;
+  return Buffer.from(
+    asset.body.toString('utf8').replaceAll('__PHOTO_UI_ASSET_REV__', revision),
+    'utf8',
+  );
+}
+
+function requestEtagMatches(request, etag) {
+  const value = request.headers['if-none-match'];
+  if (typeof value !== 'string' || value.length > 512) return false;
+  return value.split(',').map((part) => part.trim()).includes(etag);
+}
+
+function respondImmutablePhotoUiAsset(request, response, asset, revision) {
+  const body = versionPhotoUiBody(asset, revision);
+  if (body === null) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+    return;
+  }
+  const bodyRevision = createHash('sha256').update(body).digest('hex').slice(0, 16);
+  const etag = `"class-archive-photo-ui-${revision}-${bodyRevision}"`;
+  setSecurityHeaders(response, { immutable: true });
+  response.setHeader('ETag', etag);
+  response.setHeader('Content-Type', asset.type);
+  if (requestEtagMatches(request, etag)) {
+    response.statusCode = 304;
+    response.end();
+    return;
+  }
+  response.statusCode = 200;
+  response.setHeader('Content-Length', String(body.length));
+  if (noBody(request.method)) {
+    response.end();
+    return;
+  }
+  response.end(body);
+}
+
+function photoUiCacheScope(request, role, presentationEpoch, clientAddress) {
+  if (!knownRoles.has(role) || typeof presentationEpoch !== 'string' || !/^[a-f0-9]{64}$/.test(presentationEpoch)
+    || typeof clientAddress !== 'string' || isIP(clientAddress) === 0) {
+    throw new GatewayResponseError(503, 'photo_ui_cache_scope_invalid');
+  }
+  return createHash('sha256')
+    .update('class-archive-photo-ui-session-scope-v2\0')
+    .update(role)
+    .update('\0')
+    .update(presentationEpoch)
+    .update('\0')
+    .update(clientAddress)
+    .update('\0')
+    .update(sessionCookie(request))
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function isPhotoUiRoute(pathname) {
+  if (pathname === '/people/manage') {
+    return true;
+  }
+  if (photoUiRootRoutes.has(pathname)) {
+    return true;
+  }
+  const detail = /^\/(?:photos|people|albums)\/([0-9a-f-]{36})$/i.exec(pathname);
+  return detail !== null && UUID_V4.test(detail[1]);
+}
+
+function photoUiDocumentQueryAllowed(url) {
+  if (url.pathname === '/home') {
+    return url.searchParams.size === 0
+      || (url.searchParams.size === 1 && url.searchParams.has('search') && url.searchParams.get('search') === '1');
+  }
+  if (url.pathname !== '/search') return url.searchParams.size === 0;
+  if (url.searchParams.size === 0) return true;
+  if (url.searchParams.size !== 1 || !url.searchParams.has('album')) return false;
+  const albumId = url.searchParams.get('album');
+  return typeof albumId === 'string' && UUID_V4.test(albumId);
+}
+
+function sessionCookie(request) {
+  const cookie = request.headers.cookie;
+  return typeof cookie === 'string' && cookie.length <= 8192 ? cookie : '';
+}
+
+function gatewayRequestHeaders(request, clientAddress, contentType = null) {
+  const csrf = request.headers['x-class-archive-csrf'];
+  if (csrf !== undefined && (typeof csrf !== 'string' || csrf.length === 0 || csrf.length > 4096 || csrf.includes('\0'))) {
+    throw new TypeError('class_archive_web_compat_csrf_invalid');
+  }
+  const cookie = sessionCookie(request);
+  return {
+    Accept: 'application/json',
+    ...(cookie ? { Cookie: cookie } : {}),
+    ...(csrf ? { 'X-Class-Archive-CSRF': csrf } : {}),
+    ...(contentType ? { 'Content-Type': contentType } : {}),
+    'X-Forwarded-For': clientAddress,
+    'X-Class-Archive-Web-Compat-Internal': '1',
+  };
+}
+
+function isSafeInternalDelivery(value) {
+  if (typeof value !== 'string' || value.length < 2 || value.length > 4096
+    || value.includes('?') || value.includes('#') || value.includes('\\') || value.includes('\0') || value.includes('//')) {
+    return false;
+  }
+  let decoded;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    return false;
+  }
+  if (decoded.includes('\\') || decoded.includes('\0') || decoded.includes('//')
+    || decoded.split('/').some((part) => part === '.' || part === '..')) {
+    return false;
+  }
+  return [
+    '/_class_archive_internal/source/upload/',
+    '/_class_archive_internal/source/galleries/',
+    '/_class_archive_internal/derivative/',
+    '/_class_archive_internal/generate/',
+  ].some((prefix) => decoded.startsWith(prefix));
+}
+
+class GatewayResponseError extends Error {
+  constructor(status, diagnostic = 'gateway_unavailable') {
+    super('class_archive_gateway_response_invalid');
+    this.status = status;
+    this.diagnostic = /^[a-z0-9_]{1,96}$/.test(diagnostic) ? diagnostic : 'gateway_unavailable';
+  }
+}
+
+const emittedGatewayDiagnostics = new Set();
+
+function emitGatewayDiagnostic(operation, error) {
+  const safeOperation = /^[a-z0-9_]{1,48}$/.test(operation) ? operation : 'unknown';
+  const code = error instanceof GatewayResponseError ? error.diagnostic
+    : error instanceof TypeError || error instanceof SyntaxError ? 'request_invalid'
+      : 'unexpected';
+  const key = `${safeOperation}:${code}`;
+  if (emittedGatewayDiagnostics.has(key)) return;
+  emittedGatewayDiagnostics.add(key);
+  // These fixed, content-free diagnostics are consumed only by the local
+  // runtime harness from the disposable container log. They do not travel
+  // back to a browser and intentionally omit route parameters, IDs, cookies,
+  // request bodies, upstream URLs, and credentials.
+  process.stderr.write(`CLASS_ARCHIVE_BFF_DIAGNOSTIC operation=${safeOperation} code=${code}\n`);
+}
+
+// Piwigo's session implementation can serialize requests for one cookie. The
+// untouched Immich Web starts several read requests at once, so letting every
+// BFF request independently race through the same Piwigo session can turn a
+// healthy authorization decision into a timeout/503. Queue only the internal
+// metadata calls for one opaque cookie digest. This is not an authorization
+// cache: each queued operation still performs its own fresh Gateway request,
+// and the digest is discarded as soon as the queue drains.
+const gatewaySessionQueues = new Map();
+const maxGatewaySessionQueues = 128;
+const gatewayRequestResponses = new WeakMap();
+
+function gatewaySessionKey(request, clientAddress) {
+  const cookie = sessionCookie(request);
+  return createHash('sha256').update(`${clientAddress}\0${cookie}`).digest('hex');
+}
+
+function gatewayRequestIsActive(request) {
+  const response = gatewayRequestResponses.get(request);
+  // Node may auto-destroy an IncomingMessage after a bounded POST body is
+  // completely consumed. That is normal stream cleanup, not a browser abort;
+  // search performs its second canonical Gateway call only after parsing that
+  // body. ServerResponse instead represents the real connection lifetime.
+  // A closed/ended response cannot receive a policy result, while an active
+  // one still receives a fresh authorization without any permission cache.
+  return response !== undefined && !response.destroyed && !response.writableEnded;
+}
+
+async function queueGatewaySessionRequest(request, clientAddress, task) {
+  const key = gatewaySessionKey(request, clientAddress);
+  const previous = gatewaySessionQueues.get(key);
+  if (!previous && gatewaySessionQueues.size >= maxGatewaySessionQueues) {
+    throw new GatewayResponseError(503, 'gateway_queue_capacity');
+  }
+  const current = Promise.resolve(previous)
+    .catch(() => undefined)
+    .then(async () => {
+      // A Chromium context can disappear while an earlier same-session request
+      // waits its turn. Do not begin a fresh PHP/Gateway request for that dead
+      // client: return no authorization result, drain the opaque queue, and
+      // leave the next active session independent.
+      if (!gatewayRequestIsActive(request)) {
+        throw new GatewayResponseError(503, 'gateway_request_inactive');
+      }
+      return task();
+    });
+  gatewaySessionQueues.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (gatewaySessionQueues.get(key) === current) {
+      gatewaySessionQueues.delete(key);
+    }
+  }
+}
+
+async function fetchGatewayJson(request, path, clientAddress) {
+  const upstream = new URL(path, gatewayOrigin);
+  const headers = gatewayRequestHeaders(request, clientAddress);
+  let result;
+  try {
+    result = await fetch(upstream, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new GatewayResponseError(503, 'gateway_transport');
+  }
+  if (result.status !== 200) {
+    const diagnostic = result.headers.get('x-class-archive-gateway-diagnostic');
+    throw new GatewayResponseError(result.status, diagnostic ?? `gateway_http_${result.status}`);
+  }
+  const contentType = result.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().startsWith('application/json')) {
+    try { await result.body?.cancel(); } catch { }
+    throw new GatewayResponseError(503, 'gateway_content_type');
+  }
+  try {
+    const body = await boundedGatewayBody(result);
+    return JSON.parse(body.toString('utf8'));
+  } catch (error) {
+    if (error instanceof GatewayResponseError) throw error;
+    throw new GatewayResponseError(503, 'gateway_json');
+  }
+}
+
+async function gatewayJson(request, path, clientAddress) {
+  if (typeof clientAddress !== 'string' || isIP(clientAddress) === 0) {
+    throw new GatewayResponseError(503, 'gateway_client_address');
+  }
+  return queueGatewaySessionRequest(request, clientAddress, () => fetchGatewayJson(request, path, clientAddress));
+}
+
+function mappedPublicGatewayStatus(status) {
+  if (status >= 200 && status < 300) return status;
+  return new Set([400, 403, 404, 409, 429, 503]).has(status) ? status : 503;
+}
+
+async function boundedGatewayBody(result) {
+  if (!result.body) return Buffer.alloc(0);
+  const chunks = [];
+  let length = 0;
+  try {
+    for await (const chunk of result.body) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      length += bytes.length;
+      // Public API responses are small control-plane JSON documents. A
+      // bounded relay prevents a faulty internal endpoint from turning this
+      // compatibility process into an unbounded response buffer.
+      if (length > 1024 * 1024) {
+        throw new GatewayResponseError(503, 'gateway_body_too_large');
+      }
+      chunks.push(bytes);
+    }
+  } catch (error) {
+    try { await result.body.cancel(); } catch { }
+    if (error instanceof GatewayResponseError) throw error;
+    throw new GatewayResponseError(503, 'gateway_body_read');
+  }
+  return Buffer.concat(chunks, length);
+}
+
+async function fetchPublicGatewayApi(request, path, clientAddress, options = {}) {
+  const method = options.method ?? 'GET';
+  const body = options.body ?? null;
+  const headers = gatewayRequestHeaders(request, clientAddress, body === null ? null : 'application/json');
+  let result;
+  try {
+    result = await fetch(new URL(path, gatewayOrigin), {
+      method,
+      headers,
+      ...(body === null ? {} : { body }),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new GatewayResponseError(503, 'gateway_transport');
+  }
+  const contentType = result.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().startsWith('application/json')) {
+    try { await result.body?.cancel(); } catch { }
+    throw new GatewayResponseError(503, 'gateway_content_type');
+  }
+  if (result.status < 200 || result.status >= 300) {
+    const diagnostic = result.headers.get('x-class-archive-gateway-diagnostic');
+    if (diagnostic) {
+      emitGatewayDiagnostic(method === 'POST' ? 'mutation' : 'api', new GatewayResponseError(result.status, diagnostic));
+    }
+  }
+  return {
+    body: await boundedGatewayBody(result),
+    status: mappedPublicGatewayStatus(result.status),
+  };
+}
+
+async function publicGatewayApi(request, path, clientAddress, options = {}) {
+  if (typeof clientAddress !== 'string' || isIP(clientAddress) === 0) {
+    throw new GatewayResponseError(503, 'gateway_client_address');
+  }
+  return queueGatewaySessionRequest(
+    request,
+    clientAddress,
+    () => fetchPublicGatewayApi(request, path, clientAddress, options),
+  );
+}
+
+async function relayPublicGatewayApi(request, response, path, clientAddress, options = {}) {
+  const result = await publicGatewayApi(request, path, clientAddress, options);
+  // Deliberately relay the bounded JSON body verbatim. It may contain
+  // validation/conflict details which the owned UI needs, but is never logged
+  // here (including on mutation failures).
+  respond(
+    response,
+    request.method,
+    result.status,
+    'application/json; charset=utf-8',
+    result.body,
+    options.responseOptions ?? { metadata: request.method === 'GET' || request.method === 'HEAD' },
+  );
+}
+
+function equalMemberUploadCsrf(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string' || left.length === 0 || right.length === 0) {
+    return false;
+  }
+  const leftBytes = Buffer.from(left, 'utf8');
+  const rightBytes = Buffer.from(right, 'utf8');
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function memberEraUploadRequestContract(request, url, principalState) {
+  exactQuery(url, new Set());
+  if (!memberEraUploadRoles.has(principalState.role)) {
+    throw new GatewayResponseError(403, 'member_upload_role_denied');
+  }
+  // This endpoint is fetch-only: unlike the normal read surface, it does not
+  // permit an absent/opaque Origin.  CSRF is still authoritative, but an
+  // exact browser origin and Fetch Metadata value make the public hop
+  // explicitly same-origin before any multipart byte is read or relayed.
+  if (request.headers.origin !== publicOrigin || request.headers['sec-fetch-site'] !== 'same-origin') {
+    throw new GatewayResponseError(403, 'member_upload_same_origin_required');
+  }
+  const contentType = request.headers['content-type'];
+  // Keep parser selection out of Node. PHP receives the unchanged multipart
+  // stream, but only after this BFF has verified it is the one expected form
+  // shape rather than a transfer-encoded/generic upload tunnel.
+  const multipart = typeof contentType === 'string'
+    && contentType.length <= 512
+    && /^multipart\/form-data\s*;\s*boundary=(?:"[^"\r\n]{1,180}"|[A-Za-z0-9'()+_,.\/:=?-]{1,180})(?:\s*;\s*[A-Za-z0-9_-]{1,32}=(?:"[^"\r\n]{0,180}"|[A-Za-z0-9._-]{0,180}))?\s*$/i.test(contentType);
+  if (!multipart || request.headers['transfer-encoding'] !== undefined) {
+    throw new TypeError('class_archive_member_upload_multipart_required');
+  }
+  const contentEncoding = request.headers['content-encoding'];
+  if (contentEncoding !== undefined && contentEncoding !== 'identity') {
+    throw new TypeError('class_archive_member_upload_content_encoding_invalid');
+  }
+  const rawLength = request.headers['content-length'];
+  if (typeof rawLength !== 'string' || !/^[1-9][0-9]{0,8}$/.test(rawLength)) {
+    throw new TypeError('class_archive_member_upload_content_length_required');
+  }
+  const contentLength = Number(rawLength);
+  if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > memberEraUploadMaxRequestBytes) {
+    throw new TypeError('class_archive_member_upload_body_too_large');
+  }
+  const csrf = request.headers['x-class-archive-csrf'];
+  const expected = principalState.payload?.csrfToken;
+  if (typeof csrf !== 'string' || Buffer.byteLength(csrf, 'utf8') > 4096
+    || typeof expected !== 'string' || Buffer.byteLength(expected, 'utf8') > 4096
+    || !equalMemberUploadCsrf(csrf, expected)
+  ) {
+    throw new GatewayResponseError(403, 'member_upload_csrf_denied');
+  }
+  return { contentType, contentLength, csrf };
+}
+
+async function boundedMemberEraUploadResponse(upstreamResponse) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of upstreamResponse) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += bytes.length;
+    if (length > memberEraUploadMaxResponseBytes) {
+      upstreamResponse.destroy();
+      throw new GatewayResponseError(503, 'member_upload_response_too_large');
+    }
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, length);
+}
+
+function memberEraUploadSuccessProjection(raw) {
+  let decoded;
+  try {
+    decoded = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new GatewayResponseError(503, 'member_upload_response_json_invalid');
+  }
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)
+    || decoded.state !== 'PUBLISHED'
+    || typeof decoded.photoId !== 'string' || !UUID_V4.test(decoded.photoId)
+    || typeof decoded.albumId !== 'string' || !UUID_V4.test(decoded.albumId)
+    || (decoded.era !== 'HERITAGE' && decoded.era !== 'LIVING')
+    || typeof decoded.indexPending !== 'boolean'
+    || typeof decoded.derivativeWarmupPending !== 'boolean'
+  ) {
+    throw new GatewayResponseError(503, 'member_upload_response_schema_invalid');
+  }
+  // Whitelist the browser response rather than relaying any future Piwigo/PHP
+  // fields. Internal ids, paths, filenames, checksums, and URLs cannot escape
+  // through a newly added downstream key.
+  return {
+    state: 'PUBLISHED',
+    photoId: decoded.photoId.toLowerCase(),
+    albumId: decoded.albumId.toLowerCase(),
+    era: decoded.era,
+    indexPending: decoded.indexPending,
+    derivativeWarmupPending: decoded.derivativeWarmupPending,
+  };
+}
+
+/**
+ * Streams one fixed multipart request to one fixed private nginx route.
+ * There is no fetch()/Buffer body accumulation and no caller-controlled
+ * upstream path. The only buffered data is the <=64 KiB JSON control reply.
+ */
+async function relayMemberEraUpload(request, response, url, clientAddress, principalState) {
+  const contract = memberEraUploadRequestContract(request, url, principalState);
+  const upstreamUrl = new URL(memberEraUploadInternalPath, gatewayOrigin);
+  const result = await new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    const upstream = createHttpRequest(upstreamUrl, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': contract.contentType,
+        'Content-Length': String(contract.contentLength),
+        ...(sessionCookie(request) ? { Cookie: sessionCookie(request) } : {}),
+        'X-Class-Archive-CSRF': contract.csrf,
+        // Reconstruct, do not forward, all trusted bridge headers. In
+        // particular, browser Host/Origin/X-Forwarded-* never cross this hop.
+        'X-Forwarded-For': clientAddress,
+        'X-Class-Archive-Web-Compat-Internal': '1',
+      },
+    }, async (upstreamResponse) => {
+      try {
+        const body = await boundedMemberEraUploadResponse(upstreamResponse);
+        settle(resolve, {
+          status: upstreamResponse.statusCode ?? 503,
+          contentType: typeof upstreamResponse.headers['content-type'] === 'string'
+            ? upstreamResponse.headers['content-type']
+            : '',
+          body,
+        });
+      } catch (error) {
+        settle(reject, error);
+      }
+    });
+    upstream.once('error', () => settle(reject, new GatewayResponseError(503, 'member_upload_transport')));
+    upstream.setTimeout(70_000, () => upstream.destroy(new Error('member_upload_timeout')));
+    request.setTimeout(70_000, () => request.destroy(new Error('member_upload_client_timeout')));
+
+    let transferred = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        transferred += bytes.length;
+        if (transferred > contract.contentLength || transferred > memberEraUploadMaxRequestBytes) {
+          callback(new TypeError('class_archive_member_upload_body_too_large'));
+          return;
+        }
+        callback(null, bytes);
+      },
+      flush(callback) {
+        if (transferred !== contract.contentLength) {
+          callback(new TypeError('class_archive_member_upload_content_length_mismatch'));
+          return;
+        }
+        callback();
+      },
+    });
+    pipeline(request, limiter, upstream).catch((error) => {
+      upstream.destroy();
+      settle(reject, error instanceof TypeError
+        ? error
+        : new GatewayResponseError(503, 'member_upload_stream_failed'));
+    });
+  });
+
+  const status = result.status;
+  const responseType = result.contentType.toLowerCase();
+  if (!responseType.startsWith('application/json')) {
+    throw new GatewayResponseError(503, 'member_upload_response_content_type');
+  }
+  if (status === 201) {
+    respondJson(response, request.method, 201, memberEraUploadSuccessProjection(result.body));
+    return;
+  }
+  if (status === 400 || status === 403 || status === 409 || status === 503) {
+    const message = status === 400 ? '上传资料无效'
+      : status === 403 ? '请求被拒绝'
+        : status === 409 ? '状态已发生变化，请刷新后重试'
+          : '上传暂时无法安全确认';
+    respondJson(response, request.method, status, { error: message });
+    return;
+  }
+  throw new GatewayResponseError(503, 'member_upload_response_status');
+}
+
+async function principal(request, clientAddress) {
+  const payload = await gatewayJson(request, '/api/me', clientAddress);
+  const role = payload?.role;
+  if (typeof role !== 'string' || !knownRoles.has(role)) {
+    throw new GatewayResponseError(503, 'gateway_principal_payload');
+  }
+  return role;
+}
+
+async function photoUiPrincipalContext(request, clientAddress) {
+  const payload = await gatewayJson(request, '/api/product-state', clientAddress);
+  const role = payload?.role;
+  const presentationEpoch = payload?.presentationEpoch;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || typeof role !== 'string' || !knownRoles.has(role)
+    || typeof presentationEpoch !== 'string' || !/^[a-f0-9]{64}$/.test(presentationEpoch)) {
+    throw new GatewayResponseError(503, 'photo_ui_product_state_invalid');
+  }
+  return {
+    role,
+    presentationEpoch,
+    cacheScope: photoUiCacheScope(request, role, presentationEpoch, clientAddress),
+    payload,
+  };
+}
+
+function technicalUserId(role) {
+  const bytes = createHash('sha256').update(`class-archive-immich-web-compat-v1\0${role}`).digest();
+  // UUID-shaped, non-secret presentation compatibility id. It is intentionally
+  // unrelated to Piwigo and Immich account identifiers.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function roleLabel(role) {
+  return new Map([
+    ['CLASSMATE', '班级成员'],
+    ['TEACHER', '班级教师'],
+    ['FAMILY', '班级家属'],
+    ['ANONYMOUS', '匿名成员'],
+    ['SYSTEM_ADMIN', '班级管理'],
+  ]).get(role) ?? '班级成员';
+}
+
+function compatibleUser(role) {
+  const now = '2026-01-01T00:00:00.000Z';
+  return {
+    id: technicalUserId(role),
+    email: 'class-archive@local.invalid',
+    name: roleLabel(role),
+    profileImagePath: '',
+    avatarColor: 'blue',
+    profileChangedAt: now,
+    storageLabel: 'class-archive',
+    shouldChangePassword: false,
+    // Class Archive SYSTEM_ADMIN does not become an Immich administrator.
+    isAdmin: false,
+    createdAt: now,
+    deletedAt: null,
+    updatedAt: now,
+    oauthId: '',
+    quotaSizeInBytes: null,
+    quotaUsageInBytes: 0,
+    status: 'active',
+    license: null,
+  };
+}
+
+function exactQuery(url, allowed) {
+  const seen = new Map();
+  for (const [key, value] of url.searchParams.entries()) {
+    if (!allowed.has(key) || seen.has(key) || value.length > 190 || value.includes('\0')) {
+      throw new TypeError('class_archive_web_compat_query_invalid');
+    }
+    seen.set(key, value);
+  }
+  return seen;
+}
+
+function timelineGatewayPath(cursor = null, limit = timelinePageDefault) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > timelinePageMaximum
+    || (cursor !== null && (typeof cursor !== 'string' || !timelineCursorPattern.test(cursor)))) {
+    throw new TypeError('class_archive_web_compat_timeline_page_invalid');
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== null) query.set('cursor', cursor);
+  return `/api/timeline?${query}`;
+}
+
+function assertUuid(id) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new TypeError('class_archive_web_compat_photo_id_invalid');
+  }
+  return id.toLowerCase();
+}
+
+function photoDate(photo) {
+  // The upstream compatibility shape has several mandatory-looking date
+  // fields. Returning upload/import time (or a placeholder epoch) would
+  // incorrectly turn technical file metadata into a claimed capture date.
+  // Only a confirmed day-level archive value is representable in that shape.
+  if (
+    typeof photo?.taken_at !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at)
+    || !['ARCHIVE_CONFIRMED', 'EXIF_TRUSTED'].includes(photo?.date_source)
+    || !['EXACT', 'DAY'].includes(photo?.date_precision)
+  ) {
+    return null;
+  }
+  return `${photo.taken_at}T12:00:00.000Z`;
+}
+
+function archiveDateProjection(photo) {
+  const precision = typeof photo?.date_precision === 'string' ? photo.date_precision : 'UNKNOWN';
+  const source = typeof photo?.date_source === 'string' ? photo.date_source : 'UNKNOWN';
+  const takenAt = typeof photo?.taken_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(photo.taken_at) ? photo.taken_at : null;
+  const event = typeof photo?.event_label === 'string' && photo.event_label.length > 0 && photo.event_label.length <= 190 ? photo.event_label : null;
+  const precisionLabels = Object.freeze({
+    EXACT: '日期精确', DAY: '日期精确', MONTH: '仅确定到月份', TERM: '仅确定学期',
+    YEAR: '仅确定年份', EVENT_ONLY: '仅确定活动', UNKNOWN: '日期未知',
+  });
+  const sourceLabels = Object.freeze({
+    ARCHIVE_CONFIRMED: '档案确认日期', EVENT_INFERENCE: '档案事件推定', EXIF_TRUSTED: '已核验 EXIF 日期', UNKNOWN: '日期来源未确认',
+  });
+  let label = '日期未知';
+  if (takenAt && ['EXACT', 'DAY'].includes(precision)) {
+    label = `${takenAt.slice(0, 4)}年${takenAt.slice(5, 7)}月${takenAt.slice(8, 10)}日`;
+  } else if (takenAt && precision === 'MONTH') {
+    label = `${takenAt.slice(0, 4)}年${takenAt.slice(5, 7)}月`;
+  } else if (takenAt && precision === 'YEAR') {
+    label = `${takenAt.slice(0, 4)}年`;
+  } else if (event) {
+    label = event;
+  }
+  return {
+    label,
+    precision: precisionLabels[precision] ?? precisionLabels.UNKNOWN,
+    source: sourceLabels[source] ?? sourceLabels.UNKNOWN,
+  };
+}
+
+function validateGatewayTimelinePage(payload) {
+  const groups = Array.isArray(payload?.groups) ? payload.groups : null;
+  if (!groups || !Number.isInteger(payload?.total) || payload.total < 0
+    || !Number.isInteger(payload?.count) || payload.count < 0 || payload.count > payload.total
+    || !Number.isInteger(payload?.limit) || payload.limit < 1 || payload.limit > timelinePageMaximum
+    || payload.count > payload.limit || typeof payload?.has_more !== 'boolean'
+    || (payload.has_more && (typeof payload.next_cursor !== 'string' || !timelineCursorPattern.test(payload.next_cursor)))
+    || (!payload.has_more && payload.next_cursor !== null)
+    || (payload.total === 0 && (payload.count !== 0 || groups.length !== 0 || payload.has_more))
+    || (payload.total > 0 && payload.count === 0)) {
+    throw new GatewayResponseError(503);
+  }
+  const keys = new Set();
+  let count = 0;
+  for (const group of groups) {
+    if (!group || typeof group !== 'object' || typeof group.key !== 'string' || typeof group.label !== 'string'
+      || group.label.length < 1 || group.label.length > 190 || !Number.isInteger(group.total) || group.total < 1
+      || !Number.isInteger(group.count) || group.count < 1 || group.count > group.total
+      || !['MONTH', 'YEAR', 'EVENT', 'UNKNOWN'].includes(group.kind) || !Array.isArray(group.items)
+      || group.items.length !== group.count || keys.has(group.key)) {
+      throw new GatewayResponseError(503);
+    }
+    const keyMatchesKind = (group.kind === 'MONTH' && /^month:\d{4}-\d{2}$/.test(group.key))
+      || (group.kind === 'YEAR' && /^year:\d{4}$/.test(group.key))
+      || (group.kind === 'EVENT' && /^event:[0-9a-f]{64}$/.test(group.key))
+      || (group.kind === 'UNKNOWN' && group.key === 'unknown');
+    if (!keyMatchesKind || (group.kind === 'UNKNOWN' && groups.indexOf(group) !== groups.length - 1)) {
+      throw new GatewayResponseError(503);
+    }
+    keys.add(group.key);
+    count += group.count;
+  }
+  if (count !== payload.count) throw new GatewayResponseError(503);
+  return {
+    total: payload.total,
+    count: payload.count,
+    limit: payload.limit,
+    groups,
+    hasMore: payload.has_more,
+    nextCursor: payload.next_cursor,
+    presentationEpoch: typeof payload.presentation_epoch === 'string'
+      && /^[a-f0-9]{64}$/.test(payload.presentation_epoch) ? payload.presentation_epoch : null,
+  };
+}
+
+function archiveTimelineProjection(payload, cacheScope = null, expectedPresentationEpoch = null) {
+  const page = validateGatewayTimelinePage(payload);
+  if (cacheScope !== null && (typeof cacheScope !== 'string' || !/^[a-f0-9]{32}$/.test(cacheScope))) {
+    throw new GatewayResponseError(503);
+  }
+  if (expectedPresentationEpoch !== null
+    && (page.presentationEpoch === null || page.presentationEpoch !== expectedPresentationEpoch)) {
+    throw new GatewayResponseError(503, 'timeline_presentation_scope_mismatch');
+  }
+  const photoIds = new Set();
+  let count = 0;
+  const output = page.groups.map((group) => {
+    const items = group.items.map((photo) => {
+      const id = assertUuid(photo?.id);
+      if (photoIds.has(id)) {
+        throw new GatewayResponseError(503);
+      }
+      photoIds.add(id);
+      const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
+      const mediaRevision = typeof photo?.media_revision === 'string' && /^[a-f0-9]{32}$/.test(photo.media_revision)
+        ? photo.media_revision : null;
+      const width = Number.isInteger(photo?.width) && photo.width > 0 && photo.width <= 200000 ? photo.width : null;
+      const height = Number.isInteger(photo?.height) && photo.height > 0 && photo.height <= 200000 ? photo.height : null;
+      if ((width === null) !== (height === null)) throw new GatewayResponseError(503);
+      return { id, title, archive_date: archiveDateProjection(photo), media_revision: mediaRevision, width, height };
+    });
+    if (items.length !== group.count) {
+      throw new GatewayResponseError(503);
+    }
+    count += items.length;
+    return { key: group.key, label: group.label, kind: group.kind, total: group.total, count: group.count, items };
+  });
+  if (count !== page.count) {
+    throw new GatewayResponseError(503);
+  }
+  return {
+    total: page.total,
+    count,
+    limit: page.limit,
+    groups: output,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    cacheScope,
+  };
+}
+
+function archiveMemoryProjection(payload) {
+  if (!payload || typeof payload !== 'object' || payload.available !== true
+    || !Number.isInteger(payload.total) || !Array.isArray(payload.items) || payload.total !== payload.items.length) {
+    throw new GatewayResponseError(503);
+  }
+  const ids = new Set();
+  const items = payload.items.map((memory) => {
+    if (!memory || typeof memory !== 'object' || typeof memory.label !== 'string'
+      || memory.label.length < 1 || memory.label.length > 190
+      || !Number.isInteger(memory.photo_count) || memory.photo_count < 1
+      || typeof memory.cover_photo_id !== 'string' || !UUID_V4.test(memory.cover_photo_id)
+      || typeof memory.kind !== 'string' || !['EVENT', 'MONTH', 'YEAR', 'TERM', 'COLLECTION'].includes(memory.kind)) {
+      throw new GatewayResponseError(503);
+    }
+    const coverPhotoId = memory.cover_photo_id.toLowerCase();
+    const key = `${memory.kind}:${memory.label}:${coverPhotoId}`;
+    if (ids.has(key)) throw new GatewayResponseError(503);
+    ids.add(key);
+    return { label: memory.label, kind: memory.kind, photo_count: memory.photo_count, cover_photo_id: coverPhotoId };
+  });
+  return { total: items.length, items };
+}
+
+function archivePersonProjection(person) {
+  if (!person || typeof person !== 'object' || typeof person.id !== 'string' || !UUID_V4.test(person.id)
+    || typeof person.label !== 'string' || person.label.length < 1 || person.label.length > 190
+    || typeof person.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)
+    || !Number.isInteger(person.photo_count) || person.photo_count < 1 || !Array.isArray(person.items)
+    || person.items.length !== person.photo_count) {
+    throw new GatewayResponseError(503);
+  }
+  const ids = new Set();
+  const items = person.items.map((photo) => {
+    const id = assertUuid(photo?.id);
+    if (ids.has(id)) {
+      throw new GatewayResponseError(503);
+    }
+    ids.add(id);
+    const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
+    return { id, title, archive_date: archiveDateProjection(photo) };
+  });
+  const coverPhotoId = person.cover_photo_id.toLowerCase();
+  if (!ids.has(coverPhotoId)) {
+    throw new GatewayResponseError(503);
+  }
+  const portraitFocus = normalizePortraitFocus(person.portrait_focus);
+  return {
+    id: person.id.toLowerCase(), label: person.label, photo_count: person.photo_count,
+    cover_photo_id: coverPhotoId, portrait_focus: portraitFocus, items,
+  };
+}
+
+function normalizePortraitFocus(value) {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'x,y,zoom'
+    || !Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.zoom)
+    || value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1 || value.zoom < 1 || value.zoom > 6) {
+    throw new GatewayResponseError(503);
+  }
+  return { x: value.x, y: value.y, zoom: value.zoom };
+}
+
+function compatibleAssetOwner(role) {
+  const owner = compatibleUser(role);
+  return {
+    id: owner.id,
+    email: owner.email,
+    name: owner.name,
+    profileImagePath: '',
+    profileChangedAt: owner.profileChangedAt,
+    avatarColor: owner.avatarColor,
+  };
+}
+
+function compatibleAsset(photo, role, cacheScope = null) {
+  const id = assertUuid(photo?.id);
+  const date = photoDate(photo);
+  const owner = compatibleAssetOwner(role);
+  const title = typeof photo?.title === 'string' && photo.title.length <= 190 ? photo.title : '班级照片';
+  const mediaRevision = typeof photo?.media_revision === 'string' && /^[a-f0-9]{32}$/.test(photo.media_revision)
+    ? photo.media_revision : null;
+  const width = Number.isInteger(photo?.width) && photo.width > 0 && photo.width <= 200000 ? photo.width : null;
+  const height = Number.isInteger(photo?.height) && photo.height > 0 && photo.height <= 200000 ? photo.height : null;
+  if ((width === null) !== (height === null)) throw new GatewayResponseError(503);
+  return {
+    id,
+    ownerId: owner.id,
+    owner,
+    libraryId: 'class-archive-presentation',
+    type: 'IMAGE',
+    // These compatibility values deliberately contain no Piwigo pathname.
+    originalPath: `class-archive/${id}.jpg`,
+    originalFileName: title,
+    originalMimeType: 'image/jpeg',
+    // The upstream-shaped search card needs an explicit thumbnail property.
+    // This is still a canonical UUID route: the BFF re-checks the active
+    // ClassIdentity session and the Piwigo Gateway re-enters MediaGuard
+    // before outer nginx can transfer a byte.
+    thumbnailPath: `/api/assets/${id}/thumbnail?size=thumbnail`,
+    thumbhash: null,
+    // Unknown/month/year/event-only archive dates stay null in the generic
+    // Immich-shaped object. They are rendered with their real precision by
+    // /class-archive-timeline instead of being silently rounded to a day.
+    fileCreatedAt: date,
+    fileModifiedAt: date,
+    localDateTime: date,
+    updatedAt: date,
+    createdAt: date,
+    isFavorite: false,
+    isArchived: false,
+    isTrashed: false,
+    visibility: 'timeline',
+    duration: '0:00:00.000000',
+    exifInfo: {
+      make: null,
+      model: null,
+      exifImageWidth: 1600,
+      exifImageHeight: 1067,
+      fileSizeInByte: 0,
+      orientation: '1',
+      dateTimeOriginal: date,
+      modifyDate: date,
+      timeZone: 'UTC',
+      lensModel: null,
+      fNumber: null,
+      focalLength: null,
+      iso: null,
+      exposureTime: null,
+      latitude: null,
+      longitude: null,
+      city: null,
+      country: null,
+      state: null,
+      description: null,
+    },
+    livePhotoVideoId: null,
+    tags: [],
+    people: [],
+    stack: null,
+    isOffline: false,
+    hasMetadata: true,
+    duplicateId: null,
+    resized: true,
+    // Owned Photo UI point projection. This contains presentation metadata
+    // only, so a deep-linked photo does not require downloading every prior
+    // timeline page. The UUID media URL still re-enters MediaGuard.
+    classArchiveDate: archiveDateProjection(photo),
+    classArchiveMediaRevision: mediaRevision,
+    classArchiveWidth: width,
+    classArchiveHeight: height,
+    classArchiveCacheScope: typeof cacheScope === 'string' && /^[a-f0-9]{32}$/.test(cacheScope) ? cacheScope : null,
+    checksum: null,
+    width: 1600,
+    height: 1067,
+    isEdited: false,
+  };
+}
+
+function timeBucketResponse(photos, role) {
+  const response = {
+    id: [], ownerId: [], ratio: [], thumbhash: [], createdAt: [], fileCreatedAt: [], localOffsetHours: [],
+    isFavorite: [], isTrashed: [], isImage: [], duration: [], projectionType: [], livePhotoVideoId: [],
+    city: [], country: [], visibility: [], stack: [],
+  };
+  for (const photo of photos) {
+    const asset = compatibleAsset(photo, role);
+    response.id.push(asset.id);
+    response.ownerId.push(asset.ownerId);
+    response.ratio.push(asset.width / asset.height);
+    response.thumbhash.push(asset.thumbhash);
+    response.createdAt.push(asset.createdAt);
+    response.fileCreatedAt.push(asset.fileCreatedAt);
+    response.localOffsetHours.push(0);
+    response.isFavorite.push(false);
+    response.isTrashed.push(false);
+    response.isImage.push(true);
+    response.duration.push(asset.duration);
+    response.projectionType.push(null);
+    response.livePhotoVideoId.push(null);
+    response.city.push(null);
+    response.country.push(null);
+    response.visibility.push('timeline');
+    response.stack.push(null);
+  }
+  return response;
+}
+
+function parseMonth(value) {
+  const match = /^(\d{4}-\d{2})-01(?:T00:00:00\.000Z)?$/.exec(value);
+  if (!match) {
+    throw new TypeError('class_archive_web_compat_time_bucket_invalid');
+  }
+  return match[1];
+}
+
+async function policyTimelinePhotos(request, clientAddress, personId = null, expectedPresentationEpoch = null) {
+  if (personId !== null) {
+    // A Person route must not ask Immich for its full cluster and subtract
+    // hidden assets afterwards. The canonical Gateway has already applied
+    // ClassArchivePolicy before it returns this person's media projection.
+    const person = await gatewayJson(request, `/api/people/${assertUuid(personId)}`, clientAddress);
+    const items = Array.isArray(person?.items) ? person.items : null;
+    if (items === null) {
+      throw new GatewayResponseError(503);
+    }
+    if (items.length > timelineCompatibilityMaximumAssets) {
+      throw new GatewayResponseError(503, 'timeline_compatibility_budget');
+    }
+    const ids = new Set();
+    return items.map((photo) => {
+      const id = assertUuid(photo?.id);
+      if (ids.has(id)) {
+        throw new GatewayResponseError(503);
+      }
+      ids.add(id);
+      return photo;
+    });
+  }
+
+  const ids = new Set();
+  const photos = [];
+  const cursors = new Set();
+  let cursor = null;
+  let expectedTotal = null;
+  let pageCount = 0;
+  do {
+    pageCount += 1;
+    if (pageCount > timelineCompatibilityMaximumPages) {
+      throw new GatewayResponseError(503, 'timeline_compatibility_budget');
+    }
+    const page = validateGatewayTimelinePage(await gatewayJson(
+      request,
+      timelineGatewayPath(cursor, timelinePageMaximum),
+      clientAddress,
+    ));
+    if (expectedPresentationEpoch !== null && page.presentationEpoch !== expectedPresentationEpoch) {
+      throw new GatewayResponseError(503, 'timeline_presentation_scope_mismatch');
+    }
+    if (expectedTotal === null) {
+      expectedTotal = page.total;
+      if (expectedTotal > timelineCompatibilityMaximumAssets) {
+        throw new GatewayResponseError(503, 'timeline_compatibility_budget');
+      }
+    }
+    if (page.total !== expectedTotal) throw new GatewayResponseError(503);
+    for (const group of page.groups) {
+      for (const photo of group.items) {
+        const id = assertUuid(photo?.id);
+        if (ids.has(id)) {
+          throw new GatewayResponseError(503);
+        }
+        ids.add(id);
+        photos.push(photo);
+      }
+    }
+    if (!page.hasMore) break;
+    if (cursors.has(page.nextCursor)) throw new GatewayResponseError(503);
+    cursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  } while (true);
+  if (expectedTotal === null || photos.length !== expectedTotal) throw new GatewayResponseError(503);
+  return photos;
+}
+
+function opaqueId(namespace, label) {
+  const digest = createHash('sha256').update(`class-archive-immich-web-compat-v1\0${namespace}\0${label}`).digest();
+  digest[6] = (digest[6] & 0x0f) | 0x40;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function compatibleAlbums(payload, role) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  return items
+    .filter((entry) => typeof entry?.name === 'string' && Number.isInteger(entry?.total)
+      && typeof entry?.cover_photo_id === 'string' && UUID_V4.test(entry.cover_photo_id))
+    .map((entry) => ({
+      id: opaqueId('album', entry.name), albumName: entry.name, description: '', albumThumbnailAssetId: entry.cover_photo_id.toLowerCase(),
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      albumUsers: [{ user: compatibleAssetOwner(role), role: 'owner' }], shared: false, hasSharedLink: false,
+      startDate: null, endDate: null, lastModifiedAssetTimestamp: null, assetCount: entry.total, order: 'desc',
+      isActivityEnabled: false, contributorCounts: [],
+    }));
+}
+
+function gatewayPeople(payload) {
+  if (payload?.available === false && payload?.total === 0 && Array.isArray(payload?.items) && payload.items.length === 0) {
+    return [];
+  }
+  if (payload?.available !== true || !Array.isArray(payload?.items) || !Number.isInteger(payload?.total) || payload.total !== payload.items.length) {
+    throw new GatewayResponseError(503);
+  }
+  const ids = new Set();
+  return payload.items.map((entry) => {
+    if (
+      !entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !UUID_V4.test(entry.id)
+      || typeof entry.label !== 'string' || entry.label.length < 1 || entry.label.length > 190
+      || !Number.isInteger(entry.photo_count) || entry.photo_count < 1
+      || typeof entry.cover_photo_id !== 'string' || !UUID_V4.test(entry.cover_photo_id)
+      || ids.has(entry.id)
+    ) {
+      throw new GatewayResponseError(503);
+    }
+    ids.add(entry.id);
+    return entry;
+  });
+}
+
+function compatiblePerson(person, role) {
+  if (!person || typeof person !== 'object' || typeof person.id !== 'string' || !UUID_V4.test(person.id)
+    || typeof person.label !== 'string' || person.label.length < 1 || person.label.length > 190
+    || typeof person.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)) {
+    throw new GatewayResponseError(503);
+  }
+  // Thumbnail bytes remain a canonical asset request, which re-enters the
+  // Gateway and MediaGuard. There is no Immich thumbnail URL in this object.
+  return {
+    id: person.id,
+    name: person.label,
+    photoCount: person.photo_count,
+    // Public ClassArchivePhoto UUID selected from this already role-filtered
+    // projection. The owned Photo UI can request it through the ordinary
+    // canonical asset route, avoiding a second full People projection for
+    // every portrait while MediaGuard still authorizes the bytes.
+    coverPhotoId: person.cover_photo_id,
+    portraitFocus: normalizePortraitFocus(person.portrait_focus),
+    birthDate: null,
+    thumbnailPath: `/api/people/${person.id}/thumbnail`,
+    isHidden: false,
+    isFavorite: false,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+function compatiblePeople(payload, role) {
+  const people = gatewayPeople(payload);
+  return {
+    hasNextPage: false,
+    hidden: 0,
+    total: people.length,
+    people: people.map((person) => compatiblePerson(person, role)),
+  };
+}
+
+function compatibleSearch(photos, role) {
+  return {
+    albums: { total: 0, count: 0, items: [], facets: [] },
+    assets: { total: photos.length, count: photos.length, items: photos.map((photo) => compatibleAsset(photo, role)), facets: [], nextPage: null },
+  };
+}
+
+async function parseJsonBody(request) {
+  let raw = '';
+  for await (const chunk of request) {
+    raw += chunk;
+    if (raw.length > 8192) {
+      throw new TypeError('class_archive_web_compat_body_too_large');
+    }
+  }
+  if (raw === '') {
+    return {};
+  }
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('class_archive_web_compat_body_invalid');
+  }
+  return parsed;
+}
+
+async function parsePhotoUiMutationBody(request) {
+  const contentType = request.headers['content-type'];
+  if (typeof contentType !== 'string' || contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    throw new TypeError('class_archive_web_compat_mutation_content_type');
+  }
+  const contentLength = request.headers['content-length'];
+  if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > 64 * 1024)) {
+    throw new TypeError('class_archive_web_compat_mutation_body_too_large');
+  }
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += bytes.length;
+    if (length > 64 * 1024) {
+      throw new TypeError('class_archive_web_compat_mutation_body_too_large');
+    }
+    chunks.push(bytes);
+  }
+  const raw = Buffer.concat(chunks, length);
+  if (raw.length === 0) {
+    throw new TypeError('class_archive_web_compat_mutation_body_empty');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new SyntaxError('class_archive_web_compat_mutation_json_invalid');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('class_archive_web_compat_mutation_body_invalid');
+  }
+  return raw;
+}
+
+function searchTermFromBody(payload) {
+  for (const key of ['originalFileName', 'description', 'ocr', 'originalPath', 'query']) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim() !== '') {
+      const normalized = value.trim();
+      if (normalized.length > 190 || normalized.includes('\0')) {
+        throw new TypeError('class_archive_web_compat_search_invalid');
+      }
+      return normalized;
+    }
+  }
+  return '';
+}
+
+function clearCompatibilityCookie(response) {
+  response.setHeader('Set-Cookie', 'immich_is_authenticated=; Path=/; Max-Age=0; SameSite=Lax');
+}
+
+function setCompatibilityCookie(response) {
+  response.setHeader('Set-Cookie', 'immich_is_authenticated=1; Path=/; Max-Age=300; SameSite=Lax');
+}
+
+function redirectToPiwigoLogin(request, response) {
+  setSecurityHeaders(response);
+  clearCompatibilityCookie(response);
+  response.statusCode = 303;
+  response.setHeader('Location', '/class-archive-core/login');
+  response.end();
+}
+
+function redirectToPiwigoCore(request, response, target) {
+  if (corePublicPort === null) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Core interface unavailable.');
+    return;
+  }
+  setSecurityHeaders(response);
+  response.statusCode = 303;
+  response.setHeader('Location', `http://127.0.0.1:${corePublicPort}${target}`);
+  response.end();
+}
+
+async function proxyCanonicalMedia(request, response, photoId, variant, clientAddress, mediaRevision = null) {
+  const headers = {
+    ...(sessionCookie(request) ? { Cookie: sessionCookie(request) } : {}),
+    ...(typeof request.headers.range === 'string' && request.headers.range.length <= 128 ? { Range: request.headers.range } : {}),
+    ...(typeof request.headers['if-none-match'] === 'string' ? { 'If-None-Match': request.headers['if-none-match'] } : {}),
+    ...(typeof request.headers['if-modified-since'] === 'string' ? { 'If-Modified-Since': request.headers['if-modified-since'] } : {}),
+    'X-Forwarded-For': clientAddress,
+    'X-Class-Archive-Web-Compat-Internal': '1',
+  };
+  const upstream = new URL(`/api/photos/${photoId}/media/${variant}`, gatewayOrigin);
+  if (mediaRevision !== null) {
+    upstream.searchParams.set('v', mediaRevision);
+  }
+  let upstreamResponse;
+  try {
+    upstreamResponse = await fetch(upstream, { method: request.method, headers, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
+  } catch {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
+    return;
+  }
+  const allowedStatus = new Set([200, 206, 304, 403, 404, 503]);
+  if (!allowedStatus.has(upstreamResponse.status)) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
+    return;
+  }
+  // The internal Gateway has already established the ClassIdentity +
+  // MediaGuard decision. It deliberately leaves its X-Accel target unhandled
+  // on port 8088 so this BFF can validate that target and hand it to the
+  // loopback ingress nginx. The outer nginx then transfers the file itself:
+  // neither PHP nor Node buffers an original or derivative byte stream.
+  const accelRedirect = upstreamResponse.headers.get('x-accel-redirect');
+  if (accelRedirect !== null) {
+    if (upstreamResponse.status !== 200 || !isSafeInternalDelivery(accelRedirect)) {
+      respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
+      return;
+    }
+    // The final internal nginx location owns the one canonical private cache
+    // header and validators. Avoid adding a second conflicting field here.
+    setSecurityHeaders(response, { media: true, deferCache: true });
+    response.statusCode = 200;
+    const contentType = upstreamResponse.headers.get('content-type');
+    if (contentType !== null && contentType.toLowerCase().startsWith('image/')) {
+      response.setHeader('Content-Type', contentType);
+    }
+    response.setHeader('X-Accel-Redirect', accelRedirect);
+    response.end();
+    return;
+  }
+  if (upstreamResponse.status === 200 || upstreamResponse.status === 206) {
+    // A successful canonical media authorization must have an internal nginx
+    // target. Do not silently fall back to user-space media relay.
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Media temporarily unavailable.', { media: true });
+    return;
+  }
+  if (upstreamResponse.status === 304) {
+    setSecurityHeaders(response, { media: true });
+    for (const header of ['etag', 'last-modified']) {
+      const value = upstreamResponse.headers.get(header);
+      if (value !== null) response.setHeader(header, value);
+    }
+    response.statusCode = 304;
+    response.end();
+    return;
+  }
+  // Authorization failures are status-only evidence. Never buffer or relay a
+  // caller-influenced Gateway body into Node memory, even on an error path.
+  // A fixed tiny response also avoids leaking internal diagnostics.
+  try { await upstreamResponse.body?.cancel(); } catch { }
+  const message = upstreamResponse.status === 404
+    ? 'Media not found.'
+    : upstreamResponse.status === 403
+      ? 'Media access denied.'
+      : 'Media temporarily unavailable.';
+  respond(response, request.method, upstreamResponse.status, 'text/plain; charset=utf-8', message, { media: true });
+}
+
+async function handleApi(request, response, url, clientAddress) {
+  const isSearch = url.pathname === '/api/search/metadata' || url.pathname === '/api/search/smart';
+  const isPhotoUiMutation = photoUiGatewayMutationRoutes.has(url.pathname);
+  const isMemberEraUpload = url.pathname === memberEraUploadPublicPath;
+  if (isMemberEraUpload && request.method !== 'POST') {
+    response.setHeader('Allow', 'POST');
+    respond(response, request.method, 405, 'application/json; charset=utf-8', '{"error":"仅支持 POST"}');
+    return;
+  }
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !(isSearch && request.method === 'POST') && !(isPhotoUiMutation && request.method === 'POST') && !(isMemberEraUpload && request.method === 'POST')) {
+    response.setHeader('Allow', isSearch || isPhotoUiMutation || isMemberEraUpload ? 'POST' : 'GET, HEAD');
+    respond(response, request.method, 405, 'application/json; charset=utf-8', '{"error":"只读接口"}');
+    return;
+  }
+  // Check the relay-only request headers before the principal call so a
+  // malformed CSRF value remains a caller error (400), never an apparent
+  // session-expiry response. The actual headers are rebuilt per Gateway call.
+  try {
+    gatewayRequestHeaders(request, clientAddress);
+  } catch (error) {
+    emitGatewayDiagnostic('api', error);
+    respondJson(response, request.method, 400, { error: '请求格式无效' });
+    return;
+  }
+  let principalState;
+  try {
+    principalState = await photoUiPrincipalContext(request, clientAddress);
+  } catch (error) {
+    emitGatewayDiagnostic('principal', error);
+    clearCompatibilityCookie(response);
+    const status = error instanceof GatewayResponseError && error.status === 503 ? 503 : 401;
+    respondJson(response, request.method, status, { error: status === 503 ? '数据暂时无法安全确认' : '需要班级相册登录' });
+    return;
+  }
+  const role = principalState.role;
+
+  try {
+    if (isMemberEraUpload) {
+      await relayMemberEraUpload(request, response, url, clientAddress, principalState);
+      return;
+    }
+    const readPath = photoUiGatewayReadRoutes.get(url.pathname);
+    if (readPath) {
+      exactQuery(url, new Set());
+      if (url.pathname === '/api/class-archive/product-state') {
+        const payload = { ...principalState.payload, cacheScope: principalState.cacheScope };
+        // Product state includes the mutation CSRF value, so it remains
+        // no-store even though ordinary presentation documents can revalidate.
+        respondJson(response, request.method, 200, payload);
+        return;
+      }
+      await relayPublicGatewayApi(request, response, readPath, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
+    const albumMatch = /^\/api\/class-archive\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (albumMatch) {
+      // Album detail is cursor-paginated by the canonical Gateway. Preserve
+      // only its two bounded opaque query fields; accepting a generic query
+      // here would turn this BFF route into an unreviewed proxy surface.
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const cursor = query.get('cursor');
+      const limit = query.get('limit');
+      // exactQuery() returns a Map, whose missing optional values are
+      // undefined. Check presence rather than truthiness so an ordinary
+      // first-page request with only `limit` remains valid, while malformed
+      // supplied values still fail closed before reaching the Gateway.
+      const hasCursor = query.has('cursor');
+      const hasLimit = query.has('limit');
+      if (hasCursor && !timelineCursorPattern.test(cursor)) {
+        throw new TypeError('class_archive_web_compat_album_cursor_invalid');
+      }
+      if (hasLimit && (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 240)) {
+        throw new TypeError('class_archive_web_compat_album_limit_invalid');
+      }
+      const params = new URLSearchParams();
+      if (hasCursor) params.set('cursor', cursor);
+      if (hasLimit) params.set('limit', limit);
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/albums/${assertUuid(albumMatch[1])}${suffix}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
+    const commentsMatch = /^\/api\/class-archive\/comments\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (commentsMatch) {
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const params = new URLSearchParams();
+      if (query.has('cursor')) params.set('cursor', assertUuid(query.get('cursor')));
+      if (query.has('limit')) {
+        const limit = query.get('limit');
+        if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) {
+          throw new TypeError('class_archive_web_compat_comment_limit_invalid');
+        }
+        params.set('limit', limit);
+      }
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/comments/${assertUuid(commentsMatch[1])}${suffix}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
+    if (url.pathname === '/api/class-archive/search/suggestions') {
+      // Suggestions remain a deliberately narrow Gateway read: there is no
+      // caller-controlled upstream path, no unbounded query, and only one
+      // opaque album context may scope the policy-filtered response.
+      const query = exactQuery(url, new Set(['q', 'albumId']));
+      const value = query.get('q');
+      if (value !== undefined && (value.length > 190 || value.includes('\0'))) {
+        throw new TypeError('class_archive_web_compat_search_suggestions_query_invalid');
+      }
+      const albumId = query.get('albumId');
+      if (albumId !== undefined && !UUID_V4.test(albumId)) {
+        throw new TypeError('class_archive_web_compat_search_suggestions_album_invalid');
+      }
+      const params = new URLSearchParams();
+      if (value !== undefined) params.set('q', value);
+      if (albumId !== undefined) params.set('albumId', assertUuid(albumId));
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      await relayPublicGatewayApi(request, response, `/api/search/suggestions${suffix}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
+    if (url.pathname === '/api/class-archive/search/grouped') {
+      // This is a deliberately typed, fixed-path Gateway contract. A caller
+      // can request one search context, but never an arbitrary adapter query
+      // or a browser-side visibility filter. The Gateway binds the resulting
+      // opaque cursor to the normalized context, role scope, account namespace
+      // and presentation revision before any continuation is returned.
+      const query = exactQuery(url, new Set(['q', 'contextType', 'contextId', 'albumId', 'cursor', 'limit']));
+      const value = query.get('q');
+      if (value === undefined || value.trim() === '') {
+        throw new TypeError('class_archive_web_compat_grouped_search_query_missing');
+      }
+      const hasContextType = query.has('contextType');
+      const hasContextId = query.has('contextId');
+      const hasAlbumId = query.has('albumId');
+      const contextType = query.get('contextType');
+      const contextId = query.get('contextId');
+      if ((!hasContextType && hasContextId)
+        || (hasContextType && contextType === 'ALL' && hasContextId)
+        || (hasContextType && contextType !== 'ALL' && !hasContextId)
+        || (hasAlbumId && hasContextType)) {
+        throw new TypeError('class_archive_web_compat_grouped_search_context_invalid');
+      }
+      if (hasContextType) {
+        if (!groupedSearchContextTypes.has(contextType)
+          || (contextType === 'ALL' && contextId !== undefined)
+          || ((contextType === 'ALBUM' || contextType === 'PERSON') && !UUID_V4.test(contextId))
+          || (contextType === 'MEMORY' && !groupedSearchMemoryContextPattern.test(contextId))
+          || (contextType === 'COLLECTION' && !groupedSearchCollectionContextPattern.test(contextId))) {
+          throw new TypeError('class_archive_web_compat_grouped_search_context_invalid');
+        }
+      }
+      const albumId = query.get('albumId');
+      if (hasAlbumId && !UUID_V4.test(albumId)) {
+        throw new TypeError('class_archive_web_compat_grouped_search_album_invalid');
+      }
+      const cursor = query.get('cursor');
+      if (cursor !== undefined && !timelineCursorPattern.test(cursor)) {
+        throw new TypeError('class_archive_web_compat_grouped_search_cursor_invalid');
+      }
+      const limit = query.get('limit');
+      if (limit !== undefined && (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > groupedSearchPageMaximum)) {
+        throw new TypeError('class_archive_web_compat_grouped_search_limit_invalid');
+      }
+      const params = new URLSearchParams({ q: value });
+      if (hasContextType) {
+        params.set('contextType', contextType);
+        if (contextId !== undefined) params.set('contextId', contextId);
+      } else if (hasAlbumId) {
+        // Legacy albumId remains a compatibility form. It is converted to
+        // SearchContext::ALBUM only inside the Gateway; no broader legacy
+        // hybrid response is synthesized by the BFF.
+        params.set('albumId', assertUuid(albumId));
+      }
+      if (cursor !== undefined) params.set('cursor', cursor);
+      if (limit !== undefined) params.set('limit', limit);
+      await relayPublicGatewayApi(request, response, `/api/search/grouped?${params.toString()}`, clientAddress, { responseOptions: { metadata: true } });
+      return;
+    }
+    if (url.pathname === '/api/class-archive/search/hybrid') {
+      const query = exactQuery(url, new Set(['q', 'albumId']));
+      const value = query.get('q');
+      if (value === undefined) {
+        throw new TypeError('class_archive_web_compat_hybrid_search_query_missing');
+      }
+      const albumId = query.get('albumId');
+      if (albumId !== undefined && !UUID_V4.test(albumId)) {
+        throw new TypeError('class_archive_web_compat_hybrid_search_album_invalid');
+      }
+      const suffix = albumId === undefined ? '' : `&albumId=${encodeURIComponent(assertUuid(albumId))}`;
+      await relayPublicGatewayApi(request, response, `/api/search/hybrid?q=${encodeURIComponent(value)}${suffix}`, clientAddress);
+      return;
+    }
+    const mutationPath = photoUiGatewayMutationRoutes.get(url.pathname);
+    if (mutationPath) {
+      if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST');
+        respondJson(response, request.method, 405, { error: '仅支持 POST' });
+        return;
+      }
+      if (url.pathname === '/api/class-archive/manage/comments/delete' && role !== 'SYSTEM_ADMIN') {
+        respondJson(response, request.method, 403, { error: '请求被拒绝' });
+        return;
+      }
+      exactQuery(url, new Set());
+      const body = await parsePhotoUiMutationBody(request);
+      await relayPublicGatewayApi(request, response, mutationPath, clientAddress, { method: 'POST', body });
+      return;
+    }
+    if (url.pathname === '/api/users/me') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, compatibleUser(role));
+      return;
+    }
+    if (url.pathname === '/api/users/me/preferences') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, compatiblePreferences);
+      return;
+    }
+    if (url.pathname === '/api/server/about') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, {
+        version: 'Class Archive Immich Web compatibility spike', versionUrl: '', licensed: false,
+        build: 'class-archive-gateway', buildUrl: '', buildImage: 'verified-upstream-web-v3.1.0', buildImageUrl: '',
+        repository: 'immich-app/immich', repositoryUrl: 'https://github.com/immich-app/immich', sourceRef: 'v3.1.0',
+        sourceCommit: '8aa95c67470a02a8ddedf03c2e52963af33065ff', sourceUrl: 'https://github.com/immich-app/immich/tree/v3.1.0',
+        nodejs: process.version, exiftool: '', ffmpeg: '', libvips: '', imagemagick: '',
+      });
+      return;
+    }
+    if (url.pathname === '/api/server/version-history') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, []);
+      return;
+    }
+    if (url.pathname === '/api/server/features') {
+      exactQuery(url, new Set());
+      let enrichmentAvailable = false;
+      try {
+        const people = await gatewayJson(request, '/api/people', clientAddress);
+        enrichmentAvailable = people?.available === true;
+      } catch {
+        // The metadata-only bridge is optional for the base compatibility
+        // shell. Do not advertise an unavailable ML feature as usable.
+        enrichmentAvailable = false;
+      }
+      respondJson(response, request.method, 200, {
+        smartSearch: enrichmentAvailable, facialRecognition: enrichmentAvailable, duplicateDetection: false, map: false, reverseGeocoding: false,
+        importFaces: false, sidecar: false, search: true, trash: false, oauth: false, oauthAutoLaunch: false,
+        ocr: false, passwordLogin: false, configFile: false, email: false,
+      });
+      return;
+    }
+    if (url.pathname === '/api/server/config') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, {
+        loginPageMessage: '', trashDays: 0, userDeleteDelay: 0, oauthButtonText: '', isInitialized: true,
+        isOnboarded: true, externalDomain: '', publicUsers: false, mapDarkStyleUrl: '', mapLightStyleUrl: '', maintenanceMode: false,
+      });
+      return;
+    }
+    if (url.pathname === '/api/server/media-types') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, { image: ['.jpg', '.jpeg', '.png', '.webp'], video: [], sidecar: [] });
+      return;
+    }
+    if (url.pathname === '/api/server/storage') {
+      exactQuery(url, new Set());
+      respondJson(response, request.method, 200, {
+        diskSize: '不适用', diskUse: '不适用', diskAvailable: '不适用', diskSizeRaw: 0, diskUseRaw: 0,
+        diskAvailableRaw: 0, diskUsagePercentage: 0,
+      });
+      return;
+    }
+    if (url.pathname === '/api/notifications') {
+      exactQuery(url, new Set(['id', 'level', 'type', 'unread']));
+      respondJson(response, request.method, 200, []);
+      return;
+    }
+    if (url.pathname === '/api/timeline/buckets') {
+      const query = exactQuery(url, new Set(['albumId', 'isTrashed', 'isFavorite', 'visibility', 'withStacked', 'withPartners', 'order', 'orderBy', 'personId']));
+      if (query.get('isTrashed') === 'true' || query.get('visibility') === 'archive' || query.has('albumId')) {
+        respondJson(response, request.method, 200, []);
+        return;
+      }
+      const photos = await policyTimelinePhotos(
+        request,
+        clientAddress,
+        query.get('personId'),
+        principalState.presentationEpoch,
+      );
+      const counts = new Map();
+      for (const photo of photos) {
+        // The generic Immich timeline is only safe for confirmed day-level
+        // dates. Month/year/event/unknown assets remain available through
+        // the Class Archive timeline projection rather than being rounded
+        // to an invented calendar day.
+        const date = photoDate(photo);
+        if (date === null) continue;
+        const month = date.slice(0, 7);
+        counts.set(month, (counts.get(month) ?? 0) + 1);
+      }
+      const result = Array.from(counts.entries())
+        .sort(([left], [right]) => right.localeCompare(left))
+        .map(([month, count]) => ({ timeBucket: `${month}-01T00:00:00.000Z`, count }));
+      respondJson(response, request.method, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/timeline/bucket') {
+      const query = exactQuery(url, new Set(['timeBucket', 'albumId', 'isTrashed', 'isFavorite', 'visibility', 'withStacked', 'withPartners', 'order', 'orderBy', 'personId']));
+      const timeBucket = query.get('timeBucket');
+      if (!timeBucket) {
+        throw new TypeError('class_archive_web_compat_time_bucket_missing');
+      }
+      if (query.get('isTrashed') === 'true' || query.get('visibility') === 'archive' || query.has('albumId')) {
+        respondJson(response, request.method, 200, timeBucketResponse([], role));
+        return;
+      }
+      const requestedMonth = parseMonth(timeBucket);
+      const photos = (await policyTimelinePhotos(
+        request,
+        clientAddress,
+        query.get('personId'),
+        principalState.presentationEpoch,
+      ))
+        .filter((photo) => {
+          const date = photoDate(photo);
+          return date !== null && date.slice(0, 7) === requestedMonth;
+        });
+      if (photos.length > timelineCompatibilityBucketMaximum) {
+        throw new GatewayResponseError(503, 'timeline_compatibility_bucket_budget');
+      }
+      respondJson(response, request.method, 200, timeBucketResponse(photos, role));
+      return;
+    }
+    if (url.pathname === '/api/class-archive/timeline') {
+      const query = exactQuery(url, new Set(['cursor', 'limit']));
+      const cursor = query.get('cursor') ?? null;
+      const limitValue = query.get('limit');
+      if (cursor !== null && !timelineCursorPattern.test(cursor)) {
+        throw new TypeError('class_archive_web_compat_timeline_cursor_invalid');
+      }
+      const limit = limitValue === undefined ? timelinePageDefault : Number(limitValue);
+      if (!/^[1-9][0-9]{0,2}$/.test(limitValue ?? String(timelinePageDefault))
+        || !Number.isInteger(limit) || limit > timelinePageMaximum) {
+        throw new TypeError('class_archive_web_compat_timeline_limit_invalid');
+      }
+      const timeline = await gatewayJson(request, timelineGatewayPath(cursor, limit), clientAddress);
+      respondJson(response, request.method, 200, archiveTimelineProjection(
+        timeline,
+        principalState.cacheScope,
+        principalState.presentationEpoch,
+      ));
+      return;
+    }
+    if (url.pathname === '/api/class-archive/memories') {
+      exactQuery(url, new Set());
+      const memories = await gatewayJson(request, '/api/memories', clientAddress);
+      respondJson(response, request.method, 200, archiveMemoryProjection(memories));
+      return;
+    }
+    if (url.pathname === '/api/albums') {
+      exactQuery(url, new Set(['isShared', 'isOwned', 'assetId']));
+      const albums = await gatewayJson(request, '/api/albums', clientAddress);
+      respondJson(response, request.method, 200, compatibleAlbums(albums, role));
+      return;
+    }
+    if (url.pathname === '/api/memories') {
+      exactQuery(url, new Set(['for', 'isSaved', 'isTrashed', 'order', 'size', 'type']));
+      // Metadata bridge capabilities are not projected until the public
+      // Gateway exports canonical photo membership. Never synthesize an
+      // Immich memory or let its count imply a hidden asset.
+      respondJson(response, request.method, 200, []);
+      return;
+    }
+    if (url.pathname === '/api/people') {
+      exactQuery(url, new Set(['closestAssetId', 'closestPersonId', 'page', 'size', 'withHidden']));
+      const people = await gatewayJson(request, '/api/people', clientAddress);
+      respondJson(response, request.method, 200, compatiblePeople(people, role));
+      return;
+    }
+    if (isSearch) {
+      const body = await parseJsonBody(request);
+      const requestKey = url.pathname.endsWith('/smart') ? 'smartSearchDto' : 'metadataSearchDto';
+      // The upstream v3.1.0 SDK POSTs the DTO itself. Earlier isolated
+      // contract probes used the OpenAPI operation-name wrapper. Accept both
+      // bounded shapes so the unmodified Web can run, but reject a hybrid
+      // payload instead of silently letting arbitrary extra fields redefine
+      // the request. Only the normalised, allowlisted search term below is
+      // ever sent to the canonical Gateway.
+      const wrapped = Object.prototype.hasOwnProperty.call(body, requestKey);
+      if (wrapped && Object.keys(body).length !== 1) {
+        throw new TypeError('class_archive_web_compat_search_body_ambiguous');
+      }
+      const source = wrapped ? body[requestKey] : body;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        throw new TypeError('class_archive_web_compat_search_body_invalid');
+      }
+      const personIds = source.personIds;
+      if (url.pathname === '/api/search/metadata' && Array.isArray(personIds)) {
+        if (personIds.length !== 1 || typeof personIds[0] !== 'string' || !UUID_V4.test(personIds[0])) {
+          throw new TypeError('class_archive_web_compat_person_search_invalid');
+        }
+        const person = await gatewayJson(request, `/api/people/${personIds[0].toLowerCase()}`, clientAddress);
+        const items = Array.isArray(person?.items) ? person.items : null;
+        if (!items) {
+          throw new GatewayResponseError(503);
+        }
+        respondJson(response, request.method, 200, compatibleSearch(items, role));
+        return;
+      }
+      const query = searchTermFromBody(source);
+      // The upstream search route performs an initial metadata request before
+      // the member enters a term. Class Archive does not project arbitrary
+      // Immich metadata filters, so an empty/unsupported query is safely
+      // empty rather than forwarded as a whole-library request or surfaced as
+      // an error toast. A real text query below still goes through the
+      // canonical Gateway before any result/count is returned.
+      if (query === '') {
+        respondJson(response, request.method, 200, compatibleSearch([], role));
+        return;
+      }
+      const path = url.pathname.endsWith('/smart') ? '/api/search/smart' : '/api/search';
+      const results = await gatewayJson(request, `${path}?q=${encodeURIComponent(query)}`, clientAddress);
+      const photos = Array.isArray(results?.items) ? results.items : [];
+      respondJson(response, request.method, 200, compatibleSearch(photos, role));
+      return;
+    }
+
+    const archivePersonMatch = /^\/api\/class-archive\/people\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (archivePersonMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(archivePersonMatch[1])}`, clientAddress);
+      respondJson(response, request.method, 200, archivePersonProjection(person));
+      return;
+    }
+
+    const personStatisticsMatch = /^\/api\/people\/([0-9a-f-]{36})\/statistics$/.exec(url.pathname);
+    if (personStatisticsMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personStatisticsMatch[1])}`, clientAddress);
+      if (!Number.isInteger(person?.photo_count) || person.photo_count < 1) {
+        throw new GatewayResponseError(503);
+      }
+      respondJson(response, request.method, 200, { assets: person.photo_count });
+      return;
+    }
+    const personThumbnailMatch = /^\/api\/people\/([0-9a-f-]{36})\/thumbnail$/.exec(url.pathname);
+    if (personThumbnailMatch) {
+      // The verified upstream v3.1.0 Web bundle appends `updatedAt` purely as
+      // an image-cache buster. It is deliberately ignored here: neither a
+      // cache hint nor any query value can select a person, a cover asset, or
+      // an authorization decision. Unknown/duplicate query keys still fail
+      // closed via exactQuery(), and the actual thumbnail request remains a
+      // fresh canonical Gateway -> MediaGuard authorization check.
+      exactQuery(url, new Set(['updatedAt']));
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personThumbnailMatch[1])}`, clientAddress);
+      if (typeof person?.cover_photo_id !== 'string' || !UUID_V4.test(person.cover_photo_id)) {
+        throw new GatewayResponseError(503);
+      }
+      await proxyCanonicalMedia(request, response, person.cover_photo_id.toLowerCase(), 'thumbnail', clientAddress);
+      return;
+    }
+    const personMatch = /^\/api\/people\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (personMatch) {
+      exactQuery(url, new Set());
+      const person = await gatewayJson(request, `/api/people/${assertUuid(personMatch[1])}`, clientAddress);
+      respondJson(response, request.method, 200, compatiblePerson(person, role));
+      return;
+    }
+
+    const assetMatch = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (assetMatch) {
+      exactQuery(url, new Set());
+      const id = assertUuid(assetMatch[1]);
+      const photo = await gatewayJson(request, `/api/photos/${id}`, clientAddress);
+      if (photo?.presentation_epoch !== principalState.presentationEpoch) {
+        throw new GatewayResponseError(503, 'photo_presentation_scope_mismatch');
+      }
+      respondJson(response, request.method, 200, compatibleAsset(photo, role, principalState.cacheScope));
+      return;
+    }
+    const thumbnailMatch = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(url.pathname);
+    if (thumbnailMatch) {
+      const query = exactQuery(url, new Set(['size', 'c', 'edited', 'v']));
+      const size = query.get('size');
+      if (!['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview'].includes(size)) {
+        throw new TypeError('class_archive_web_compat_thumbnail_size_invalid');
+      }
+      const mediaRevision = query.get('v');
+      if (mediaRevision !== undefined && !/^[a-f0-9]{32}$/.test(mediaRevision)) {
+        throw new TypeError('class_archive_web_compat_media_revision_invalid');
+      }
+      await proxyCanonicalMedia(request, response, assertUuid(thumbnailMatch[1]), size, clientAddress, mediaRevision ?? null);
+      return;
+    }
+    const originalMatch = /^\/api\/assets\/([0-9a-f-]{36})\/original$/.exec(url.pathname);
+    if (originalMatch) {
+      // The upstream Web SDK carries its cache/editor hint on both preview
+      // and original URLs. It is not a delivery credential, so accept only
+      // the bounded form expected from the verified v3.1.0 bundle. The
+      // canonical gateway and MediaGuard still authorize every request.
+      const query = exactQuery(url, new Set(['c', 'edited', 'v']));
+      if (query.has('edited') && query.get('edited') !== 'true' && query.get('edited') !== 'false') {
+        throw new TypeError('class_archive_web_compat_original_edited_invalid');
+      }
+      if (query.has('c') && !/^[A-Za-z0-9_-]{1,128}$/.test(query.get('c'))) {
+        throw new TypeError('class_archive_web_compat_original_cache_key_invalid');
+      }
+      const mediaRevision = query.get('v');
+      if (mediaRevision !== undefined && !/^[a-f0-9]{32}$/.test(mediaRevision)) {
+        throw new TypeError('class_archive_web_compat_media_revision_invalid');
+      }
+      await proxyCanonicalMedia(request, response, assertUuid(originalMatch[1]), 'original', clientAddress, mediaRevision ?? null);
+      return;
+    }
+  } catch (error) {
+    if (error instanceof GatewayResponseError) {
+      emitGatewayDiagnostic('api', error);
+      const status = mappedPublicGatewayStatus(error.status);
+      const errors = {
+        400: '请求格式无效',
+        403: '请求被拒绝',
+        404: '资源不存在',
+        409: '请求冲突',
+        503: '数据暂时无法安全确认',
+      };
+      respondJson(response, request.method, status, { error: errors[status] });
+      return;
+    }
+    if (error instanceof TypeError || error instanceof SyntaxError) {
+      emitGatewayDiagnostic('api', error);
+      respondJson(response, request.method, 400, { error: '请求格式无效' });
+      return;
+    }
+    emitGatewayDiagnostic('api', error);
+    respondJson(response, request.method, 503, { error: '数据暂时无法安全确认' });
+    return;
+  }
+  respondJson(response, request.method, 404, { error: '资源不存在' });
+}
+
+async function serveApplication(request, response, url) {
+  if (url.pathname === '/healthz') {
+    respond(response, request.method, 200, 'text/plain; charset=utf-8', 'ok');
+    return;
+  }
+  if (rejectHost(request, response) || rejectForeignRequest(request, response, url) || rejectUnsafePath(request, response)) {
+    return;
+  }
+  const clientAddress = trustedClientAddress(request, response);
+  if (clientAddress === null) {
+    return;
+  }
+  // The compatible upstream SDK uses POST for two bounded, read-only search
+  // payloads. Route API requests before the static read-only guard so that
+  // the API-level allowlist remains the sole authority for that exception.
+  if (url.pathname.startsWith('/api/')) {
+    await handleApi(request, response, url, clientAddress);
+    return;
+  }
+  if (onlyReadMethod(request, response)) {
+    return;
+  }
+  if (url.pathname === '/service-worker.js') {
+    respond(response, request.method, 404, 'text/plain; charset=utf-8', 'Not found.');
+    return;
+  }
+  if (url.pathname === '/custom.css') {
+    respond(response, request.method, 200, 'text/css; charset=utf-8', webCompatCss);
+    return;
+  }
+  const photoUiStaticFile = photoUiStaticPaths.get(url.pathname);
+  if (photoUiStaticFile) {
+    const revision = await photoUiAssetRevision();
+    if (revision === null
+      || url.searchParams.size !== 1
+      || url.searchParams.get('v') !== revision
+    ) {
+      respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
+      return;
+    }
+    const asset = await readPhotoUiFile(photoUiStaticFile);
+    if (!asset) {
+      respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+      return;
+    }
+    respondImmutablePhotoUiAsset(request, response, asset, revision);
+    return;
+  }
+  const coreRedirectTarget = coreRedirectTargets.get(url.pathname);
+  if (coreRedirectTarget) {
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
+      return;
+    }
+    redirectToPiwigoCore(request, response, coreRedirectTarget);
+    return;
+  }
+  if (url.pathname === '/class-archive-about') {
+    respond(response, request.method, 200, 'text/html; charset=utf-8', legalNoticeHtml, { html: true });
+    return;
+  }
+  if (url.pathname === '/auth/login' || url.pathname === '/auth/register' || url.pathname === '/auth/change-password') {
+    redirectToPiwigoLogin(request, response);
+    return;
+  }
+  if (url.pathname === '/') {
+    if (url.searchParams.size !== 0) {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    response.setHeader('Location', '/home');
+    respond(response, request.method, 302, 'text/plain; charset=utf-8', '');
+    return;
+  }
+  if (isPhotoUiRoute(url.pathname)) {
+    // The document is not an authorization result. Require the current
+    // ClassIdentity principal before returning it, then let every metadata and
+    // media request independently re-enter the Gateway and MediaGuard.
+    let documentRole;
+    try {
+      documentRole = await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    if (url.pathname === '/people/manage' && documentRole !== 'SYSTEM_ADMIN') {
+      respond(response, request.method, 403, 'text/plain; charset=utf-8', '禁止访问', { html: true });
+      return;
+    }
+    if (!photoUiDocumentQueryAllowed(url)) {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    const photoDetail = /^\/photos\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    const personDetail = /^\/people\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    const albumDetail = /^\/albums\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    try {
+      if (photoDetail) {
+        const photoId = assertUuid(photoDetail[1]);
+        const photo = await gatewayJson(request, `/api/photos/${photoId}`, clientAddress);
+        if (assertUuid(photo?.id) !== photoId) throw new GatewayResponseError(503);
+      }
+      if (personDetail) {
+        const personId = assertUuid(personDetail[1]);
+        archivePersonProjection(await gatewayJson(request, `/api/people/${personId}`, clientAddress));
+      }
+      if (albumDetail) {
+        const albumId = assertUuid(albumDetail[1]);
+        const album = await gatewayJson(request, `/api/albums/${albumId}`, clientAddress);
+        if (assertUuid(album?.id) !== albumId) throw new GatewayResponseError(503);
+      }
+    } catch (error) {
+      const status = error instanceof GatewayResponseError && error.status === 404 ? 404 : 503;
+      respond(response, request.method, status, 'text/plain; charset=utf-8', status === 404 ? '资源不存在' : '数据暂时无法安全确认', { html: true });
+      return;
+    }
+    const document = await readPhotoUiFile('index.html');
+    const revision = await photoUiAssetRevision();
+    const documentBody = revision === null ? null : versionPhotoUiBody(document, revision);
+    if (!document || documentBody === null) {
+      respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Photo interface unavailable.');
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', documentBody, { html: true, photoUi: true });
+    return;
+  }
+  if (url.pathname === '/class-archive-timeline') {
+    // Unlike the static legal notice, this page contains a live, role-filtered
+    // archive projection. It must not become a shell shortcut around the
+    // Piwigo session check.
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', archiveTimelineHtml, { html: true });
+    return;
+  }
+  const archivePersonMatch = /^\/class-archive-person\/([0-9a-f-]{36})$/i.exec(url.pathname);
+  if (archivePersonMatch) {
+    const personId = assertUuid(archivePersonMatch[1]);
+    try {
+      await principal(request, clientAddress);
+      // Return the same status for an unknown/inaccessible person. The custom
+      // page itself performs the full, role-filtered data fetch after load.
+      const person = await gatewayJson(request, `/api/people/${personId}`, clientAddress);
+      archivePersonProjection(person);
+    } catch {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', archivePersonHtml(personId), { html: true });
+    return;
+  }
+  const upstreamPersonMatch = /^\/people\/([0-9a-f-]{36})$/i.exec(url.pathname);
+  if (upstreamPersonMatch) {
+    // The pinned, unmodified Web still generates its normal /people/{id}
+    // link. Preserve that ordinary browser path, but resolve it server-side
+    // into the archive-aware projection. This is not a client-side hiding
+    // rule: the active Piwigo principal and canonical Gateway must both
+    // authorize the public ClassArchivePerson UUID before we redirect.
+    if (url.searchParams.size > 1 || (url.searchParams.size === 1 && url.searchParams.get('previousRoute') !== '/people')) {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    const personId = assertUuid(upstreamPersonMatch[1]);
+    try {
+      await principal(request, clientAddress);
+      const person = await gatewayJson(request, `/api/people/${personId}`, clientAddress);
+      archivePersonProjection(person);
+    } catch {
+      respond(response, request.method, 404, 'text/plain; charset=utf-8', '资源不存在', { html: true });
+      return;
+    }
+    response.setHeader('Location', '/class-archive-person/' + encodeURIComponent(personId));
+    respond(response, request.method, 302, 'text/plain; charset=utf-8', '');
+    return;
+  }
+  const archivePhotoMatch = /^\/class-archive-photo\/([0-9a-f-]{36})$/i.exec(url.pathname);
+  if (archivePhotoMatch) {
+    const photoId = assertUuid(archivePhotoMatch[1]);
+    try {
+      await principal(request, clientAddress);
+    } catch {
+      redirectToPiwigoLogin(request, response);
+      return;
+    }
+    try {
+      // Do not return a distinct viewer shell for a known-but-hidden UUID.
+      // This policy check is metadata-only; the actual preview still makes its
+      // own canonical MediaGuard request in the browser.
+      const photo = await gatewayJson(request, `/api/photos/${photoId}`, clientAddress);
+      assertUuid(photo?.id);
+    } catch (error) {
+      const status = error instanceof GatewayResponseError && error.status === 404 ? 404 : 503;
+      respond(response, request.method, status, 'text/plain; charset=utf-8', status === 404 ? '资源不存在' : '数据暂时无法安全确认', { html: true });
+      return;
+    }
+    respond(response, request.method, 200, 'text/html; charset=utf-8', archivePhotoHtml(photoId), { html: true });
+    return;
+  }
+
+  const direct = await readStatic(url.pathname);
+  // The application document is authorization-sensitive. Static JS/CSS/font
+  // assets can be served without a session, but an explicit /index.html must
+  // not be a shortcut around the Piwigo login redirect.
+  if (direct && !direct.type.startsWith('text/html')) {
+    setSecurityHeaders(response, { html: direct.type.startsWith('text/html') });
+    response.statusCode = 200;
+    response.setHeader('Content-Type', direct.type);
+    if (noBody(request.method)) {
+      response.end();
+      return;
+    }
+    response.end(direct.body);
+    return;
+  }
+
+  try {
+    await principal(request, clientAddress);
+  } catch {
+    redirectToPiwigoLogin(request, response);
+    return;
+  }
+  const index = await readStatic('/index.html');
+  if (!index) {
+    respond(response, request.method, 503, 'text/plain; charset=utf-8', 'Compatibility web build unavailable.');
+    return;
+  }
+  setCompatibilityCookie(response);
+  setSecurityHeaders(response, { html: true });
+  response.statusCode = 200;
+  response.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (noBody(request.method)) {
+    response.end();
+    return;
+  }
+  // Branding is injected into the response only; the verified upstream tree
+  // remains unmodified and rebuildable from its pinned source archive.
+  const html = index.body.toString('utf8').replace(
+    '</head>',
+    '<title>班级相册</title><meta name="application-name" content="班级相册"><link rel="stylesheet" href="/custom.css">' + webCompatBootstrap + '</head>',
+  );
+  response.end(html);
+}
+
+const server = createServer((request, response) => {
+  // Suppress only socket-level errors for a client that has already gone away.
+  // Application failures still become the explicit fail-closed 4xx/503 paths
+  // in serveApplication/handleApi.
+  response.on('error', () => {});
+  const method = request.method ?? 'GET';
+  let url;
+  try {
+    url = new URL(request.url ?? '/', publicOrigin);
+  } catch {
+    respond(response, method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
+    return;
+  }
+  gatewayRequestResponses.set(request, response);
+  response.once('close', () => gatewayRequestResponses.delete(request));
+  void serveApplication(request, response, url).catch(() => {
+    if (!responseIsWritable(response)) {
+      return;
+    }
+    if (!response.headersSent) {
+      respond(response, method, 503, 'text/plain; charset=utf-8', 'Service temporarily unavailable.');
+    } else {
+      try { response.destroy(); } catch { }
+    }
+  });
+});
+
+server.listen(port, '0.0.0.0', () => {
+  process.stdout.write(`class-archive-immich-web-compat listening on ${port}\n`);
+});

@@ -1,0 +1,91 @@
+services:
+  immich-server:
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-machine-learning:
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-gateway:
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-gateway-secret-stager:
+    labels:
+      com.classarchive.scope: private-real-qa
+
+  immich-web-compat:
+    labels:
+      com.classarchive.scope: private-real-qa
+    environment:
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: "8190"
+    volumes:
+      - ./photo-ui:/photo-ui:ro
+    networks:
+      class_archive_gateway:
+        ipv4_address: 172.27.0.10
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  redis:
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  database:
+    labels:
+      com.classarchive.scope: private-real-qa
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  immich_internal:
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_ml_internal:
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_bridge_internal:
+    labels:
+      com.classarchive.scope: private-real-qa
+
+volumes:
+  immich_upload:
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_model_cache:
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_db:
+    labels:
+      com.classarchive.scope: private-real-qa
+  immich_gateway_secret:
+    labels:
+      com.classarchive.scope: private-real-qa

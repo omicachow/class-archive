@@ -18,9 +18,9 @@ remain separate.
 | 8 | Family cannot like | 2 | **Pass for current Core/direct endpoints:** Core rating and equivalent mutation paths are denied; the final Like feature is not implemented |
 | 9 | Family cannot create a public album | 2 | **Pass for current Core/direct endpoints:** album creation is denied; Community remains inactive |
 | 10 | Family cannot access LIVING content, including known media URLs | 2 | **Pass for read paths (Phase 0 MediaGuard):** album/API and known LIVING thumbnail/preview/original requests are denied; Family HERITAGE preview remains allowed |
-| 11 | Family can upload a HERITAGE submission | 2 | Pending |
-| 12 | Family upload defaults to Pending | 2 | Pending |
-| 13 | Submission enters archive only after Admin approval | 2 | Pending |
+| 11 | Family can upload a HERITAGE submission | 2 | **Pass (Phase 1 real HTTP):** Family-only custom submission boundary accepts validated synthetic images and rejects LIVING/unauthorized roles |
+| 12 | Family upload defaults to Pending | 2 | **Pass (Phase 1 real HTTP):** submission row, private original and safe thumbnail are created as `PENDING`; Family receives status metadata only |
+| 13 | Submission enters archive only after Admin approval | 2 | **Pass (Phase 1 focused gate):** 75 Pending-media probes cover Family denial, Admin visibility, reject restoration and approve-to-HERITAGE handoff; Community remains inactive |
 | 14 | Classmate upload publishes directly | 2 | Pending |
 | 15 | Teacher upload publishes directly | 2 | Pending |
 | 16 | Classmate can create Community Album | 2 | Pending |
@@ -49,7 +49,7 @@ remain separate.
 | 39 | Production Admin accounts have a tested 2FA path and recovery procedure | 5 | Pending; no SMTP/real production credentials in V1 local spike |
 | 40 | Session revoke/freeze invalidates active UI, API, auth-key and remember-me paths on the next request | 1 | **Partial:** active UI/media session and new-login denial pass; Remember Me is disabled and Core sessions/auth keys are revoked, but a real Header API-key lifecycle and active Family release remain pending |
 | 41 | Database, app/proxy logs, audit and responses contain no plaintext password, Claim/Invite/reset validator, cookie or authorization secret | 1 | **Pass for implemented surfaces / partial future scope:** long-lived administrator key count is zero, the env ACL is restricted, and Claim/Invite/Admin paths pass exact secret scans and Audit canaries; future member reset and business mutations remain uncovered |
-| 42 | Upload rejects spoofed MIME, non-image/polyglot payloads and over-limit files before publication | 2 | Pending |
+| 42 | Upload rejects spoofed MIME, non-image/polyglot payloads and over-limit files before publication | 2 | **Pass for ClassIdentity Family submissions:** finfo/getimagesize, extension allowlist, size/pixel limits, random storage refs and 0660 permissions are enforced; future Community upload remains blocked |
 | 43 | Every custom mutation passes CSRF, authorization, XSS output-encoding and parameterized-SQL negative tests | 1-4 | **Partial:** current Admin/public mutations have CSRF, same-origin, authorization, typed input and prepared-statement coverage; complete stored/reflected XSS negatives for every present and future field remain pending |
 | 44 | Any enabled impersonation records actor, target, reason, start/end and session revocation in Audit Log | 1 | Pending; impersonation is not enabled in the Piwigo baseline |
 | 45 | Backup failure cannot publish a complete-looking bundle; a full restore into empty volumes passes hashes and role/media gates | 5 | Partial: fail-closed bundle creation/checksums pass; empty-volume restore pending |

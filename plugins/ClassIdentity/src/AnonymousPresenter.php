@@ -446,6 +446,32 @@ final class AnonymousPresenter
         return '匿名 ' . self::uniquePrefix($code, $otherCodes);
     }
 
+    /**
+     * Public product-domain bridge for a photo-scoped anonymous pseudonym.
+     * Callers provide only the opaque subject/key version already bound to an
+     * anonymous account; the server-only secret remains inside this presenter.
+     *
+     * @param list<array{subject:string,key_version:int}> $collisionCandidates
+     */
+    public static function displayAliasForPhotoContext(
+        int $piwigoImageId,
+        string $pseudonymSubject,
+        int $keyVersion,
+        array $collisionCandidates = [],
+    ): string {
+        if ($piwigoImageId <= 0 || strlen($pseudonymSubject) !== 16 || $keyVersion <= 0) {
+            throw new RuntimeException('class_identity_pseudonym_subject_invalid');
+        }
+        return self::deriveAlias(
+            self::secretForVersion($keyVersion),
+            self::CONTEXT_PHOTO,
+            $piwigoImageId,
+            $pseudonymSubject,
+            $keyVersion,
+            $collisionCandidates,
+        );
+    }
+
     public static function resetForTests(): void
     {
         self::$repository = null;

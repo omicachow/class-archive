@@ -24,7 +24,7 @@ test against the exact Core and role matrix.
 | Component | Version | License | Runtime state | Boundary |
 |---|---:|---|---|---|
 | ClassArchivePolicy | 0.1.0 | GPL-2.0-or-later | Active; final Phase 0/Phase 1 regressions pass | HERITAGE/LIVING MediaGuard, Community Pending-state fail-closed handling and nginx internal delivery; no Core patch |
-| ClassIdentity | 0.1.0 | GPL-2.0-or-later | Active; final Phase 1 regression passes | Explicit Principal/Identity/Seat/account lifecycle, Claims/Invites, SYSTEM_ADMIN, minimum Admin Console, CapabilityGuard and AnonymousPresenter |
+| ClassIdentity | 0.1.0 | GPL-2.0-or-later | Active; final Phase 1 regression passes | Explicit Principal/Identity/Seat/account lifecycle, Claims/Invites, SYSTEM_ADMIN, minimum Admin Console, CapabilityGuard and AnonymousPresenter; its 18 plugin-owned MariaDB native-mutation triggers are locked to Piwigo 16.4.0 and removed/reinstalled through the tested plugin lifecycle, without changing Core source files |
 | Class plugin publication/FPM wrapper | repository version | GPL-2.0-or-later | Active | Workflow mutex, maintenance fail-closed protocol, atomic publish, runtime verification and PHP-FPM umask `0007` |
 
 These components are installed from the tracked workspace, not downloaded from

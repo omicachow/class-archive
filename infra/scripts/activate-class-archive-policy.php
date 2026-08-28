@@ -43,12 +43,17 @@ try {
 
     chdir(CLASS_ARCHIVE_PIWIGO_ROOT) || fail('Cannot enter the Piwigo root.');
     define('PHPWG_ROOT_PATH', './');
-    $_SERVER['SCRIPT_NAME'] = '/ws.php';
+    // Piwigo permits its login context through the gallery-lock/no-photo
+    // presentation exits. The helper remains an in-container CLI operation.
+    $_SERVER['SCRIPT_NAME'] = '/identification.php';
     $_SERVER['SERVER_NAME'] = 'localhost';
     $_SERVER['HTTP_HOST'] = 'localhost';
     $_SERVER['SERVER_PORT'] = '80';
     $_SERVER['REQUEST_URI'] = '/';
     $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+
+    require_once '/workspace/infra/scripts/class-archive-trusted-bootstrap-context.php';
+    classArchiveEnableTrustedCliBootstrapContext();
 
     // Piwigo intentionally creates global bootstrap state. Keep this include at
     // file scope; wrapping it in a helper strands $conf/$user/database locals.

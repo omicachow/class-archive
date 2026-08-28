@@ -15,6 +15,7 @@ $paths = [
     'installer' => $root . '/infra/scripts/install-class-archive-plugins.php',
     'bootstrap' => $root . '/infra/scripts/bootstrap-class-identity.php',
     'prepare' => $root . '/infra/scripts/prepare-class-archive-maintenance.php',
+    'backup_audit' => $root . '/infra/scripts/audit-backup.sh',
     'dev' => $root . '/infra/scripts/dev.ps1',
     'access' => $root . '/plugins/ClassIdentity/src/Access.php',
     'media_guard' => $root . '/plugins/ClassArchivePolicy/src/MediaGuard.php',
@@ -49,6 +50,7 @@ $lastPosition = static function (string $haystack, string $needle): int {
 $installer = $sources['installer'];
 $bootstrap = $sources['bootstrap'];
 $prepare = $sources['prepare'];
+$backupAudit = $sources['backup_audit'];
 $dev = $sources['dev'];
 $access = $sources['access'];
 $mediaGuard = $sources['media_guard'];
@@ -65,6 +67,9 @@ $assert(str_contains($installer, "elseif (\$mode === 'verify-runtime')"), 'post-
 $assert(str_contains($installer, "elseif (\$mode === 'finalize')"), 'independent finalization mode is required');
 $assert(substr_count($installer, 'verifyInstalledRuntime($results, $withSyntheticFixtures, true);') === 2, 'verify and finalize must independently repeat runtime assertions');
 $assert(str_contains($installer, 'assertTrustedMaintenanceGate();'), 'installer must validate exact marker state');
+$assert(str_contains($installer, 'hasTrustedMaintenanceMarkerOwnership'), 'installer must recognize only the two pinned marker ownership forms');
+$assert(str_contains($installer, 'in_array($mode, [0660, 0670], true)'), 'installer may accept only observed normalized marker modes');
+$assert(str_contains($installer, "\$uid === (int) (\$directory['uid'] ?? -2)"), 'installer normalized marker owner must match the persistent directory');
 $sameDigestReturn = $position($installer, 'return "VERIFIED {$pluginId} {$definition[\'version\']}";');
 $presenterReset = $position($installer, 'resetAnonymousPresenterReadiness();');
 $atomicReplace = $position($installer, 'rename($destination, $backup)');
@@ -73,19 +78,22 @@ $assert($presenterReset >= 0 && $presenterReset < $atomicReplace, 'changed Class
 $assert(substr_count($installer, 'resetAnonymousPresenterReadiness();') === 1, 'presenter reset must occur only on the replacement path');
 $assert(str_contains($installer, 'class_identity_anon_presenter_ready'), 'installer must reset the exact persisted presenter gate');
 $assert(str_contains($prepare, "posix_geteuid() !== 0"), 'ownership bridge must require container root');
-$assert(str_contains($prepare, '($mode & 0777) === 0660'), 'ownership bridge must require the exact normalized historical mode');
+$assert(str_contains($prepare, 'in_array(($mode & 0777), [0660, 0670], true)'), 'ownership bridge must accept only the two exact observed normalized modes');
 $assert(str_contains($prepare, "\$uid === (int) (\$directory['uid'] ?? -2)"), 'normalized marker owner must match the persistent directory');
 $assert(str_contains($prepare, 'rename($temporary, CLASS_ARCHIVE_PREPARE_MARKER)'), 'ownership bridge must atomically publish its staged inode');
 $assert(str_contains($prepare, 'chown($temporary, $nginxUid)'), 'ownership bridge may chown only its newly staged inode');
 $assert(!str_contains($prepare, 'chmod(CLASS_ARCHIVE_PREPARE_MARKER'), 'ownership bridge must never chmod the existing marker inode');
+$assert(str_contains($backupAudit, 'chmod 0660 "$temporary"'), 'backup freshness evidence must remain private inside _data');
+$assert(!str_contains($backupAudit, 'chmod 0644 "$temporary"'), 'backup freshness evidence must never become world-readable');
 
 $bootstrapFalse = $position($bootstrap, "conf_update_param('class_identity_enforcement', false, true);");
 $bootstrapMarker = $position($bootstrap, 'assertTrustedMaintenanceGate();');
 $assert($bootstrapMarker >= 0 && $bootstrapMarker < $bootstrapFalse, 'bootstrap must validate marker before enforcement=false');
 $assert(substr_count($bootstrap, 'assertTrustedMaintenanceGate();') >= 3, 'bootstrap must revalidate marker at preparation, mutation and post-mutation boundaries');
 $assert(str_contains($bootstrap, '(($metadata[\'mode\'] ?? 0) & 0170000) !== 0100000'), 'bootstrap must require a regular marker file');
-$assert(str_contains($bootstrap, '(($metadata[\'mode\'] ?? 0) & 0777) !== 0600'), 'bootstrap must require marker mode 0600');
-$assert(str_contains($bootstrap, "(int) (\$metadata['uid'] ?? -1) !== \$uid"), 'bootstrap must require nginx ownership');
+$assert(str_contains($bootstrap, 'hasTrustedMaintenanceMarkerOwnership'), 'bootstrap must validate the trusted marker ownership forms');
+$assert(str_contains($bootstrap, 'in_array($mode, [0660, 0670], true)'), 'bootstrap may accept only observed normalized marker modes');
+$assert(str_contains($bootstrap, "\$uid === (int) (\$directory['uid'] ?? -2)"), 'bootstrap normalized marker owner must match the persistent directory');
 $assert(str_contains($bootstrap, 'realpath($path) !== $path'), 'bootstrap must require the exact in-root path');
 $contextDefinition = $position($bootstrap, "define('CLASS_IDENTITY_TRUSTED_BOOTSTRAP_CONTEXT', 'class-archive-cli-bootstrap-v1');");
 $commonBootstrap = $position($bootstrap, "require PHPWG_ROOT_PATH . 'include/common.inc.php';");
@@ -99,11 +107,11 @@ $assert(!str_contains($mediaGuard, 'USER_GROUP_TABLE'), 'MediaGuard must not fal
 $assert(!str_contains($mediaGuard, 'GROUPS_TABLE'), 'MediaGuard must not resolve business roles from Core groups');
 
 $assert(!str_contains($dev, "'php', '/workspace/infra/scripts/bootstrap-class-identity.php'"), 'dev must not expose direct online bootstrap');
-$restart = $position($dev, "@('restart', 'piwigo')");
+$recreate = $position($dev, "@('up', '-d', '--force-recreate', '--no-deps', 'piwigo')");
 $ready = $lastPosition($dev, 'Wait-ClassArchiveMaintenanceReady');
 $verify = $position($dev, "'--verify-runtime'");
 $finalize = $position($dev, "'--finalize-maintenance'");
-$assert($restart >= 0 && $restart < $verify, 'restart must precede runtime verification');
+$assert($recreate >= 0 && $recreate < $verify, 'fail-closed Piwigo recreation must precede runtime verification');
 $assert($ready >= 0 && $ready < $verify, 'maintenance readiness must precede runtime verification');
 $assert($verify >= 0 && $verify < $finalize, 'runtime verification must precede independent finalization');
 $assert(str_contains($dev, "if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"), 'orchestrator failures must stop before finalization');

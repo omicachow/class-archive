@@ -5,16 +5,23 @@ declare(strict_types=1);
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
 use ClassIdentity\Access;
+use ClassIdentity\MemberEraUploadService;
 use ClassIdentity\ProvisioningService;
 use ClassIdentity\RateLimiter;
 use ClassIdentity\Repository;
 
 require_once CLASS_IDENTITY_PATH . 'src/Repository.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhoto.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePhotoMappingService.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePerson.php';
+require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePersonMappingService.php';
 require_once CLASS_IDENTITY_PATH . 'src/RateLimiter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
 require_once CLASS_IDENTITY_PATH . 'src/ProvisioningService.php';
+require_once CLASS_IDENTITY_PATH . 'src/SubmissionService.php';
+require_once CLASS_IDENTITY_PATH . 'src/MemberEraUploadService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Http.php';
 
 /**
@@ -29,6 +36,9 @@ final class ClassIdentityPublicController
     private const ROUTE_CLAIM = 'claim';
     private const ROUTE_FAMILY_INVITE = 'family-invite';
     private const ROUTE_MY_IDENTITY = 'my';
+    // This is not a browser page. It is reachable only through the fixed
+    // compatibility BFF -> private nginx bridge and always exits as JSON.
+    private const ROUTE_MEMBER_UPLOAD = 'member-upload';
 
     /** @var array<string, mixed> */
     private static array $view = [];
@@ -56,6 +66,7 @@ final class ClassIdentityPublicController
             self::ROUTE_CLAIM => '认领班级身份',
             self::ROUTE_FAMILY_INVITE => '接受家庭席位邀请',
             self::ROUTE_MY_IDENTITY => '我的身份',
+            self::ROUTE_MEMBER_UPLOAD => '成员照片发布',
         ];
 
         $page['class_identity_public_route'] = $route;
@@ -98,6 +109,10 @@ final class ClassIdentityPublicController
         ClassIdentityHttp::noStore();
         self::rejectSecretsInUrl();
 
+        if ($route === self::ROUTE_MEMBER_UPLOAD) {
+            self::handleMemberEraUploadBridge();
+        }
+
         if (!in_array($route, [self::ROUTE_CLAIM, self::ROUTE_FAMILY_INVITE, self::ROUTE_MY_IDENTITY], true)) {
             ClassIdentityHttp::abort(404, '页面不存在');
         }
@@ -123,9 +138,12 @@ final class ClassIdentityPublicController
         ];
 
         if ($method === 'POST') {
-            // Piwigo CSRF is mandatory; Origin is additionally mandatory for
-            // these credential-bearing forms. Neither Referer nor JS is used
-            // as an authorization signal.
+            // A per-session Piwigo CSRF token is mandatory for every public
+            // credential-bearing form. A concrete browser Origin is checked
+            // as a second signal; Chromium is permitted to send the opaque
+            // literal `null` for a same-document HTML form navigation, in
+            // which case the CSRF token remains the authorization proof.
+            // Neither Referer nor JS is used as an authorization signal.
             ClassIdentityHttp::requireMutation();
             self::requireExactOrigin();
 
@@ -140,6 +158,8 @@ final class ClassIdentityPublicController
                 self::handleFamilyInvitationIssue();
             } elseif ($route === self::ROUTE_MY_IDENTITY && $action === 'activate_anonymous') {
                 self::handleAnonymousActivation();
+            } elseif ($route === self::ROUTE_MY_IDENTITY && $action === 'submit_family_photo') {
+                self::handleFamilySubmission();
             } else {
                 self::clearSensitivePostedFields([
                     'claim_code',
@@ -322,6 +342,141 @@ final class ClassIdentityPublicController
         }
     }
 
+    private static function handleFamilySubmission(): void
+    {
+        try {
+            // Family submissions always enter the HERITAGE-only moderation
+            // queue.  Require the hidden form marker instead of silently
+            // ignoring an attacker-supplied era: a forged LIVING/unknown
+            // value must fail before the upload service ever sees the file.
+            $era = self::postOptional('era', 16);
+            if ($era !== 'HERITAGE') {
+                throw new InvalidArgumentException('family_submission_era_invalid');
+            }
+            $date = self::postOptional('suggested_date', 32);
+            $precision = self::postOptional('date_precision', 16) ?? 'UNKNOWN';
+            $album = self::postOptional('suggested_album', 190);
+            $description = self::postOptional('description', 2000);
+            $file = $_FILES['submission_file'] ?? null;
+            unset($_POST['era'], $_POST['suggested_date'], $_POST['date_precision'], $_POST['suggested_album'], $_POST['description'], $_FILES['submission_file']);
+            if (!is_array($file)) {
+                throw new InvalidArgumentException('family_submission_upload_invalid');
+            }
+            $id = ClassIdentitySubmissionService::fromPiwigo()->submit(
+                self::currentUserId(),
+                $era,
+                $file,
+                $date,
+                $precision,
+                $album,
+                $description,
+            );
+            self::$view['CA_SUCCESS'] = '照片已提交，正在等待管理员审核（编号 #' . $id . '）。';
+        } catch (InvalidArgumentException $error) {
+            unset($error);
+            self::$view['CA_ERROR'] = '投稿资料或照片格式不符合要求，照片尚未提交。';
+        } catch (Throwable $error) {
+            self::logFailure('family_submission', $error);
+            http_response_code(503);
+            self::$view['CA_ERROR'] = '投稿暂时无法完成。系统已按默认拒绝处理，请稍后重试。';
+        } finally {
+            self::clearPostedFields(['era', 'suggested_date', 'date_precision', 'suggested_album', 'description']);
+            unset($_FILES['submission_file']);
+        }
+    }
+
+    /**
+     * Fixed private BFF upload bridge.  This route is intentionally not added
+     * to the normal public-page allowlist: Piwigo's session CSRF verification
+     * and the service's role/album/era checks remain authoritative, while
+     * nginx overwrites the marker on the non-host-published 8088 listener.
+     *
+     * The BFF removes the browser Origin on its server-to-server hop after it
+     * has already enforced the exact outer same-origin request. Do not call
+     * requireExactOrigin() here: the per-session Piwigo token plus the exact
+     * header match below are the downstream proof, not a caller-controlled
+     * forwarded Origin/Host header.
+     */
+    private static function handleMemberEraUploadBridge(): never
+    {
+        $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+        if ($method !== 'POST') {
+            header('Allow: POST');
+            self::respondMemberUploadJson(405, ['error' => '仅支持 POST']);
+        }
+        if (($_SERVER['CLASS_ARCHIVE_WEB_COMPAT_INTERNAL'] ?? '') !== '1') {
+            self::respondMemberUploadJson(404, ['error' => '页面不存在']);
+        }
+
+        try {
+            // This validates the Piwigo session-bound multipart token. It is
+            // deliberately repeated against the BFF header so a body token
+            // cannot be substituted after the BFF has authenticated the UI
+            // request with product-state.csrfToken.
+            ClassIdentityHttp::requireMutation();
+            $bodyToken = $_POST['pwg_token'] ?? null;
+            $headerToken = $_SERVER['HTTP_X_CLASS_ARCHIVE_CSRF'] ?? null;
+            if (!is_string($bodyToken) || !is_string($headerToken) || $headerToken === ''
+                || !hash_equals($bodyToken, $headerToken)
+            ) {
+                self::respondMemberUploadJson(403, ['error' => '请求被拒绝']);
+            }
+
+            $action = self::postPlain('action', 64);
+            $era = self::postPlain('era', 16);
+            $albumId = self::postPlain('album_id', 64);
+            $file = $_FILES['member_photo'] ?? null;
+            unset($_POST['action'], $_POST['era'], $_POST['album_id'], $_POST['pwg_token'], $_FILES['member_photo']);
+            if ($action !== 'publish_member_photo' || !is_array($file)) {
+                self::respondMemberUploadJson(400, ['error' => '上传资料无效']);
+            }
+
+            $published = MemberEraUploadService::fromPiwigo()->publish(
+                self::currentUserId(),
+                $file,
+                $era,
+                $albumId,
+            );
+            self::respondMemberUploadJson(201, [
+                'state' => 'PUBLISHED',
+                'photoId' => $published['class_photo_id'],
+                'era' => $published['era'],
+                'albumId' => $published['album_id'],
+                'indexPending' => !($published['index_queued'] ?? false),
+                'derivativeWarmupPending' => !($published['derivative_warmup_queued'] ?? false),
+            ]);
+        } catch (\InvalidArgumentException) {
+            self::respondMemberUploadJson(400, ['error' => '上传资料无效']);
+        } catch (\Throwable $error) {
+            self::logFailure('member_era_upload', $error);
+            // The service deliberately uses a uniform non-success result for
+            // role/state/album uncertainty. Avoid turning error messages into
+            // an album, identity, or storage oracle.
+            $message = $error->getMessage();
+            $status = str_contains($message, 'role_forbidden')
+                || str_contains($message, 'member_role')
+                || str_contains($message, 'principal_')
+                ? 403
+                : 503;
+            self::respondMemberUploadJson($status, [
+                'error' => $status === 403 ? '请求被拒绝' : '上传暂时无法安全确认',
+            ]);
+        } finally {
+            unset($_POST['action'], $_POST['era'], $_POST['album_id'], $_POST['pwg_token'], $_FILES['member_photo']);
+        }
+    }
+
+    /** @param array<string,mixed> $payload */
+    private static function respondMemberUploadJson(int $status, array $payload): never
+    {
+        ClassIdentityHttp::noStore();
+        http_response_code($status);
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Vary: Cookie');
+        echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        exit;
+    }
+
     /** @return array<string, mixed> */
     private static function loadMyIdentity(): array
     {
@@ -410,6 +565,20 @@ final class ClassIdentityPublicController
             }
         }
 
+        $submissionRows = $role === Access::ROLE_FAMILY
+            ? ClassIdentitySubmissionService::fromPiwigo()->mine($userId)
+            : [];
+        foreach ($submissionRows as &$submission) {
+            $submission['state_label'] = match ((string) ($submission['state'] ?? '')) {
+                'PENDING' => '待审核',
+                'APPROVED' => '已通过',
+                'REJECTED' => '已拒绝',
+                default => '状态异常',
+            };
+            $submission['precision_label'] = ClassIdentityArchiveService::precisionLabel((string) ($submission['date_precision'] ?? 'UNKNOWN'));
+        }
+        unset($submission);
+
         return [
             'role' => $role,
             'role_label' => self::roleLabel($role),
@@ -420,6 +589,7 @@ final class ClassIdentityPublicController
             'seats' => $seats,
             'can_issue_family' => $canIssueFamily,
             'can_activate_anonymous' => $canActivateAnonymous,
+            'submissions' => $submissionRows,
         ];
     }
 
@@ -448,13 +618,20 @@ final class ClassIdentityPublicController
     private static function requireExactOrigin(): void
     {
         $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
-        if (!is_string($origin) || $origin === '' || $origin === 'null') {
-            ClassIdentityHttp::abort(403, '请求来源未被允许');
-        }
-
         $fetchSite = $_SERVER['HTTP_SEC_FETCH_SITE'] ?? null;
         if (is_string($fetchSite) && $fetchSite !== '' && $fetchSite !== 'same-origin') {
             ClassIdentityHttp::abort(403, '请求来源未被允许');
+        }
+
+        // ClassIdentityHttp::requireMutation() has already verified the
+        // session-bound Piwigo CSRF token before this method is called.
+        // Chromium can legitimately send Origin: null (and omit
+        // Sec-Fetch-Site) for a same-document form navigation. Treat that
+        // opaque value like an absent Origin rather than blocking a real
+        // browser Claim/Invite flow. A concrete foreign Origin and an
+        // explicit cross-site Fetch Metadata value still fail closed above.
+        if (!is_string($origin) || $origin === '' || strtolower($origin) === 'null') {
+            return;
         }
 
         if (!ClassIdentityHttp::originMatchesConfiguredRoot($origin)) {
@@ -500,6 +677,19 @@ final class ClassIdentityPublicController
         }
 
         return $value;
+    }
+
+    private static function postOptional(string $name, int $maxLength): ?string
+    {
+        $value = $_POST[$name] ?? null;
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (!is_string($value) || self::length($value) > $maxLength || str_contains($value, "\0")) {
+            throw new InvalidArgumentException('invalid_input');
+        }
+        $value = trim($value);
+        return $value === '' ? null : $value;
     }
 
     private static function pullSensitive(string $name, int $maxLength, bool $trim): string

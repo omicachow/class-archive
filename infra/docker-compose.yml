@@ -32,12 +32,24 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${CLASS_ARCHIVE_HTTP_PORT:-8090}:80"
+      # The compatibility Web service itself has no host port. This separate
+      # loopback listener is an nginx front proxy so Piwigo's IP-bound session
+      # check still sees the browser's original source address.
+      - "127.0.0.1:${CLASS_ARCHIVE_COMPAT_HTTP_PORT:-8091}:8081"
+    expose:
+      # Only the narrow, internal BFF→Gateway server listens here. It is not
+      # mapped to a host port and rejects requests without the fixed proxy
+      # header set by the compatibility BFF.
+      - "8088"
     environment:
       TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
       PIWIGO_UID: ${PIWIGO_UID:-1000}
       PIWIGO_GID: ${PIWIGO_GID:-1000}
       CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER:?Set CLASS_ARCHIVE_CLAIM_CODE_PEPPER in .env.piwigo}
       CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET:?Set CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET in .env.piwigo}
+      # Non-secret localhost handoff used only after Piwigo completes a login.
+      # The plugin validates the numeric port and fixes the host to 127.0.0.1.
+      CLASS_ARCHIVE_COMPAT_HTTP_PORT: ${CLASS_ARCHIVE_COMPAT_HTTP_PORT:-8091}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/"]
       interval: 10s
@@ -57,8 +69,18 @@ services:
       - ../plugins:/workspace/plugins:ro
       - ../themes:/workspace/themes:ro
       - ../tests:/workspace/tests:ro
+      # Only the live ref metadata is exposed. No Git config, remotes,
+      # credentials, object database or reflog is mounted into Piwigo. Release
+      # attestations use this narrow view to prove their recorded commit is the
+      # commit currently checked out on the host.
+      - ../.git/HEAD:/workspace/git/HEAD:ro
+      - ../.git/refs:/workspace/git/refs:ro
     networks:
       - app
+      # This internal-only network carries the narrow Class Archive ->
+      # Immich metadata bridge when its explicitly opt-in spike profile is
+      # running. Piwigo never joins the Immich service network directly.
+      - immich_gateway
 
   backup:
     image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
@@ -75,6 +97,9 @@ services:
           echo "Refusing backup: use infra/scripts/dev.ps1 backup so the application is quiesced." >&2
           exit 1
         }
+        # The contract selector is deliberately versioned: it keeps format 8
+        # / schema 16 immutable and adds format 9 only for schema 17.
+        . /workspace/infra/scripts/class-archive-recovery-contracts.sh
         lock_dir=/backup/.class-archive-backup.lock
         mkdir "$${lock_dir}" 2>/dev/null || {
           echo "Refusing overlapping backup: $${lock_dir} already exists." >&2
@@ -89,7 +114,9 @@ services:
               "$${partial_bundle}/piwigo-data.tar.gz" \
               "$${partial_bundle}/uploads.tar.gz" \
               "$${partial_bundle}/galleries.tar.gz" \
+              "$${partial_bundle}/scripts.tar.gz" \
               "$${partial_bundle}/COMPLETE" \
+              "$${partial_bundle}/MANIFEST.json" \
               "$${partial_bundle}/SHA256SUMS"
             rmdir -- "$${partial_bundle}"
           fi
@@ -110,19 +137,95 @@ services:
           exit 1
         }
         mkdir "$${partial_bundle}"
+        # Resolve the one installed ClassIdentity prefix and prove the exact
+        # declared business and rebuildable tables for one known recovery
+        # contract before taking the database snapshot. Unknown schema values
+        # never become an implicitly upgraded manifest.
+        set -- $$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COUNT(*),COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$$'")
+        test "$${#}" = 2 && test "$${1}" = 1 || {
+          echo "Refusing backup: ClassIdentity migration table is missing or ambiguous." >&2
+          exit 1
+        }
+        ci_migration="$${2}"
+        case "$${ci_migration}" in ''|*[!A-Za-z0-9_]*) echo "Refusing backup: ClassIdentity table prefix is invalid." >&2; exit 1 ;; esac
+        ci_base="$${ci_migration%migration}"
+        ci_version=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COALESCE(MAX(version),0) FROM $${ci_migration}")
+        ca_recovery_select_by_schema "$${ci_version}" || {
+          echo "Refusing backup: ClassIdentity schema has no recovery contract." >&2
+          exit 1
+        }
+        for suffix in $${CA_RECOVERY_ALL_TABLES}; do
+          ci_table_count=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+            -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$${ci_base}$${suffix}'")
+          test "$${ci_table_count}" = 1 || {
+            echo "Refusing backup: required ClassIdentity recovery-contract table is missing." >&2
+            exit 1
+          }
+        done
+        pwg_base="$${ci_base%class_identity_}"
+        test "$${pwg_base}" != "$${ci_base}" || {
+          echo "Refusing backup: Piwigo table prefix cannot be derived safely." >&2
+          exit 1
+        }
+        epoch_table="$${ci_base}native_source_epoch"
+        epoch_engine=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$${epoch_table}' AND TABLE_TYPE='BASE TABLE' AND ENGINE='MyISAM'")
+        test "$${epoch_engine}" = 1 || {
+          echo "Refusing backup: durable native source epoch is not MyISAM." >&2
+          exit 1
+        }
+        set -- $$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COUNT(*),COALESCE(SUM(source_key='PIWIGO_NATIVE' AND OCTET_LENGTH(generation)=16),0) FROM $${epoch_table}")
+        test "$${#}" = 2 && test "$${1}" = 1 && test "$${2}" = 1 || {
+          echo "Refusing backup: durable native source epoch singleton is invalid." >&2
+          exit 1
+        }
+        ci_trigger_count=$$(mariadb --batch --skip-column-names --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          -e "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('$${pwg_base}ci_projection_images_bi','$${pwg_base}ci_projection_images_bu','$${pwg_base}ci_projection_images_bd','$${pwg_base}ci_projection_image_category_bi','$${pwg_base}ci_projection_image_category_bu','$${pwg_base}ci_projection_image_category_bd','$${pwg_base}ci_projection_categories_bi','$${pwg_base}ci_projection_categories_bu','$${pwg_base}ci_projection_categories_bd','$${pwg_base}ci_source_epoch_images_bi','$${pwg_base}ci_source_epoch_images_bu','$${pwg_base}ci_source_epoch_images_bd','$${pwg_base}ci_source_epoch_image_category_bi','$${pwg_base}ci_source_epoch_image_category_bu','$${pwg_base}ci_source_epoch_image_category_bd','$${pwg_base}ci_source_epoch_categories_bi','$${pwg_base}ci_source_epoch_categories_bu','$${pwg_base}ci_source_epoch_categories_bd') AND ACTION_TIMING='BEFORE'")
+        test "$${ci_trigger_count}" = 18 || {
+          echo "Refusing backup: native Piwigo projection/source-epoch guards are incomplete." >&2
+          exit 1
+        }
         # Piwigo and several mature plugins still use MyISAM tables. The app is
         # stopped by dev.ps1 before this service runs, and --lock-all-tables
         # gives those tables a consistent database snapshot.
-        mariadb-dump --quick --lock-all-tables \
+        mariadb-dump --quick --lock-all-tables --skip-triggers \
+          --ignore-table-data="$${DB_NAME}.$${ci_base}read_projection" \
+          --ignore-table-data="$${DB_NAME}.$${ci_base}read_photo" \
           --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
           > "$${partial_bundle}/database.sql"
+        # Append all 18 guarded Core-table triggers only after every table
+        # DDL/data statement. Dumping triggers inline can restore a categories
+        # trigger before read_projection exists and would make recovery order
+        # depend on lexical table names.
+        mariadb-dump --no-data --no-create-info --triggers \
+          --host=db --user=root --password="$${DB_ROOT_PASSWORD}" "$${DB_NAME}" \
+          "$${pwg_base}images" "$${pwg_base}image_category" "$${pwg_base}categories" \
+          >> "$${partial_bundle}/database.sql"
+        if grep -Eq '^INSERT INTO `[^`]+class_identity_(read_projection|read_photo)`' "$${partial_bundle}/database.sql"; then
+          echo "Refusing backup: rebuildable projection cache leaked into the SQL snapshot." >&2
+          exit 1
+        fi
         gzip -9 "$${partial_bundle}/database.sql"
         tar -C /source/piwigo -czf "$${partial_bundle}/piwigo-data.tar.gz" .
         tar -C /source/uploads -czf "$${partial_bundle}/uploads.tar.gz" .
         tar -C /source/galleries -czf "$${partial_bundle}/galleries.tar.gz" .
+        # This volume contains the pinned container lifecycle script that
+        # restores private media permissions on startup. It is application
+        # state, not an image-layer convenience, so a destructive restore
+        # must restore it byte-for-byte with the other durable volumes.
+        tar -C /source/scripts -czf "$${partial_bundle}/scripts.tar.gz" .
         printf 'completed_at=%s\n' "$${stamp}" > "$${partial_bundle}/COMPLETE"
+        # Projection DDL remains in the SQL dump, but its rows are deliberately
+        # omitted. The selected manifest separates business truth from the
+        # rebuildable authorization-neutral read cache. Format 9 extends only
+        # that business truth with the six v17 collection tables.
+        printf '{"format":%s,"created_at":"%s","class_identity_schema":%s,"files":["database.sql.gz","piwigo-data.tar.gz","uploads.tar.gz","galleries.tar.gz","scripts.tar.gz","COMPLETE"]}\n' \
+          "$${CA_RECOVERY_FORMAT}" "$${stamp}" "$${CA_RECOVERY_SCHEMA_JSON}" > "$${partial_bundle}/MANIFEST.json"
         cd "$${partial_bundle}"
-        sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz COMPLETE > SHA256SUMS
+        sha256sum database.sql.gz piwigo-data.tar.gz uploads.tar.gz galleries.tar.gz scripts.tar.gz COMPLETE MANIFEST.json > SHA256SUMS
         sha256sum -c SHA256SUMS
         cd /backup
         mv "$${partial_bundle}" "$${bundle}"
@@ -140,12 +243,95 @@ services:
       - piwigo_data:/source/piwigo:ro
       - piwigo_uploads:/source/uploads:ro
       - piwigo_galleries:/source/galleries:ro
+      - piwigo_scripts:/source/scripts:ro
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+
+  # A narrow, one-time rollback point for a forward-only ClassIdentity schema
+  # migration. It deliberately contains database state only: media volumes are
+  # not mounted and therefore cannot be read, changed, or accidentally treated
+  # as part of a schema rollback. The owner deployment helper stops Piwigo and
+  # proves the trusted maintenance gate before it enables this service.
+  pre-migration-db-backup:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
+    profiles: ["ops"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/create-pre-migration-db-snapshot.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:-piwigo}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.piwigo}
+      CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION: "14"
+      CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION: "15"
+      CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE: "snapshot"
+      CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM: "false"
+    volumes:
+      - backups:/backup
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+
+  backup-audit:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
+    profiles: ["ops"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/audit-backup.sh"]
+    environment:
+      CLASS_ARCHIVE_BACKUP_AUDIT_WRITE: "false"
+      PIWIGO_UID: ${PIWIGO_UID:-1000}
+      PIWIGO_GID: ${PIWIGO_GID:-1000}
+    volumes:
+      - backups:/backup:ro
+      - piwigo_data:/target-data
+      - ../infra:/workspace/infra:ro
+
+  restore:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env.piwigo}
+    profiles: ["ops"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/restore-backup.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:-piwigo}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.piwigo}
+      CLASS_ARCHIVE_RESTORE_DRILL: "false"
+      CLASS_ARCHIVE_RESTORE_CONFIRM: ""
+      CLASS_ARCHIVE_RESTORE_BUNDLE: ""
+      CLASS_ARCHIVE_RESTORE_PRECHECK: "false"
+    volumes:
+      - backups:/backup:ro
+      - piwigo_data:/target/piwigo
+      - piwigo_uploads:/target/uploads
+      - piwigo_galleries:/target/galleries
+      - piwigo_derivatives:/target/derivatives
+      - piwigo_scripts:/target/scripts
+      - ../infra:/workspace/infra:ro
     networks:
       - app
 
 networks:
   app:
     driver: bridge
+  immich_gateway:
+    name: ${CLASS_ARCHIVE_GATEWAY_NETWORK:-class_archive_immich_gateway}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        # nginx trusts this exact metadata-only bridge when restoring the
+        # browser source address for Piwigo's IP-bound session check.
+        - subnet: 172.23.0.0/16
 
 volumes:
   piwigo_data:

@@ -115,6 +115,56 @@ try {
     $failures[] = 'structured value final defense: reached persistence';
 }
 
+// Archive date provenance is operational metadata, not a secret. It must be
+// allowed through the same final audit-value allowlist that protects passwords
+// and raw claim material; otherwise approval would create a Core image and
+// then roll back the ClassIdentity transaction.
+try {
+    $encoder = new ReflectionMethod(Audit::class, 'encodeValue');
+    $encoder->setAccessible(true);
+    $encoded = $encoder->invoke($audit, ['date_source' => 'ARCHIVE_CONFIRMED'], 'new_value');
+    assertSameValue('{"date_source":"ARCHIVE_CONFIRMED"}', $encoded, 'archive date source audit value');
+    $album = $encoder->invoke($audit, ['era' => 'HERITAGE', 'name' => '毕业（私有 QA）', 'official' => 1], 'new_value');
+    assertSameValue('{"era":"HERITAGE","name":"毕业（私有 QA）","official":1}', $album, 'archive album name audit value');
+
+    // The full-library import records bounded operational state, never source
+    // paths or original filenames. These fields must remain compatible with
+    // Audit before an import can mutate native Piwigo state.
+    $fullImport = $encoder->invoke($audit, [
+        'manifest_version' => 1,
+        'item_total' => 3,
+        'applied_count' => 1,
+        'deduplicated_count' => 1,
+        'failed_count' => 1,
+        'source_code' => 'PRIVATE_SOURCE_A',
+        'presentation_kind' => 'MPO_PRIMARY_FRAME_JPEG',
+        'presentation_byte_size' => 2048,
+        'source_collection_id' => '123e4567-e89b-42d3-a456-426614174000',
+        'depth' => 2,
+        'error_code' => 'STAGING_MIME',
+        'state' => 'RUNNING',
+    ], 'new_value');
+    assertSameValue(
+        '{"manifest_version":1,"item_total":3,"applied_count":1,"deduplicated_count":1,"failed_count":1,"source_code":"PRIVATE_SOURCE_A","presentation_kind":"MPO_PRIMARY_FRAME_JPEG","presentation_byte_size":2048,"source_collection_id":"123e4567-e89b-42d3-a456-426614174000","depth":2,"error_code":"STAGING_MIME","state":"RUNNING"}',
+        $fullImport,
+        'private full import audit value',
+    );
+    try {
+        $encoder->invoke($audit, ['relative_source_path' => 'private/source.jpg'], 'new_value');
+        $failures[] = 'private full source path audit value: accepted';
+    } catch (InvalidArgumentException) {
+        $passed++;
+    }
+    try {
+        $encoder->invoke($audit, ['presentation_kind' => '../PRIVATE_SOURCE'], 'new_value');
+        $failures[] = 'private presentation kind audit value: accepted';
+    } catch (InvalidArgumentException) {
+        $passed++;
+    }
+} catch (Throwable $error) {
+    $failures[] = 'archive date source audit value: rejected';
+}
+
 if ($failures !== []) {
     fwrite(STDERR, 'CLASS_IDENTITY_AUDIT_REASON=FAIL assertions=' . $passed . ' failures=' . count($failures) . "\n");
     foreach ($failures as $failure) {

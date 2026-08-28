@@ -23,13 +23,18 @@ function preparePiwigoBootstrap(): void
 
     chdir(PIWIGO_ROOT) || fail('Cannot enter the Piwigo application directory.');
     define('PHPWG_ROOT_PATH', './');
-    // Use the Core web-service execution context to bypass the interactive
-    // "no photos yet" page while still loading normal database/config state.
-    $_SERVER['SCRIPT_NAME'] = '/ws.php';
+    // Piwigo's login route is the only normal Core context that passes both
+    // its gallery-lock and no-photo presentation exits. This remains a local
+    // CLI bootstrap: no browser request, session credential, or HTTP route is
+    // invoked by the helper.
+    $_SERVER['SCRIPT_NAME'] = '/identification.php';
     $_SERVER['SERVER_NAME'] = 'localhost';
     $_SERVER['SERVER_PORT'] = '80';
     $_SERVER['REQUEST_URI'] = '/';
     $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+
+    require_once '/workspace/infra/scripts/class-archive-trusted-bootstrap-context.php';
+    classArchiveEnableTrustedCliBootstrapContext();
 }
 
 function fetchOne(string $query): ?array
@@ -278,15 +283,35 @@ function ensureModernAdminHash(): void
 function main(array $argv): void
 {
     $verifyOnly = false;
+    $verifyV4SyntheticExistingRuntime = false;
     foreach (array_slice($argv, 1) as $argument) {
         if ($argument === '--verify-only' && !$verifyOnly) {
             $verifyOnly = true;
             continue;
         }
+        if ($argument === '--verify-v4-synthetic-existing-runtime' && !$verifyV4SyntheticExistingRuntime) {
+            $verifyV4SyntheticExistingRuntime = true;
+            continue;
+        }
         fail("Unknown or duplicate argument: {$argument}");
+    }
+    if (
+        $verifyV4SyntheticExistingRuntime
+        && (
+            !$verifyOnly
+            || getenv('CLASS_ARCHIVE_RUNTIME_SCOPE') !== 'SYNTHETIC_V4_MIGRATION'
+            || getenv('CLASS_ARCHIVE_V4_SYNTHETIC_MIGRATION') !== '1'
+        )
+    ) {
+        fail('The existing-runtime verifier is restricted to the isolated V4 synthetic migration laboratory.');
     }
 
     ensureConfig([
+        // Class Archive's Policy, Identity and Gateway hooks are the security
+        // boundary. A fresh Piwigo installation can leave plugins disabled
+        // even while their database rows say "active", which silently serves
+        // the Core HTML shell instead of the fail-closed Gateway API.
+        'enable_plugins' => true,
         'allow_user_registration' => false,
         'guest_access' => false,
         'comments_forall' => false,
@@ -310,7 +335,14 @@ function main(array $argv): void
     ensureUnsafeExtensionsInactive();
     ensureClassArchivePolicyActive();
     ensureModernAdminHash();
-    ensureTheme($verifyOnly);
+    // A DB-only migration snapshot intentionally carries no theme files. The
+    // synthetic laboratory verifies all business and ACL baseline records but
+    // must not copy the owner runtime's theme directory just to pass this
+    // schema/recovery proof. Normal bootstrap/verification still requires the
+    // pinned theme exactly as before.
+    if (!$verifyV4SyntheticExistingRuntime) {
+        ensureTheme($verifyOnly);
+    }
 
     $groups = [];
     foreach (['CLASSMATE', 'TEACHER', 'FAMILY', 'ANONYMOUS'] as $name) {
@@ -327,6 +359,10 @@ function main(array $argv): void
         invalidate_user_cache();
     }
 
+    if ($verifyV4SyntheticExistingRuntime) {
+        fwrite(STDOUT, "BASELINE_SYNTHETIC_EXISTING_RUNTIME_VERIFIED\n");
+        return;
+    }
     fwrite(STDOUT, $verifyOnly ? "BASELINE_VERIFIED\n" : "BASELINE_CONFIGURED\n");
 }
 

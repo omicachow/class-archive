@@ -1,0 +1,42 @@
+services:
+  supplemental-ingress-audit:
+    # This standalone overlay is deliberately not merged with the historical
+    # full-library overlay.  It receives only the path-free supplemental
+    # manifest and opaque JPEG presentation staging; the two original source
+    # roots and the old full-real manifest cannot enter this container.
+    image: ${PIWIGO_IMAGE:?Set PIWIGO_IMAGE in the ignored owner environment}
+    pull_policy: never
+    profiles: ["private-supplemental"]
+    restart: "no"
+    network_mode: "none"
+    read_only: true
+    user: "${PIWIGO_UID:-1000}:${PIWIGO_GID:-1000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL: "1"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        test "$${CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL}" = "1"
+        test -r /private-real-full/manifests/supplemental-import-manifest.json
+        test -d /private-real-full/staging
+        test -r /private-real-full/staging/.classarchive-private-supplemental-staging-v1.json
+    volumes:
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_MANIFEST_PATH:?Set verified supplemental manifest WSL path}
+        target: /private-real-full/manifests/supplemental-import-manifest.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_STAGING_PATH:?Set verified supplemental staging WSL path}
+        target: /private-real-full/staging
+        read_only: true
+        bind:
+          create_host_path: false
+    labels:
+      com.classarchive.scope: private-real-supplemental-ingress
+      com.classarchive.operation: verify-only

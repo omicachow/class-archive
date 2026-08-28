@@ -25,6 +25,32 @@ function assertRuntimeUser(): void
     }
 }
 
+/**
+ * Piwigo's pinned startup normalizer may translate a root-prepared nginx 0600
+ * marker into the one managed _data-owner form below. Both forms retain the
+ * exact marker bytes and fail-closed semantics; all other ownership or mode
+ * combinations are rejected.
+ */
+function hasTrustedMaintenanceMarkerOwnership(array $metadata, string $dataDirectory, int $nginxUid, int $nginxGid): bool
+{
+    $mode = (int) ($metadata['mode'] ?? 0) & 0777;
+    $uid = (int) ($metadata['uid'] ?? -1);
+    $gid = (int) ($metadata['gid'] ?? -1);
+    // Docker's named-volume ACL normalizer can retain the exact nginx
+    // owner/group while showing its private ACL mask as 0660/0670.  Accept
+    // only those known forms; an arbitrary readable marker remains invalid.
+    if ($uid === $nginxUid && $gid === $nginxGid && in_array($mode, [0600, 0660, 0670], true)) {
+        return true;
+    }
+
+    $directory = @lstat($dataDirectory);
+    return is_array($directory)
+        && $uid > 0
+        && $uid === (int) ($directory['uid'] ?? -2)
+        && $gid === (int) ($directory['gid'] ?? -2)
+        && in_array($mode, [0660, 0670], true);
+}
+
 function assertTrustedMaintenanceGate(): void
 {
     $uid = posix_geteuid();
@@ -51,11 +77,7 @@ function assertTrustedMaintenanceGate(): void
     ) {
         fail('An exact regular ClassIdentity maintenance marker is required.');
     }
-    if (
-        (int) ($metadata['uid'] ?? -1) !== $uid
-        || (($metadata['mode'] ?? 0) & 0777) !== 0600
-        || (int) ($metadata['nlink'] ?? 0) !== 1
-    ) {
+    if (!hasTrustedMaintenanceMarkerOwnership($metadata, $dataDirectory, $uid, posix_getegid()) || (int) ($metadata['nlink'] ?? 0) !== 1) {
         fail('The ClassIdentity maintenance marker owner or permissions are untrusted.');
     }
     $contents = file_get_contents($path);
@@ -290,6 +312,120 @@ function ensureSystemAdmin(\ClassIdentity\Repository $repository): array
     \ClassIdentity\CoreAdapter::revokeAllCredentials($webmasterId);
 
     return ['id' => $principalId, 'created' => $created];
+}
+
+/**
+ * One-time, audited adoption of the official Piwigo archive tree into stable
+ * opaque Class Archive album ids. The durable config marker prevents a later
+ * untracked Community category from being guessed as official.
+ */
+function ensureInitialOfficialAlbumMappings(\ClassIdentity\Repository $repository, int $adminUserId): void
+{
+    global $conf;
+
+    // Piwigo's config.param column is VARCHAR(40); keep durable markers below
+    // that hard boundary so a first install cannot strand maintenance mode.
+    $marker = 'class_identity_album_map_bootstrap_v1';
+    $roots = $repository->fetchAll(
+        "SELECT `id`,`permalink` FROM " . CATEGORIES_TABLE
+            . " WHERE `permalink` IN ('class-archive-heritage','class-archive-living') ORDER BY `permalink`"
+    );
+    if (count($roots) !== 2) {
+        fail('The two Class Archive Era roots are required before album mapping bootstrap.');
+    }
+    $rootIds = [];
+    foreach ($roots as $root) {
+        $rootIds[(string) $root['permalink']] = (int) $root['id'];
+    }
+    $heritage = $rootIds['class-archive-heritage'] ?? 0;
+    $living = $rootIds['class-archive-living'] ?? 0;
+    if ($heritage <= 0 || $living <= 0 || $heritage === $living) {
+        fail('The Class Archive Era roots are invalid.');
+    }
+
+    $service = \ClassIdentity\AlbumService::fromPiwigo();
+    if (($conf[$marker] ?? null) !== true) {
+        \ClassIdentity\Access::resetRepositoryForTests();
+        $rows = $repository->fetchAll(
+            'SELECT `id`,`uppercats` FROM ' . CATEGORIES_TABLE
+                . ' WHERE `id` IN (?, ?) OR FIND_IN_SET(?,`uppercats`) > 0 OR FIND_IN_SET(?,`uppercats`) > 0 ORDER BY `id`',
+            [$heritage, $living, $heritage, $living],
+        );
+        foreach ($rows as $row) {
+            $categoryId = (int) ($row['id'] ?? 0);
+            $uppercats = ',' . (string) ($row['uppercats'] ?? '') . ',';
+            $inHeritage = $categoryId === $heritage || str_contains($uppercats, ',' . $heritage . ',');
+            $inLiving = $categoryId === $living || str_contains($uppercats, ',' . $living . ',');
+            if ($categoryId <= 0 || $inHeritage === $inLiving) {
+                fail('An existing archive album has ambiguous Era ancestry.');
+            }
+            $era = $inHeritage ? 'HERITAGE' : 'LIVING';
+            $existing = $service->findByPiwigoCategoryId($categoryId);
+            if ($existing === null) {
+                $service->ensureMapping(
+                    $adminUserId,
+                    $categoryId,
+                    'OFFICIAL',
+                    $era,
+                    null,
+                    null,
+                    null,
+                    null,
+                    '初始化稳定班级相册标识',
+                );
+                continue;
+            }
+            if (($existing['album_type'] ?? null) !== 'OFFICIAL'
+                || ($existing['era'] ?? null) !== $era
+                || ($existing['owner_principal_id'] ?? null) !== null
+                || ($existing['state'] ?? null) !== 'ACTIVE'
+            ) {
+                fail('An existing archive album mapping conflicts with initial adoption.');
+            }
+        }
+        conf_update_param($marker, true, true);
+        if (($conf[$marker] ?? null) !== true) {
+            fail('The stable album mapping bootstrap marker could not be persisted.');
+        }
+    }
+
+    foreach ([[$heritage, 'HERITAGE'], [$living, 'LIVING']] as [$categoryId, $era]) {
+        $mapping = $service->findByPiwigoCategoryId($categoryId);
+        if ($mapping === null
+            || ($mapping['album_type'] ?? null) !== 'OFFICIAL'
+            || ($mapping['era'] ?? null) !== $era
+            || ($mapping['owner_principal_id'] ?? null) !== null
+            || ($mapping['state'] ?? null) !== 'ACTIVE'
+        ) {
+            fail('The Class Archive Era root mapping is not converged.');
+        }
+    }
+}
+
+function assertOfficialAlbumMappingsConverged(\ClassIdentity\Repository $repository): void
+{
+    global $conf;
+    if (($conf['class_identity_album_map_bootstrap_v1'] ?? null) !== true) {
+        fail('The stable album mapping bootstrap marker is missing.');
+    }
+    $roots = $repository->fetchAll(
+        'SELECT c.`permalink`,a.`album_type`,a.`owner_principal_id`,a.`era`,a.`state` FROM '
+            . CATEGORIES_TABLE . ' c JOIN `' . $repository->table('album') . '` a ON a.`piwigo_category_id`=c.`id` '
+            . "WHERE c.`permalink` IN ('class-archive-heritage','class-archive-living') ORDER BY c.`permalink`"
+    );
+    if (count($roots) !== 2) {
+        fail('The stable Era root album mappings are incomplete.');
+    }
+    foreach ($roots as $row) {
+        $expectedEra = ($row['permalink'] ?? null) === 'class-archive-heritage' ? 'HERITAGE' : 'LIVING';
+        if (($row['album_type'] ?? null) !== 'OFFICIAL'
+            || ($row['owner_principal_id'] ?? null) !== null
+            || ($row['era'] ?? null) !== $expectedEra
+            || ($row['state'] ?? null) !== 'ACTIVE'
+        ) {
+            fail('A stable Era root album mapping has drifted.');
+        }
+    }
 }
 
 /** @return array<string, array{id: int, username: string, role: string}> */
@@ -753,6 +889,7 @@ function verifyRuntimeState(bool $withSyntheticFixtures): void
     assertMigrationLedger($repository);
     assertManagedGroupsConverged($repository);
     assertSystemAdminConverged($repository);
+    assertOfficialAlbumMappingsConverged($repository);
     if ($withSyntheticFixtures) {
         assertSyntheticPrincipalsConverged();
     }
@@ -791,6 +928,7 @@ function main(array $options): void
         assertMigrationLedger($repository);
         ensureManagedGroups($repository);
         $systemAdmin = ensureSystemAdmin($repository);
+        ensureInitialOfficialAlbumMappings($repository, (int) ($conf['webmaster_id'] ?? 0));
         if ($withSyntheticFixtures) {
             ensureSyntheticCoreUsers();
             provisionSyntheticFixtures($repository);

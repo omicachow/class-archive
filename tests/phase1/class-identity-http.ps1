@@ -113,6 +113,22 @@ function Invoke-Fixture {
     catch { Stop-Setup "Fixture action '$Action' returned invalid JSON." }
 }
 
+function Invoke-ReadProjectionRebuild {
+    $arguments = @($script:composeBase + @(
+        'exec', '-T', '--user', 'nginx', 'piwigo', 'php',
+        '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+    ))
+    $output = @(& wsl.exe @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Setup 'Post-cleanup read projection rebuild failed.'
+    }
+    try { $result = (($output -join '').Trim() | ConvertFrom-Json -ErrorAction Stop) }
+    catch { Stop-Setup 'Post-cleanup read projection rebuild returned invalid JSON.' }
+    if ([string]$result.result -ne 'PASS' -or [int]$result.count -lt 1) {
+        Stop-Setup 'Post-cleanup read projection rebuild did not restore the synthetic baseline.'
+    }
+}
+
 function ConvertTo-FormBody {
     param([Parameter(Mandatory = $true)][hashtable]$Form)
     $pairs = foreach ($key in ($Form.Keys | Sort-Object)) {
@@ -125,15 +141,61 @@ function ConvertTo-FormBody {
     return $pairs -join '&'
 }
 
+function New-MultipartBody {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Form,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$FileField,
+        [Parameter(Mandatory = $true)][string]$UploadFileName,
+        [Parameter(Mandatory = $true)][string]$UploadContentType
+    )
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw 'Multipart fixture file is missing.'
+    }
+    if ($FileField -notmatch '^[A-Za-z0-9_-]{1,64}$' -or $UploadFileName -match '[\"\r\n]') {
+        throw 'Multipart field metadata is unsafe.'
+    }
+    $boundary = '----ClassArchiveBoundary' + (New-RunId)
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $memory = [IO.MemoryStream]::new()
+    try {
+        foreach ($key in ($Form.Keys | Sort-Object)) {
+            $value = $Form[$key]
+            if (-not ($value -is [string]) -and -not ($value -is [ValueType])) {
+                throw 'Multipart form contains a non-scalar value.'
+            }
+            $part = "--$boundary`r`nContent-Disposition: form-data; name=`"$key`"`r`n`r`n$([string]$value)`r`n"
+            $partBytes = $encoding.GetBytes($part)
+            $memory.Write($partBytes, 0, $partBytes.Length)
+        }
+        $fileHeader = "--$boundary`r`nContent-Disposition: form-data; name=`"$FileField`"; filename=`"$UploadFileName`"`r`nContent-Type: $UploadContentType`r`n`r`n"
+        $headerBytes = $encoding.GetBytes($fileHeader)
+        $memory.Write($headerBytes, 0, $headerBytes.Length)
+        $fileBytes = [IO.File]::ReadAllBytes($FilePath)
+        $memory.Write($fileBytes, 0, $fileBytes.Length)
+        $tailBytes = $encoding.GetBytes("`r`n--$boundary--`r`n")
+        $memory.Write($tailBytes, 0, $tailBytes.Length)
+        return [pscustomobject]@{ Boundary = $boundary; Body = $memory.ToArray() }
+    }
+    finally {
+        $memory.Dispose()
+    }
+}
+
 function Invoke-Http {
     param(
         [Parameter(Mandatory = $true)][Uri]$Uri,
         [Parameter(Mandatory = $true)][Microsoft.PowerShell.Commands.WebRequestSession]$Session,
-        [ValidateSet('GET', 'POST')][string]$Method = 'GET',
+        [ValidateSet('GET', 'POST', 'HEAD')][string]$Method = 'GET',
         [hashtable]$Form = @{},
         [AllowNull()][string]$Origin = $null,
         [ValidateRange(64, 4194304)][int]$MaxBodyBytes = 2097152,
-        [string]$FetchSite = 'same-origin'
+        [string]$FetchSite = 'same-origin',
+        [string]$FilePath = '',
+        [string]$FileField = '',
+        [string]$UploadFileName = '',
+        [string]$UploadContentType = 'application/octet-stream',
+        [string]$RangeHeader = ''
     )
     $script:probeCount++
     $request = [Net.HttpWebRequest]::Create($Uri)
@@ -148,9 +210,20 @@ function Invoke-Http {
         $request.Headers['Origin'] = $Origin
         $request.Headers['Sec-Fetch-Site'] = $FetchSite
     }
+    if ($RangeHeader -ne '') {
+        if ($RangeHeader -notmatch '^bytes=0-31$') { throw 'Only the bounded 0-31 test range is permitted.' }
+        $request.AddRange(0, 31)
+    }
     if ($Method -eq 'POST') {
-        $bodyBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-FormBody -Form $Form))
-        $request.ContentType = 'application/x-www-form-urlencoded; charset=UTF-8'
+        if ($FilePath -ne '') {
+            $multipart = New-MultipartBody -Form $Form -FilePath $FilePath -FileField $FileField `
+                -UploadFileName $UploadFileName -UploadContentType $UploadContentType
+            $bodyBytes = [byte[]]$multipart.Body
+            $request.ContentType = "multipart/form-data; boundary=$($multipart.Boundary)"
+        } else {
+            $bodyBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-FormBody -Form $Form))
+            $request.ContentType = 'application/x-www-form-urlencoded; charset=UTF-8'
+        }
         $request.ContentLength = $bodyBytes.Length
         $stream = $request.GetRequestStream()
         try { $stream.Write($bodyBytes, 0, $bodyBytes.Length) } finally { $stream.Dispose() }
@@ -170,7 +243,7 @@ function Invoke-Http {
         $memory = [IO.MemoryStream]::new()
         $stream = $response.GetResponseStream()
         try {
-            if ($null -ne $stream) {
+            if ($null -ne $stream -and $Method -ne 'HEAD') {
                 $buffer = New-Object byte[] 8192
                 while ($memory.Length -lt $MaxBodyBytes) {
                     $remaining = [int]($MaxBodyBytes - $memory.Length)
@@ -271,6 +344,23 @@ function Assert-ProtectedPageDenied {
 function ConvertTo-AbsoluteUri {
     param([Parameter(Mandatory = $true)][Uri]$BaseUri, [Parameter(Mandatory = $true)][string]$Reference)
     return [Uri]::new($BaseUri, [Net.WebUtility]::HtmlDecode($Reference))
+}
+
+function Get-EffectiveImageSourceMatch {
+    param([AllowEmptyString()][string]$ImageTag)
+
+    # Bootstrap Darkroom keeps a transparent placeholder in `src` while a
+    # derivative is absent. The lazy target is the protected media URL, so
+    # prefer it when proving Family/freeze authorization after a cold cache.
+    foreach ($attribute in @('data-src', 'data-lazy', 'src')) {
+        $candidate = [regex]::Match(
+            $ImageTag,
+            ('\b' + [regex]::Escape($attribute) + '=["'']([^"'']+)["'']'),
+            'IgnoreCase'
+        )
+        if ($candidate.Success) { return $candidate }
+    }
+    return $null
 }
 
 function Get-CsrfToken {
@@ -404,6 +494,9 @@ $adminDashboardUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-d
 $adminIdentitiesUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-identities')
 $adminTeachersUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-teachers')
 $adminInvitationsUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-invitations')
+$adminSubmissionsUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-submissions')
+$adminAnonymousUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-anonymous')
+$adminArchiveUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-archive')
 $adminSystemUri = [Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-system')
 $adminDirectUri = [Uri]::new($baseUri, 'admin.php?page=plugin&section=ClassIdentity/admin.php')
 $coreAdminProfileUri = [Uri]::new($baseUri, 'admin.php?page=profile')
@@ -447,14 +540,16 @@ Write-Output "CLASS_IDENTITY_HTTP_RUN=$($script:runId)"
 $adminLease = $null
 $coreProfileAdminLease = $null
 $coreUsersAdminLease = $null
+$submissionTempPath = $null
 try {
     $setup = Invoke-Fixture -Action setup -RunId $script:runId -Environment @{ CI_TEST_UNBOUND_PASSWORD = $unboundPassword }
     $script:fixtureReady = $true
     $script:baselineImageCount = [int]$setup.baseline_image_count
     if ($script:baselineImageCount -lt 1) { Stop-Setup 'Synthetic image baseline is empty.' }
+    $heritageImageId = [int]$setup.heritage_image_id
     $livingImageId = [int]$setup.living_image_id
     $livingOriginalPath = [string]$setup.living_original_path
-    if ($livingImageId -lt 1 -or $livingOriginalPath -notmatch '^upload/[A-Za-z0-9_./-]+$') {
+    if ($heritageImageId -lt 1 -or $livingImageId -lt 1 -or $livingOriginalPath -notmatch '^upload/[A-Za-z0-9_./-]+$') {
         Stop-Setup 'Fixture returned an unsafe LIVING media reference.'
     }
 
@@ -647,6 +742,168 @@ try {
     $familySession = New-AuthenticatedSession -WebServiceUri $webServiceUri -Username $familyUsername -Password $familyPassword -Label 'login/family'
     if ($null -eq $familySession) { Stop-Setup 'Family session unavailable.' }
 
+    # Warm the real Piwigo Family gallery cache while the HERITAGE root has
+    # no direct uploaded image. The approval below must invalidate that cache
+    # so the newly approved root-associated image is immediately visible on a
+    # normal Family refresh, without requiring a new login.
+    $familyWarmHeritage = Invoke-Http -Uri ([Uri]::new($baseUri, "picture.php?/$heritageImageId")) -Session $familySession
+    Assert-Status -Response $familyWarmHeritage -Expected @(200) -Label 'submission/family-warm-existing-heritage' | Out-Null
+    $familyWarmMainTag = [regex]::Match($familyWarmHeritage.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
+    if (-not $familyWarmMainTag.Success) {
+        Add-Failure 'submission/family-warm-existing-heritage' 'Family gallery cache warm-up did not render an authenticated HERITAGE viewer.'
+    }
+
+    # Family Submission: the upload is a real multipart HTTP request. The
+    # source is a tiny synthetic PNG created only for this run; no fixture
+    # image is copied into the repository or retained after cleanup.
+    $submissionTempPath = Join-Path $env:TEMP ("class-archive-submission-$($script:runId).png")
+    [IO.File]::WriteAllBytes(
+        $submissionTempPath,
+        [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
+    )
+    $familyMyForSubmission = Invoke-Http -Uri $myUri -Session $familySession
+    $familySubmissionToken = Get-CsrfToken -Response $familyMyForSubmission -Label 'submission/family-form'
+    if ($null -eq $familySubmissionToken) { Stop-Setup 'Family submission form unavailable.' }
+    # The FAMILY form is deliberately HERITAGE-only.  A forged LIVING value
+    # must be denied before the submission service receives a file, so neither
+    # a pending row nor a protected binary can be created by parameter
+    # tampering.
+    $stateBeforeLivingTamper = Invoke-Fixture -Action state -RunId $script:runId
+    $livingTamperPost = Invoke-Http -Uri $myUri -Session $familySession -Method POST `
+        -Origin $origin.AbsoluteUri.TrimEnd('/') -Form @{
+            pwg_token = $familySubmissionToken; action = 'submit_family_photo'; era = 'LIVING'
+            suggested_date = ''; date_precision = 'UNKNOWN'; suggested_album = ''; description = 'Synthetic forged FAMILY era.'
+        } -FilePath $submissionTempPath -FileField 'submission_file' `
+        -UploadFileName 'family-living-forged.png' -UploadContentType 'image/png'
+    Assert-Status -Response $livingTamperPost -Expected @(200) -Label 'submission/family-living-tamper-deny' | Out-Null
+    $familyLivingDeniedText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5oqV56i/6LWE5paZ5oiW54Wn54mH5qC85byP5LiN56ym5ZCI6KaB5rGC77yM54Wn54mH5bCa5pyq5o+Q5Lqk44CC'))
+    if ($livingTamperPost.Text -notmatch [regex]::Escape($familyLivingDeniedText)) {
+        Add-Failure 'submission/family-living-tamper-deny' 'Forged FAMILY LIVING era did not return the safe validation denial.'
+    }
+    $stateAfterLivingTamper = Invoke-Fixture -Action state -RunId $script:runId
+    if (@($stateAfterLivingTamper.submissions).Count -ne @($stateBeforeLivingTamper.submissions).Count) {
+        Add-Failure 'submission/family-living-tamper-no-write' 'Forged FAMILY LIVING era created a submission record.'
+    }
+    $familyMyForSubmission = Invoke-Http -Uri $myUri -Session $familySession
+    $familySubmissionToken = Get-CsrfToken -Response $familyMyForSubmission -Label 'submission/family-form-after-living-deny'
+    if ($null -eq $familySubmissionToken) { Stop-Setup 'Family submission form unavailable after LIVING denial.' }
+    $submissionPost = Invoke-Http -Uri $myUri -Session $familySession -Method POST `
+        -Origin $origin.AbsoluteUri.TrimEnd('/') -Form @{
+            pwg_token = $familySubmissionToken; action = 'submit_family_photo'
+            era = 'HERITAGE'; suggested_date = '2008-05'; date_precision = 'MONTH'
+            suggested_album = 'Synthetic Class History'; description = 'Synthetic Family submission for HTTP review.'
+        } -FilePath $submissionTempPath -FileField 'submission_file' `
+        -UploadFileName 'family-history.png' -UploadContentType 'image/png'
+    if (-not (Assert-Status -Response $submissionPost -Expected @(200) -Label 'submission/family-upload')) {
+        Stop-Setup 'Family submission HTTP upload failed.'
+    }
+    $submissionAcceptedText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('54Wn54mH5bey5o+Q5Lqk'))
+    $submissionPendingText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5b6F5a6h5qC4'))
+    if ($submissionPost.Text -notmatch [regex]::Escape($submissionAcceptedText) -and $submissionPost.Text -notmatch [regex]::Escape($submissionPendingText)) {
+        Add-Failure 'submission/family-upload' 'successful upload did not return a safe pending status.'
+    }
+    $stateAfterSubmission = Invoke-Fixture -Action state -RunId $script:runId
+    $pendingSubmission = @($stateAfterSubmission.submissions | Where-Object { $_.state -eq 'PENDING' } | Sort-Object id -Descending | Select-Object -First 1)
+    if ($pendingSubmission.Count -ne 1) { Stop-Setup 'Pending Family submission was not persisted.' }
+    $submissionId = [int]$pendingSubmission[0].id
+    $pendingOriginalUri = [Uri]::new($baseUri, ('_data/' + [string]$pendingSubmission[0].storage_ref))
+    $pendingThumbnailUri = [Uri]::new($baseUri, ('_data/' + [string]$pendingSubmission[0].thumbnail_ref))
+    Assert-MediaDenied (Invoke-Http -Uri $pendingOriginalUri -Session $familySession) 'submission/family-known-pending-original-deny'
+    Assert-MediaDenied (Invoke-Http -Uri $pendingThumbnailUri -Session $familySession) 'submission/family-known-pending-thumbnail-deny'
+    Assert-MediaDenied (Invoke-Http -Uri $pendingOriginalUri -Session $familySession -Method HEAD) 'submission/family-pending-head-deny'
+    Assert-MediaDenied (Invoke-Http -Uri $pendingOriginalUri -Session $familySession -RangeHeader 'bytes=0-31') 'submission/family-pending-range-deny'
+    $familyLeakedStorage = $familyMyForSubmission.Text -match [regex]::Escape([string]$pendingSubmission[0].storage_ref)
+    $familyLeakedThumbnail = $familyMyForSubmission.Text -match [regex]::Escape([string]$pendingSubmission[0].thumbnail_ref)
+    if ($familyLeakedStorage -or $familyLeakedThumbnail) {
+        Add-Failure 'submission/family-redaction' 'Family My page exposed a pending storage reference.'
+    }
+
+    $submissionAdminPage = Invoke-Http -Uri $adminSubmissionsUri -Session $adminSession
+    Assert-Status -Response $submissionAdminPage -Expected @(200) -Label 'submission/admin-list' | Out-Null
+    $pendingLabel = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5b6F5a6h5qC4'))
+    $adminMissingFilename = $submissionAdminPage.Text -notmatch [regex]::Escape([string]$pendingSubmission[0].original_filename)
+    $adminMissingPending = $submissionAdminPage.Text -notmatch [regex]::Escape($pendingLabel)
+    if ($adminMissingFilename -or $adminMissingPending) {
+        Add-Failure 'submission/admin-list' 'Admin submission list did not show the pending Family record.'
+    }
+    $anonymousAdminPage = Invoke-Http -Uri $adminAnonymousUri -Session $adminSession
+    Assert-Status -Response $anonymousAdminPage -Expected @(200) -Label 'admin/anonymous-page' | Out-Null
+    $anonymousHeading = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5Yy/5ZCN566h55CG'))
+    if ($anonymousAdminPage.Text -notmatch [regex]::Escape($anonymousHeading)) {
+        Add-Failure 'admin/anonymous-page' 'Anonymous Governance page did not render its Chinese business heading.'
+    }
+    $archiveAdminPage = Invoke-Http -Uri $adminArchiveUri -Session $adminSession
+    Assert-Status -Response $archiveAdminPage -Expected @(200) -Label 'admin/archive-page' | Out-Null
+    $archiveAlbumHeading = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5bu656uL5q2j5byP5qGj5qGI55u45YaM'))
+    $archivePrecisionLabel = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5pel5pyf57K+56Gu'))
+    if ($archiveAdminPage.Text -notmatch [regex]::Escape($archiveAlbumHeading) -or $archiveAdminPage.Text -notmatch [regex]::Escape($archivePrecisionLabel)) {
+        Add-Failure 'admin/archive-page' 'Archive page did not render the official-album form and date precision labels.'
+    }
+    $adminSubmissionThumbnail = Invoke-Http -Uri ([Uri]::new($baseUri, "admin.php?page=plugin-ClassIdentity-submissions&action=submission_thumbnail&submission_id=$submissionId")) -Session $adminSession
+    Assert-MediaAllowed $adminSubmissionThumbnail 'submission/admin-thumbnail-allow'
+
+    $submissionAdminToken = Get-CsrfToken -Response $submissionAdminPage -Label 'submission/admin-approve-form'
+    if ($null -eq $submissionAdminToken) { Stop-Setup 'Admin submission review form unavailable.' }
+    $approveSubmission = Invoke-Http -Uri ([Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-submissions')) -Session $adminSession -Method POST `
+        -Origin $origin.AbsoluteUri.TrimEnd('/') -Form @{
+            pwg_token = $submissionAdminToken; action = 'approve_submission'; submission_id = $submissionId
+            album_id = ''; archive_date = '2008-05'; date_precision = 'MONTH'; event_label = 'Synthetic history'; reason = 'Phase1 Family submission approval'
+        }
+    Assert-Status -Response $approveSubmission -Expected @(303) -Label 'submission/admin-approve' | Out-Null
+    $stateAfterApproval = Invoke-Fixture -Action state -RunId $script:runId
+    $approvedSubmission = @($stateAfterApproval.submissions | Where-Object { [int]$_.id -eq $submissionId })
+    if ($approvedSubmission.Count -ne 1 -or $approvedSubmission[0].state -ne 'APPROVED' -or [int]$approvedSubmission[0].approved_image_id -le 0 -or $approvedSubmission[0].era -ne 'HERITAGE') {
+        Add-Failure 'submission/admin-approve-state' 'Approval did not create a HERITAGE archive record.'
+    }
+    if ([int]$stateAfterApproval.image_count -ne ($script:baselineImageCount + 1)) {
+        Add-Failure 'submission/one-original' 'Approval did not add exactly one Piwigo image row.'
+    }
+    $approvedImageId = [int]$approvedSubmission[0].approved_image_id
+    $approvedPicture = Invoke-Http -Uri ([Uri]::new($baseUri, "picture.php?/$approvedImageId")) -Session $familySession
+    Assert-Status -Response $approvedPicture -Expected @(200) -Label 'submission/family-approved-view' | Out-Null
+    $approvedMainTag = [regex]::Match($approvedPicture.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
+    $approvedPreview = if ($approvedMainTag.Success) { Get-EffectiveImageSourceMatch -ImageTag $approvedMainTag.Value } else { $null }
+    $approvedPreviewUri = $null
+    if ($null -eq $approvedPreview -or -not $approvedPreview.Success) {
+        Add-Failure 'submission/family-approved-view' 'Approved HERITAGE viewer did not expose a protected preview.'
+    } else {
+        $approvedPreviewUri = ConvertTo-AbsoluteUri -BaseUri $baseUri -Reference $approvedPreview.Groups[1].Value
+        Assert-MediaAllowed (Invoke-Http -Uri $approvedPreviewUri -Session $familySession -MaxBodyBytes 128) 'submission/family-approved-preview-allow'
+    }
+    Assert-MediaDenied (Invoke-Http -Uri $pendingOriginalUri -Session $familySession) 'submission/family-old-pending-original-deny'
+
+    # A second upload exercises the rejection path. It must remain an audited
+    # rejected record and never become a Piwigo image.
+    $familySubmissionPageTwo = Invoke-Http -Uri $myUri -Session $familySession
+    $familySubmissionTokenTwo = Get-CsrfToken -Response $familySubmissionPageTwo -Label 'submission/family-reject-form'
+    $rejectPost = Invoke-Http -Uri $myUri -Session $familySession -Method POST `
+        -Origin $origin.AbsoluteUri.TrimEnd('/') -Form @{
+            pwg_token = $familySubmissionTokenTwo; action = 'submit_family_photo'
+            era = 'HERITAGE'; suggested_date = ''; date_precision = 'UNKNOWN'; suggested_album = ''; description = 'Synthetic rejection path.'
+        } -FilePath $submissionTempPath -FileField 'submission_file' `
+        -UploadFileName 'family-reject.png' -UploadContentType 'image/png'
+    Assert-Status -Response $rejectPost -Expected @(200) -Label 'submission/family-reject-upload' | Out-Null
+    $stateBeforeReject = Invoke-Fixture -Action state -RunId $script:runId
+    $rejectSubmission = @($stateBeforeReject.submissions | Where-Object { $_.state -eq 'PENDING' } | Sort-Object id -Descending | Select-Object -First 1)
+    if ($rejectSubmission.Count -ne 1) { Stop-Setup 'Second pending Family submission was not persisted.' }
+    $rejectId = [int]$rejectSubmission[0].id
+    $rejectPage = Invoke-Http -Uri ([Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-submissions')) -Session $adminSession
+    $rejectToken = Get-CsrfToken -Response $rejectPage -Label 'submission/admin-reject-form'
+    $rejectResponse = Invoke-Http -Uri ([Uri]::new($baseUri, 'admin.php?page=plugin-ClassIdentity-submissions')) -Session $adminSession -Method POST `
+        -Origin $origin.AbsoluteUri.TrimEnd('/') -Form @{
+            pwg_token = $rejectToken; action = 'reject_submission'; submission_id = $rejectId; reason = 'Phase1 Family submission rejection'
+        }
+    Assert-Status -Response $rejectResponse -Expected @(303) -Label 'submission/admin-reject' | Out-Null
+    $stateAfterReject = Invoke-Fixture -Action state -RunId $script:runId
+    $rejected = @($stateAfterReject.submissions | Where-Object { [int]$_.id -eq $rejectId })
+    if ($rejected.Count -ne 1 -or $rejected[0].state -ne 'REJECTED' -or [int]$rejected[0].approved_image_id -ne 0) {
+        Add-Failure 'submission/admin-reject-state' 'Rejected submission changed into an archive image.'
+    }
+    $submissionAudit = @($stateAfterReject.audit | Where-Object { $_.action -in @('SUBMISSION_CREATE', 'SUBMISSION_APPROVE', 'SUBMISSION_REJECT') -and $_.result -eq 'SUCCESS' })
+    if ($submissionAudit.Count -lt 3) { Add-Failure 'audit/submission-lifecycle' 'Submission create/approve/reject actions were not all audited.' }
+    if (Test-Path -LiteralPath $submissionTempPath) { Remove-Item -LiteralPath $submissionTempPath -Force }
+    $submissionTempPath = $null
+
     # A separate Family Invitation exercises explicit Admin revoke/reissue.
     # Revocation releases the Seat, generation increases on reissue, and the
     # old raw token remains invalid even when replayed with fresh credentials.
@@ -746,8 +1003,11 @@ try {
     # Keep this Windows PowerShell 5.1 script ASCII-only. Decode the expected
     # localized label at runtime because UTF-8 without a BOM is parsed as the
     # active ANSI/DBCS code page by powershell.exe 5.1.
+    # The primary console is Simplified Chinese; keep the technical gate
+    # name above as an internal marker, but assert the business-facing label
+    # here so localization does not regress the safety summary.
     $staleIncidentCountMarkup = [Text.Encoding]::UTF8.GetString(
-        [Convert]::FromBase64String('6ZW/5pyfIFByb3Zpc2lvbmluZ++8iOaTjeS9nCAvIOi0puWPtyAvIOW4reS9je+8iTwvdGg+PHRkPjEgLyAxIC8gMQ==')
+        [Convert]::FromBase64String('6ZW/5pyf5byA6YCa54q25oCB77yI5pON5L2cIC8g6LSm5Y+3IC8g5bit5L2N77yJPC90aD48dGQ+MSAvIDEgLyAx')
     )
     if ($staleSystem.Text -notmatch 'PRODUCTION BLOCKED' -or $staleSystem.Text -notmatch 'PROVISIONING_INCIDENT' -or $staleSystem.Text -notmatch [regex]::Escape($staleIncidentCountMarkup)) {
         Add-Failure 'provisioning/stale-visible' 'long-running operation/account/Seat counts were not visible as a production blocker'
@@ -821,7 +1081,7 @@ try {
     $picture = Invoke-Http -Uri $pictureUri -Session $classmateSession
     Assert-Status $picture @(200) 'media/classmate-living-viewer' | Out-Null
     $mainTag = [regex]::Match($picture.Text, '<img(?=[^>]*\bid=["'']theMainImage["''])[^>]*>', 'IgnoreCase')
-    $previewMatch = if ($mainTag.Success) { [regex]::Match($mainTag.Value, '\bsrc=["'']([^"'']+)["'']', 'IgnoreCase') } else { $null }
+    $previewMatch = if ($mainTag.Success) { Get-EffectiveImageSourceMatch -ImageTag $mainTag.Value } else { $null }
     if ($null -eq $previewMatch -or -not $previewMatch.Success) {
         Add-Pending 'media/living-preview' 'Piwigo viewer did not expose the mature protected preview URL'
         Stop-Setup 'Known LIVING preview URL unavailable.'
@@ -887,7 +1147,12 @@ try {
     Assert-Status $freeze @(303) 'freeze/admin-action' | Out-Null
     Assert-ProtectedPageDenied (Invoke-Http -Uri $myUri -Session $classmateSession) 'freeze/old-session-page-denied'
     Assert-MediaDenied (Invoke-Http -Uri $livingPreviewUri -Session $classmateSession -MaxBodyBytes 128) 'freeze/old-session-media-denied'
+    Assert-ProtectedPageDenied (Invoke-Http -Uri $myUri -Session $familySession) 'freeze/family-old-session-page-denied'
+    if ($null -ne $approvedPreviewUri) {
+        Assert-MediaDenied (Invoke-Http -Uri $approvedPreviewUri -Session $familySession -MaxBodyBytes 128) 'freeze/family-approved-media-denied'
+    }
     [void](New-AuthenticatedSession -WebServiceUri $webServiceUri -Username $classmateUsername -Password $classmatePassword -Label 'freeze/new-login-denied' -ExpectDenied)
+    [void](New-AuthenticatedSession -WebServiceUri $webServiceUri -Username $familyUsername -Password $familyPassword -Label 'freeze/family-new-login-denied' -ExpectDenied)
     $stateAfterFreeze = Invoke-Fixture -Action state -RunId $script:runId
     if ($stateAfterFreeze.classmate.state -ne 'FROZEN') { Add-Failure 'freeze/database-state' 'Identity state did not become FROZEN' }
     $freezeAudit = @($stateAfterFreeze.audit | Where-Object { $_.action -eq 'IDENTITY_FREEZE' -and $_.result -eq 'SUCCESS' })
@@ -917,6 +1182,9 @@ try {
 } catch {
     Add-Failure 'suite/runtime' $_.Exception.Message
 } finally {
+    if ($null -ne $submissionTempPath -and (Test-Path -LiteralPath $submissionTempPath)) {
+        Remove-Item -LiteralPath $submissionTempPath -Force -ErrorAction SilentlyContinue
+    }
     foreach ($lease in @($coreProfileAdminLease, $coreUsersAdminLease, $adminLease)) {
         if ($null -ne $lease) {
             try { Remove-ClassArchiveSystemAdminSession -Lease $lease }
@@ -930,6 +1198,7 @@ try {
                 $cleanupEnvironment['CI_TEST_BASELINE_IMAGE_COUNT'] = [string]$script:baselineImageCount
             }
             [void](Invoke-Fixture -Action cleanup -RunId $script:runId -Environment $cleanupEnvironment)
+            Invoke-ReadProjectionRebuild
         } catch {
             Add-Failure 'cleanup' 'namespace-bounded fixture cleanup failed; run the documented cleanup command before retrying'
         }

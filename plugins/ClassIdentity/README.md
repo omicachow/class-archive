@@ -30,8 +30,24 @@ for every migration. DDL is inspect/create/assert based so interrupted MariaDB
 DDL can be retried safely. A changed checksum, missing constraint, non-InnoDB
 engine or non-utf8mb4 table fails closed.
 
-Deactivation and uninstall never drop ClassIdentity data. Data erasure requires
-a separate, explicit, backed-up governance procedure.
+The native-mutation trigger integration is explicitly locked to **Piwigo
+16.4.0**. Activation, install migration and runtime schema attestation reject a
+different or unknown `PHPWG_VERSION`; a Core upgrade therefore requires a new
+source-schema review and lifecycle regression first. The 18 `BEFORE` triggers
+are plugin-owned MariaDB objects on `images`, `image_category` and `categories`.
+They are a database extension point, not a modification of any Piwigo Core
+source file.
+
+Deactivation first marks all six presentation projections stale, rotates the
+native source epoch, and then drops all 18 plugin-owned triggers. Uninstall
+repeats the same cleanup idempotently while retaining ClassIdentity data.
+Reactivation/reinstall restores and attests the exact trigger definitions, then
+again rotates the epoch and invalidates all projections before migration may
+complete. This prevents native writes made while inactive from reviving an old
+ACTIVE projection. Retirement deliberately remains available after an
+accidental unsupported Core upgrade so cleanup cannot be blocked by the version
+guard. Data erasure still requires a separate, explicit, backed-up governance
+procedure.
 
 ## Tables
 
@@ -46,6 +62,7 @@ The configured Piwigo table prefix is followed by:
 - `class_identity_token`
 - `class_identity_audit_event`
 - `class_identity_role_group`
+- `class_identity_photo`
 
 Non-Family Seat types have a generated singleton marker and a unique
 `(identity_id, singleton_marker)` key. This prevents more than one Classmate,
@@ -53,6 +70,23 @@ Teacher or Anonymous Seat per Identity while allowing multiple Family Seats.
 Token target checks require Claim/Family Invite tokens to target a Seat and
 Password Reset tokens to target a principal, including a Seat-less system
 administrator.
+
+## Canonical photo mapping and Gateway contract
+
+`class_identity_photo` assigns an opaque RFC 4122 ClassArchivePhoto UUID to a
+Piwigo image, its verified media checksum/reference and a nullable future
+Immich asset link. The UUID is the only planned public photo identity; Piwigo
+image ids, Immich asset ids, checksums and storage references remain internal.
+An accepted mapping is never silently rebound: source drift becomes `STALE`
+and Gateway projection fails closed. Pending Family submissions have a private
+`PENDING` mapping which is promoted only after the existing audited Piwigo
+approval pipeline succeeds.
+
+The `Gateway` source boundary separates `IdentityAdapter`, `PiwigoAdapter` and
+`ImmichAdapter`. At the Phase 2 pre-runtime stage its `/api` definitions and
+policy are contract-tested only; routes are deliberately not HTTP-bound until
+an opaque dispatcher can delegate media delivery back to MediaGuard. See
+`docs/class-archive-gateway-contract.md` for ACL and evidence-level details.
 
 ## Runtime APIs
 

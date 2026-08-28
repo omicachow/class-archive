@@ -551,9 +551,12 @@ the deployed surface from the target design:
 | Admin Dashboard | Implemented | Identity/content summaries, recent Audit and fail-closed production blockers |
 | Admin Identities / Teachers | Implemented subset | List/detail/create; issue/reissue Claim; freeze/unfreeze Identity. Import/edit/retire and account-level operations are pending |
 | Admin Invitations | Implemented | Inspect lifecycle; revoke/reissue Claim and Family Invitation. A newly issued raw code appears only in the terminal no-store POST response |
-| Admin Audit / System | Implemented subset | Read redacted events; inspect provisioning incidents; run only the bounded proven compensation. Search/export and anonymous-resolution UI are pending |
+| Admin Audit / System | Implemented subset | Read redacted events; inspect provisioning incidents; run only the bounded proven compensation |
 | Admin Seats/Accounts | Planned | Active Family release, account freeze, Anonymous disable, force logout and member-account password reset |
-| Submissions / Anonymous / Archive / Spotlight | Planned | No Admin page or route exists yet |
+| Submissions | Implemented Phase 1 subset | Family HERITAGE-only pending store, safe Admin thumbnail/review, audited approve/reject and Piwigo pipeline handoff; Community remains inactive |
+| Anonymous governance | Implemented Phase 1 subset | Context aliases, interaction summary, explicit audited resolution, enable/disable with credential revocation |
+| Archive | Implemented Phase 1 subset | Create private official albums below Era roots; existing Piwigo image/album projections, Era/date precision/confidence/event metadata and one-original multi-album association |
+| Spotlight | Planned | No Admin page or route exists yet |
 | Export | Planned | Future CSV/JSON Identity/Seat/account metadata only; never password/token/hash/session/secret fields |
 
 Every mutation is POST, CSRF-protected, same-origin checked and authorized on

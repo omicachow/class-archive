@@ -15,6 +15,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
         'required' => [
             'main.inc.php', 'media-gateway.php', 'derivative-generator.php',
             'identity-derivative-fallback.php', 'src/MediaGuard.php',
+            'src/MediaFilePolicy.php', 'src/DerivativeWarmupQueue.php', 'src/DerivativeCacheWarmer.php',
         ],
     ],
     'ClassIdentity' => [
@@ -22,10 +23,25 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
         'required' => [
             'main.inc.php', 'maintain.class.php', 'admin.php',
             'src/Schema.php', 'src/Repository.php', 'src/Audit.php',
+            'src/ClassArchivePhoto.php', 'src/ClassArchivePhotoMappingService.php',
             'src/Access.php', 'src/CoreAdapter.php', 'src/CapabilityGuard.php',
             'src/RateLimiter.php', 'src/ProvisioningService.php',
             'src/AdminService.php', 'src/AnonymousPresenter.php',
             'src/AnonymousResolutionService.php', 'src/Http.php', 'public.php',
+            'src/SubmissionService.php', 'src/MemberEraUploadService.php', 'src/ArchiveService.php',
+            'src/AnonymousGovernanceService.php', 'src/BuildCommit.php', 'src/MediaAttestation.php',
+            'src/MlArtifactAttestation.php',
+            'src/ReconciliationService.php', 'src/MaintenanceStatus.php',
+            'src/BackupRestoreEvidence.php',
+            'src/PhotoCommentService.php', 'src/AiIndexService.php',
+            'src/DomainSupport.php', 'src/ProjectionMutationBoundary.php', 'src/PersonCurationService.php',
+            'src/AlbumService.php', 'src/MemoryAlbumCurationService.php', 'src/SpotlightService.php', 'src/SpotlightRotationService.php',
+            'src/CanonicalPhotoService.php', 'src/BulkArchiveService.php',
+            'src/PrivateFullLibraryService.php',
+            'src/PhotoAppRedirect.php',
+            'src/Gateway/Contracts.php', 'src/Gateway/GatewayPolicy.php',
+            'src/Gateway/GatewayService.php', 'src/Gateway/ReadProjectionStore.php', 'src/Gateway/PiwigoGatewayAdapter.php',
+            'src/Gateway/BridgeImmichAdapter.php', 'src/Gateway/CollectionSnapshotBuilder.php', 'src/Gateway/ReadProjectionBuilder.php', 'src/Gateway/GatewayHttpController.php',
         ],
     ],
 ];
@@ -45,6 +61,33 @@ function assertRuntimeUser(): void
     if ($uid === 0 || !is_array($account) || ($account['name'] ?? null) !== 'nginx') {
         fail('Run the custom plugin installer as the nginx user, never root.');
     }
+}
+
+/**
+ * The pinned image normalizes persistent _data ownership at startup. That can
+ * transform the root-prepared nginx:nginx 0600 marker into one exact managed
+ * data-owner form while retaining the nginx ACL. Both forms remain fail-closed:
+ * an unrecognized marker is never used to open or close maintenance.
+ */
+function hasTrustedMaintenanceMarkerOwnership(array $metadata, string $dataDirectory, int $nginxUid, int $nginxGid): bool
+{
+    $mode = (int) ($metadata['mode'] ?? 0) & 0777;
+    $uid = (int) ($metadata['uid'] ?? -1);
+    $gid = (int) ($metadata['gid'] ?? -1);
+    // The named-volume ACL normalizer can expose the same nginx-owned marker
+    // as 0660/0670 after restart.  Permit those exact modes only when its
+    // group remains nginx; never accept a readable marker for an arbitrary
+    // runtime group.
+    if ($uid === $nginxUid && $gid === $nginxGid && in_array($mode, [0600, 0660, 0670], true)) {
+        return true;
+    }
+
+    $directory = @lstat($dataDirectory);
+    return is_array($directory)
+        && $uid > 0
+        && $uid === (int) ($directory['uid'] ?? -2)
+        && $gid === (int) ($directory['gid'] ?? -2)
+        && in_array($mode, [0660, 0670], true);
 }
 
 function assertTrustedMaintenanceGate(): void
@@ -72,11 +115,7 @@ function assertTrustedMaintenanceGate(): void
     ) {
         fail('An exact regular maintenance gate is required.');
     }
-    if (
-        (int) ($metadata['uid'] ?? -1) !== posix_geteuid()
-        || (($metadata['mode'] ?? 0) & 0777) !== 0600
-        || (int) ($metadata['nlink'] ?? 0) !== 1
-    ) {
+    if (!hasTrustedMaintenanceMarkerOwnership($metadata, $resolvedDirectory, posix_geteuid(), posix_getegid()) || (int) ($metadata['nlink'] ?? 0) !== 1) {
         fail('The maintenance gate owner or permissions are untrusted.');
     }
     $existing = file_get_contents($path);
@@ -360,7 +399,12 @@ function activatePlugin(string $pluginId): void
     }
     $expected = "ACTIVATED {$pluginId} {$definition['version']}";
     if (!str_contains((string) $stdout, $expected)) {
-        fail("{$pluginId} activation returned an unexpected result.");
+        // Piwigo 16's native lifecycle can return successfully through its
+        // bootstrap path without preserving the helper's stdout. Never treat
+        // that silent success as authorization to continue: verify the exact
+        // plugin id, locked version, and active database state through the
+        // independent read-only verifier before accepting it.
+        verifyPluginState($pluginId);
     }
 }
 
@@ -650,6 +694,44 @@ function bootstrapClassIdentity(bool $withSyntheticFixtures): void
     runClassIdentityBootstrap($arguments, 'CLASS_IDENTITY_BOOTSTRAPPED', 'bootstrap');
 }
 
+/**
+ * A fresh Piwigo install has no Era roots yet.  ClassIdentity intentionally
+ * refuses to create or guess them, while the baseline configurator creates
+ * the two reviewed roots only after ClassArchivePolicy is active.  Keeping
+ * this narrow ordering here makes a brand-new isolated private library use
+ * the same safe bootstrap sequence as the established stack.
+ */
+function configurePiwigoBaseline(bool $verifyOnly, bool $verifyV4SyntheticExistingRuntime = false): void
+{
+    $arguments = $verifyOnly ? ['--verify-only'] : [];
+    if ($verifyV4SyntheticExistingRuntime) {
+        $arguments[] = '--verify-v4-synthetic-existing-runtime';
+    }
+    $pipes = [];
+    $process = proc_open(
+        [PHP_BINARY, '/workspace/infra/scripts/configure-piwigo-baseline.php', ...$arguments],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        null,
+        null,
+        ['bypass_shell' => true],
+    );
+    if (!is_resource($process)) {
+        fail('Cannot start isolated Piwigo baseline configuration.');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exitCode = proc_close($process);
+    $expected = $verifyV4SyntheticExistingRuntime
+        ? 'BASELINE_SYNTHETIC_EXISTING_RUNTIME_VERIFIED'
+        : ($verifyOnly ? 'BASELINE_VERIFIED' : 'BASELINE_CONFIGURED');
+    if ($exitCode !== 0 || !str_contains((string) $stdout, $expected)) {
+        fail('Piwigo baseline configuration failed: ' . trim((string) $stderr));
+    }
+}
+
 function verifyClassIdentityRuntime(bool $withSyntheticFixtures, bool $requireMaintenanceMarker): void
 {
     $arguments = ['--verify-only'];
@@ -690,6 +772,15 @@ function parseInstallerArguments(array $arguments): array
     return ['mode' => $mode, 'with_synthetic_fixtures' => $withSyntheticFixtures];
 }
 
+function isV4SyntheticExistingRuntime(): bool
+{
+    // The synthetic runner owns both values in its strict generated Compose
+    // environment. This is only a non-mutating baseline verifier; it can
+    // never enable the exception for a normal/private runtime.
+    return getenv('CLASS_ARCHIVE_RUNTIME_SCOPE') === 'SYNTHETIC_V4_MIGRATION'
+        && getenv('CLASS_ARCHIVE_V4_SYNTHETIC_MIGRATION') === '1';
+}
+
 /**
  * @param list<string> $results
  */
@@ -703,6 +794,8 @@ function verifyInstalledRuntime(array &$results, bool $withSyntheticFixtures, bo
     foreach (array_keys(CLASS_ARCHIVE_PLUGIN_MANIFEST) as $pluginId) {
         $results[] = installPlugin($pluginId, true);
     }
+    configurePiwigoBaseline(true, isV4SyntheticExistingRuntime());
+    $results[] = 'VERIFIED Piwigo baseline';
     verifyClassIdentityRuntime($withSyntheticFixtures, $maintenanceOpen);
     $results[] = 'VERIFIED ClassIdentity schema/principal runtime';
 }
@@ -713,6 +806,7 @@ function main(array $arguments): void
     $options = parseInstallerArguments($arguments);
     $mode = $options['mode'];
     $withSyntheticFixtures = $options['with_synthetic_fixtures'];
+    $existingSyntheticRuntime = isV4SyntheticExistingRuntime();
     $results = [];
     if ($mode === 'verify') {
         verifyInstalledRuntime($results, $withSyntheticFixtures, false);
@@ -735,9 +829,16 @@ function main(array $arguments): void
         try {
             assertTrustedMaintenanceGate();
             setClassIdentityEnforcement(true);
-            foreach (array_keys(CLASS_ARCHIVE_PLUGIN_MANIFEST) as $pluginId) {
-                $results[] = installPlugin($pluginId, false);
-            }
+            // The first plugin is deliberately installed before the Core
+            // baseline.  The configurator requires ClassArchivePolicy, and
+            // it establishes the Heritage/Living roots that ClassIdentity
+            // later maps without guessing their semantics.
+            $results[] = installPlugin('ClassArchivePolicy', false);
+            configurePiwigoBaseline($existingSyntheticRuntime, $existingSyntheticRuntime);
+            $results[] = $existingSyntheticRuntime
+                ? 'VERIFIED existing synthetic Piwigo baseline'
+                : 'CONFIGURED Piwigo baseline';
+            $results[] = installPlugin('ClassIdentity', false);
             bootstrapClassIdentity($withSyntheticFixtures);
             // Bootstrap already closes the window. Repeat the narrow setter so
             // this process independently verifies the durable state. The web

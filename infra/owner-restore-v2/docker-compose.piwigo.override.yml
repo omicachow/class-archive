@@ -1,0 +1,98 @@
+services:
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+      com.classarchive.storage: m-ext4-bind-v2
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+      com.classarchive.storage: m-ext4-bind-v2
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+    volumes:
+      - type: bind
+        source: ${CLASS_ARCHIVE_RESTORE_NGINX_CONFIG:?Set the generated v2 restore nginx config}
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../.codex-work/owner-restore-v2/runtime/git-evidence/HEAD
+        target: /workspace/git/HEAD
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../.codex-work/owner-restore-v2/runtime/git-evidence/refs
+        target: /workspace/git/refs
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+
+  pre-migration-db-backup:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+
+  restore:
+    restart: "no"
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+
+networks:
+  app:
+    internal: false
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+    ipam:
+      config:
+        - subnet: 10.246.1.0/24
+  immich_gateway:
+    labels:
+      com.classarchive.scope: owner-independent-restore-v2
+    ipam:
+      config:
+        - subnet: 10.246.0.0/24
+
+volumes:
+  piwigo_data:
+    labels: &v2-volume-labels
+      com.classarchive.scope: owner-independent-restore-v2
+      com.classarchive.storage: m-ext4-bind-v2
+  piwigo_uploads:
+    labels: *v2-volume-labels
+  piwigo_galleries:
+    labels: *v2-volume-labels
+  piwigo_derivatives:
+    labels: *v2-volume-labels
+  piwigo_db:
+    labels: *v2-volume-labels
+  piwigo_scripts:
+    labels: *v2-volume-labels
+  backups:
+    labels: *v2-volume-labels

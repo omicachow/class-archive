@@ -1,0 +1,440 @@
+# Isolated, synthetic-only v16 -> v17 schema-migration laboratory.
+#
+# This overlay is deliberately additive.  It never shares a Docker project,
+# named volume, bridge, source-media bind, or port with the 8091 engineering
+# baseline, the 8191 owner library, or either preserved restore environment.
+# The only host input is a verified DB-only pre-migration snapshot mounted
+# read-only into the one-shot restore service.  It contains no original media.
+
+services:
+  db:
+    restart: "no"
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+    # The only code mount granted to the sandbox database is a small,
+    # read-only probe program.  Keeping the probe in a file avoids fragile
+    # Windows-to-WSL `sh -c` quoting while keeping the database unable to see
+    # any source snapshot, media, owner runtime, or private data.
+    volumes:
+      - type: bind
+        source: ../infra/scripts/v4-synthetic-db-probe.sh
+        target: /workspace/infra/scripts/v4-synthetic-db-probe.sh
+        read_only: true
+        bind:
+          create_host_path: false
+
+  piwigo:
+    restart: "no"
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V4_SYNTHETIC_MIGRATION: "1"
+
+  # Source input is intentionally database-only and read-only.  This service
+  # has no mount to 8091, 8191, 8291, any private runtime, M:, or media data.
+  # It refuses a non-empty target database and validates the existing snapshot
+  # manifest before it writes the isolated sandbox database/configuration.
+  v4-synthetic-db-restore:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v4-synthetic-migration"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    # The helper writes one 0600 Piwigo DB config and must transfer ownership
+    # to the unprivileged Piwigo runtime user. No other capability is granted.
+    # The one-shot restore writes a freshly generated Piwigo DB config into
+    # the isolated data volume and then transfers it to the runtime uid. It
+    # needs only the same narrow ownership capabilities as the established
+    # recovery helper, never a broader Docker/network capability.
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+      # MariaDB declares this path as a VOLUME. Mask it for the one-shot
+      # helper so `compose run --rm` cannot create an anonymous data volume.
+      - /var/lib/mysql:rw,nosuid,nodev,noexec,size=1m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/restore-v4-synthetic-pre-migration-db.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      DB_USER: ${DB_USER:?Set DB_USER in the ignored v4 sandbox env file}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v4 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      PIWIGO_UID: ${PIWIGO_UID:-1000}
+      PIWIGO_GID: ${PIWIGO_GID:-1000}
+      CLASS_ARCHIVE_V4_SYNTHETIC_RESTORE: "1"
+    volumes:
+      - type: bind
+        source: ${V4_SYNTHETIC_SNAPSHOT_PATH:?Set V4_SYNTHETIC_SNAPSHOT_PATH in the ignored v4 sandbox env file}
+        target: /snapshot
+        read_only: true
+        bind:
+          create_host_path: false
+      - piwigo_data:/target-piwigo
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+
+  # Opt-in browser evidence surface for the migrated synthetic database.  It
+  # is a deliberately small compatibility BFF, not an Immich runtime: no
+  # Immich server/ML/Postgres/Valkey service is declared here, and it receives
+  # no Piwigo database, original, derivative, upload or gallery volume.  The
+  # browser can reach it only through Piwigo nginx's existing 8081 front proxy
+  # at the sandbox's loopback 8491 mapping.
+  #
+  # The service name intentionally matches the nginx variable upstream.  Its
+  # Docker project and fixed gateway address remain unique to this sandbox.
+  immich-web-compat:
+    profiles: ["v4-synthetic-browser"]
+    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa
+    entrypoint: ["node", "/compat/server.mjs"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CLASS_ARCHIVE_WEB_COMPAT_PORT: "3000"
+      CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT: ${CLASS_ARCHIVE_COMPAT_HTTP_PORT:?Set CLASS_ARCHIVE_COMPAT_HTTP_PORT in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: ${CLASS_ARCHIVE_CORE_PUBLIC_PORT:?Set CLASS_ARCHIVE_CORE_PUBLIC_PORT in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_WEB_ROOT: /web
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
+      # The BFF cannot pick an upstream.  Its only application request path is
+      # the policy-enforcing internal Piwigo Gateway, which still owns the
+      # MediaGuard authorization decision.
+      CLASS_ARCHIVE_GATEWAY_ORIGIN: http://piwigo:8088
+    expose:
+      - "3000"
+    volumes:
+      - type: bind
+        source: ./immich-spike/web-compat
+        target: /compat
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./immich-spike/photo-ui
+        target: /photo-ui
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./immich-spike/source/official-v3.1.0/web/build
+        target: /web
+        read_only: true
+        bind:
+          create_host_path: false
+      # Override the upstream image's writable /data VOLUME with the existing
+      # empty source directory.  This prevents an anonymous data volume and
+      # makes the compatibility process incapable of persisting media/indexes.
+      - type: bind
+        source: ./immich-spike/web-compat/empty-data
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/healthz').then(function(r){process.exit(r.status === 200 ? 0 : 1)}).catch(function(){process.exit(1)})\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks:
+      immich_gateway:
+        # The exact peer is intentionally trusted by nginx's 8088 listener;
+        # no broader subnet trust is granted to the browser BFF.
+        ipv4_address: ${CLASS_ARCHIVE_BFF_GATEWAY_IP:?Set CLASS_ARCHIVE_BFF_GATEWAY_IP in the ignored v4 sandbox env file}
+    restart: "no"
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.component: compatibility-bff-no-ml
+
+  pre-migration-db-backup:
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.operation: input-created-elsewhere-only
+
+  backup:
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+
+  backup-audit:
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+
+  restore:
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+
+  # Explicit format-9 recovery proof. These services remain opt-in and have
+  # no original, upload, gallery, derivative, owner, private, or source-media
+  # mount. The second MariaDB volume is intentionally independent from the
+  # migrated sandbox DB so a successful import cannot be a same-volume read.
+  v17-synthetic-db-backup:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/create-v17-synthetic-db-backup.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V17_SYNTHETIC_RECOVERY: "1"
+    volumes:
+      - backups:/backup
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-db-only-backup
+
+  v17-synthetic-recovery-db:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      MARIADB_USER: ${DB_USER:?Set DB_USER in the ignored v4 sandbox env file}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v4 sandbox env file}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - v17_synthetic_recovery_db:/var/lib/mysql
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-second-empty-db
+
+  v17-synthetic-db-restore:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      v17-synthetic-recovery-db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/restore-v17-synthetic-db-backup.sh"]
+    environment:
+      DB_HOST: v17-synthetic-recovery-db
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V17_SYNTHETIC_RECOVERY: "1"
+      CLASS_ARCHIVE_V17_SYNTHETIC_RESTORE_BUNDLE: ""
+    volumes:
+      - backups:/snapshot:ro
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-second-empty-db-restore
+
+  v17-synthetic-db-fixture:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/capture-v17-synthetic-recovery-fixture.sh"]
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V17_SYNTHETIC_RECOVERY: "1"
+    volumes:
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-db-only-fixture
+
+  # This one-shot service creates an idempotent, non-empty collection-domain
+  # marker through the installed ClassIdentity service. It has the synthetic
+  # Piwigo application volume only; original/upload/gallery/derivative media
+  # volumes are deliberately absent.
+  v17-synthetic-marker:
+    image: ${PIWIGO_IMAGE:?Set PIWIGO_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      piwigo:
+        condition: service_healthy
+    user: "${PIWIGO_UID:-1000}:${PIWIGO_GID:-1000}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+      # Piwigo Core builds a temporary template object during CLI bootstrap.
+      # Overlay only that disposable cache directory so this one-shot marker
+      # can keep the entire synthetic application volume read-only.
+      - /var/www/html/piwigo/_data/templates_c:mode=0770,uid=${PIWIGO_UID:-1000},gid=${PIWIGO_GID:-1000},size=16m
+    entrypoint: ["php", "/workspace/infra/scripts/seed-v17-synthetic-recovery-marker.php"]
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V17_SYNTHETIC_RECOVERY: "1"
+      CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER:?Set CLASS_ARCHIVE_CLAIM_CODE_PEPPER in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET:?Set CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET in the ignored v4 sandbox env file}
+    volumes:
+      - piwigo_data:/var/www/html/piwigo:ro
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-collection-marker
+
+  # The target fingerprint uses a separate service rather than a caller
+  # supplied DB_HOST override, making the source/target comparison explicit.
+  v17-synthetic-recovery-fixture:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v4 sandbox env file}
+    profiles: ["v17-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      v17-synthetic-recovery-db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/capture-v17-synthetic-recovery-fixture.sh"]
+    environment:
+      DB_HOST: v17-synthetic-recovery-db
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v4 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v4 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V17_SYNTHETIC_RECOVERY: "1"
+    volumes:
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-second-empty-db-fixture
+
+networks:
+  # No egress is needed for a schema-only laboratory.  Docker image pulls are
+  # performed before containers join this network; host exposure remains the
+  # two exact loopback ports inherited from the base compose file.
+  app:
+    name: ${CLASS_ARCHIVE_V4_SANDBOX_APP_NETWORK:?Set CLASS_ARCHIVE_V4_SANDBOX_APP_NETWORK in the ignored v4 sandbox env file}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CLASS_ARCHIVE_V4_SANDBOX_APP_SUBNET:?Set CLASS_ARCHIVE_V4_SANDBOX_APP_SUBNET in the ignored v4 sandbox env file}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+
+  # Kept separate because the base Piwigo compose joins it.  No Immich or BFF
+  # service is started by this runner; a schema drill must not create a second
+  # AI runtime or expose a media path merely to test migration DDL.
+  immich_gateway:
+    name: ${CLASS_ARCHIVE_GATEWAY_NETWORK:?Set CLASS_ARCHIVE_GATEWAY_NETWORK in the ignored v4 sandbox env file}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CLASS_ARCHIVE_GATEWAY_SUBNET:?Set CLASS_ARCHIVE_GATEWAY_SUBNET in the ignored v4 sandbox env file}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+
+volumes:
+  piwigo_data:
+    name: ${PIWIGO_DATA_VOLUME:-class_archive_v4_synthetic_migration_piwigo_data}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  piwigo_uploads:
+    name: ${PIWIGO_UPLOADS_VOLUME:-class_archive_v4_synthetic_migration_piwigo_uploads}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  piwigo_galleries:
+    name: ${PIWIGO_GALLERIES_VOLUME:-class_archive_v4_synthetic_migration_piwigo_galleries}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  piwigo_derivatives:
+    name: ${PIWIGO_DERIVATIVES_VOLUME:-class_archive_v4_synthetic_migration_piwigo_derivatives}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  piwigo_db:
+    name: ${PIWIGO_DB_VOLUME:-class_archive_v4_synthetic_migration_piwigo_db}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  piwigo_scripts:
+    name: ${PIWIGO_SCRIPTS_VOLUME:-class_archive_v4_synthetic_migration_piwigo_scripts}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  backups:
+    name: ${PIWIGO_BACKUPS_VOLUME:-class_archive_v4_synthetic_migration_backups}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+  v17_synthetic_recovery_db:
+    # The migration runner supplies an attempt-specific value in its ignored
+    # sandbox env.  A recovery proof must never attach to an earlier attempt's
+    # target volume merely because the Compose project name is unchanged.
+    name: ${V17_SYNTHETIC_RECOVERY_DB_VOLUME:?Set V17_SYNTHETIC_RECOVERY_DB_VOLUME in the ignored v4 sandbox env file}
+    labels:
+      com.classarchive.scope: v4-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-9-second-empty-db

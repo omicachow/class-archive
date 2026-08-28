@@ -187,8 +187,14 @@ old session loses access immediately remain lifecycle production gates.
 - Both `GET` and `HEAD` execute MediaGuard.
 - Authorized static transfer and byte ranges are performed by nginx, not a PHP
   `readfile()` loop.
-- First-time derivative generation may execute Piwigo's existing `i.php`
-  pipeline only after authorization; cached derivatives use nginx sendfile.
+- Member `GET`, `HEAD` and `Range` never generate a derivative. A missing,
+  unsafe or stale presentation cache entry returns a generic HTTP 503 with no
+  path/filename and no `X-Accel-Redirect`; the request cannot reach `i.php`.
+  Approval/import first queues only a canonical ClassArchivePhoto UUID + Piwigo
+  image mapping, then performs a bounded warm after the administrator/CLI write
+  has committed. Failure retains that path-free marker for maintenance retry;
+  it never moves image work into a Family/member read. Cached derivatives
+  continue to use nginx sendfile/X-Accel delivery.
 - Responses use `Cache-Control: private, no-cache, must-revalidate, max-age=0`,
   `Pragma: no-cache`, `Vary: Cookie`, `X-Content-Type-Options: nosniff` and
   `Referrer-Policy: no-referrer`. A browser may retain bytes privately but must
@@ -196,6 +202,10 @@ old session loses access immediately remain lifecycle production gates.
   bandwidth without turning a stale cache entry into persistent access.
 - Range, query strings, filename guesses, image-id guesses, path encoding and
   normalization never alter the actor/era decision.
+- Before emitting `X-Accel-Redirect`, MediaGuard revalidates that the target is
+  a private `0660` regular file with exactly one hard-link and a trusted media
+  owner. Symlinks, hardlinks and ownership/mode drift return no internal URI;
+  `GET`, `HEAD` and `Range` share this fail-closed check.
 - Raw paths, cookies, passwords and authorization data are not written to the
   Class Archive audit log. Internal gateway failures log only a bounded error
   code and return no media bytes.
@@ -220,8 +230,8 @@ Having only the PHP plugin or only rewrite rules is not a passing state.
 The outage and Phase 1 lifecycle tests confirm their respective fail-closed
 boundaries. The Admin Console reports MediaGuard configuration and keeps
 `PRODUCTION BLOCKED`, because a digest-bound, persisted record of the complete
-HTTP matrix is not implemented yet; a green configuration inspection is not a
-substitute for that attestation.
+HTTP matrix is not implemented; the live matrix passing is not itself a
+production attestation.
 
 ## Deployment boundary
 

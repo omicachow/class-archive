@@ -54,9 +54,27 @@ final class Audit
         'piwigo_user_id',
         'piwigo_group_id',
         'group_name',
+        'name',
         'enabled',
         'auth_epoch',
         'era',
+        'mime_type',
+        'extension',
+        'byte_size',
+        'presentation_byte_size',
+        'width',
+        'height',
+        'date_precision',
+        'date_confidence',
+        'date_source',
+        'suggested_date',
+        'archive_date',
+        'event_label',
+        'image_id',
+        'piwigo_image_id',
+        'submission_id',
+        'album_id',
+        'official',
         'result',
         'operation_type',
         'operation_state',
@@ -71,6 +89,48 @@ final class Audit
         'to',
         'fields',
         'changes',
+        'class_photo_id',
+        'comment_id',
+        'parent_comment_id',
+        'class_person_id',
+        'class_album_id',
+        'canonical_class_photo_id',
+        'cover_class_photo_id',
+        'duplicate_id',
+        'merge_id',
+        'spotlight_id',
+        'batch_id',
+        'display_name',
+        'display_alias',
+        'classmate_identity_id',
+        'owner_principal_id',
+        'piwigo_category_id',
+        'visibility',
+        'album_type',
+        'relation_kind',
+        'rule',
+        'similarity',
+        'source_kind',
+        'presentation_kind',
+        'provenance_code',
+        'canonicalized',
+        'item_count',
+        'item_total',
+        'applied_count',
+        'deduplicated_count',
+        'failed_count',
+        'manifest_version',
+        'source_code',
+        'source_collection_id',
+        'depth',
+        'error_code',
+        'high_risk_confirmed',
+        'scope',
+        'display_count',
+        'candidate_count',
+        'next_rotation_at',
+        'rotation_interval_seconds',
+        'rotation_state',
     ];
 
     /** @var list<string> */
@@ -87,11 +147,35 @@ final class Audit
         'ANONYMOUS_RESOLVE',
         'ANONYMOUS_DISABLE',
         'SUBMISSION_REJECT',
+        'SUBMISSION_APPROVE',
+        'SUBMISSION_APPROVE_ABORT',
+        'REJECTED_BINARY_CLEANUP',
+        'ARCHIVE_METADATA_UPDATE',
+        'ANONYMOUS_ENABLE',
         'ERA_CHANGE',
         'PERMISSION_CHANGE',
         'PRINCIPAL_SECURITY_CHANGE',
         'MANUAL_COMPENSATION_ATTEMPT',
         'MANUAL_COMPENSATION',
+        'PERSON_CREATE_MANUAL',
+        'PERSON_UPDATE',
+        'PERSON_MERGE',
+        'PERSON_MERGE_REVERT',
+        'PERSON_PHOTO_RULE_SET',
+        'PERSON_PHOTO_RULE_CLEAR',
+        'PERSON_PHOTO_MOVE',
+        'ALBUM_MAPPING_CREATE',
+        'ALBUM_MAPPING_UPDATE',
+        'ALBUM_COVER_UPDATE',
+        'ALBUM_DISPLAY_ALIAS_UPDATE',
+        'MEMORY_SAVE_AS_ALBUM',
+        'SPOTLIGHT_CANCEL',
+        'PHOTO_SOURCE_RECORD',
+        'PHOTO_DUPLICATE_REVIEW',
+        'PHOTO_DUPLICATE_CONSOLIDATE',
+        'PHOTO_DUPLICATE_REVERT',
+        'BULK_ARCHIVE_UPDATE',
+        'PHOTO_COMMENT_DELETE',
     ];
 
     private Repository $repository;
@@ -305,6 +389,46 @@ final class Audit
                 if (preg_match('/\A[A-Z0-9][A-Z0-9._-]{1,63}\z/D', $value) !== 1) {
                     throw new \InvalidArgumentException('class_identity_audit_invalid_roster_code');
                 }
+                return;
+            }
+            if ($field === 'provenance_code') {
+                // This is a bounded, non-secret enum-like local source label.
+                // Filesystem paths and filenames are intentionally forbidden.
+                if (preg_match('/\A[A-Z0-9][A-Z0-9._:-]{1,63}\z/D', $value) !== 1) {
+                    throw new \InvalidArgumentException('class_identity_audit_invalid_provenance_code');
+                }
+                return;
+            }
+            if ($field === 'presentation_kind') {
+                // Presentation surrogates use a closed, enum-like technical
+                // label. Source filenames and paths remain forbidden.
+                if (preg_match('/\A[A-Z0-9][A-Z0-9_]{1,63}\z/D', $value) !== 1) {
+                    throw new \InvalidArgumentException('class_identity_audit_invalid_presentation_kind');
+                }
+                return;
+            }
+            if (in_array($field, [
+                'class_photo_id',
+                'comment_id',
+                'parent_comment_id',
+                'class_person_id',
+                'class_album_id',
+                'source_collection_id',
+                'canonical_class_photo_id',
+                'cover_class_photo_id',
+                'duplicate_id',
+                'merge_id',
+                'spotlight_id',
+                'batch_id',
+            ], true)) {
+                if (preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/iD', $value) !== 1) {
+                    throw new \InvalidArgumentException('class_identity_audit_invalid_opaque_id');
+                }
+                return;
+            }
+            if (in_array($field, ['from', 'to'], true)
+                && preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/iD', $value) === 1
+            ) {
                 return;
             }
             // Structured old/new values use an allowlisted key vocabulary, but

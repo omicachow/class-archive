@@ -164,6 +164,34 @@ final class ClassIdentityHttp
         );
     }
 
+    /** @param array<string, mixed> $mapping */
+    public static function renderAnonymousResolution(array $mapping, string $returnUrl): never
+    {
+        $alias = $mapping['alias'] ?? null;
+        $classmate = $mapping['classmate_id'] ?? null;
+        $realName = $mapping['real_name'] ?? null;
+        $seatId = filter_var($mapping['seat_id'] ?? null, FILTER_VALIDATE_INT);
+        if (
+            !is_string($alias) || $alias === '' || strlen($alias) > 128
+            || !is_string($classmate) || $classmate === '' || strlen($classmate) > 64
+            || !is_string($realName) || $realName === '' || strlen($realName) > 190
+            || !is_int($seatId) || $seatId <= 0
+        ) {
+            self::abort(503, '匿名身份结果暂时不可用');
+        }
+        self::renderOneTimeCredential(
+            '匿名身份解析结果',
+            '本次查看已写入操作审计。关闭本页后不会把映射结果保存在普通页面、会话或 URL 中。',
+            [
+                '对外匿名名' => $alias,
+                '班级成员编号' => $classmate,
+                '成员姓名' => $realName,
+                '匿名席位' => '#' . $seatId,
+            ],
+            $returnUrl,
+        );
+    }
+
     /** @param array<string, string> $fields */
     private static function renderOneTimeCredential(
         string $title,
@@ -287,18 +315,29 @@ final class ClassIdentityHttp
         if (
             $originScheme === '' || $originHost === ''
             || !hash_equals($rootScheme, $originScheme)
-            || $rootPort !== $originPort
         ) {
             return false;
         }
 
-        if (hash_equals($rootHost, $originHost)) {
+        if ($rootPort === $originPort && hash_equals($rootHost, $originHost)) {
             return true;
         }
 
         $loopbackHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
-        return in_array($rootHost, $loopbackHosts, true)
-            && in_array($originHost, $loopbackHosts, true);
+        if (!in_array($rootHost, $loopbackHosts, true)
+            || !in_array($originHost, $loopbackHosts, true)
+        ) {
+            return false;
+        }
+
+        // Piwigo's configured root has no knowledge of a Docker host-port
+        // mapping, so localhost development can legitimately be served at
+        // http://127.0.0.1:8090 while get_absolute_root_url() says
+        // http://localhost/. Never accept an arbitrary loopback Origin just
+        // because both names are aliases: it must exactly match the browser's
+        // request Host and port. A site on localhost:3000 therefore cannot
+        // forge a state-changing request to this service on localhost:8090.
+        return self::originMatchesRequestHost($originScheme, $originHost, $originPort);
     }
 
     public static function requireReason(string $field = 'reason'): string
@@ -433,7 +472,13 @@ final class ClassIdentityHttp
     private static function requireSameOriginWhenPresent(): void
     {
         $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-        if ($origin === '') {
+        // Chromium can emit the literal `null` Origin for a same-document
+        // HTML form navigation. It carries no origin assertion, so handle it
+        // exactly like an absent Origin: the mandatory per-session Piwigo
+        // CSRF token remains the authorization proof. A concrete foreign
+        // Origin is still rejected below; public Claim/Invite routes keep
+        // their stricter explicit-Origin requirement.
+        if ($origin === '' || (is_string($origin) && strtolower($origin) === 'null')) {
             return;
         }
         if (!is_string($origin)) {
@@ -448,6 +493,31 @@ final class ClassIdentityHttp
     private static function defaultPort(string $scheme): int
     {
         return $scheme === 'https' ? 443 : 80;
+    }
+
+    private static function originMatchesRequestHost(string $scheme, string $originHost, int $originPort): bool
+    {
+        $requestHost = $_SERVER['HTTP_HOST'] ?? '';
+        if (!is_string($requestHost) || $requestHost === '' || str_contains($requestHost, '/')) {
+            return false;
+        }
+
+        $requestParts = parse_url($scheme . '://' . $requestHost);
+        if (!is_array($requestParts)
+            || isset($requestParts['user']) || isset($requestParts['pass'])
+            || isset($requestParts['path']) || isset($requestParts['query']) || isset($requestParts['fragment'])
+        ) {
+            return false;
+        }
+
+        $requestHostName = strtolower((string) ($requestParts['host'] ?? ''));
+        $requestPort = isset($requestParts['port'])
+            ? (int) $requestParts['port']
+            : self::defaultPort($scheme);
+
+        return $requestHostName !== ''
+            && $requestPort === $originPort
+            && hash_equals($originHost, $requestHostName);
     }
 
     private static function length(string $value): int

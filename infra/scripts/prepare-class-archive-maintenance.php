@@ -84,16 +84,33 @@ function classifyMarker(string $path, int $nginxUid, int $nginxGid): array
     }
 
     $state = 'UNKNOWN';
-    if ($uid === $nginxUid && $gid === $nginxGid && ($mode & 0777) === 0600) {
+    if (
+        $uid === $nginxUid
+        && $gid === $nginxGid
+        // Docker's named-volume ACL normalizer can expose the ACL mask as
+        // 0660/0670 after the initial atomic 0600 publish, while retaining
+        // the exact nginx owner/group and no permissions for "other".  Those
+        // three forms are equivalently private inside the pinned container;
+        // accepting no broader mode prevents a harmless restart from leaving
+        // the fail-closed maintenance gate permanently stuck.
+        && in_array(($mode & 0777), [0600, 0660, 0670], true)
+    ) {
         $state = 'TRUSTED';
     } else {
         $directory = @lstat(CLASS_ARCHIVE_PREPARE_DATA);
+        // The pinned image recursively grants the nginx account rwx through
+        // an ACL during every startup. On a regular persistent data inode,
+        // Linux exposes that ACL mask as 0670 even though neither the marker
+        // content nor `other` permissions have changed. Accept only this
+        // exact, observed normalization alongside the original 0660 state;
+        // both still require the data-directory owner/group, regular file,
+        // single link and exact marker bytes above.
         if (
             is_array($directory)
             && $uid > 0
             && $uid === (int) ($directory['uid'] ?? -2)
             && $gid === (int) ($directory['gid'] ?? -2)
-            && ($mode & 0777) === 0660
+            && in_array(($mode & 0777), [0660, 0670], true)
         ) {
             $state = 'NORMALIZED';
         }

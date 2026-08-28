@@ -15,19 +15,93 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reject private artifact names
+      - name: Verify public Git boundary
+        shell: pwsh
+        env:
+          PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
+        run: |
+          & ./infra/scripts/verify-public-boundary.ps1 -Mode Head
+
+          $base = ''
+          if ($env:PUBLIC_BOUNDARY_PR_BASE -match '^[0-9a-fA-F]{40,64}$') {
+            $base = $env:PUBLIC_BOUNDARY_PR_BASE
+          } elseif ($env:PUBLIC_BOUNDARY_PUSH_BASE -match '^[0-9a-fA-F]{40,64}$' -and $env:PUBLIC_BOUNDARY_PUSH_BASE -notmatch '^0+$') {
+            $base = $env:PUBLIC_BOUNDARY_PUSH_BASE
+          }
+          if ($base -ne '') {
+            & ./infra/scripts/verify-public-boundary.ps1 -Mode Outgoing -BaseRef $base
+          } else {
+            Write-Output 'PUBLIC_BOUNDARY_OUTGOING=SKIP reason=base_unavailable'
+          }
+
+      - name: Verify public boundary protocol
+        shell: pwsh
+        run: ./tests/public-boundary-protocol.ps1
+
+      - name: Verify pinned fictional ML fixtures
         shell: bash
         run: |
           set -euo pipefail
-          forbidden="$(git ls-files | grep -Ei '(^|/)(\.env($|\.)|.*\.(sql|dump|sqlite|db|pem|key|p12|pfx|jpg|jpeg|png|webp|heic)$|uploads?/|backups?/|database-exports?/)' | grep -Ev '(^|/)\.env\.example$' || true)"
-          if [[ -n "$forbidden" ]]; then
-            printf '%s\n' "Tracked private artifacts are not allowed:" >&2
-            printf '%s\n' "$forbidden" >&2
-            exit 1
-          fi
+          sha256sum --check <<'SHA256'
+          9bc950a58a09490ccdd118a3db56805ff2caa5fd953e3f83ecb79245345e99c3  tests/fixtures/phase2-synthetic/fictional-cast-classroom.png
+          ce2cd9cd2fc38caa8c3aa4cf17abe6394da420383106097d5f4bea701aca3ad0  tests/fixtures/phase2-synthetic/fictional-cast-night-cake.png
+          23b3aaf513f69c7b9ed9a208078d8e47989bac77fe458853f9c2895e03dcbd93  tests/fixtures/phase2-synthetic/fictional-cast-outdoor.png
+          d2d8d3478288affdc8d0fa89be92d063fc669e18d8152cf6952c497e1ef81987  tests/fixtures/phase2-synthetic/fictional-cast-playground.png
+          7d4f5570cd81033d609b13d0c8fee55199b47360aef9728aa8835735e6a8379f  tests/fixtures/phase2-synthetic/fictional-cast-portraits.png
+          SHA256
+
+      - name: Verify public Photo UI contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/phase3/photo-comment-security-static.php
+          php tests/phase3/auto-collection-persistence-static.php
+          php tests/phase3/ai-index-persistence-static.php
+          php tests/phase3/photo-product-ops-protocol.php
+          php tests/phase3/presentation-epoch-static.php
+          php tests/phase3/collection-snapshot-builder-static.php
+          php tests/phase3/collection-snapshot-fallback-contract.php
+          php tests/phase3/collection-lifecycle-maintenance.php
+          php tests/phase3/collection-feedback-projection-contract.php
+          php tests/phase3/memory-album-curation-contract.php
+          php tests/phase3/responsive-media-contract.php
+          php tests/phase3/photo-cache-warmup-static.php
+          php tests/phase3/spotlight-rotation-migration-contract.php
+          php tests/phase3/spotlight-rotation-service.php
+          php tests/phase3/v17-backup-restore-contract.php
+          php tests/phase3/v18-synthetic-migration-contract.php
+          node tests/phase3/search-suggestions-contract.mjs
+          node tests/phase3/search-context-contract.mjs
+          node tests/phase3/restore-bff-source-allowlist-contract.mjs
+          node tests/phase3/photo-ui-static.mjs
+          node tests/phase3/photo-cache-contract.mjs
+          node tests/phase3/photo-product-contract.mjs
+          node tests/phase3/photos-app-v4-contract.mjs
+          node tests/phase3/photos-app-v4-ui-contract.mjs
+          node tests/phase3/member-era-upload-contract.mjs
+
+      - name: Verify synthetic migration protocol contracts
+        shell: pwsh
+        run: |
+          ./tests/phase3/v4-synthetic-migration-stage-protocol.ps1
+          ./tests/phase3/v4-synthetic-migration-sandbox-protocol.ps1
+          ./tests/phase3/v4-synthetic-phase-ab-attestation-protocol.ps1
+          ./tests/phase3/private-v18-owner-migration-protocol.ps1
+
+      - name: Verify V4 Chrome acceptance protocol
+        shell: pwsh
+        run: |
+          ./tests/phase3/photos-app-v4-chrome-qa-protocol.ps1
+          ./tests/phase3/photos-app-v4-chrome-deep-qa-protocol.ps1
+          ./tests/phase3/photos-app-v4-chrome-scope-projection-protocol.ps1
+          ./tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1
 
       - name: Reject high-risk credential material
         shell: bash
+        env:
+          PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           gh_prefix="gh""o_"
@@ -35,7 +109,31 @@ jobs:
           key_marker="BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY"
           aws_prefix="AKIA[0-9A-Z]{16}"
           pattern="${gh_prefix}[A-Za-z0-9]{20,}|${pat_prefix}[A-Za-z0-9_]{20,}|${aws_prefix}|${key_marker}"
-          if git grep -n -I -E "$pattern" -- .; then
-            echo "High-risk credential material found in tracked content." >&2
+          base=""
+          if [[ "${PUBLIC_BOUNDARY_PR_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+            base="$PUBLIC_BOUNDARY_PR_BASE"
+          elif [[ "${PUBLIC_BOUNDARY_PUSH_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]] && [[ ! "$PUBLIC_BOUNDARY_PUSH_BASE" =~ ^0+$ ]]; then
+            base="$PUBLIC_BOUNDARY_PUSH_BASE"
+          fi
+          if [[ -n "$base" ]]; then
+            mapfile -t commits < <(git rev-list --reverse "$base..HEAD")
+          else
+            commits=(HEAD)
+          fi
+          contaminated=0
+          for commit in "${commits[@]}"; do
+            if git grep -q -I -E "$pattern" "$commit" -- .; then
+              contaminated=$((contaminated + 1))
+            else
+              code=$?
+              if (( code > 1 )); then
+                printf 'PUBLIC_CREDENTIAL_GATE=FAIL reason=scan_error count=1\n' >&2
+                exit 1
+              fi
+            fi
+          done
+          if (( contaminated > 0 )); then
+            printf 'PUBLIC_CREDENTIAL_GATE=FAIL reason=high_risk_material count=%d\n' "$contaminated" >&2
             exit 1
           fi
+          printf 'PUBLIC_CREDENTIAL_GATE=PASS commits=%d\n' "${#commits[@]}"

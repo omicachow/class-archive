@@ -1,0 +1,77 @@
+{
+  "lock_version": 1,
+  "upstream": {
+    "repository": "https://github.com/immich-app/immich.git",
+    "version": "v3.1.0",
+    "commit": "8aa95c67470a02a8ddedf03c2e52963af33065ff",
+    "license": "AGPL-3.0-only",
+    "commit_verification": {
+      "method": "official_github_rest_tag_ref",
+      "url": "https://api.github.com/repos/immich-app/immich/git/ref/tags/v3.1.0",
+      "object_type": "commit",
+      "verified_at": "2026-08-19T12:05:10Z"
+    },
+    "source_checkout": "AVAILABLE_OFFICIAL_CODELOAD_ARCHIVE_EXTRACTED"
+  },
+  "source_archive": {
+    "origin": "official_github_codeload",
+    "url": "https://codeload.github.com/immich-app/immich/tar.gz/refs/tags/v3.1.0",
+    "tag_ref_url": "https://api.github.com/repos/immich-app/immich/git/ref/tags/v3.1.0",
+    "tag_ref_commit": "8aa95c67470a02a8ddedf03c2e52963af33065ff",
+    "http_content_length": 74961232,
+    "http_etag": "51f35cc3a150cb71a55597a62d383053dae1c31d9dcb0e3dcbfd72cf26dafdb1",
+    "sha256": "af0fba69cc5830093392de4f5576eeb7f2ccf28ba55154b7598e10f596fdfb40",
+    "downloaded_at": "2026-08-19T12:14:24Z",
+    "archive_validation": "gzip/tar listing succeeded; required LICENSE, docker/docker-compose.yml, web/package.json and server/package.json present; extracted root, web and server versions are 3.1.0",
+    "local_archive": ".codex-work/immich-supply-chain/immich-v3.1.0-full-attempt.tar.gz",
+    "local_extraction": "infra/immich-spike/source/official-v3.1.0",
+    "status": "AVAILABLE_VERIFIED"
+  },
+  "images": {
+    "immich_server": {
+      "reference": "ghcr.io/immich-app/immich-server:v3.1.0",
+      "pinned_reference": "ghcr.io/immich-app/immich-server:v3.1.0@sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa",
+      "digest": "sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa",
+      "platform": "linux/amd64",
+      "registry": "official_ghcr",
+      "manifest_verification": "docker manifest inspect --verbose ghcr.io/immich-app/immich-server:v3.1.0; one linux/amd64 descriptor matched",
+      "manifest_evidence_sha256": "af5fe2e1455638989d1b95b8a039b31441c25f6bec7e4695e9c64878db63ec5e",
+      "local_pull": "VERIFIED",
+      "local_image_id": "sha256:079cc990b26a88d71f96027341c67329cb11829d4c341ce33b3718fe0f84cbfa",
+      "status": "AVAILABLE_VERIFIED_LOCAL_PULL"
+    },
+    "immich_machine_learning": {
+      "reference": "ghcr.io/immich-app/immich-machine-learning:v3.1.0",
+      "pinned_reference": "ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05",
+      "digest": "sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05",
+      "platform": "linux/amd64",
+      "registry": "official_ghcr",
+      "manifest_verification": "docker manifest inspect --verbose ghcr.io/immich-app/immich-machine-learning:v3.1.0; one linux/amd64 descriptor matched",
+      "manifest_evidence_sha256": "c80d2ad07ccc8c5ad3da7338ea738ab7d6a0c2025b3c5bb3ddb7af196ad3b012",
+      "local_pull": "VERIFIED",
+      "local_image_id": "sha256:a25ddad7d6d2ab18a161176731dc171bb7e39c0e9dd3884fb1ec629dab535d05",
+      "status": "AVAILABLE_VERIFIED_LOCAL_PULL"
+    },
+    "postgres": {
+      "reference": "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0",
+      "digest": "sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23"
+    },
+    "valkey": {
+      "reference": "docker.io/valkey/valkey:9",
+      "digest": "sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411"
+    }
+  },
+  "admission": {
+    "synthetic_media_only": true,
+    "localhost_only": true,
+    "piwigo_original_mounts_read_only": true,
+    "piwigo_database_mount": "FORBIDDEN",
+    "piwigo_data_mount": "FORBIDDEN",
+    "browser_direct_immich_media": "FORBIDDEN"
+  },
+  "local_acquisition": {
+    "status": "OFFICIAL_SOURCE_AND_CORE_IMAGES_AVAILABLE_ISOLATED_GATEWAY_BRIDGE_RUNTIME_TESTED",
+    "detail": "2026-08-19: GitHub REST tag ref, official codeload archive, GHCR manifests and local linux/amd64 pulls were verified. The original git clone failure is superseded; no third-party source, proxy image or floating tag was used.",
+    "effect": "The pinned Server, PostgreSQL and Valkey have passed an isolated internal-network boot gate: healthy server, internal ping, no host port, read-only Piwigo original volumes and unchanged Piwigo original SHA-256. A second disposable runtime gate created the first internal technical user and a read-only external library, scanned synthetic originals, confirmed the indexed asset count, then reset only the spike database and upload volumes and verified the empty state. A third disposable bridge gate bound two canonical synthetic mappings and verified policy-filtered Classmate/FAMILY metadata aggregation through a fixed internal bridge, with no bridge media route, no host port and final empty-spike/original-hash verification. A separate compatibility BFF has passed localhost HTTP and role browser coverage through the Class Archive Gateway and MediaGuard. No technical credential, library, asset or binding remains; ML index, non-empty People and Smart Search runtime remain unavailable until verified offline model artifacts are admitted."
+  }
+}

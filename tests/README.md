@@ -309,3 +309,117 @@ the fixture state is removed.
 wsl.exe -d Ubuntu --cd $PWD -- docker compose --env-file .env.piwigo -f infra/docker-compose.yml exec -T --user nginx piwigo php /workspace/tests/class-identity-anonymous-presenter.php
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase1\anonymous-presenter-http.ps1
 ```
+
+## Phase 1.5 browser acceptance
+
+`phase1/browser-qa.ps1` uses a locally installed Chrome executable and
+Playwright to drive real page navigation and form submission at
+`127.0.0.1:8090`; it does not use a public network or a mock browser. It creates
+a random, short-lived synthetic SYSTEM_ADMIN and exercises a real Classmate
+Claim, Family invitation/registration/upload/review, Teacher Claim, Anonymous
+comments in two contexts, explicit admin resolution, Chinese management pages,
+and desktop/mobile layout checks. The test makes no use of the long-lived
+administrator password. All temporary credentials live only in ignored
+short-lived files and the outer cleanup restores the canonical `72/72/8`
+media baseline.
+
+```powershell
+.\infra\scripts\dev.ps1 browser-qa
+```
+
+The latest successful browser run reported 234 assertions and 11 synthetic-only
+screenshots. Full procedure, screenshots and scope limits are recorded in
+[`docs/browser-qa-report.md`](../docs/browser-qa-report.md).
+
+## Phase 2: Immich Web compatibility boundary
+
+`phase2/immich-web-compat-http.ps1` is a localhost-only `RUNTIME_TESTED`
+gate for the verified upstream Immich Web static build. It verifies the narrow
+`127.0.0.1:8091 -> Piwigo nginx -> internal compatibility process -> internal
+Gateway -> MediaGuard` topology, immutable official image digest, read-only
+compatibility mounts, no compatibility host port, and the absence of an
+Immich/Piwigo database or original-file mount. It then exercises real Piwigo
+fixture sessions for Guest, Classmate, Teacher, Family, Anonymous and
+SYSTEM_ADMIN. It proves canonical UUID DTO redaction, Family aggregate/search/
+album/thumbnail LIVING exclusion, Family Heritage thumbnail allow and original
+deny, Classmate LIVING preview allow, exact `HEAD`/`Range`, bounded request
+input, Piwigo sign-in redirection, and the AGPL notice endpoint. It starts no
+Immich browser account, asset, library, API key or duplicate original.
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase2-immich-web-compat
+```
+
+The current focused run reports `HTTP_PROBES=34` and `ASSERTIONS=325`. This is
+not a statement that Immich owns authorization or that browser UI has passed:
+browser screenshots and interactions are independently labelled
+`BROWSER_E2E_TESTED`. People and Memories deliberately return empty data until
+a canonical aggregate adapter can demonstrate policy filtering instead of
+inventing or leaking memberships.
+
+## Phase 3.2/3.3A product and performance contracts
+
+`test-phase3-contract` is a public-safe, synthetic-only gate. Its Phase 3.2
+schema suite applies only migration 8 to disposable MariaDB tables under a
+random prefix, locks the person-curation, album, Spotlight, provenance, dedupe
+and batch-journal schema fingerprints, and exercises representative ownership,
+duration, merge, dedupe and nonempty-batch constraints. The source-level checks
+separately prove the five-tab mobile information architecture, explicit BFF
+route allowlists, server-side SYSTEM_ADMIN people-management denial, CSRF/body
+bounds, stable album UUIDs, bulk archive controls, person curation, review-only
+near matches, structured-first search and the unchanged Gateway -> MediaGuard
+-> X-Accel-Redirect delivery chain.
+
+The Phase 3.3A additions cover opaque media revisions, bounded responsive
+variants, protected conditional caching, immutable versioned UI assets,
+session-scoped presentation reuse, maintenance-only derivative generation and
+durable MariaDB read projections. They also exercise stale/tampered projection
+failure, catalog/aggregate publication races, scoped write-side refresh,
+Spotlight expiry, canonical-merge and submission-review boundaries, the durable
+MyISAM source-epoch sentinel, and all 18 native Piwigo mutation guards. A
+separate read-only operations contract locks the current v14 backup
+manifest/fixture, cache-free projection recovery, restore preflight ordering,
+conservative reconciliation findings and System Health table coverage; it
+never runs the destructive restore drill.
+
+```powershell
+.\infra\scripts\dev.ps1 test-phase3-contract
+```
+
+The current verified focused run (2026-08-25) completed 857 assertions:
+
+| Gate | Assertions |
+|---|---:|
+| Phase 3.2 schema/constraints | 34 |
+| Product operations protocol | 134 |
+| Presentation epoch static contract | 29 |
+| Presentation epoch MariaDB runtime | 22 |
+| Read-projection semantics | 58 |
+| Spotlight read projection | 17 |
+| Final-source invalidation race | 20 |
+| Native Piwigo projection guard | 30 |
+| Plugin native-trigger lifecycle | 34 |
+| Bulk-archive projection runtime | 18 |
+| Canonical projection boundary | 28 |
+| Submission-review preflight | 14 |
+| Responsive media contract | 23 |
+| Derivative warmup static contract | 83 |
+| Derivative queue runtime | 20 |
+| Photo UI static contract | 104 |
+| Photo cache contract | 59 |
+| Phase 3.2 product boundary | 130 |
+| **Total** | **857** |
+
+The native-trigger lifecycle fixture uses only disposable cloned Piwigo table
+DDL and synthetic rows. It proves the exact 16.4.0 compatibility lock,
+deactivate/uninstall cleanup, inactive-source writes, idempotent retirement,
+reinstallation, epoch rotation and restored fail-closed invalidation without
+touching live Core tables. The same local command runs the queue crash-recovery runtime fixture with a
+dedicated opt-in environment flag. It creates only canonical UUID/image-ID
+markers and cleans its temporary and quarantine evidence before returning. The
+seven source-only PHP/Node suites scheduled by public CI account for 562 of the
+assertions above and use no private QA paths, images, manifests, credentials or
+network services. Public CI never starts Piwigo, resizes media or reads a
+private path. Assertion success is correctness evidence; the separate browser
+performance acceptance remains local and unpublished as recorded in
+[`docs/photo-performance-reuse-audit.md`](../docs/photo-performance-reuse-audit.md).

@@ -1,0 +1,92 @@
+services:
+  db:
+    # The writer reaches only MariaDB on this internal bridge. It is not put
+    # on the regular app bridge, which is intentionally non-internal solely so
+    # nginx can publish its two loopback listeners.
+    networks:
+      - supplemental_internal
+
+  supplemental-apply:
+    # Privileged operators reach this one-shot writer only after the normal
+    # Piwigo process is maintenance-gated and stopped. It has no source roots,
+    # old full-import manifest, host port, Immich volume, or public network.
+    image: ${PIWIGO_IMAGE:?Set PIWIGO_IMAGE in the selected ignored environment}
+    pull_policy: never
+    profiles: ["private-supplemental-apply"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "${PIWIGO_UID:-1000}:${PIWIGO_GID:-1000}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    environment:
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+      CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL: "1"
+      CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_APPLY: "1"
+      CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER:?Set CLASS_ARCHIVE_CLAIM_CODE_PEPPER in the selected ignored environment}
+      CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET:?Set CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET in the selected ignored environment}
+      CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_ACTION: preflight
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        case "$${CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_ACTION}" in
+          preflight)
+            exec php /opt/class-archive/verify-supplemental-target.php preflight
+            ;;
+          apply)
+            test "$${CLASS_ARCHIVE_PRIVATE_SUPPLEMENTAL_CONFIRM:-}" = APPLY_VERIFIED_28_SOURCE_26_PRESENTATION_BATCH
+            php /opt/class-archive/verify-supplemental-target.php preflight
+            php /opt/class-archive/import-private-real-full.php \
+              /private-real-full/manifests/supplemental-import-manifest.json \
+              /private-real-full/supplemental-staging
+            exec php /opt/class-archive/verify-supplemental-target.php postflight
+            ;;
+          *) exit 64 ;;
+        esac
+    volumes:
+      - piwigo_data:/var/www/html/piwigo
+      - piwigo_uploads:/var/www/html/piwigo/upload
+      - piwigo_galleries:/var/www/html/piwigo/galleries
+      - piwigo_derivatives:/var/www/html/piwigo/_data/i
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_MANIFEST_PATH:?Set verified supplemental manifest WSL path}
+        target: /private-real-full/manifests/supplemental-import-manifest.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_STAGING_PATH:?Set verified supplemental staging WSL path}
+        target: /private-real-full/supplemental-staging
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_IMPORTER_PATH:?Set reviewed supplemental importer WSL path}
+        target: /opt/class-archive/import-private-real-full.php
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PRIVATE_SUPPLEMENTAL_TARGET_GATE_PATH:?Set reviewed supplemental target gate WSL path}
+        target: /opt/class-archive/verify-supplemental-target.php
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - supplemental_internal
+    labels:
+      com.classarchive.scope: private-real-supplemental-apply
+      com.classarchive.operation: one-shot-maintenance-writer
+
+networks:
+  supplemental_internal:
+    name: ${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME in the selected ignored environment}_supplemental_internal
+    internal: true
+    labels:
+      com.classarchive.scope: private-real-supplemental-apply

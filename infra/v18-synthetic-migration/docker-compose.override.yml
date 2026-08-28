@@ -1,0 +1,250 @@
+# Fixed attempt8 laboratory for a database-only V17 -> V18 proof.
+#
+# It has no source-media bind, no Owner-library bind, no Immich/ML
+# service and no host ports other than the inherited Piwigo ports, which the
+# runner verifies are loopback-only.  Every writable volume has an attempt8
+# name supplied by the ignored local env file.
+
+services:
+  db:
+    restart: "no"
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V18_SYNTHETIC_PROOF: "1"
+      # The DB-only probe runs inside this container. Base Compose maps these
+      # values only to MariaDB's startup variables, so expose the same ignored
+      # sandbox values under the probe's deliberately constrained names.
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v18 sandbox env file}
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+    volumes:
+      - type: bind
+        source: ../infra/scripts/v18-synthetic-db-probe.sh
+        target: /workspace/infra/scripts/v18-synthetic-db-probe.sh
+        read_only: true
+        bind:
+          create_host_path: false
+
+  piwigo:
+    restart: "no"
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V18_SYNTHETIC_PROOF: "1"
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+    volumes:
+      - type: bind
+        source: ${V18_SYNTHETIC_V17_SCHEMA_PATH:?Set V18_SYNTHETIC_V17_SCHEMA_PATH in the ignored v18 sandbox env file}
+        target: /workspace/v18-synthetic-v17/Schema.php
+        read_only: true
+        bind:
+          create_host_path: false
+
+  v18-synthetic-db-restore-v16:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v18 sandbox env file}
+    profiles: ["v18-synthetic-migration"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+      - /var/lib/mysql:rw,nosuid,nodev,noexec,size=1m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/restore-v4-synthetic-pre-migration-db.sh"]
+    environment:
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      DB_USER: ${DB_USER:?Set DB_USER in the ignored v18 sandbox env file}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v18 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v18 sandbox env file}
+      PIWIGO_UID: ${PIWIGO_UID:-1000}
+      PIWIGO_GID: ${PIWIGO_GID:-1000}
+      CLASS_ARCHIVE_V4_SYNTHETIC_RESTORE: "1"
+    volumes:
+      - type: bind
+        source: ${V18_SYNTHETIC_SNAPSHOT_PATH:?Set V18_SYNTHETIC_SNAPSHOT_PATH in the ignored v18 sandbox env file}
+        target: /snapshot
+        read_only: true
+        bind:
+          create_host_path: false
+      - piwigo_data:/target-piwigo
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: v16-input-restore
+
+  v18-synthetic-db-backup:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v18 sandbox env file}
+    profiles: ["v18-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/create-v18-synthetic-db-backup.sh"]
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v18 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V18_SYNTHETIC_RECOVERY: "1"
+    volumes:
+      - backups:/snapshot
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-10-db-only-backup
+
+  v18-synthetic-recovery-db:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v18 sandbox env file}
+    profiles: ["v18-synthetic-recovery"]
+    restart: "no"
+    user: "999:999"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      MARIADB_USER: ${DB_USER:?Set DB_USER in the ignored v18 sandbox env file}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v18 sandbox env file}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v18 sandbox env file}
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - v18_synthetic_recovery_db:/var/lib/mysql
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-10-second-empty-db
+
+  v18-synthetic-db-restore:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in the ignored v18 sandbox env file}
+    profiles: ["v18-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      v18-synthetic-recovery-db:
+        condition: service_healthy
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["/bin/sh", "/workspace/infra/scripts/restore-v18-synthetic-db-backup.sh"]
+    environment:
+      DB_HOST: v18-synthetic-recovery-db
+      DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in the ignored v18 sandbox env file}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V18_SYNTHETIC_RECOVERY: "1"
+      CLASS_ARCHIVE_V18_SYNTHETIC_RESTORE_BUNDLE: ""
+    volumes:
+      - backups:/snapshot:ro
+      - ../infra:/workspace/infra:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-10-second-empty-db-restore
+
+  v18-synthetic-recovery-verify:
+    image: ${PIWIGO_IMAGE:?Set PIWIGO_IMAGE in the ignored v18 sandbox env file}
+    profiles: ["v18-synthetic-recovery"]
+    restart: "no"
+    depends_on:
+      v18-synthetic-recovery-db:
+        condition: service_healthy
+    # This verifier does not mount the mutable Piwigo volume. It must execute
+    # as the image's named unprivileged account so the proof's uid guard is
+    # portable across the locked Piwigo image rather than assuming host UID.
+    user: "nginx"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    entrypoint: ["php", "/workspace/infra/scripts/v18-synthetic-migration-proof.php", "--verify-v18"]
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: SYNTHETIC_V4_MIGRATION
+      CLASS_ARCHIVE_V18_SYNTHETIC_PROOF: "1"
+      V18_SYNTHETIC_DB_HOST: v18-synthetic-recovery-db
+      V18_SYNTHETIC_DB_NAME: ${DB_NAME:?Set DB_NAME in the ignored v18 sandbox env file}
+      V18_SYNTHETIC_DB_USER: ${DB_USER:?Set DB_USER in the ignored v18 sandbox env file}
+      V18_SYNTHETIC_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored v18 sandbox env file}
+    volumes:
+      - ../infra:/workspace/infra:ro
+      - ../plugins:/workspace/plugins:ro
+    networks:
+      - app
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-10-second-empty-db-verify
+
+networks:
+  app:
+    name: ${CLASS_ARCHIVE_V18_SANDBOX_APP_NETWORK:?Set CLASS_ARCHIVE_V18_SANDBOX_APP_NETWORK in the ignored v18 sandbox env file}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CLASS_ARCHIVE_V18_SANDBOX_APP_SUBNET:?Set CLASS_ARCHIVE_V18_SANDBOX_APP_SUBNET in the ignored v18 sandbox env file}
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+
+  immich_gateway:
+    name: ${CLASS_ARCHIVE_V18_GATEWAY_NETWORK:?Set CLASS_ARCHIVE_V18_GATEWAY_NETWORK in the ignored v18 sandbox env file}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CLASS_ARCHIVE_V18_GATEWAY_SUBNET:?Set CLASS_ARCHIVE_V18_GATEWAY_SUBNET in the ignored v18 sandbox env file}
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+
+volumes:
+  piwigo_data:
+    name: ${PIWIGO_DATA_VOLUME:?Set PIWIGO_DATA_VOLUME in the ignored v18 sandbox env file}
+  piwigo_uploads:
+    name: ${PIWIGO_UPLOADS_VOLUME:?Set PIWIGO_UPLOADS_VOLUME in the ignored v18 sandbox env file}
+  piwigo_galleries:
+    name: ${PIWIGO_GALLERIES_VOLUME:?Set PIWIGO_GALLERIES_VOLUME in the ignored v18 sandbox env file}
+  piwigo_derivatives:
+    name: ${PIWIGO_DERIVATIVES_VOLUME:?Set PIWIGO_DERIVATIVES_VOLUME in the ignored v18 sandbox env file}
+  piwigo_db:
+    name: ${PIWIGO_DB_VOLUME:?Set PIWIGO_DB_VOLUME in the ignored v18 sandbox env file}
+  piwigo_scripts:
+    name: ${PIWIGO_SCRIPTS_VOLUME:?Set PIWIGO_SCRIPTS_VOLUME in the ignored v18 sandbox env file}
+  backups:
+    name: ${PIWIGO_BACKUPS_VOLUME:?Set PIWIGO_BACKUPS_VOLUME in the ignored v18 sandbox env file}
+  v18_synthetic_recovery_db:
+    name: ${V18_SYNTHETIC_RECOVERY_DB_VOLUME:?Set V18_SYNTHETIC_RECOVERY_DB_VOLUME in the ignored v18 sandbox env file}
+    labels:
+      com.classarchive.scope: v18-synthetic-migration
+      com.classarchive.data: synthetic-only
+      com.classarchive.operation: format-10-second-empty-db

@@ -31,9 +31,9 @@ with the current working-tree result:
   tables, explicit `SEAT_ACCOUNT` / `SYSTEM_ACCOUNT` principals, hashed
   Claim/Invite credentials, account lifecycle guards and an independent
   `SYSTEM_ADMIN` that is never a Seat.
-- A minimum business Admin Console for Dashboard, Identities, Teachers,
-  Invitations, Audit and System Health. Submissions, Anonymous governance,
-  Archive and Spotlight pages do not exist yet.
+- A business Admin Console for Dashboard, Identities, Teachers, Invitations,
+  Submissions, Anonymous governance, Archive, Audit and System Health. The
+  Spotlight page remains intentionally unimplemented.
 - The private UI defaults to Simplified Chinese (`zh_CN`) with browser-language
   negotiation disabled. Core login/gallery labels and the implemented
   ClassIdentity forms and Admin Console are translated; product names and
@@ -54,19 +54,19 @@ with the current working-tree result:
 
 ### Verification status at public sync (2026-08-19)
 
-- A direct run of `tests/phase1/class-identity-http.ps1` completed with
-  `FAIL`, 87 probes and one known failure:
-  `provisioning/stale-visible` did not expose the seeded long-running
-  operation/account/Seat counts as a production blocker. This is a health and
-  dashboard assertion; it is not evidence that the MediaGuard URL-authorization
-  boundary passed or failed.
-- The last coordinated Phase 0/Phase 1 baseline remains useful evidence, but
-  it must be rerun after source or runtime changes. The public repository does
-  not claim a release gate is green while the current stale-provisioning
-  assertion remains open.
-- Focused media, pending-media, anonymous-presenter and credential protocol
-  evidence is retained in the test and phase documents; each document labels
-  whether its result is a current run, a prior baseline, or still pending.
+- The coordinated localhost run is green: `test-phase1` and `test-phase0`
+  both exit 0 on the current tree. The Family workflow covers upload → Pending
+  → Admin review → approve/reject → cleanup with `CLASS_IDENTITY_HTTP=PASS`
+  and 108 probes, including the Submissions, Anonymous and Archive admin
+  routes.
+- Pending-media isolation passes 75 real HTTP probes, AnonymousPresenter passes
+  211 HTTP assertions, and the Phase 0 MediaGuard suite passes 290 + 16 + 38
+  probes. The synthetic photo model is restored to 72 images, 72 originals and
+  8 multi-album relationships after each fixture.
+- The dashboard still deliberately shows `PRODUCTION BLOCKED`: the local
+  HTTP proof is not persisted as a digest-bound attestation, Admin MFA,
+  backup/restore rehearsal, scheduled jobs, and later business-mutation audit
+  gates remain open. No real photo, NAS or public-network claim is made.
 
 The architecture decision is in
 [`docs/photo-first-architecture-decision.md`](docs/photo-first-architecture-decision.md).
