@@ -100,9 +100,47 @@ function Assert-CleanAcceptanceCheckout {
 
 function Get-SourceDigests {
     $relativePaths = @(
+        # Direct host-side prerequisites.  The attester and cold-restart flow
+        # dot-source these helpers, so their behavior is evidence-critical.
+        'infra/scripts/secret-file-acl.ps1',
+        'infra/scripts/configure-piwigo-baseline.php',
+        'infra/scripts/rebuild-photo-read-projection.php',
+        'infra/docker-compose.yml',
+        'infra/immich-spike/docker-compose.yml',
+        'tests/support/system-admin-session.ps1',
         'plugins/ClassIdentity/src/Schema.php',
+        # Bind the complete server-side authorization and projection chain,
+        # not just the browser runners.  A Phase A/B record must cease to
+        # apply if a policy, upload, comment, or MediaGuard path changes.
+        'plugins/ClassIdentity/public.php',
+        'plugins/ClassIdentity/src/AlbumService.php',
+        'plugins/ClassIdentity/src/AnonymousPresenter.php',
+        'plugins/ClassIdentity/src/CapabilityGuard.php',
+        'plugins/ClassIdentity/src/MemberEraUploadService.php',
+        'plugins/ClassIdentity/src/PhotoCommentService.php',
+        'plugins/ClassIdentity/src/SpotlightRotationService.php',
+        'plugins/ClassIdentity/src/Gateway/GatewayHttpController.php',
+        'plugins/ClassIdentity/src/Gateway/GatewayPolicy.php',
+        'plugins/ClassIdentity/src/Gateway/GatewayService.php',
+        'plugins/ClassIdentity/src/Gateway/ReadProjectionStore.php',
+        'plugins/ClassIdentity/src/Gateway/ReadProjectionBuilder.php',
+        'plugins/ClassIdentity/src/Gateway/CollectionSnapshotBuilder.php',
+        'plugins/ClassArchivePolicy/main.inc.php',
+        'plugins/ClassArchivePolicy/media-gateway.php',
+        'plugins/ClassArchivePolicy/src/MediaGuard.php',
+        'plugins/ClassArchivePolicy/src/MediaFilePolicy.php',
+        'infra/piwigo-nginx/nginx.conf',
+        'infra/immich-spike/photo-ui/index.html',
         'infra/immich-spike/photo-ui/app.js',
+        'infra/immich-spike/photo-ui/app.css',
+        'infra/immich-spike/photo-ui/i18n.js',
+        'infra/immich-spike/photo-ui/ui-dom.js',
+        'infra/immich-spike/photo-ui/ui-era-upload.js',
+        'infra/immich-spike/photo-ui/ui-search-overlay.js',
         'infra/immich-spike/web-compat/server.mjs',
+        'tests/phase3/photos-app-v4-viewer-fixture.php',
+        'tests/phase3/photos-app-v4-upload-lifecycle-fixture.php',
+        'tests/phase3/photos-app-v4-scope-unknown-fixture.php',
         'tests/phase3/photos-app-v4-chrome-qa.mjs',
         'tests/phase3/photos-app-v4-chrome-deep-qa.mjs',
         'tests/phase3/photos-app-v4-chrome-scope-projection.mjs',
@@ -112,7 +150,50 @@ function Get-SourceDigests {
         'tests/phase3/photos-app-v4-chrome-deep-qa.ps1',
         'tests/phase3/photos-app-v4-chrome-scope-projection.ps1',
         'tests/phase3/photos-app-v4-chrome-upload-lifecycle.ps1',
+        # Bind the static contracts that accept the four browser transcripts;
+        # otherwise a changed transcript validator could be paired with old
+        # browser evidence under the same source-digest claim.
+        'tests/phase3/photos-app-v4-chrome-qa-protocol.ps1',
+        'tests/phase3/photos-app-v4-chrome-deep-qa-protocol.ps1',
+        'tests/phase3/photos-app-v4-chrome-scope-projection-protocol.ps1',
+        'tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1',
         'tests/phase3/photos-app-v4-chrome-localhost-guard-protocol.ps1',
+        'tests/phase3/member-era-upload-contract.mjs',
+        'tests/phase3/photos-app-v4-contract.mjs',
+        'tests/phase3/photos-app-v4-ui-contract.mjs',
+        'tests/phase3/search-context-contract.mjs',
+        # The accepted MediaGuard regression transcript is produced by these
+        # public synthetic Phase 0/1 runners and their fixture cleanup paths.
+        'tests/phase0/assert-photo-model.php',
+        'tests/phase0/assert-media-permissions.sh',
+        'tests/phase0/smoke-photo-ui.ps1',
+        'tests/phase0/access-matrix.ps1',
+        'tests/phase0/media-guard-http.ps1',
+        'tests/phase0/media-guard-tiny-preview.ps1',
+        'tests/phase0/media-guard-state-transitions.ps1',
+        'tests/phase1/class-plugin-workflow-lock.ps1',
+        'tests/class-identity-maintenance-protocol.php',
+        'tests/phase1/media-file-policy.php',
+        'tests/class-identity-enforcement-context.php',
+        'tests/class-identity-anonymous-presenter.php',
+        'tests/class-identity-audit-reason.php',
+        'tests/class-identity-capability-guard.php',
+        'tests/class-identity-rate-limiter.php',
+        'tests/class-identity-schema-semantics.php',
+        'tests/class-identity-synthetic-bootstrap-protocol.php',
+        'tests/system-admin-credential-protocol.php',
+        'tests/system-admin-session-fault-http.ps1',
+        'tests/phase1/class-identity-http.ps1',
+        'tests/phase1/maintenance-gate-http.ps1',
+        'tests/phase1/runtime-surface-http.ps1',
+        'tests/phase1/enforcement-fault-http.ps1',
+        'tests/phase1/capability-guard-http.ps1',
+        'tests/phase1/pending-media-http.ps1',
+        'tests/phase1/anonymous-presenter-http.ps1',
+        'tests/phase1/class-identity-fixture.php',
+        'tests/phase1/pending-media-fixture.php',
+        'tests/phase1/enforcement-fault-fixture.php',
+        'tests/phase1/anonymous-presenter-fixture.php',
         # Every accepted browser/restart transcript is serialized by this
         # ignored owner-only host lease. Its source and static contract must
         # invalidate evidence when the lease behavior changes.
@@ -130,9 +211,12 @@ function Get-SourceDigests {
         # cold-restart scripts. Any change here invalidates old restart
         # evidence instead of allowing it to be paired with a new migration.
         'tests/phase3/read-projection-runtime.ps1',
+        'tests/phase3/read-projection-runtime-snapshot.php',
+        'tests/phase3/read-projection-runtime-fixture.php',
         'tests/phase3/photos-app-v4-synthetic-cold-restart-snapshot.php',
         'tests/phase3/photos-app-v4-synthetic-cold-restart.ps1',
         'tests/phase3/photos-app-v4-synthetic-cold-restart-protocol.ps1',
+        'tests/phase3/v4-synthetic-phase-ab-attestation-protocol.ps1',
         'infra/scripts/dev.ps1',
         # Evidence processing itself is part of the release boundary. A
         # change to the normalizer or this verifier invalidates an earlier
