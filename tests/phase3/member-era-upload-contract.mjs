@@ -21,6 +21,7 @@ const paths = Object.freeze({
   main: 'plugins/ClassIdentity/main.inc.php',
   installer: 'infra/scripts/install-class-archive-plugins.php',
   bff: 'infra/immich-spike/web-compat/server.mjs',
+  eraUploadUi: 'infra/immich-spike/photo-ui/ui-era-upload.js',
   nginx: 'infra/piwigo-nginx/nginx.conf',
   compose: 'infra/docker-compose.yml',
 });
@@ -93,11 +94,12 @@ check(service.includes('withChecksumLock($checksum')
 check(publish.includes('ClassArchiveDerivativeWarmupQueue::enqueueBestEffort')
   && publish.includes('AiIndexService($this->repository))->enqueueNewPhoto')
   && service.includes('rebuildPhotoProjectionIfRequired(')
-  && service.includes('Gateway\\ReadProjectionBuilder::rebuildChangedPhotos(')
+  && service.includes('Gateway\\ReadProjectionBuilder::rebuild();')
   && service.includes('ProjectionMutationBoundary::invalidatePhotos(')
   && service.includes('foreach ($store->status() as $status)')
   && service.includes("($status['kind'] ?? null) === Gateway\\ReadProjectionStore::PHOTO_CATALOG")
-  && !service.includes('sourcePhotoCandidatesForRebuild('), 'incremental_derivative_ai_or_projection_missing');
+  && !service.includes('Gateway\\ReadProjectionBuilder::rebuildChangedPhotos(')
+  && !service.includes('sourcePhotoCandidatesForRebuild('), 'native_epoch_full_rebuild_or_incremental_projection_missing');
 check(source.projectionStore.includes('or atomically appends new canonical rows to the')
   && source.projectionStore.includes('class_archive_read_projection_refresh_append_failed')
   && source.projectionStore.includes('`item_count`=?,`invalidated_reason`=NULL')
@@ -141,6 +143,8 @@ check(publicBridge.includes("$action !== 'publish_member_photo'")
 check(publicBridge.includes("'photoId' => $published['class_photo_id']")
   && !publicBridge.includes("'piwigo_image_id' =>")
   && !publicBridge.includes("'media_reference' =>"), 'browser_response_must_not_expose_internal_media_identifiers');
+check(!publicController.includes('X-Class-Archive-Member-Upload-Diagnostic')
+  && !publicController.includes('memberUploadDiagnosticCode('), 'member_upload_internal_diagnostics_must_not_persist');
 
 const controller = source.controller;
 check(controller.includes("'canEraUpload' => in_array($role, [\\ClassIdentity\\Access::ROLE_CLASSMATE, \\ClassIdentity\\Access::ROLE_TEACHER], true)")
@@ -156,6 +160,11 @@ check(source.gateway.includes('public function memberEraUploadOptions()')
 check(!source.album.slice(source.album.indexOf('public function memberEraUploadOptions'), source.album.indexOf('public function memberEraUploadOptions') + 8000).includes("'piwigo_category_id' =>"), 'options_must_not_expose_piwigo_category_id');
 
 const bff = source.bff;
+const eraUploadUi = source.eraUploadUi;
+const uuidV4Matcher = '/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i';
+check(eraUploadUi.includes(`const UUID_V4 = ${uuidV4Matcher};`)
+  && eraUploadUi.includes('function safeAlbumChoices(rawAlbums)')
+  && eraUploadUi.includes('const visible = selectedEra ? albums.filter((entry) => entry.eras.includes(selectedEra)) : [];'), 'era_upload_ui_must_retain_valid_v4_album_choices');
 const bffUpload = section(bff, 'function memberEraUploadRequestContract(', 'async function principal(');
 const bffRelay = section(bff, 'async function relayMemberEraUpload(', 'async function principal(');
 check(bff.includes("const memberEraUploadPublicPath = '/api/class-archive/member-upload';")
@@ -178,6 +187,9 @@ check(bffUpload.includes("'X-Class-Archive-Web-Compat-Internal': '1'")
 check(bffUpload.includes('memberEraUploadMaxResponseBytes')
   && bffUpload.includes('memberEraUploadSuccessProjection')
   && bffUpload.includes("decoded.state !== 'PUBLISHED'"), 'bff_control_response_must_be_bounded_and_whitelisted');
+check(!bff.includes('memberEraUploadDiagnosticPattern')
+  && !bffRelay.includes('x-class-archive-member-upload-diagnostic')
+  && !bffRelay.includes('CLASS_ARCHIVE_BFF_MEMBER_UPLOAD'), 'member_upload_temporary_diagnostics_must_be_removed');
 
 const nginx = source.nginx;
 const outer = section(nginx, 'server {\n        listen 8081;', '    # The BFF\'s only Piwigo-facing listener.');
@@ -201,7 +213,9 @@ check(!/location = \/member-upload \{[\s\S]*?\n\s*internal;/m.test(innerUpload)
 check(innerUpload.includes('fastcgi_param HTTP_HOST piwigo;')
   && innerUpload.includes('fastcgi_param HTTP_ORIGIN "";')
   && innerUpload.includes('fastcgi_param HTTP_X_FORWARDED_FOR "";')
-  && innerUpload.includes('fastcgi_param HTTP_X_REAL_IP "";'), 'inner_fastcgi_must_overwrite_spoofable_headers');
+  && innerUpload.includes('fastcgi_param HTTP_X_REAL_IP "";')
+  && innerUpload.includes('fastcgi_param HTTP_X_CLASS_ARCHIVE_CSRF $http_x_class_archive_csrf;')
+  && innerUpload.includes('error_page 500 502 503 504 =503 /_class_archive_internal/api-unavailable;'), 'inner_fastcgi_must_overwrite_spoofable_headers');
 check(source.compose.includes('- "8088"')
   && !source.compose.includes('127.0.0.1:${CLASS_ARCHIVE_GATEWAY_HTTP_PORT')
   && !source.compose.includes(':8088"'), 'inner_listener_must_not_be_host_published');

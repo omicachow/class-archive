@@ -19,7 +19,7 @@ $separator = [IO.Path]::DirectorySeparatorChar
 . (Join-Path $projectRoot 'infra\scripts\v4-synthetic-phase-a-lease.ps1')
 
 function Assert-PrivateChildPath([string]$Base, [string]$Target, [string]$Code) {
-    $relative = [IO.Path]::GetRelativePath($Base, $Target)
+    $relative = Get-V4SyntheticPhaseARelativePath -Base $Base -Target $Target
     if ([string]::IsNullOrWhiteSpace($relative) -or $relative -eq '..' -or $relative.StartsWith('..' + $separator, [StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($relative)) {
         throw $Code
     }

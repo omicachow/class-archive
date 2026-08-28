@@ -747,6 +747,7 @@ function ciTestCleanup(string $runId): never
     $photoComment = $repository->table('photo_comment');
     $autoCollection = $repository->table('auto_collection');
     $autoCollectionPhoto = $repository->table('auto_collection_photo');
+    $collectionSnapshotItem = $repository->table('collection_snapshot_item');
     $aiAssetIndex = $repository->table('ai_asset_index');
     $aiIndexJob = $repository->table('ai_index_job');
 
@@ -810,7 +811,7 @@ function ciTestCleanup(string $runId): never
 
     $repository->transaction(static function (\ClassIdentity\Repository $tx) use (
         $identity, $seat, $account, $principal, $operation, $token, $audit, $submission, $archiveImage, $photo,
-        $photoComment, $autoCollection, $autoCollectionPhoto, $aiAssetIndex, $aiIndexJob,
+        $photoComment, $autoCollection, $autoCollectionPhoto, $collectionSnapshotItem, $aiAssetIndex, $aiIndexJob,
         $idList, $accountList, $principalList,
     ): void {
         $fixturePhotoIds = 'SELECT `class_photo_id` FROM `' . $photo . '` WHERE `source_submission_id` IN '
@@ -833,6 +834,11 @@ function ciTestCleanup(string $runId): never
         );
         $tx->execute('DELETE FROM `' . $autoCollection . '` WHERE `cover_class_photo_id` IN (' . $fixturePhotoIds . ')');
         $tx->execute('DELETE FROM `' . $autoCollectionPhoto . '` WHERE `class_photo_id` IN (' . $fixturePhotoIds . ')');
+        // V18 collection snapshots retain an FK-backed cover reference. A
+        // fixture photo can be selected as a memory cover before this helper
+        // starts. Remove only the affected snapshot items; the subsequent
+        // bounded projection rebuild publishes a complete baseline snapshot.
+        $tx->execute('DELETE FROM `' . $collectionSnapshotItem . '` WHERE `cover_class_photo_id` IN (' . $fixturePhotoIds . ')');
         $tx->execute('DELETE FROM `' . $photo . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $archiveImage . '` WHERE source_submission_id IN (SELECT id FROM `' . $submission . '` WHERE identity_id IN (' . $idList . '))');
         $tx->execute('DELETE FROM `' . $submission . '` WHERE identity_id IN (' . $idList . ')');

@@ -15,6 +15,7 @@ $paths = [
     'installer' => $root . '/infra/scripts/install-class-archive-plugins.php',
     'bootstrap' => $root . '/infra/scripts/bootstrap-class-identity.php',
     'prepare' => $root . '/infra/scripts/prepare-class-archive-maintenance.php',
+    'baseline' => $root . '/infra/scripts/configure-piwigo-baseline.php',
     'backup_audit' => $root . '/infra/scripts/audit-backup.sh',
     'dev' => $root . '/infra/scripts/dev.ps1',
     'access' => $root . '/plugins/ClassIdentity/src/Access.php',
@@ -50,6 +51,7 @@ $lastPosition = static function (string $haystack, string $needle): int {
 $installer = $sources['installer'];
 $bootstrap = $sources['bootstrap'];
 $prepare = $sources['prepare'];
+$baseline = $sources['baseline'];
 $backupAudit = $sources['backup_audit'];
 $dev = $sources['dev'];
 $access = $sources['access'];
@@ -98,6 +100,15 @@ $assert(str_contains($bootstrap, 'realpath($path) !== $path'), 'bootstrap must r
 $contextDefinition = $position($bootstrap, "define('CLASS_IDENTITY_TRUSTED_BOOTSTRAP_CONTEXT', 'class-archive-cli-bootstrap-v1');");
 $commonBootstrap = $position($bootstrap, "require PHPWG_ROOT_PATH . 'include/common.inc.php';");
 $assert($contextDefinition >= 0 && $contextDefinition < $commonBootstrap, 'trusted bootstrap context must be defined before plugin load');
+
+// A finalized service has no marker by design.  The normal baseline verifier
+// must retain enforcement in that state, while every extant inode still enters
+// the exact trusted-marker verifier and therefore fails closed if malformed.
+$assert(str_contains($baseline, "\$maintenanceMarker = PIWIGO_ROOT . '/_data/.class-archive-maintenance';"), 'baseline verifier must identify the exact maintenance marker');
+$assert(str_contains($baseline, '@lstat($maintenanceMarker) !== false || is_link($maintenanceMarker)'), 'baseline verifier must route every extant marker inode through trusted validation');
+$baselineHelper = $position($baseline, 'classArchiveEnableTrustedCliBootstrapContext();');
+$baselineMarkerCondition = $position($baseline, 'if (@lstat($maintenanceMarker) !== false || is_link($maintenanceMarker))');
+$assert($baselineMarkerCondition >= 0 && $baselineHelper > $baselineMarkerCondition, 'baseline verifier must require trusted context only while a marker inode exists');
 
 $assert(str_contains($access, "PHP_SAPI !== 'cli'"), 'Access must restrict bootstrap bypass to CLI');
 $assert(str_contains($access, 'CLASS_IDENTITY_TRUSTED_BOOTSTRAP_CONTEXT'), 'Access must require the explicit bootstrap context');

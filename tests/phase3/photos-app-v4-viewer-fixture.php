@@ -52,23 +52,6 @@ function cavfRequireRuntime(): void
     $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 }
 
-function cavfBootstrap(): \ClassIdentity\Repository
-{
-    ob_start();
-    require PHPWG_ROOT_PATH . 'include/common.inc.php';
-    ob_end_clean();
-    require_once PHPWG_ROOT_PATH . 'plugins/ClassIdentity/main.inc.php';
-    if (!class_exists(\ClassIdentity\PhotoCommentService::class, false)
-        || !defined('CLASS_IDENTITY_VERSION')
-        || \ClassIdentity\Schema::CURRENT_VERSION !== 18) {
-        cavfFail('v18_comment_domain_required');
-    }
-    // This is deliberately a read-only attestation. The fixture must never
-    // "repair" schema state as a side effect of creating its two comments.
-    \ClassIdentity\Schema::fromPiwigo((string) CLASS_IDENTITY_VERSION)->verifyCurrent();
-    return \ClassIdentity\Repository::fromPiwigo();
-}
-
 function cavfMarker(string $run, string $suffix): string
 {
     if (!in_array($suffix, ['a', 'b'], true)) {
@@ -119,13 +102,14 @@ function cavfHeritagePhotos(\ClassIdentity\Repository $repository): array
         cavfFail('era_roots_invalid');
     }
     $photo = $repository->table('photo');
-    $archive = $repository->table('archive_image');
     $rows = $repository->fetchAll(
         'SELECT p.`class_photo_id`,p.`piwigo_image_id` FROM `' . $photo . '` p '
-        . 'INNER JOIN `' . $archive . '` a ON a.`piwigo_image_id`=p.`piwigo_image_id` '
         . 'INNER JOIN `' . $prefixeTable . 'image_category` ic ON ic.`image_id`=p.`piwigo_image_id` '
         . 'INNER JOIN `' . $prefixeTable . 'categories` c ON c.`id`=ic.`category_id` '
-        . "WHERE p.`state`='ACTIVE' AND p.`piwigo_image_id` IS NOT NULL AND a.`era`='HERITAGE' "
+        // The synthetic baseline deliberately has no optional archive_image
+        // metadata rows. Era is therefore derived from the same Piwigo album
+        // ancestry that Gateway/PiwigoGatewayAdapter uses for authorization.
+        . "WHERE p.`state`='ACTIVE' AND p.`piwigo_image_id` IS NOT NULL "
         . 'GROUP BY p.`class_photo_id`,p.`piwigo_image_id` '
         . 'HAVING MAX(CASE WHEN ic.`category_id`=? OR FIND_IN_SET(?,c.`uppercats`)>0 THEN 1 ELSE 0 END)=1 '
         . 'AND MAX(CASE WHEN ic.`category_id`=? OR FIND_IN_SET(?,c.`uppercats`)>0 THEN 1 ELSE 0 END)=0 '
@@ -282,9 +266,25 @@ function cavfCleanup(\ClassIdentity\Repository $repository, string $run): void
 }
 
 try {
-    cavfRequireRuntime();
-    $repository = cavfBootstrap();
     $arguments = array_values(array_slice($_SERVER['argv'] ?? [], 1));
+    cavfRequireRuntime();
+    // Piwigo's common bootstrap initializes a broad set of globals. Include
+    // it at file scope, as Piwigo expects; including it inside a helper
+    // function would isolate `$conf` and other runtime globals in that local
+    // function scope.
+    ob_start();
+    require PHPWG_ROOT_PATH . 'include/common.inc.php';
+    ob_end_clean();
+    require_once PHPWG_ROOT_PATH . 'plugins/ClassIdentity/main.inc.php';
+    if (!class_exists(\ClassIdentity\PhotoCommentService::class, false)
+        || !defined('CLASS_IDENTITY_VERSION')
+        || \ClassIdentity\Schema::CURRENT_VERSION !== 18) {
+        cavfFail('v18_comment_domain_required');
+    }
+    // This is deliberately a read-only attestation. The fixture must never
+    // "repair" schema state as a side effect of creating its two comments.
+    \ClassIdentity\Schema::fromPiwigo((string) CLASS_IDENTITY_VERSION)->verifyCurrent();
+    $repository = \ClassIdentity\Repository::fromPiwigo();
     $action = $arguments[0] ?? '';
     $run = cavfRun((string) ($arguments[1] ?? ''));
     if (count($arguments) !== 2) {

@@ -47,6 +47,13 @@ const CI_SCHEMA_SUFFIXES = [
     'auto_collection_photo',
     'ai_asset_index',
     'ai_index_job',
+    'collection_snapshot',
+    'collection_snapshot_item',
+    'collection_snapshot_pointer',
+    'collection_pin',
+    'collection_feedback',
+    'collection_maintenance_state',
+    'spotlight_rotation_state',
 ];
 
 function schemaTestFail(string $message): never

@@ -33,8 +33,16 @@ function preparePiwigoBootstrap(): void
     $_SERVER['REQUEST_URI'] = '/';
     $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 
-    require_once '/workspace/infra/scripts/class-archive-trusted-bootstrap-context.php';
-    classArchiveEnableTrustedCliBootstrapContext();
+    // A finalized runtime deliberately has no maintenance marker.  Its normal
+    // baseline verifier must therefore load Core under the ordinary enforced
+    // context.  If any marker inode exists (including a malformed or dangling
+    // link), take the stricter maintenance-only path and let the trusted
+    // bootstrap helper reject anything that is not the exact expected marker.
+    $maintenanceMarker = PIWIGO_ROOT . '/_data/.class-archive-maintenance';
+    if (@lstat($maintenanceMarker) !== false || is_link($maintenanceMarker)) {
+        require_once '/workspace/infra/scripts/class-archive-trusted-bootstrap-context.php';
+        classArchiveEnableTrustedCliBootstrapContext();
+    }
 }
 
 function fetchOne(string $query): ?array

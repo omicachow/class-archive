@@ -108,6 +108,15 @@ try {
     );
     $assert($empty['heroSpotlightId'] === null && $empty['orderedSpotlightIds'] === [] && $empty['displayCount'] === 0, 'empty_rotation_state_invalid');
     $assert(is_string($empty['nextRotationAt']) && $empty['nextRotationAt'] !== '', 'empty_rotation_checkpoint_missing');
+    $emptyHeld = \ClassIdentity\SpotlightRotationService::planForSyntheticTest(
+        'FULL', [], $empty, $t0->add(new DateInterval('PT2H')),
+    );
+    $assert($emptyHeld['changed'] === false && $emptyHeld['nextRotationAt'] === $empty['nextRotationAt']
+        && $emptyHeld['revision'] === $empty['revision'], 'empty_rotation_checkpoint_not_persistent');
+    $emptyDue = \ClassIdentity\SpotlightRotationService::planForSyntheticTest(
+        'FULL', [], $emptyHeld, $t0->add(new DateInterval('PT2H32M')),
+    );
+    $assert($emptyDue['changed'] === true && $emptyDue['nextRotationAt'] !== $emptyHeld['nextRotationAt'], 'empty_rotation_due_checkpoint_not_advanced');
 
     $heritage = \ClassIdentity\SpotlightRotationService::planForSyntheticTest('HERITAGE', [$a, $b], null, $t0);
     $assert($heritage['heroSpotlightId'] === $a && $heritage['revision'] !== $initial['revision'], 'scope_state_not_isolated');

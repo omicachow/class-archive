@@ -10,6 +10,28 @@ Set-StrictMode -Version Latest
 # or an ambiguous filesystem state. The owning wrapper must remove its exact
 # random token in finally before it emits an attester-eligible PASS record.
 
+function Get-V4SyntheticPhaseARelativePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Base,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    # System.IO.Path.GetRelativePath was introduced after the .NET Framework
+    # runtime used by Windows PowerShell 5.1.  The V4 acceptance runners are
+    # deliberately executable with the host's Windows PowerShell, so keep the
+    # containment calculation on APIs available there.  Both inputs are made
+    # absolute first and the caller still separately rejects reparse points.
+    $baseFull = [IO.Path]::GetFullPath($Base).TrimEnd([char]'\', [char]'/')
+    $targetFull = [IO.Path]::GetFullPath($Target)
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $prefix = $baseFull + $separator
+    if (-not $targetFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return $targetFull.Substring($prefix.Length)
+}
+
 function Assert-V4SyntheticPhaseALeaseChildPath {
     [CmdletBinding()]
     param(
@@ -19,7 +41,7 @@ function Assert-V4SyntheticPhaseALeaseChildPath {
     )
 
     $separator = [IO.Path]::DirectorySeparatorChar
-    $relative = [IO.Path]::GetRelativePath($Base, $Target)
+    $relative = Get-V4SyntheticPhaseARelativePath -Base $Base -Target $Target
     if (
         [string]::IsNullOrWhiteSpace($relative) -or
         $relative -eq '..' -or
@@ -71,20 +93,40 @@ function Import-V4SyntheticPhaseALeaseAclSupport {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
-    if ($null -eq (Get-Command Assert-ClassArchiveOwnerOnlyFileAcl -ErrorAction SilentlyContinue)) {
-        $aclScript = Join-Path $ProjectRoot 'infra\scripts\secret-file-acl.ps1'
-        if (-not (Test-Path -LiteralPath $aclScript -PathType Leaf)) {
-            throw 'v4_synthetic_phase_a_lease_acl_support_missing'
-        }
-        . $aclScript
+    $aclScript = Join-Path $ProjectRoot 'infra\scripts\secret-file-acl.ps1'
+    if (-not (Test-Path -LiteralPath $aclScript -PathType Leaf)) {
+        throw 'v4_synthetic_phase_a_lease_acl_support_missing'
     }
+    return $aclScript
+}
+
+function Invoke-V4SyntheticPhaseALeaseAcl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('assert', 'set')][string]$Action
+    )
+
+    # PowerShell dot-sourcing inside Import-V4SyntheticPhaseALeaseAclSupport
+    # creates functions in that helper's local scope. Load the reviewed ACL
+    # helpers and invoke them in this same short-lived scope instead; this
+    # avoids an ambient profile/global dependency while preserving the exact
+    # owner-only descriptor check for every lease operation.
+    $aclScript = Import-V4SyntheticPhaseALeaseAclSupport -ProjectRoot $ProjectRoot
+    . $aclScript
+    if ($Action -eq 'set') {
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $Path
+        return
+    }
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $Path
 }
 
 function Initialize-V4SyntheticPhaseALeaseRoot {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Location)
 
-    Import-V4SyntheticPhaseALeaseAclSupport -ProjectRoot $Location.project_root
+    [void](Import-V4SyntheticPhaseALeaseAclSupport -ProjectRoot $Location.project_root)
     foreach ($path in @($Location.work_root, $Location.runtime_root, $Location.lease_root, $Location.lease_path)) {
         Assert-V4SyntheticPhaseALeaseIgnoredUntracked -ProjectRoot $Location.project_root -Path $path -Code 'v4_synthetic_phase_a_lease_not_ignored'
     }
@@ -109,7 +151,7 @@ function Assert-V4SyntheticPhaseALeaseLeaf {
         throw 'v4_synthetic_phase_a_lease_leaf_unsafe'
     }
     Assert-V4SyntheticPhaseALeaseIgnoredUntracked -ProjectRoot $Location.project_root -Path $Location.lease_path -Code 'v4_synthetic_phase_a_lease_not_ignored'
-    Assert-ClassArchiveOwnerOnlyFileAcl -Path $Location.lease_path
+    Invoke-V4SyntheticPhaseALeaseAcl -ProjectRoot $Location.project_root -Path $Location.lease_path -Action assert
 }
 
 function New-V4SyntheticPhaseALeaseToken {
@@ -200,11 +242,24 @@ function Enter-V4SyntheticPhaseAMutationLease {
         if ($null -ne $stream) { $stream.Dispose() }
     }
 
-    try {
-        Set-ClassArchiveOwnerOnlyFileAcl -Path $location.lease_path
-        [void](Read-V4SyntheticPhaseALeaseRecord -Location $location)
+    # Fresh NTFS leaves can briefly retain their inherited descriptor after the
+    # CreateNew handle closes.  Re-prove the exact ACL and record a few times
+    # rather than turning that bounded host filesystem propagation race into a
+    # false permanent lease.  This never removes a marker: a failure after the
+    # retries still leaves the opaque token in place and remains fail-closed.
+    $initializationVerified = $false
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try {
+            Invoke-V4SyntheticPhaseALeaseAcl -ProjectRoot $location.project_root -Path $location.lease_path -Action set
+            [void](Read-V4SyntheticPhaseALeaseRecord -Location $location)
+            $initializationVerified = $true
+            break
+        }
+        catch {
+            if ($attempt -lt 2) { Start-Sleep -Milliseconds 100 }
+        }
     }
-    catch {
+    if (-not $initializationVerified) {
         # Do not delete a marker whose ACL or record cannot be re-proven.
         throw 'v4_synthetic_phase_a_lease_initialization_ambiguous'
     }

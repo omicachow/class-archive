@@ -50,7 +50,7 @@ function ciulRequireCli(): void
 function ciulUuid(string $value): string
 {
     $value = strtolower($value);
-    if (preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}\z/D', $value) !== 1) {
+    if (preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/D', $value) !== 1) {
         ciulFail('uuid_invalid');
     }
     return $value;
@@ -303,10 +303,14 @@ function ciulCleanupPublished(string $uuid, string $checksum): void
     if ($imageId <= 0 || !str_starts_with($reference, 'upload/')) {
         ciulFail('published_media_reference_invalid');
     }
-    $escapedReference = pwg_db_real_escape_string($reference);
-    $imageRows = query2array('SELECT `id`,`path` FROM `' . $prefixeTable . 'images` WHERE `path`=\'' . $escapedReference . '\'');
+    // Piwigo can persist the same managed relative path with a leading `./`,
+    // while Class Archive deliberately stores its normalized reference without
+    // that presentation prefix. Scope this cleanup to the known numeric Core
+    // row, then compare its normalized reference; never search by a filename
+    // or a loose path fragment.
+    $imageRows = query2array('SELECT `id`,`path` FROM `' . $prefixeTable . 'images` WHERE `id`=' . $imageId);
     if (count($imageRows) !== 1 || (int) ($imageRows[0]['id'] ?? 0) !== $imageId
-        || !hash_equals($reference, (string) ($imageRows[0]['path'] ?? ''))) {
+        || !hash_equals($reference, \ClassIdentity\ClassArchivePhoto::normalizeMediaReference((string) ($imageRows[0]['path'] ?? '')))) {
         ciulFail('published_core_mapping_drift');
     }
     $sourcePath = CIUL_ROOT . '/' . $reference;

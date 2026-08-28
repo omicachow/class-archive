@@ -390,6 +390,17 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase1\anonymous-presenter-http.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # The Anonymous presenter HTTP fixture intentionally updates a native
+        # Piwigo category flag. The native source guard must mark every photo
+        # projection STALE while that mutation is being exercised. Publish a
+        # fresh synthetic projection only after the fixture completed and
+        # cleaned up successfully; any fixture or rebuild failure remains
+        # fail-closed instead of converting a 503 into stale data.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+        ))
         exit $LASTEXITCODE
     }
     'test-phase2-contract' {
@@ -626,6 +637,17 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase3\private-incremental-evidence-egress-synthetic.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # Several Phase 3 runtime fixtures deliberately exercise native Piwigo
+        # mutation and the durable source-epoch guard. A successful contract
+        # run must restore the canonical synthetic projection before handing
+        # the already-running 8091 service to Chrome acceptance. On failure we
+        # intentionally leave the projection STALE, preserving fail-closed
+        # behavior for investigation rather than silently publishing a view.
+        & wsl.exe @($composeArguments + @(
+            'exec', '-T', '--user', 'nginx', 'piwigo',
+            'php', '/workspace/infra/scripts/rebuild-photo-read-projection.php', '--scope=all', '--json'
+        ))
         exit $LASTEXITCODE
     }
     'test-phase2-gateway-http' {

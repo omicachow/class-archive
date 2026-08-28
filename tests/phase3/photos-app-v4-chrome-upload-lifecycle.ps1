@@ -17,7 +17,7 @@ $separator = [IO.Path]::DirectorySeparatorChar
 $compose = @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml')
 
 function Assert-ChildPath([string]$Base, [string]$Target, [string]$Code) {
-    $relative = [IO.Path]::GetRelativePath($Base, $Target)
+    $relative = Get-V4SyntheticPhaseARelativePath -Base $Base -Target $Target
     if ([string]::IsNullOrWhiteSpace($relative) -or $relative -eq '..' -or $relative.StartsWith('..' + $separator, [StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($relative)) { throw $Code }
 }
 function Assert-IgnoredUntracked([string]$Path, [string]$Code) {
@@ -54,14 +54,35 @@ function Assert-Baseline([string]$Code) {
     $state = Invoke-UploadFixture @('baseline')
     if ([int]$state.images -ne 72 -or [int]$state.active_canonical -ne 72 -or [int]$state.physical_originals -ne 72 -or [int]$state.multi_album_images -ne 8) { throw $Code }
 }
-function Get-Sha256([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Get-Sha256([string]$Path) {
+    # Use the BCL directly rather than relying on PowerShell module
+    # auto-loading. The runner is intentionally launched under a fresh
+    # no-profile Windows PowerShell process during Chrome acceptance.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return (([BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '')).ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
 function Get-Crc32([byte[]]$Bytes) {
-    [uint32]$crc = 0xffffffff
+    # Hex literals above Int32.MaxValue are parsed as signed values by
+    # PowerShell before a checked UInt32 cast. Build both CRC constants using
+    # the framework conversion API so this fixture works in Windows
+    # PowerShell 5.1 as well as PowerShell 7.
+    [uint32]$crc = [uint32]::MaxValue
+    [uint32]$polynomial = [Convert]::ToUInt32('EDB88320', 16)
     foreach ($byte in $Bytes) {
         $crc = $crc -bxor [uint32]$byte
-        for ($i = 0; $i -lt 8; $i++) { if (($crc -band 1) -ne 0) { $crc = ([uint32]($crc -shr 1)) -bxor [uint32]0xedb88320 } else { $crc = [uint32]($crc -shr 1) } }
+        for ($i = 0; $i -lt 8; $i++) { if (($crc -band 1) -ne 0) { $crc = ([uint32]($crc -shr 1)) -bxor $polynomial } else { $crc = [uint32]($crc -shr 1) } }
     }
-    return [uint32](-bnot $crc)
+    # PowerShell 7 evaluates `-bnot` over a UInt32 as a signed -1 for an
+    # all-zero intermediate, then refuses a checked cast back to UInt32.
+    # XOR against the explicit UInt32 maximum preserves the CRC32 operation
+    # on both Windows PowerShell 5.1 and PowerShell 7.
+    return ([uint32]::MaxValue -bxor $crc)
 }
 function New-SyntheticPng([string]$Path, [string]$Marker) {
     # One valid PNG, with an ancillary tEXt chunk before IEND. The random
@@ -122,7 +143,11 @@ try {
         $output = @(& $node (Join-Path $PSScriptRoot 'photos-app-v4-chrome-upload-lifecycle.mjs') 2>&1); $code = $LASTEXITCODE
         $safe = @($output | ForEach-Object {[string]$_} | Where-Object { $_ -match '^V4_CHROME_UPLOAD_STAGE=[a-z0-9_-]+$' -or $_ -match '^V4_CHROME_UPLOAD_LIFECYCLE=(PASS assertions=[0-9]+ uploads=5 channel=chrome chrome_product=chrome chrome_version=[0-9.]+|FAIL stage=[a-z0-9_-]+ code=[a-z0-9_]+)$' })
         $pass = @($safe | Where-Object { $_ -match '^V4_CHROME_UPLOAD_LIFECYCLE=PASS\b' })
-        if ($code -ne 0 -or $pass.Count -ne 1) { throw 'v4_upload_browser_failed' }
+        if ($code -ne 0 -or $pass.Count -ne 1) {
+            $failure = @($safe | Where-Object { $_ -match '^V4_CHROME_UPLOAD_LIFECYCLE=FAIL stage=[a-z0-9_-]+ code=[a-z0-9_]+$' }) | Select-Object -First 1
+            if ($null -ne $failure) { throw ('v4_upload_browser_failed_' + ([string] $failure).Replace('V4_CHROME_UPLOAD_LIFECYCLE=FAIL ', '')) }
+            throw 'v4_upload_browser_failed'
+        }
         $result = $pass[0]
         # This exact checksum differs from the successful Heritage fixture.
         # Assert the forged Family LIVING form did not create a submission,

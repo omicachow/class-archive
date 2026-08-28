@@ -20,8 +20,9 @@ const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SYNTHETIC_UPLOAD_ROOT = path.join(PROJECT_ROOT, '.codex-work', 'runtime', 'phase3-upload-lifecycle');
+const MEMBER_UPLOAD_CAPTURE_BINDING = '__classArchiveV4CaptureMemberUpload';
 
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/i;
 const FIXTURE_NAMES = Object.freeze([
   Object.freeze({ role: 'classmate', era: 'HERITAGE', file: 'classmate-heritage.png' }),
@@ -102,6 +103,14 @@ function readCredentials() {
 function allowedUrl(value) {
   return ['about:', 'blob:', 'data:'].includes(value.protocol)
     || (value.protocol === 'http:' && value.hostname === '127.0.0.1' && ['8090', '8091'].includes(value.port));
+}
+
+function isPiwigoFamilySubmissionPage(value) {
+  const piwigo = new URL(settings.piwigo);
+  // The BFF redirects this fixed core route to Piwigo's canonical query
+  // routing form (`/index.php?/class-identity/my`), not a pretty pathname.
+  return value.origin === piwigo.origin && value.pathname === '/index.php'
+    && value.search === '?/class-identity/my';
 }
 
 function sha256File(file) {
@@ -185,6 +194,39 @@ async function recordChromeStableVersion(context, page) {
   }
 }
 
+function safeObservedMemberUpload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const status = Number.isInteger(value.status) ? value.status : 0;
+  const contentType = typeof value.contentType === 'string' && value.contentType.length <= 200
+    ? value.contentType
+    : '';
+  const rawPayload = value.payload;
+  const payload = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload)
+    ? {
+      state: rawPayload.state,
+      photoId: rawPayload.photoId,
+      albumId: rawPayload.albumId,
+      era: rawPayload.era,
+      indexPending: rawPayload.indexPending,
+      derivativeWarmupPending: rawPayload.derivativeWarmupPending,
+    }
+    : null;
+  return { status, contentType, payload };
+}
+
+async function waitForObservedMemberUpload(observations, expectedIndex, code) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (observations.length > expectedIndex) {
+      const observed = safeObservedMemberUpload(observations[expectedIndex]);
+      if (observed) return observed;
+      fail(`${code}_capture_shape`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  fail(`${code}_capture_timeout`);
+}
+
 async function open(role, credentials) {
   const profile = childPath(settings.userDataRoot, role, 'profile_child');
   check(!fs.existsSync(profile), `profile_${role}_fresh`);
@@ -209,10 +251,60 @@ async function open(role, credentials) {
         ...CHROME_SYNTHETIC_LOCALHOST_ONLY_LAUNCH_ARGS,
       ],
     });
+    const observedMemberUploads = [];
+    await context.exposeBinding(MEMBER_UPLOAD_CAPTURE_BINDING, (_source, value) => {
+      const observed = safeObservedMemberUpload(value);
+      if (observed) observedMemberUploads.push(observed);
+      return true;
+    });
     await context.route('**/*', (route) => {
       try { return allowedUrl(new URL(route.request().url())) ? route.continue() : route.abort(); }
       catch { return route.abort(); }
     });
+    // The owned UI refreshes its projection in a zero-delay task after it has
+    // consumed a successful upload response. Playwright can then lose the
+    // response body while the page is navigating. Capture a cloned, strictly
+    // whitelisted response in the browser before returning it to the UI; this
+    // preserves the real Chrome request and the UI's own JSON consumption.
+    await context.addInitScript((binding) => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await nativeFetch(...args);
+        try {
+          const input = args[0];
+          const request = typeof Request === 'function' && input instanceof Request ? input : null;
+          const rawUrl = typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : request?.url;
+          const method = String(args[1]?.method ?? request?.method ?? 'GET').toUpperCase();
+          const url = new URL(rawUrl, window.location.href);
+          if (method === 'POST' && url.origin === window.location.origin && url.pathname === '/api/class-archive/member-upload') {
+            let payload = null;
+            try {
+              const decoded = await response.clone().json();
+              if (decoded && typeof decoded === 'object' && !Array.isArray(decoded)) {
+                payload = {
+                  state: decoded.state,
+                  photoId: decoded.photoId,
+                  albumId: decoded.albumId,
+                  era: decoded.era,
+                  indexPending: decoded.indexPending,
+                  derivativeWarmupPending: decoded.derivativeWarmupPending,
+                };
+              }
+            } catch { /* The Node assertion records a bounded capture failure. */ }
+            await window[binding]({
+              status: response.status,
+              contentType: response.headers.get('content-type') ?? '',
+              payload,
+            });
+          }
+        } catch { /* Test instrumentation must never alter the application response. */ }
+        return response;
+      };
+    }, MEMBER_UPLOAD_CAPTURE_BINDING);
     const page = context.pages()[0] ?? await context.newPage();
     await recordChromeStableVersion(context, page);
     await page.goto(new URL('identification.php', settings.piwigo).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -224,7 +316,7 @@ async function open(role, credentials) {
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => null),
       form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last().click(),
     ]);
-    return { context, page };
+    return { context, page, observedMemberUploads };
   } catch (error) {
     await context?.close().catch(() => null);
     if (error instanceof GateError) throw error;
@@ -259,7 +351,7 @@ async function selectFile(page, locator, file, code) {
   await chooser.setFiles([absolutePath(file, `${code}_file`)]);
 }
 
-async function directMemberUpload(page, record, journal) {
+async function directMemberUpload(page, record, journal, observedMemberUploads) {
   stageAt(`${record.role}_${record.era.toLowerCase()}_upload`);
   const state = await roleState(page, record.role);
   check(state.canEraUpload === true && state.canFamilySubmission === false, `${record.role}_direct_upload_state`);
@@ -275,7 +367,7 @@ async function directMemberUpload(page, record, journal) {
   await album.waitFor({ state: 'visible', timeout: 5_000 });
   const options = await album.locator('option').evaluateAll((nodes) => nodes
     .map((node) => ({ value: node.value, disabled: node.disabled }))
-    .filter((node) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(node.value) && !node.disabled));
+    .filter((node) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(node.value) && !node.disabled));
   check(options.length >= 1, `${record.role}_${record.era.toLowerCase()}_album_options`);
   const albumId = options[0].value.toLowerCase();
   await album.selectOption(albumId);
@@ -287,21 +379,35 @@ async function directMemberUpload(page, record, journal) {
         && response.request().method() === 'POST';
     } catch { return false; }
   }, { timeout: 30_000 });
+  const projectionReloadPromise = page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+  const observedIndex = observedMemberUploads.length;
   // Persist a checksum-only intent before dispatch. If the browser dies after
   // the server writes but before it returns the opaque UUID, the localhost
   // fixture can safely resolve that one preflighted checksum to its UUID and
   // clean it; it never searches a filename or a directory pattern.
   journal.uploads.push({ kind: 'PUBLISHED_INTENT', role: record.role, era: record.era, checksum: record.checksum });
   writeJournal(settings.journal, journal);
-  await dialog.getByRole('button', { name: '确认上传', exact: true }).click();
+  // The dialog's async submit handler never navigates. Do not let
+  // Playwright's generic post-click navigation waiting mask the actual
+  // bounded upload response that this suite is asserting.
+  await dialog.getByRole('button', { name: '确认上传', exact: true }).click({ noWaitAfter: true });
   const response = await responsePromise;
-  let payload = null;
-  try { payload = await response.json(); } catch { fail(`${record.role}_${record.era.toLowerCase()}_response_json`); }
-  check(response.status() === 201 && payload && typeof payload === 'object' && !Array.isArray(payload), `${record.role}_${record.era.toLowerCase()}_response_status`);
+  const responseCode = `${record.role}_${record.era.toLowerCase()}_response`;
+  const observed = await waitForObservedMemberUpload(observedMemberUploads, observedIndex, responseCode);
+  await page.locator('dialog.era-upload-dialog[open]').waitFor({ state: 'hidden', timeout: 10_000 });
+  check(await page.locator('dialog.era-upload-dialog[open]').count() === 0, `${record.role}_${record.era.toLowerCase()}_dialog_completed`);
+  const payload = observed.payload;
+  check(response.status() === 201 && observed.status === 201
+    && observed.contentType.toLowerCase().startsWith('application/json')
+    && payload && typeof payload === 'object' && !Array.isArray(payload), `${record.role}_${record.era.toLowerCase()}_response_status`);
   check(payload.state === 'PUBLISHED' && UUID_V4.test(payload.photoId ?? '')
     && UUID_V4.test(payload.albumId ?? '') && payload.albumId.toLowerCase() === albumId
     && payload.era === record.era && typeof payload.indexPending === 'boolean'
     && typeof payload.derivativeWarmupPending === 'boolean', `${record.role}_${record.era.toLowerCase()}_response_contract`);
+  check(await projectionReloadPromise, `${record.role}_${record.era.toLowerCase()}_projection_reload`);
+  await page.locator('[data-photo-app="true"]').waitFor({ timeout: 15_000 });
   const intentIndex = journal.uploads.findIndex((entry) => entry.kind === 'PUBLISHED_INTENT'
     && entry.role === record.role && entry.era === record.era && entry.checksum === record.checksum);
   check(intentIndex >= 0, `${record.role}_${record.era.toLowerCase()}_cleanup_intent`);
@@ -326,9 +432,9 @@ async function familyPendingUpload(page, record, journal) {
   check(state.canEraUpload === false && state.canFamilySubmission === true, 'family_pending_state');
   const trigger = page.getByRole('button', { name: '投稿历史照片', exact: true });
   check(await trigger.count() === 1, 'family_pending_trigger');
-  await trigger.click();
-  await page.waitForURL((value) => value.origin === new URL(settings.piwigo).origin
-    && value.pathname.includes('/class-archive-core/identity'), { timeout: 20_000 });
+  const pendingDestination = page.waitForURL(isPiwigoFamilySubmissionPage, { timeout: 20_000 });
+  await trigger.click({ noWaitAfter: true });
+  await pendingDestination;
   const form = page.locator('form[enctype="multipart/form-data"]').filter({ has: page.locator('input[name="submission_file"]') });
   check(await form.count() === 1, 'family_pending_form');
   const era = form.locator('input[name="era"]');
@@ -353,9 +459,14 @@ async function familyLivingTamper(page, record) {
   stageAt('family_living_tamper_denied');
   const state = await roleState(page, 'family');
   check(state.canEraUpload === false && state.canFamilySubmission === true, 'family_tamper_state');
-  await page.getByRole('button', { name: '投稿历史照片', exact: true }).click();
-  await page.waitForURL((value) => value.origin === new URL(settings.piwigo).origin
-    && value.pathname.includes('/class-archive-core/identity'), { timeout: 20_000 });
+  stageAt('family_living_tamper_open');
+  stageAt('family_living_tamper_destination');
+  const tamperDestination = page.waitForURL(isPiwigoFamilySubmissionPage, { timeout: 20_000 });
+  stageAt('family_living_tamper_open_click');
+  await page.getByRole('button', { name: '投稿历史照片', exact: true }).click({ noWaitAfter: true });
+  stageAt('family_living_tamper_open_wait');
+  await tamperDestination;
+  stageAt('family_living_tamper_form');
   const form = page.locator('form[enctype="multipart/form-data"]').filter({ has: page.locator('input[name="submission_file"]') });
   check(await form.count() === 1, 'family_tamper_form');
   const era = form.locator('input[name="era"]');
@@ -364,16 +475,28 @@ async function familyLivingTamper(page, record) {
   // file after a caller-controlled hidden marker is changed to LIVING.
   await era.evaluate((node) => { node.value = 'LIVING'; });
   check(await era.inputValue() === 'LIVING', 'family_tamper_marker_mutated');
+  stageAt('family_living_tamper_file');
   await selectFile(page, form.locator('input[type="file"][name="submission_file"]'), record.file, 'family_tamper_living');
   const responsePromise = page.waitForResponse((response) => {
     try {
       const url = new URL(response.url());
-      return url.origin === new URL(settings.piwigo).origin && url.pathname.includes('/class-archive-core/identity')
+      return isPiwigoFamilySubmissionPage(url)
         && response.request().method() === 'POST';
     } catch { return false; }
   }, { timeout: 30_000 });
-  await form.getByRole('button', { name: '提交审核', exact: true }).click();
+  // The rejected POST returns an identity page and replaces this document.
+  // Keep the response and navigation observations separate so Playwright does
+  // not discard one while it waits on the other.
+  const rejectionNavigation = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+  stageAt('family_living_tamper_dispatch');
+  await form.getByRole('button', { name: '提交审核', exact: true }).click({ noWaitAfter: true });
+  stageAt('family_living_tamper_response');
   const response = await responsePromise;
+  stageAt('family_living_tamper_navigation');
+  check(await rejectionNavigation, 'family_tamper_navigation');
+  stageAt('family_living_tamper_assert');
   check(response.status() === 200, 'family_tamper_response_status');
   check((await page.locator('body').innerText()).includes('投稿资料或照片格式不符合要求'), 'family_tamper_validation_error');
 }
@@ -394,13 +517,19 @@ async function run() {
     byRole.get(input.role).push(input);
   }
   for (const role of ['classmate', 'teacher', 'family']) {
-    const { context, page } = await open(role, credentials);
+    const { context, page, observedMemberUploads } = await open(role, credentials);
     try {
       await gotoPhotos(page, role);
       for (const record of byRole.get(role) ?? []) {
-        if (role === 'family' && record.tamper === true) await familyLivingTamper(page, record);
+        if (role === 'family' && record.tamper === true) {
+          await familyLivingTamper(page, record);
+          // A tampered Family form deliberately stays on Piwigo's validation
+          // page. Return through the real BFF route before testing the
+          // separate, valid Pending submission flow.
+          await gotoPhotos(page, role);
+        }
         else if (role === 'family') await familyPendingUpload(page, record, journal);
-        else await directMemberUpload(page, record, journal);
+        else await directMemberUpload(page, record, journal, observedMemberUploads);
       }
     } finally {
       await context.close().catch(() => null);

@@ -28,6 +28,7 @@ let stage = 'initialization';
 let chromeProduct = 'unknown';
 let chromeVersion = 'unknown';
 let screenshots = 0;
+let browserProfileSequence = 0;
 
 function fail(code) { throw new GateError(code); }
 function check(value, code) {
@@ -39,6 +40,19 @@ function stageAt(value) {
   process.stdout.write(`V4_CHROME_DEEP_STAGE=${value}\n`);
 }
 
+function safeUnexpectedCode(error) {
+  const message = String(error?.message ?? '');
+  if (/Timeout \d+ms exceeded/i.test(message)) return 'timeout';
+  if (/outside of the viewport/i.test(message)) return 'outside_viewport';
+  if (/intercepts pointer events/i.test(message)) return 'pointer_intercepted';
+  if (/not visible/i.test(message)) return 'not_visible';
+  if (/not stable/i.test(message)) return 'not_stable';
+  if (/not attached|detached/i.test(message)) return 'detached';
+  if (/strict mode violation/i.test(message)) return 'strict_locator';
+  if (/execution context was destroyed|ERR_ABORTED/i.test(message)) return 'navigation_race';
+  return 'unexpected';
+}
+
 const settings = {
   piwigo: process.env.CLASS_ARCHIVE_V4_DEEP_PIWIGO_ORIGIN,
   photos: process.env.CLASS_ARCHIVE_V4_DEEP_PHOTO_ORIGIN,
@@ -48,7 +62,7 @@ const settings = {
   screenshots: process.env.CLASS_ARCHIVE_V4_DEEP_SCREENSHOT_DIR,
 };
 
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isUuid(value) {
   return typeof value === 'string' && UUID_V4.test(value);
@@ -146,7 +160,10 @@ async function save(page, name) {
 }
 
 async function open(role, viewport, credentials) {
-  const profile = child(settings.userDataRoot, `${role}-${viewport.width}x${viewport.height}`, 'profile_child');
+  // A single run exercises the same role/viewport across independent user
+  // stories. Every launch still needs an empty profile, so retain all prior
+  // profiles until the wrapper removes this run-scoped parent in finally.
+  const profile = child(settings.userDataRoot, `${role}-${viewport.width}x${viewport.height}-${++browserProfileSequence}`, 'profile_child');
   check(!fs.existsSync(profile), 'profile_not_fresh');
   let context = null;
   try {
@@ -190,9 +207,15 @@ async function open(role, viewport, credentials) {
 }
 
 async function gotoPhotos(page, role) {
-  await page.goto(safePhotoUrl('/photos'), { waitUntil: 'networkidle', timeout: 30_000 });
+  // The Photo UI hydrates owned API requests after its document arrives.
+  // Acceptance needs an interactive app and visible grid, not a fragile
+  // browser-wide network-idle condition.
+  stageAt(`${role}_photos_navigate`);
+  await page.goto(safePhotoUrl('/photos'), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  stageAt(`${role}_photos_shell`);
   await page.locator('[data-photo-app="true"]').waitFor({ timeout: 15_000 });
   const first = page.locator('.photo-card').first();
+  stageAt(`${role}_photos_grid`);
   await first.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => null);
   check(await first.count() === 1, `${role}_photos_grid`);
 }
@@ -245,17 +268,21 @@ async function assertFamilyKnownLivingDenied(page, credentials) {
   check(result.timelineStatus === 200 && result.leakedToTimeline === false, 'family_known_living_timeline_denied');
   check(Array.isArray(result.statuses) && result.statuses.length === 7 && result.statuses.every((status) => status === 404), 'family_known_living_mediaguard_denied');
 
-  await page.goto(safePhotoUrl(`/photos/${deniedPhotoId}`), { waitUntil: 'networkidle', timeout: 30_000 });
-  await page.locator('[data-photo-app="true"]').waitFor({ timeout: 15_000 });
+  // A known-but-hidden viewer is intentionally rejected by the BFF before it
+  // serves the Photo App document. This prevents a distinct app shell or any
+  // asset metadata from becoming an existence side channel.
+  const deniedResponse = await page.goto(safePhotoUrl(`/photos/${deniedPhotoId}`), { waitUntil: 'domcontentloaded', timeout: 30_000 });
   const deniedViewer = await page.evaluate((id) => {
     const image = document.querySelector('.viewer-image');
-    const html = document.querySelector('[data-photo-app="true"]')?.innerHTML ?? '';
+    const app = document.querySelector('[data-photo-app="true"]');
+    const html = document.documentElement.innerHTML;
     return {
       rendered: image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0,
-      requestedPreview: html.includes(`/api/assets/${id}/thumbnail`),
+      appShell: app !== null,
+      requestedPreview: html.includes(`/api/assets/${id}/thumbnail`) || html.includes(id),
     };
   }, deniedPhotoId);
-  check(deniedViewer.rendered === false && deniedViewer.requestedPreview === false, 'family_known_living_viewer_denied');
+  check(deniedResponse?.status() === 404 && deniedViewer.rendered === false && deniedViewer.appShell === false && deniedViewer.requestedPreview === false, 'family_known_living_viewer_denied');
   await gotoPhotos(page, 'family');
 }
 
@@ -310,6 +337,11 @@ async function assertAnonymousCommentProjection(page, viewerFixture, credentials
   check(!forbiddenIdentityKeys(result.first?.payload) && !forbiddenIdentityKeys(result.second?.payload)
     && !result.first?.containsFixtureUsername && !result.second?.containsFixtureUsername, 'anonymous_comment_api_identity_redacted');
 
+  // The Timeline ordering is intentionally independent of this fixture's
+  // lowest-image-id selection. Navigate to the explicit public fixture photo
+  // before asserting its rendered context pseudonym.
+  await page.goto(safePhotoUrl(`/photos/${photoA}`), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.locator('.viewer-image').waitFor({ state: 'visible', timeout: 20_000 });
   const firstComment = page.locator(`.comment-item[data-comment-id="${commentA}"]`);
   check(await firstComment.count() === 1, 'anonymous_comment_fixture_dom_present');
   check((await firstComment.locator('.comment-author').textContent())?.trim() === result.first.label, 'anonymous_comment_fixture_dom_pseudonym');
@@ -321,11 +353,11 @@ async function assertAnonymousCommentProjection(page, viewerFixture, credentials
   }, Object.values(credentials.roles).map((entry) => entry.username));
   check(!htmlState.leakedKey && !htmlState.leakedUsername, 'anonymous_comment_html_identity_redacted');
 
-  await page.goto(safePhotoUrl(`/photos/${photoB}`), { waitUntil: 'networkidle', timeout: 30_000 });
+  await page.goto(safePhotoUrl(`/photos/${photoB}`), { waitUntil: 'domcontentloaded', timeout: 30_000 });
   const secondComment = page.locator(`.comment-item[data-comment-id="${commentB}"]`);
   await secondComment.waitFor({ state: 'visible', timeout: 20_000 });
   check((await secondComment.locator('.comment-author').textContent())?.trim() === result.second.label, 'anonymous_comment_second_context_dom_pseudonym');
-  await page.goto(safePhotoUrl(`/photos/${photoA}`), { waitUntil: 'networkidle', timeout: 30_000 });
+  await page.goto(safePhotoUrl(`/photos/${photoA}`), { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.locator('.viewer-image').waitFor({ state: 'visible', timeout: 20_000 });
 }
 
@@ -334,10 +366,13 @@ async function viewerJourney(role, viewport, credentials, viewerFixture) {
   const { context, page } = await open(role, viewport, credentials);
   try {
     stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer`);
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_photos`);
     await gotoPhotos(page, role);
     if (role === 'family') {
+      stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_known_living`);
       await assertFamilyKnownLivingDenied(page, credentials);
     }
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_open`);
     const first = page.locator('.photo-card').first();
     await first.click();
     await page.waitForURL((value) => value.origin === new URL(settings.photos).origin && /^\/photos\/[0-9a-f-]{36}$/i.test(value.pathname), { timeout: 20_000 }).catch(() => null);
@@ -367,14 +402,17 @@ async function viewerJourney(role, viewport, credentials, viewerFixture) {
     }), photoId);
     check(adjacentPreloaded, `${role}_viewer_adjacent_preload`);
 
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_controls`);
     const infoToggle = page.locator('.viewer-toolbar button[aria-expanded]');
     check(await infoToggle.count() === 1, `${role}_viewer_comments_toggle`);
     const initialOpen = await infoToggle.getAttribute('aria-expanded');
     check(initialOpen === (mobile ? 'false' : 'true'), `${role}_viewer_comments_initial_state`);
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_comment_toggle`);
     await infoToggle.click();
     check(await infoToggle.getAttribute('aria-expanded') === (mobile ? 'true' : 'false'), `${role}_viewer_comments_toggle_state`);
     check(await page.locator('.viewer-info').getAttribute('data-open') === (mobile ? 'true' : 'false'), `${role}_viewer_comments_panel_state`);
     if (mobile) {
+      stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_comment_sheet`);
       await page.waitForFunction(() => {
         const panel = document.querySelector('.viewer-info');
         const next = document.querySelector('.viewer-next');
@@ -401,23 +439,51 @@ async function viewerJourney(role, viewport, credentials, viewerFixture) {
     }
     // Return the comment surface to its original state before opening the
     // collapsed photo-information disclosure.
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_comment_restore`);
     await infoToggle.click();
     check(await infoToggle.getAttribute('aria-expanded') === initialOpen, `${role}_viewer_comments_toggle_restore`);
 
     const details = page.locator('details.viewer-photo-info');
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info`);
+    // On mobile the information panel is a closed bottom sheet after the
+    // comment-state restore above. Open that same user-facing sheet before
+    // exercising the disclosure; a hidden sheet is intentionally not
+    // pointer-interactive.
+    if (mobile && initialOpen === 'false') {
+      stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_sheet_open`);
+      await infoToggle.click();
+      check(await infoToggle.getAttribute('aria-expanded') === 'true', `${role}_viewer_info_sheet_open`);
+      await page.waitForFunction(() => document.querySelector('.viewer-info')?.dataset.open === 'true', undefined, { timeout: 5_000 });
+      await page.waitForTimeout(260);
+    }
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_disclosure`);
     check(await details.count() === 1, `${role}_viewer_info_disclosure`);
     check(await details.evaluate((node) => node.open === false), `${role}_viewer_info_collapsed`);
-    await details.locator('summary').click();
+    const detailsSummary = details.locator('summary');
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_summary_scroll`);
+    await detailsSummary.scrollIntoViewIfNeeded();
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_summary_expand`);
+    await detailsSummary.click();
     check(await details.evaluate((node) => node.open === true), `${role}_viewer_info_expand`);
-    await details.locator('summary').click();
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_summary_recollapse`);
+    await save(page, `${role}-${mobile ? 'mobile' : 'desktop'}-viewer-info-open`);
+    await detailsSummary.scrollIntoViewIfNeeded();
+    await detailsSummary.click();
     check(await details.evaluate((node) => node.open === false), `${role}_viewer_info_recollapse`);
+    if (mobile && initialOpen === 'false') {
+      stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_info_sheet_restore`);
+      await infoToggle.click();
+      check(await infoToggle.getAttribute('aria-expanded') === 'false', `${role}_viewer_info_sheet_restore`);
+    }
 
     const zoom = page.getByRole('button', { name: '放大', exact: true });
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_zoom`);
     check(await zoom.count() === 1, `${role}_viewer_zoom_control`);
     await zoom.click();
     check((await image.getAttribute('style') ?? '').includes('scale(1.25)'), `${role}_viewer_zoom`);
 
     const comments = page.locator('.viewer-comments');
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_comments`);
     check(await comments.count() === 1, `${role}_viewer_comments_surface`);
     if (role === 'family') {
       check(await comments.locator('.comment-composer').count() === 0, 'family_comment_composer_hidden');
@@ -439,25 +505,38 @@ async function viewerJourney(role, viewport, credentials, viewerFixture) {
     }
     if (role === 'anonymous') await assertAnonymousCommentProjection(page, viewerFixture, credentials);
 
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation`);
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation_save`);
     await save(page, `${role}-${mobile ? 'mobile' : 'desktop'}-viewer`);
     const next = page.locator('.viewer-next');
     check(!(await next.isDisabled()), `${role}_viewer_keyboard_next_available`);
     const before = page.url();
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation_next`);
     await page.keyboard.press('ArrowRight');
     await page.waitForURL((value) => value.toString() !== before && /^\/photos\/[0-9a-f-]{36}$/i.test(value.pathname), { timeout: 20_000 }).catch(() => null);
     check(page.url() !== before, `${role}_viewer_keyboard_next`);
     const afterNext = page.url();
+    // Navigation replaces the document. Wait until the destination viewer is
+    // interactive before issuing the reverse keyboard command; an address-bar
+    // update alone does not prove the new document registered its handler.
+    await page.locator('.viewer-image').waitFor({ state: 'visible', timeout: 20_000 }).catch(() => null);
+    await page.waitForFunction(() => document.querySelector('.viewer-next') instanceof HTMLButtonElement, undefined, { timeout: 20_000 }).catch(() => null);
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation_previous`);
     await page.keyboard.press('ArrowLeft');
     await page.waitForURL((value) => value.toString() === before, { timeout: 20_000 }).catch(() => null);
     check(page.url() === before && page.url() !== afterNext, `${role}_viewer_keyboard_previous`);
+    await page.locator('.viewer-image').waitFor({ state: 'visible', timeout: 20_000 }).catch(() => null);
+    await page.waitForFunction(() => document.querySelector('.viewer-info') instanceof HTMLElement, undefined, { timeout: 20_000 }).catch(() => null);
     // Desktop initially presents the comment panel. The first Escape is
     // intentionally consumed to collapse that panel; a second Escape closes
     // the viewer. Mobile starts with it collapsed, so this remains one Escape.
-    await page.keyboard.press('Escape');
-    if (new URL(page.url()).pathname !== '/photos') {
-      check(await infoToggle.getAttribute('aria-expanded') === 'false', `${role}_viewer_escape_collapses_comments`);
+    stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation_close`);
+    if (!mobile) {
       await page.keyboard.press('Escape');
+      await page.waitForFunction(() => document.querySelector('.viewer-toolbar button[aria-expanded]')?.getAttribute('aria-expanded') === 'false', undefined, { timeout: 5_000 });
+      check(await infoToggle.getAttribute('aria-expanded') === 'false', `${role}_viewer_escape_collapses_comments`);
     }
+    await page.keyboard.press('Escape');
     await page.waitForURL((value) => value.origin === new URL(settings.photos).origin && value.pathname === '/photos', { timeout: 20_000 }).catch(() => null);
     check(new URL(page.url()).pathname === '/photos', `${role}_viewer_escape_close`);
   } finally {
@@ -622,7 +701,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  const code = error instanceof GateError ? error.code : 'unexpected';
+  const code = error instanceof GateError ? error.code : safeUnexpectedCode(error);
   process.stdout.write(`V4_CHROME_DEEP_QA=FAIL stage=${stage} code=${code}\n`);
   process.exitCode = 1;
 });

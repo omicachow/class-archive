@@ -194,6 +194,17 @@ try {
     $assert(array_key_exists('heroSpotlightId', $empty) && $empty['heroSpotlightId'] === null && ($empty['orderedSpotlightIds'] ?? null) === []
         && ($empty['displayCount'] ?? null) === 0 && is_string($empty['nextRotationAt'] ?? null),
         'empty_scope_checkpoint_invalid');
+    $emptyBefore = spotlightRotationRuntimeOne($db, 'SELECT HEX(`revision`) AS `revision`,`updated_at` FROM '
+        . spotlightRotationRuntimeIdentifier($ci . 'spotlight_rotation_state') . " WHERE `scope`='HERITAGE'");
+    $emptyHeld = $service->advanceAtForSyntheticTest('HERITAGE', [], $t0->add(new DateInterval('PT30M')));
+    $emptyAfter = spotlightRotationRuntimeOne($db, 'SELECT HEX(`revision`) AS `revision`,`updated_at` FROM '
+        . spotlightRotationRuntimeIdentifier($ci . 'spotlight_rotation_state') . " WHERE `scope`='HERITAGE'");
+    $emptyPublished = $service->stateForPublishedCandidates('HERITAGE', []);
+    $assert(($emptyHeld['changed'] ?? null) === false && ($emptyHeld['revision'] ?? null) === ($empty['revision'] ?? null)
+        && ($emptyAfter['revision'] ?? null) === ($emptyBefore['revision'] ?? null)
+        && ($emptyAfter['updated_at'] ?? null) === ($emptyBefore['updated_at'] ?? null)
+        && ($emptyPublished['revision'] ?? null) === ($empty['revision'] ?? null),
+        'empty_scope_checkpoint_not_queryable_or_persistent');
 
     // Time may be read server-side to fail closed, but it is never taken from
     // a browser. A deliberately historical test checkpoint must be rejected

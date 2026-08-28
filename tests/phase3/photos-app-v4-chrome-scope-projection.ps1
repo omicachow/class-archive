@@ -23,7 +23,7 @@ $credentialPath = (Resolve-Path -LiteralPath $CredentialFile).Path
 $compose = @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml')
 
 function Assert-ChildPath([string]$Base, [string]$Target, [string]$Code) {
-    $relative = [IO.Path]::GetRelativePath($Base, $Target)
+    $relative = Get-V4SyntheticPhaseARelativePath -Base $Base -Target $Target
     if ([string]::IsNullOrWhiteSpace($relative) -or $relative -eq '..' -or $relative.StartsWith('..' + $separator, [StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($relative)) { throw $Code }
 }
 function Assert-IgnoredUntracked([string]$Path, [string]$Code) {
@@ -156,12 +156,33 @@ try {
     $env:CLASS_ARCHIVE_V4_SCOPE_USER_DATA_ROOT = $profile
     $env:CLASS_ARCHIVE_V4_SCOPE_SCREENSHOT_DIR = $screenshots
     $env:CLASS_ARCHIVE_V4_SCOPE_REQUIRE_PEOPLE = '1'
-    $output = @(& $node (Join-Path $PSScriptRoot 'photos-app-v4-chrome-scope-projection.mjs') 2>&1); $exit = $LASTEXITCODE
+    # Node writes its intentionally sanitized gate failure to stderr.  Under
+    # PowerShell's Stop preference that becomes a NativeCommandError before we
+    # can parse the safe V4_SCOPE_PROJECTION record or execute the bounded
+    # cleanup below.  Capture it exactly as the other lifecycle wrappers do.
+    $prior = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $node (Join-Path $PSScriptRoot 'photos-app-v4-chrome-scope-projection.mjs') 2>&1)
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prior
+    }
     $safe = @($output | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^V4_SCOPE_STAGE=[a-z0-9_-]+$' -or $_ -match '^V4_SCOPE_PROJECTION=(PASS assertions=[0-9]+ screenshots=[0-9]+ chrome_version=[0-9.]+ people_required=yes|FAIL stage=[a-z0-9_-]+ assertions=[0-9]+ code=[a-z0-9_]+)$'
     })
     $pass = @($safe | Where-Object { $_ -match '^V4_SCOPE_PROJECTION=PASS\b' })
-    if ($exit -ne 0 -or $pass.Count -ne 1) { throw 'v4_scope_browser_failed' }
+    $failure = @($safe | Where-Object { $_ -match '^V4_SCOPE_PROJECTION=FAIL stage=[a-z0-9_-]+ assertions=[0-9]+ code=[a-z0-9_]+$' })
+    if ($exit -ne 0 -or $pass.Count -ne 1) {
+        # This is already a bounded, payload-free record produced by the Node
+        # gate.  Emit it so an enclosing synthetic lifecycle can distinguish a
+        # real assertion failure from wrapper or cleanup failure.
+        if ($failure.Count -eq 1) {
+            Write-Output ([string]$failure[0])
+        }
+        throw 'v4_scope_browser_failed'
+    }
     $result = [string]$pass[0]
 } finally {
     try {

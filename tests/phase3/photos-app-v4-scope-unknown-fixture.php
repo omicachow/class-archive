@@ -255,6 +255,14 @@ function v4scopeRebuild(): void
     if (!is_array($result)) {
         v4scopeFail('projection_rebuild_invalid');
     }
+    $snapshots = $result['collection_snapshots'] ?? null;
+    if (!is_array($snapshots) || ($snapshots['result'] ?? null) !== 'PASS') {
+        // The underlying builder deliberately suppresses raw operational
+        // details at this boundary.  The synthetic fixture still must not
+        // continue with stale collection snapshots and turn a build failure
+        // into an opaque browser 503 later in the run.
+        v4scopeFail('collection_snapshots_not_current');
+    }
 }
 
 function v4scopeAssertSyntheticBaseline(): void
@@ -458,7 +466,7 @@ function v4scopeRemoveLivingAssociations(array $state): void
             v4scopeFail('living_association_remove_failed');
         }
     }
-    invalidate_user_cache();
+    v4scopeInvalidateUserCache();
 }
 
 /** @param array<string,mixed> $state */
@@ -487,6 +495,24 @@ function v4scopeRestoreLivingAssociations(array $state): void
         } elseif (v4scopeNormalizeRank($existing[0]['rank'] ?? null) !== $rank) {
             v4scopeFail('living_association_restore_rank_mismatch');
         }
+    }
+    v4scopeInvalidateUserCache();
+}
+
+function v4scopeInvalidateUserCache(): void
+{
+    // The CLI fixture includes Piwigo common.inc.php, which intentionally does
+    // not load the administrator helper that owns this cache invalidation API.
+    // Reuse the same guarded core adapter path used by ClassIdentity rather
+    // than silently proceeding with stale permission data.
+    if (!function_exists('invalidate_user_cache')) {
+        $file = PHPWG_ROOT_PATH . 'admin/include/functions.php';
+        if (is_file($file)) {
+            require_once $file;
+        }
+    }
+    if (!function_exists('invalidate_user_cache')) {
+        v4scopeFail('user_cache_invalidation_unavailable');
     }
     invalidate_user_cache();
 }

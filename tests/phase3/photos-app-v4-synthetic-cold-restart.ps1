@@ -89,29 +89,34 @@ function Get-V4ColdRestartSnapshot {
 }
 
 function Assert-V4ColdRestartSnapshot([object]$Snapshot, [string]$Code) {
-    $checks = @(
-        $Snapshot.result -eq 'PASS',
-        [int]$Snapshot.schema_version -eq 18,
-        [int]$Snapshot.baseline.images -eq 72,
-        [int]$Snapshot.baseline.active_canonical -eq 72,
-        [int]$Snapshot.baseline.physical_originals -eq 72,
-        [int]$Snapshot.baseline.multi_album_images -eq 8,
-        [int]$Snapshot.projections.count -eq 6,
-        [string]$Snapshot.projections.digest -match '^[a-f0-9]{64}$',
-        [int]$Snapshot.collection_snapshots.pointer_count -eq 8,
-        [string]$Snapshot.collection_snapshots.pointer_digest -match '^[a-f0-9]{64}$',
-        [int]$Snapshot.collection_snapshots.item_count -ge 1,
-        [int]$Snapshot.collection_snapshots.maintenance_count -eq 2,
-        [string]$Snapshot.collection_snapshots.maintenance_digest -match '^[a-f0-9]{64}$',
-        [int]$Snapshot.spotlight_rotation.count -eq 2,
-        [string]$Snapshot.spotlight_rotation.digest -match '^[a-f0-9]{64}$',
-        [int]$Snapshot.ai.asset_index_count -ge 0,
-        [string]$Snapshot.ai.asset_index_digest -match '^[a-f0-9]{64}$',
-        [int]$Snapshot.ai.job_count -ge 0,
-        [int]$Snapshot.ai.open_job_count -eq 0,
-        [string]$Snapshot.ai.job_digest -match '^[a-f0-9]{64}$'
-    )
-    Assert-True (-not ($checks -contains $false)) $Code
+    # Report only a narrow invariant label on failure. The snapshot itself
+    # intentionally contains aggregate counts/digests only, but this makes a
+    # synthetic restart failure actionable without exposing any browser or
+    # account state in the test transcript.
+    $checks = [ordered]@{
+        result = $Snapshot.result -eq 'PASS'
+        schema = [int]$Snapshot.schema_version -eq 18
+        baseline_images = [int]$Snapshot.baseline.images -eq 72
+        baseline_canonical = [int]$Snapshot.baseline.active_canonical -eq 72
+        baseline_originals = [int]$Snapshot.baseline.physical_originals -eq 72
+        baseline_multi_album = [int]$Snapshot.baseline.multi_album_images -eq 8
+        projection_count = [int]$Snapshot.projections.count -eq 6
+        projection_digest = [string]$Snapshot.projections.digest -match '^[a-f0-9]{64}$'
+        snapshot_pointer_count = [int]$Snapshot.collection_snapshots.pointer_count -eq 8
+        snapshot_pointer_digest = [string]$Snapshot.collection_snapshots.pointer_digest -match '^[a-f0-9]{64}$'
+        snapshot_items = [int]$Snapshot.collection_snapshots.item_count -ge 1
+        snapshot_maintenance_count = [int]$Snapshot.collection_snapshots.maintenance_count -eq 2
+        snapshot_maintenance_digest = [string]$Snapshot.collection_snapshots.maintenance_digest -match '^[a-f0-9]{64}$'
+        spotlight_count = [int]$Snapshot.spotlight_rotation.count -eq 2
+        spotlight_digest = [string]$Snapshot.spotlight_rotation.digest -match '^[a-f0-9]{64}$'
+        ai_asset_count = [int]$Snapshot.ai.asset_index_count -ge 0
+        ai_asset_digest = [string]$Snapshot.ai.asset_index_digest -match '^[a-f0-9]{64}$'
+        ai_job_count = [int]$Snapshot.ai.job_count -ge 0
+        ai_open_jobs = [int]$Snapshot.ai.open_job_count -eq 0
+        ai_job_digest = [string]$Snapshot.ai.job_digest -match '^[a-f0-9]{64}$'
+    }
+    $failed = @($checks.Keys | Where-Object { $checks[$_] -ne $true })
+    Assert-True ($failed.Count -eq 0) ($Code + '_' + $(if ($failed.Count -gt 0) { $failed[0] } else { 'unknown' }))
 }
 
 function Assert-V4ColdRestartStable([object]$Before, [object]$After) {
@@ -186,6 +191,7 @@ try {
 
     $script:Stage = 'immediate_projection_reads'
     . (Join-Path $script:ProjectRoot 'tests\support\system-admin-session.ps1')
+    $script:Stage = 'immediate_projection_admin_username'
     $adminUsername = ''
     foreach ($line in [IO.File]::ReadAllLines((Join-Path $script:ProjectRoot '.env.piwigo'))) {
         if ($line.StartsWith('PIWIGO_ADMIN_USERNAME=')) {
@@ -198,16 +204,36 @@ try {
         '-d', 'Ubuntu', '--cd', $script:ProjectRoot, '--exec',
         'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml'
     )
-    $lease = New-ClassArchiveSystemAdminSession -BaseUri ([Uri]'http://127.0.0.1:8090/') `
-        -ComposeBase $composeBase -AdminUsername $adminUsername
-    foreach ($uri in @(
-        'http://127.0.0.1:8091/api/class-archive/collections/home',
-        'http://127.0.0.1:8091/api/class-archive/collections/pins',
-        'http://127.0.0.1:8091/api/class-archive/search/suggestions?q=%E8%AE%B0%E5%BF%86',
-        'http://127.0.0.1:8091/api/class-archive/timeline'
-    )) {
-        $payload = Invoke-JsonGet $uri $lease.Session
-        Assert-True ($null -ne $payload -and $payload.PSObject.Properties.Count -ge 1) 'v4_synthetic_cold_restart_projection_unavailable'
+    $script:Stage = 'immediate_projection_admin_session'
+    try {
+        $lease = New-ClassArchiveSystemAdminSession -BaseUri ([Uri]'http://127.0.0.1:8090/') `
+            -ComposeBase $composeBase -AdminUsername $adminUsername
+    }
+    catch {
+        throw 'v4_synthetic_cold_restart_admin_session_unavailable'
+    }
+    $projectionReads = [ordered]@{
+        home = 'http://127.0.0.1:8091/api/class-archive/collections/home'
+        pins = 'http://127.0.0.1:8091/api/class-archive/collections/pins'
+        suggestions = 'http://127.0.0.1:8091/api/class-archive/search/suggestions?q=%E8%AE%B0%E5%BF%86'
+        timeline = 'http://127.0.0.1:8091/api/class-archive/timeline'
+    }
+    foreach ($name in $projectionReads.Keys) {
+        $script:Stage = ('immediate_projection_' + $name + '_request')
+        try {
+            $payload = Invoke-JsonGet ([string]$projectionReads[$name]) $lease.Session
+        }
+        catch {
+            throw ('v4_synthetic_cold_restart_projection_' + $name + '_request_failed')
+        }
+        $script:Stage = ('immediate_projection_' + $name + '_validate')
+        try {
+            $propertyCount = @($payload.PSObject.Properties).Count
+        }
+        catch {
+            throw ('v4_synthetic_cold_restart_projection_' + $name + '_payload_shape_invalid')
+        }
+        Assert-True ($null -ne $payload -and $propertyCount -ge 1) ('v4_synthetic_cold_restart_projection_' + $name + '_payload_invalid')
     }
     $completed = $true
 }

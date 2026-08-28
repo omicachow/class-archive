@@ -30,7 +30,7 @@ $scopeRunner = Join-Path $PSScriptRoot 'photos-app-v4-chrome-scope-projection.ps
 $compose = @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose', '--env-file', '.env.piwigo', '-f', 'infra/docker-compose.yml')
 
 function Assert-ChildPath([string]$Base, [string]$Target, [string]$Code) {
-    $relative = [IO.Path]::GetRelativePath($Base, $Target)
+    $relative = Get-V4SyntheticPhaseARelativePath -Base $Base -Target $Target
     if ([string]::IsNullOrWhiteSpace($relative) -or $relative -eq '..' -or $relative.StartsWith('..' + $separator, [StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($relative)) { throw $Code }
 }
 function Assert-IgnoredUntracked([string]$Path, [string]$Code) {
@@ -69,11 +69,25 @@ function Invoke-ScopeRunner([string]$Path, [string]$Credential, [string]$Externa
     $safe = @($lines | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^V4_SCOPE_STAGE=[a-z0-9_-]+$' -or
         $_ -match '^V4_SCOPE_PROJECTION=(PASS assertions=[0-9]+ screenshots=[0-9]+ chrome_version=[0-9.]+ people_required=yes|FAIL stage=[a-z0-9_-]+ assertions=[0-9]+ code=[a-z0-9_]+)$' -or
-        $_ -match '^V4_SCOPE_PROJECTION_COMPLETE=PASS$'
+        $_ -match '^V4_SCOPE_PROJECTION_COMPLETE=PASS$' -or
+        $_ -match '^v4_scope_[a-z0-9_]{1,100}$'
     })
     $pass = @($safe | Where-Object { $_ -match '^V4_SCOPE_PROJECTION=PASS\b' })
     $completion = @($safe | Where-Object { $_ -eq 'V4_SCOPE_PROJECTION_COMPLETE=PASS' })
-    if ($exit -ne 0 -or $pass.Count -ne 1 -or $completion.Count -ne 1) { throw 'v4_scope_people_delegated_scope_failed' }
+    $failureRecords = @($safe | Where-Object { $_ -match '^V4_SCOPE_PROJECTION=FAIL stage=[a-z0-9_-]+ assertions=[0-9]+ code=[a-z0-9_]+$' })
+    $innerFailureCodes = @($safe | Where-Object { $_ -match '^v4_scope_[a-z0-9_]{1,100}$' })
+    if ($exit -ne 0 -or $pass.Count -ne 1 -or $completion.Count -ne 1) {
+        # Preserve only the runner's pre-sanitized stage/code in the terminal
+        # failure. Raw browser output can contain URL or page details and must
+        # remain inside ignored local evidence, never the test transcript.
+        if ($failureRecords.Count -eq 1 -and $failureRecords[0] -match ' code=([a-z0-9_]+)$') {
+            throw ('v4_scope_people_delegated_scope_failed_' + $Matches[1])
+        }
+        if ($innerFailureCodes.Count -eq 1) {
+            throw ('v4_scope_people_delegated_scope_failed_' + $innerFailureCodes[0])
+        }
+        throw 'v4_scope_people_delegated_scope_failed'
+    }
     return [ordered]@{ pass = [string]$pass[0]; completion = [string]$completion[0] }
 }
 

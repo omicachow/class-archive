@@ -1009,8 +1009,17 @@ try {
     $staleIncidentCountMarkup = [Text.Encoding]::UTF8.GetString(
         [Convert]::FromBase64String('6ZW/5pyf5byA6YCa54q25oCB77yI5pON5L2cIC8g6LSm5Y+3IC8g5bit5L2N77yJPC90aD48dGQ+MSAvIDEgLyAx')
     )
-    if ($staleSystem.Text -notmatch 'PRODUCTION BLOCKED' -or $staleSystem.Text -notmatch 'PROVISIONING_INCIDENT' -or $staleSystem.Text -notmatch [regex]::Escape($staleIncidentCountMarkup)) {
-        Add-Failure 'provisioning/stale-visible' 'long-running operation/account/Seat counts were not visible as a production blocker'
+    $staleProductionVisible = $staleSystem.Text -match 'PRODUCTION BLOCKED'
+    $staleIncidentVisible = $staleSystem.Text -match 'PROVISIONING_INCIDENT'
+    $staleCountsVisible = $staleSystem.Text -match [regex]::Escape($staleIncidentCountMarkup)
+    # Emit only a bounded health-shape diagnostic on failure. It contains no
+    # account, source, request, or credential data and makes a localization or
+    # stale-cutoff regression actionable in local/public-safe test output.
+    $staleCountLabel = $staleIncidentCountMarkup.Substring(0, $staleIncidentCountMarkup.IndexOf('</th><td>', [StringComparison]::Ordinal))
+    $staleCountMatch = [regex]::Match($staleSystem.Text, [regex]::Escape($staleCountLabel) + '</th><td>([0-9]+ / [0-9]+ / [0-9]+)</td>')
+    $staleCountObserved = if ($staleCountMatch.Success) { $staleCountMatch.Groups[1].Value } else { 'absent' }
+    if (-not $staleProductionVisible -or -not $staleIncidentVisible -or -not $staleCountsVisible) {
+        Add-Failure 'provisioning/stale-visible' "long-running operation/account/Seat counts were not visible as a production blocker (production=$staleProductionVisible incident=$staleIncidentVisible counts=$staleCountObserved)"
     }
     if ($staleSystem.Text -match ('name=["'']operation_id["''][^>]*value=["'']' + [regex]::Escape([string]$stale.operation_id) + '["'']')) {
         Add-Failure 'provisioning/stale-not-auto-repairable' 'ambiguous PREPARED incident incorrectly exposed an automatic compensation action'

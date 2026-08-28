@@ -33,6 +33,30 @@ function child(root, name, code) {
   const base = privatePath(root, code); const target = path.resolve(base, name);
   check(target.startsWith(`${base}${path.sep}`), code); return target;
 }
+function writeFailureArtifact(error, code) {
+  // Browser evidence stays ignored and local, but still never persist a
+  // password, cookie, token, or arbitrary URL/query value when diagnosing a
+  // runner failure. The bounded category/message below is enough to repair a
+  // broken acceptance harness without weakening its stdout boundary.
+  try {
+    const original = typeof error?.message === 'string' ? error.message : '';
+    const message = original
+      .replace(/https?:\/\/[^\s)'"\]]+/gi, '[url]')
+      .replace(/[A-Za-z0-9._~-]{24,}/g, '[redacted]')
+      .slice(0, 600);
+    const artifact = {
+      version: 1,
+      stage,
+      code,
+      errorType: typeof error?.name === 'string' ? error.name.slice(0, 80) : 'Error',
+      message,
+    };
+    fs.writeFileSync(child(settings.screenshots, 'failure.json', 'failure_artifact_child'), `${JSON.stringify(artifact)}\n`, { encoding: 'utf8', flag: 'w' });
+  } catch {
+    // The gate's primary failure output remains deterministic even if the
+    // local-only diagnostic artifact cannot be written.
+  }
+}
 function readCredentials() {
   let doc; try { doc = JSON.parse(fs.readFileSync(privatePath(settings.credentials, 'credential_path'), 'utf8')); } catch { fail('credential_document'); }
   check(doc?.version === 1 && doc.environment === 'synthetic', 'credential_shape');
@@ -139,11 +163,35 @@ function groupedSearchRequest(url, query, contextType, contextId = null) {
     return target.searchParams.get('contextId') === contextId;
   } catch { return false; }
 }
+
+function sameOwnedRoute(current, target) {
+  return current.origin === target.origin && current.pathname === target.pathname && current.search === target.search;
+}
+
+async function gotoOwned(page, target, code, expected = (current) => sameOwnedRoute(current, target)) {
+  try {
+    await page.goto(target.toString(), { waitUntil: 'networkidle', timeout: 30_000 });
+  } catch (error) {
+    // The owned single-page document can replace an in-flight navigation while
+    // canonicalizing a route. Chrome reports that as ERR_ABORTED. Accept it
+    // only if the exact expected, loopback-owned route has already loaded;
+    // never treat an arbitrary navigation failure as a successful test.
+    let current = null;
+    try { current = new URL(page.url()); } catch { }
+    const aborted = error instanceof Error && error.message.includes('ERR_ABORTED');
+    if (!aborted || current === null || !expected(current)) throw error;
+  }
+  await page.locator('[data-photo-app="true"]').waitFor({ state: 'attached', timeout: 15_000 });
+  let current = null;
+  try { current = new URL(page.url()); } catch { }
+  check(current !== null && expected(current), code);
+}
+
 async function loginAndHome(role, viewport, credentials) {
   const session = await open(role, viewport, credentials);
   try {
-    await session.page.goto(new URL('/home', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
-    await session.page.locator('[data-photo-app="true"]').waitFor({ timeout: 15_000 });
+    const target = new URL('/home', settings.photos);
+    await gotoOwned(session.page, target, 'home_route_after_login');
     return session;
   } catch (error) {
     await session.context.close().catch(() => null);
@@ -206,7 +254,7 @@ async function homeDoesNotLoadFullLibrary(page) {
   let timelineRequests = 0;
   const listener = (request) => { try { if (new URL(request.url()).pathname === '/api/class-archive/timeline') timelineRequests += 1; } catch { } };
   page.on('request', listener);
-  try { await page.goto(new URL('/home', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 }); }
+  try { await gotoOwned(page, new URL('/home', settings.photos), 'home_route_for_library_request_check'); }
   finally { page.off('request', listener); }
   check(timelineRequests === 0, 'home_full_timeline_requested');
 }
@@ -238,7 +286,19 @@ async function closeSearchDialog(page, dialog, code) {
   if (await dialog.count() === 0) return;
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => null);
-  check(await dialog.count() === 0, code);
+  if (await dialog.count() !== 0) {
+    const visible = await dialog.isVisible().catch(() => false);
+    fail(`${code}_${visible ? 'visible' : 'attached'}`);
+  }
+  // Closing an interactive overlay restores its pre-overlay history entry.
+  // Wait for that asynchronous history task before the next keyboard shortcut
+  // test, otherwise a rapid `/` can land on the closing document instead of
+  // the restored, interactive route.
+  const settled = await page.waitForFunction(() => !document.querySelector('dialog[data-search-overlay="true"][open]')
+    && new URL(location.href).searchParams.get('search') !== '1', { timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false);
+  check(settled, `${code}_history_settle`);
 }
 
 async function reducedMotionCheck(page) {
@@ -356,7 +416,7 @@ async function semanticPartialCheck(page, dialog, input, query) {
 }
 
 async function currentAlbumScopeCheck(page, query) {
-  await page.goto(new URL('/albums', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
+  await gotoOwned(page, new URL('/albums', settings.photos), 'album_route_for_search_scope');
   const card = page.locator('a.album-card').first();
   await card.waitFor({ state: 'visible', timeout: 15_000 });
   const href = await card.getAttribute('href');
@@ -393,7 +453,7 @@ async function currentAlbumScopeCheck(page, query) {
   check(await context.isHidden(), 'search_all_library_scope_context_hidden');
   await save(page, 'classmate-desktop-album-search-scope');
   await closeSearchDialog(page, dialog, 'search_album_scope_close');
-  await page.goto(new URL('/home', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
+  await gotoOwned(page, new URL('/home', settings.photos), 'home_route_after_album_search_scope');
 }
 
 async function mobileSearchOverlayCheck(page) {
@@ -447,14 +507,15 @@ async function overlayCheck(page) {
   check(await trigger.evaluate((el) => document.activeElement === el), 'search_focus_restore');
   await page.keyboard.press('Control+K'); dialog = await waitForSearchDialog(page, 'search_ctrl_k'); await closeSearchDialog(page, dialog, 'search_ctrl_k_close');
   await page.keyboard.press('/'); dialog = await waitForSearchDialog(page, 'search_slash'); await closeSearchDialog(page, dialog, 'search_slash_close');
-  await page.goto(new URL('/photos', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
-  await page.goto(new URL('/home', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
+  await gotoOwned(page, new URL('/photos', settings.photos), 'photos_route_for_search_history');
+  await gotoOwned(page, new URL('/home', settings.photos), 'home_route_for_search_history');
   await trigger.click(); dialog = await waitForSearchDialog(page, 'search_back_dialog_missing');
   await page.goBack({ waitUntil: 'networkidle', timeout: 30_000 });
   await dialog.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => null);
   check(await dialog.count() === 0 && new URL(page.url()).pathname === '/home', 'search_back_closes_overlay');
   await page.goBack({ waitUntil: 'networkidle', timeout: 30_000 }); check(new URL(page.url()).pathname === '/photos', 'search_second_back_navigation');
-  await page.goto(new URL('/search', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
+  await gotoOwned(page, new URL('/search', settings.photos), 'search_legacy_route_navigation', (current) => current.origin === new URL(settings.photos).origin
+    && current.pathname === '/home' && current.searchParams.get('search') === '1');
   dialog = await waitForSearchDialog(page, 'search_legacy_route_dialog_missing');
   check(new URL(page.url()).pathname === '/home' && new URL(page.url()).searchParams.get('search') === '1', 'search_legacy_route_open');
   await closeSearchDialog(page, dialog, 'search_legacy_route_close');
@@ -485,5 +546,6 @@ async function main() {
 
 main().catch((error) => {
   const code = error instanceof GateError && /^[a-z0-9_]{1,100}$/.test(error.code) ? error.code : 'unexpected_error';
+  writeFailureArtifact(error, code);
   process.stdout.write(`V4_CHROME_QA=FAIL stage=${stage} code=${code}\n`); process.exitCode = 1;
 });

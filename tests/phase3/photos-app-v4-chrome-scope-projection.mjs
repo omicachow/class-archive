@@ -190,7 +190,12 @@ async function browserFetch(page, target) {
 
 async function requiredJson(page, target, code) {
   const result = await browserFetch(page, target);
-  check(result.status === 200 && result.json !== null && typeof result.json === 'object' && !Array.isArray(result.json), code);
+  if (!(result.status === 200 && result.json !== null && typeof result.json === 'object' && !Array.isArray(result.json))) {
+    // A bounded HTTP status is safe diagnostic evidence and distinguishes a
+    // policy/API availability failure from a response-shape failure without
+    // recording any URL, body, identifier, or session material.
+    fail(`${code}_http_${Number.isInteger(result.status) ? result.status : 0}`);
+  }
   return result.json;
 }
 
