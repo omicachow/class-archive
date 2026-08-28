@@ -72,6 +72,10 @@ export function dialogShell(titleKey, leadKey = '') {
   const lead = leadKey ? element('p', '', t(leadKey)) : null;
   if (lead) lead.id = `dialog-lead-${dialogSequence}`;
   append(copy, title, lead);
+  // Native showModal supplies the interaction boundary; state it explicitly
+  // as well so assistive technology gets a stable modal-dialog contract.
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
   dialog.setAttribute('aria-labelledby', title.id);
   if (lead) dialog.setAttribute('aria-describedby', lead.id);
   const close = element('button', 'icon-button dialog-close', t('common.close'));

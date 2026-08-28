@@ -1623,8 +1623,20 @@ function viewerButton(labelKey) {
 }
 
 function closeViewer() {
-  if (document.referrer.startsWith(location.origin) && history.length > 1) history.back();
-  else location.assign('/photos');
+  // Arrow-key browsing creates an internal chain of viewer URLs. Esc/Close
+  // must leave that chain rather than stepping through every adjacent photo.
+  // Preserve a normal in-app Back only when the referrer was a collection,
+  // not another viewer route.
+  try {
+    const referrer = new URL(document.referrer);
+    if (referrer.origin === location.origin && !/^\/photos\/[0-9a-f-]{36}$/i.test(referrer.pathname) && history.length > 1) {
+      history.back();
+      return;
+    }
+  } catch {
+    // An absent or malformed referrer is not a navigation capability.
+  }
+  location.assign('/photos');
 }
 
 function infoRow(labelKey, value) {
@@ -3337,7 +3349,14 @@ async function openGlobalSearch({ replaceLegacyRoute = false, prevalidatedState 
   };
   overlay.input.addEventListener('input', () => runQuery(overlay.input.value));
   overlay.input.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowDown' && moveComboboxSelection(1)) {
+    // Chromium gives type="search" a native Escape behavior (clearing the
+    // value) before it dispatches the dialog cancel event. Search lives in a
+    // modal surface, so Escape must consistently dismiss that surface and
+    // restore focus/history whether the field is empty or contains a query.
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      overlay.close();
+    } else if (event.key === 'ArrowDown' && moveComboboxSelection(1)) {
       event.preventDefault();
     } else if (event.key === 'ArrowUp' && moveComboboxSelection(-1)) {
       event.preventDefault();

@@ -686,6 +686,10 @@ img { display: block; max-width: 100%; }
   .viewer-prev { left: calc(50% - 58px); }
   .viewer-next { right: calc(50% - 58px); }
   .viewer-page[data-info-open="true"] .viewer-nav { opacity: 0; pointer-events: none; }
+  /* The comment/info bottom sheet owns the lower mobile viewport. Keep the
+     filmstrip out of that interactive layer instead of letting it overlap the
+     photo-information disclosure. */
+  .viewer-page[data-info-open="true"] .viewer-filmstrip { opacity: 0; pointer-events: none; }
   .viewer-filmstrip { bottom: 66px; max-width: calc(100% - 28px); padding: 5px; }
   .viewer-filmstrip-item { width: 42px; height: 42px; }
   .selection-bar { left: 10px; right: 10px; bottom: calc(70px + env(safe-area-inset-bottom)); min-height: 64px; padding: 9px 10px 9px 14px; border-radius: 17px; }
@@ -761,5 +765,5 @@ img { display: block; max-width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; animation-duration: 0s !important; animation-iteration-count: 1 !important; }
 }

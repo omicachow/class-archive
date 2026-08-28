@@ -829,7 +829,15 @@ final class ClassIdentityPublicController
         // Log only bounded operation/error class identifiers. Exception
         // messages may originate in third-party account validation and are
         // intentionally excluded.
-        error_log('ClassIdentity public ' . $operation . ' failed [' . get_class($error) . ']');
+        $code = 'unclassified';
+        $message = $error->getMessage();
+        // Member-upload service failures deliberately use a fixed internal
+        // vocabulary. Preserve that narrow code for local operability while
+        // keeping every other exception message out of logs.
+        if (preg_match('/\Amember_era_upload_[a-z0-9_]{1,64}\z/D', $message) === 1) {
+            $code = $message;
+        }
+        error_log('ClassIdentity public ' . $operation . ' failed [' . get_class($error) . ':' . $code . ']');
     }
 
     private static function wipe(string &$value): void

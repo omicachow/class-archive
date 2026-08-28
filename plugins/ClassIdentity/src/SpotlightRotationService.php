@@ -85,15 +85,20 @@ final class SpotlightRotationService
         $previous = self::normalizePrevious($previous);
 
         if ($candidateIds === []) {
-            $changed = $previous !== null && (
-                $previous['heroSpotlightId'] !== null
-                || !hash_equals((string) ($previous['candidateDigest'] ?? ''), $candidateDigest)
-            );
-            // Keep an explicit server-side next checkpoint even when there
-            // are no active records. The row is then queryable/bounded and a
-            // future non-empty source set cannot be mistaken for a browser
-            // choice or an uninitialized state.
-            $emptyNext = $now->add(new \DateInterval('PT' . self::ROTATION_INTERVAL_SECONDS . 'S'));
+            $previousHero = $previous['heroSpotlightId'] ?? null;
+            $previousDigest = $previous['candidateDigest'] ?? null;
+            $previousNext = self::parsePersistedUtc($previous['nextRotationAt'] ?? null);
+            $candidateChanged = !is_string($previousDigest) || !hash_equals($previousDigest, $candidateDigest);
+            $due = $previousNext === null || $previousNext <= $now;
+            // Empty scopes still have a server-owned checkpoint.  Crucially,
+            // an unchanged, not-yet-due empty scope must retain its persisted
+            // checkpoint: recomputing a fresh timestamp while reporting
+            // `changed=false` would produce a revision that does not match
+            // the stored state and make all Collections snapshots fail closed.
+            $changed = $previous === null || $previousHero !== null || $candidateChanged || $due;
+            $emptyNext = !$changed && $previousNext instanceof \DateTimeImmutable
+                ? $previousNext
+                : $now->add(new \DateInterval('PT' . self::ROTATION_INTERVAL_SECONDS . 'S'));
             return self::stateResult($scope, null, [], 0, null, $emptyNext, $candidateDigest, $changed);
         }
 

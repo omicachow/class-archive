@@ -928,7 +928,6 @@ function emitGatewayDiagnostic(operation, error) {
 // and the digest is discarded as soon as the queue drains.
 const gatewaySessionQueues = new Map();
 const maxGatewaySessionQueues = 128;
-const gatewayRequestResponses = new WeakMap();
 
 function gatewaySessionKey(request, clientAddress) {
   const cookie = sessionCookie(request);
@@ -936,14 +935,14 @@ function gatewaySessionKey(request, clientAddress) {
 }
 
 function gatewayRequestIsActive(request) {
-  const response = gatewayRequestResponses.get(request);
-  // Node may auto-destroy an IncomingMessage after a bounded POST body is
-  // completely consumed. That is normal stream cleanup, not a browser abort;
-  // search performs its second canonical Gateway call only after parsing that
-  // body. ServerResponse instead represents the real connection lifetime.
-  // A closed/ended response cannot receive a policy result, while an active
-  // one still receives a fresh authorization without any permission cache.
-  return response !== undefined && !response.destroyed && !response.writableEnded;
+  // `ServerResponse.close` is not a reliable browser-abort signal once a
+  // same-session request is waiting behind another bounded Gateway read: on
+  // Chromium it can be observed while the fetch is still awaiting its queued
+  // authorization.  Treat only IncomingMessage.aborted as cancellation here.
+  // `respond()` still checks the actual writable response immediately before
+  // emitting bytes, while every queued task performs a fresh Gateway policy
+  // evaluation rather than consulting an authorization cache.
+  return request !== null && request !== undefined && request.aborted !== true;
 }
 
 async function queueGatewaySessionRequest(request, clientAddress, task) {
@@ -2853,8 +2852,6 @@ const server = createServer((request, response) => {
     respond(response, method, 400, 'text/plain; charset=utf-8', 'Invalid request.');
     return;
   }
-  gatewayRequestResponses.set(request, response);
-  response.once('close', () => gatewayRequestResponses.delete(request));
   void serveApplication(request, response, url).catch(() => {
     if (!responseIsWritable(response)) {
       return;

@@ -1506,6 +1506,14 @@ final class GatewayService
         if ($items === null && $active === true && $total === 1 && is_array($legacyItem)) {
             $items = [$legacyItem];
         }
+        // The old singleton projection also encoded an empty state as
+        // `{active:false,total:0,item:null}`.  It carries no media or
+        // capability data, so normalizing that exact shape preserves the
+        // additive V17/V18 read path without accepting a malformed active
+        // record or widening visibility.
+        if ($items === null && $active === false && $total === 0 && $legacyItem === null) {
+            $items = [];
+        }
         if (!is_bool($active) || !is_int($total) || $total < 0 || !is_array($items) || !array_is_list($items)
             || ($legacyItem !== null && !is_array($legacyItem))
             || (!$active && ($total !== 0 || $items !== [] || $legacyItem !== null))

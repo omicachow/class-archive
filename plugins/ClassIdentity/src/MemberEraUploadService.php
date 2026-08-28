@@ -1086,12 +1086,13 @@ final class MemberEraUploadService
     }
 
     /**
-     * Incrementally publish one known canonical photo into the durable read
-     * catalog. This never invokes the full Piwigo source scan: the projection
-     * store either appends/refreshes this exact UUID under its existing
-     * generation or rejects the request and leaves every affected route
-     * fail-closed. A concurrent full builder is accepted only after the
-     * active catalog proves it already contains this exact Piwigo mapping.
+     * Publish one known canonical photo into the durable read catalog. This
+     * service always creates or changes Piwigo Core source rows, which rotate
+     * the durable MyISAM source epoch. A fresh catalog generation is therefore
+     * required; treating that write as a point refresh would acknowledge a
+     * source set the point builder cannot prove complete. This rebuild is
+     * metadata/projection work only: derivative and AI jobs below remain
+     * bounded to the newly published canonical photo.
      *
      * @param array<string,mixed> $context
      */
@@ -1116,10 +1117,7 @@ final class MemberEraUploadService
             if ($catalogState !== 'STALE') {
                 throw new \RuntimeException('member_era_upload_projection_state_unavailable');
             }
-            Gateway\ReadProjectionBuilder::rebuildChangedPhotos(
-                [$classPhotoId],
-                ProjectionMutationBoundary::allAggregateKinds(),
-            );
+            Gateway\ReadProjectionBuilder::rebuild();
             $projected = $store->photo($classPhotoId);
             if ($projected === null || $projected->piwigoImageIdForDelivery() !== $imageId) {
                 throw new \RuntimeException('member_era_upload_projection_mapping_missing');
