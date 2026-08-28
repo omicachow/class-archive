@@ -98,6 +98,36 @@ function Assert-CleanAcceptanceCheckout {
     }
 }
 
+function Get-TrackedPhpSourcePaths([string]$Prefix) {
+    # Gateway behavior is composed from a number of domain services. Bind the
+    # entire tracked PHP source tree for each policy boundary instead of trying
+    # to maintain a fragile handwritten transitive-dependency list. A clean
+    # checkout makes this deterministic, while the prefix/extension checks
+    # keep arbitrary paths out of the immutable record.
+    if ($Prefix -notmatch '^plugins/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$') {
+        Stop-V4SyntheticAcceptance 'source_tree_contract_invalid'
+    }
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& git -C $projectRoot ls-files -- $Prefix 2>$null)
+        $exitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($exitCode -ne 0 -or $lines.Count -eq 0) { Stop-V4SyntheticAcceptance 'source_tree_missing' }
+    $paths = @()
+    foreach ($line in $lines) {
+        $relative = ([string]$line).Trim().Replace('\', '/')
+        if (-not $relative.StartsWith($Prefix + '/', [StringComparison]::Ordinal)) {
+            Stop-V4SyntheticAcceptance 'source_tree_path_invalid'
+        }
+        if (-not $relative.EndsWith('.php', [StringComparison]::Ordinal)) { continue }
+        if ($relative -notmatch '^[A-Za-z0-9_./-]+\.php$') { Stop-V4SyntheticAcceptance 'source_tree_path_invalid' }
+        $paths += $relative
+    }
+    return @($paths | Sort-Object -Unique)
+}
+
 function Get-SourceDigests {
     $relativePaths = @(
         # Direct host-side prerequisites.  The attester and cold-restart flow
@@ -224,6 +254,14 @@ function Get-SourceDigests {
         'infra/scripts/normalize-v4-synthetic-phase-ab-evidence.ps1',
         'infra/scripts/attest-v4-synthetic-phase-ab.ps1'
     )
+    # ClassIdentity and ClassArchivePolicy are the server-side identity,
+    # projection, and media authorization boundary. This includes direct
+    # Gateway dependencies such as Access, canonical-photo, collection,
+    # adapter and projection services, and makes any future source addition
+    # invalidate a prior Phase A/B record by construction.
+    $relativePaths += Get-TrackedPhpSourcePaths 'plugins/ClassIdentity/src'
+    $relativePaths += Get-TrackedPhpSourcePaths 'plugins/ClassArchivePolicy'
+    $relativePaths = @($relativePaths | Sort-Object -Unique)
     $digests = [ordered]@{}
     foreach ($relative in $relativePaths) {
         if ($relative -notmatch '^[A-Za-z0-9_./-]+$') { Stop-V4SyntheticAcceptance 'source_path_contract_invalid' }
