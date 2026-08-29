@@ -41,15 +41,15 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
     && str_contains($source['runner'], 'Assert-FreshSyntheticAttempt') && !str_contains($source['runner'], 'docker compose down')
     && !str_contains($source['runner'], 'docker volume rm') && !str_contains($source['runner'], 'docker rm '), 'attempt12_isolation_or_preservation_missing');
-$assert(str_contains($source['runner'], "'attempt13'") && str_contains($source['runner'], "'9790'") && str_contains($source['runner'], "'9791'")
-    && str_contains($source['runner'], "'10.255.8.0/24'") && str_contains($source['runner'], "'10.236.0.0/16'")
-    && str_contains($source['runner'], 'V16 -> V18 proof') && str_contains($source['runner'], 'does not bootstrap historical V17 code'), 'attempt13_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], "'attempt14'") && str_contains($source['runner'], "'9890'") && str_contains($source['runner'], "'9891'")
+    && str_contains($source['runner'], "'10.255.9.0/24'") && str_contains($source['runner'], "'10.234.0.0/16'")
+    && str_contains($source['runner'], 'V16 -> V18 laboratory after') && str_contains($source['runner'], 'does not bootstrap historical V17 code'), 'attempt14_direct_v16_to_v18_identity_not_fixed');
 $assert(str_contains($source['runner'], '52ff3a7ba91155efc7bed1572e2b1740973e484c')
     && str_contains($source['runner'], 'aee8ced818747a8f81c816ef5aef112005af280b694ef3bdf8f7ac453e6f7413')
     && str_contains($source['runner'], 'historical_schema_extract_failed'), 'historical_v17_source_not_pinned');
@@ -68,6 +68,13 @@ $assert(str_contains($source['compose'], 'v18-synthetic-db-restore-v16:')
     && str_contains($source['compose'], 'v18-synthetic-recovery-verify:'), 'separate_v18_recovery_services_missing');
 $assert(str_contains($source['compose'], 'internal: true') && !str_contains($source['compose'], $privateDriveRootMarker)
     && !str_contains($source['compose'], '/mnt/m/'), 'compose_private_or_network_boundary_invalid');
+$restoreSource = file_get_contents($root . '/infra/scripts/restore-v4-synthetic-pre-migration-db.sh');
+$assert(is_string($restoreSource)
+    && str_contains($restoreSource, "expected_current_snapshot_script_sha='1897ea83db59c9126125ce63afe538e7a73e58ee1386db5acf518b6ddafaf7c5'")
+    && str_contains($restoreSource, '9c5035e26aec9b3f616272f48d4a0c5a3ce81b0a505ac7bc71ad5a47176db7c0')
+    && str_contains($restoreSource, 'snapshot_restore_mechanism_unreviewed')
+    && str_contains($restoreSource, 'snapshot_not_created_by_reviewed_mechanism')
+    && !str_contains($restoreSource, 'snapshot_not_created_by_current_mechanism'), 'reviewed_v16_snapshot_producer_allowlist_missing');
 $assert(str_contains($source['backup'], 'DB_ONLY_SYNTHETIC_V18_RECOVERY')
     && str_contains($source['backup'], 'format":10') && str_contains($source['backup'], 'mariadb-dump') && str_contains($source['backup'], 'sha256sum -c')
     && str_contains($source['restore'], 'target_not_empty') && str_contains($source['restore'], 'restored_schema_not_v18'), 'format10_backup_restore_fail_closed_missing');

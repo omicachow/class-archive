@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt13 orchestration layer.  It opens
+# Static-only contract for the attempt14 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -12,6 +12,7 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runnerPath = Join-Path $projectRoot 'infra\scripts\v16-to-v18-synthetic-direct-runtime.ps1'
 $proofPath = Join-Path $projectRoot 'infra\scripts\v16-to-v18-synthetic-direct-proof.php'
 $baseRunnerPath = Join-Path $projectRoot 'infra\scripts\v18-synthetic-migration.ps1'
+$restorePath = Join-Path $projectRoot 'infra\scripts\restore-v4-synthetic-pre-migration-db.sh'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -29,6 +30,7 @@ function Slice-Function([string]$Text, [string]$StartName, [string]$NextName, [s
 Assert-True (Test-Path -LiteralPath $runnerPath -PathType Leaf) 'direct_runtime_runner_missing'
 Assert-True (Test-Path -LiteralPath $proofPath -PathType Leaf) 'direct_runtime_proof_missing'
 Assert-True (Test-Path -LiteralPath $baseRunnerPath -PathType Leaf) 'direct_runtime_base_runner_missing'
+Assert-True (Test-Path -LiteralPath $restorePath -PathType Leaf) 'direct_runtime_restore_helper_missing'
 
 $tokens = $null
 $parseErrors = $null
@@ -36,13 +38,14 @@ $parseErrors = $null
 Assert-True ($parseErrors.Count -eq 0) 'direct_runtime_runner_parse_error'
 
 $runner = [IO.File]::ReadAllText($runnerPath)
+$restore = [IO.File]::ReadAllText($restorePath)
 $enginePipeFunction = Slice-Function $runner 'function Assert-DockerDesktopEnginePipe' 'function Invoke-BaseRunner' 'direct_runtime_engine_pipe_function_boundary_missing'
 $baseRunnerFunction = Slice-Function $runner 'function Invoke-BaseRunner' 'function Get-SandboxValues' 'direct_runtime_base_runner_function_boundary_missing'
 $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 'function Get-DirectSchemaVersion' 'direct_runtime_direct_compose_function_boundary_missing'
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt13'") -and $runner.Contains("`$httpPort = '9790'") -and $runner.Contains("`$compatPort = '9791'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt13'")) 'direct_runtime_attempt13_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt14'") -and $runner.Contains("`$httpPort = '9890'") -and $runner.Contains("`$compatPort = '9891'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt14'")) 'direct_runtime_attempt14_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -66,6 +69,9 @@ Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeI
 # lab runner.  The direct orchestrator cannot invoke historical bootstrap or
 # its V17->V18 migration action.
 Assert-True ($runner.Contains('function Invoke-BaseRunner') -and $runner.Contains("@('initialize','restore')") -and $runner.Contains("Invoke-BaseRunner 'initialize'") -and $runner.Contains("Invoke-BaseRunner 'restore' -RestoreConfirmation")) 'direct_runtime_base_restore_reuse_missing'
+Assert-True ($runner.Contains('create-pre-migration-db-snapshot.sh') -and $runner.Contains('restore-v4-synthetic-pre-migration-db.sh')) 'direct_runtime_snapshot_producer_in_source_closure_missing'
+Assert-True ($restore.Contains("expected_current_snapshot_script_sha='1897ea83db59c9126125ce63afe538e7a73e58ee1386db5acf518b6ddafaf7c5'") -and $restore.Contains('9c5035e26aec9b3f616272f48d4a0c5a3ce81b0a505ac7bc71ad5a47176db7c0') -and $restore.Contains('snapshot_restore_mechanism_unreviewed') -and $restore.Contains('snapshot_not_created_by_reviewed_mechanism')) 'direct_runtime_restore_producer_allowlist_missing'
+Assert-True ($restore.Contains('case "$manifest_script_sha" in') -and -not $restore.Contains('snapshot_not_created_by_current_mechanism')) 'direct_runtime_restore_dynamic_producer_equality_forbidden'
 foreach ($forbiddenBaseInvocation in @("Invoke-BaseRunner\s+'bootstrap-v17'", "Invoke-BaseRunner\s+'migrate'", "Invoke-BaseRunner\s+'recover'", 'Invoke-BootstrapV17', 'Invoke-MigrateV18')) {
     Assert-True ($runner -notmatch $forbiddenBaseInvocation) ('direct_runtime_historical_base_action_forbidden_' + ($forbiddenBaseInvocation -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }

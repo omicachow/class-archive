@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -81,13 +81,24 @@ $attemptSpec = switch ($Attempt) {
         }
     }
     'attempt13' {
-        # Attempts 8-12 remain preserved forensic labs. attempt13 is a fresh,
-        # database-only V16 laboratory reserved for the direct current-source
-        # V16 -> V18 proof. It does not bootstrap historical V17 code.
+        # Attempts 8-12 remain preserved forensic labs. attempt13 was reserved
+        # for the direct current-source proof, but Docker recovery left its
+        # stopped containers/volumes intact before a DB restore. It remains
+        # preserved and cannot be reused.
         @{
             HttpPort = '9790'; CompatPort = '9791'
             AppSubnet = '10.255.8.0/24'; GatewaySubnet = '10.236.0.0/16'
             BffGatewayIp = '10.236.0.10'
+        }
+    }
+    'attempt14' {
+        # attempt14 is the one new, empty direct V16 -> V18 laboratory after
+        # preserving attempt13's interrupted Docker-recovery state. It does
+        # not bootstrap historical V17 code.
+        @{
+            HttpPort = '9890'; CompatPort = '9891'
+            AppSubnet = '10.255.9.0/24'; GatewaySubnet = '10.234.0.0/16'
+            BffGatewayIp = '10.234.0.10'
         }
     }
 }

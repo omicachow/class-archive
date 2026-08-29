@@ -51,8 +51,24 @@ manifest_dump_sha=$(sed -n 's/.*"dump_sha256":"\([a-f0-9]\{64\}\)".*/\1/p' "$man
 manifest_script_sha=$(sed -n 's/.*"snapshot_script_sha256":"\([a-f0-9]\{64\}\)".*/\1/p' "$manifest")
 [ "$(printf '%s' "$manifest_dump_sha" | wc -c | tr -d ' ')" = 64 ] || fail snapshot_manifest_digest_invalid
 [ "$(printf '%s' "$manifest_script_sha" | wc -c | tr -d ' ')" = 64 ] || fail snapshot_manifest_digest_invalid
-[ "$manifest_script_sha" = "$(sha256sum /workspace/infra/scripts/create-pre-migration-db-snapshot.sh | awk '{print $1}')" ] \
-  || fail snapshot_not_created_by_current_mechanism
+
+# A snapshot is not trusted merely because it declares a script hash. The
+# producer hash must be one of this narrow, reviewed immutable allowlist, and
+# the current producer must still be its separately reviewed revision. The
+# first hash is the exact V16 input producer: its only later source change was
+# the explicit transition allowlist needed for V18, not dump semantics. Do not
+# replace this with an arbitrary "current script" equality check: that would
+# incorrectly reject a valid preserved input after a reviewed future adapter.
+current_snapshot_script_sha=$(sha256sum /workspace/infra/scripts/create-pre-migration-db-snapshot.sh | awk '{print $1}')
+expected_current_snapshot_script_sha='1897ea83db59c9126125ce63afe538e7a73e58ee1386db5acf518b6ddafaf7c5'
+case "$current_snapshot_script_sha" in
+  "$expected_current_snapshot_script_sha") ;;
+  *) fail snapshot_restore_mechanism_unreviewed ;;
+esac
+case "$manifest_script_sha" in
+  9c5035e26aec9b3f616272f48d4a0c5a3ce81b0a505ac7bc71ad5a47176db7c0|"$expected_current_snapshot_script_sha") ;;
+  *) fail snapshot_not_created_by_reviewed_mechanism ;;
+esac
 
 expected_sums='^[a-f0-9]{64}  (COMPLETE|MANIFEST\.json|database\.sql\.gz)$'
 [ "$(wc -l < "$snapshot/SHA256SUMS" | tr -d '[:space:]')" = 3 ] \
