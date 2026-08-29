@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt19 orchestration layer. It opens
+# Static-only contract for the attempt20 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -45,7 +45,7 @@ $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt19'") -and $runner.Contains("`$httpPort = '10390'") -and $runner.Contains("`$compatPort = '10391'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt19'")) 'direct_runtime_attempt19_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt20'") -and $runner.Contains("`$httpPort = '10490'") -and $runner.Contains("`$compatPort = '10491'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt20'")) 'direct_runtime_attempt20_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -105,6 +105,7 @@ Assert-True ($runner.Contains('$sourceClosure = Get-ProofSourceClosure') -and $r
 Assert-True ($runner.Contains('v16-to-v18-direct-proof.json') -and $runner.Contains('Assert-IgnoredUntracked $reportPath') -and $runner.Contains('format = 2') -and $runner.Contains("source_commit = `$SourceClosure.Commit") -and $runner.Contains("source_digest = `$SourceClosure.SourceDigest") -and $runner.Contains("legacy_fingerprint = `$Fingerprint") -and $runner.Contains("media = 'NOT_MOUNTED'")) 'direct_runtime_ignored_evidence_report_missing'
 Assert-True ($runner.Contains('$record.format -ne 2') -and $runner.Contains('direct_proof_source_closure_stale') -and $runner.Contains('source_commit) -notmatch') -and $runner.Contains('source_digest) -notmatch')) 'direct_runtime_proof_report_source_binding_missing'
 Assert-True ($runner.Contains('Deliberately never echo stderr') -and -not $runner.Contains('Write-Output $stderr') -and -not $runner.Contains('Write-Error $stderr')) 'direct_runtime_stderr_secret_boundary_missing'
+Assert-True ($runner.Contains("'V18_SYNTHETIC_MIGRATION_STOP:'") -and $runner.Contains('child_failure_prefix_invalid') -and $runner.Contains('[regex]::Match($stderr') -and $runner.Contains("'([a-z0-9_]{1,96})'")) 'direct_runtime_bounded_child_failure_diagnostic_missing'
 
 # Every fail-closed path is a single, bounded, path-free record.  In
 # particular, PowerShell's Write-Error formatting would add a script path and

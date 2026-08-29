@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -158,6 +158,16 @@ $attemptSpec = switch ($Attempt) {
             BffGatewayIp = '10.224.0.10'
         }
     }
+    'attempt20' {
+        # attempt19 is preserved after emitting a bounded nested-runner hash
+        # failure. attempt20 is the next isolated direct V16 -> V18 laboratory
+        # with separated module-import and hash-command diagnostics.
+        @{
+            HttpPort = '10490'; CompatPort = '10491'
+            AppSubnet = '10.255.15.0/24'; GatewaySubnet = '10.222.0.0/16'
+            BffGatewayIp = '10.222.0.10'
+        }
+    }
 }
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $Attempt)
 $configRoot = Join-Path $sandboxRoot 'config'
@@ -290,13 +300,10 @@ function Get-FileSha256([string]$Path) {
     # The direct lab starts a fresh Windows PowerShell process. Resolve the
     # built-in hashing command through its module-qualified name rather than
     # relying on session-specific command discovery or implicit autoloading.
-    try {
-        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
-        $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
-    }
-    catch {
-        Stop-V18SyntheticMigration 'file_hash_runtime_failed'
-    }
+    try { Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop }
+    catch { Stop-V18SyntheticMigration 'file_hash_module_import_failed' }
+    try { $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash }
+    catch { Stop-V18SyntheticMigration 'file_hash_command_failed' }
     if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') { Stop-V18SyntheticMigration 'file_hash_result_invalid' }
     return ([string]$hash).ToLowerInvariant()
 }
