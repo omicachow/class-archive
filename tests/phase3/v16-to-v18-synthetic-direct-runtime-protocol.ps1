@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt14 orchestration layer. It opens
+# Static-only contract for the attempt15 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -45,7 +45,7 @@ $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt14'") -and $runner.Contains("`$httpPort = '9890'") -and $runner.Contains("`$compatPort = '9891'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt14'")) 'direct_runtime_attempt14_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt15'") -and $runner.Contains("`$httpPort = '9990'") -and $runner.Contains("`$compatPort = '9991'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt15'")) 'direct_runtime_attempt15_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -95,6 +95,7 @@ Assert-True ($runner.Contains('function Get-ProofSourceClosure') -and $runner.Co
 foreach ($proofClosurePath in @('infra/docker-compose.yml', 'infra/v18-synthetic-migration/docker-compose.override.yml', 'infra/scripts/v18-synthetic-db-probe.sh', 'infra/scripts/v18-synthetic-migration.ps1', 'infra/scripts/restore-v4-synthetic-pre-migration-db.sh', 'infra/scripts/v16-to-v18-synthetic-direct-proof.php', 'infra/scripts/v16-to-v18-synthetic-direct-runtime.ps1', 'plugins/ClassIdentity/src/Schema.php')) {
     Assert-True ($runner.Contains("'$proofClosurePath'")) ('direct_runtime_proof_source_closure_path_missing_' + ($proofClosurePath -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }
+Assert-True ($runner.Contains("'infra/scripts/attest-v16-to-v18-synthetic-direct-runtime.ps1'") -and $runner.Contains('function ConvertTo-NormalizedSourceEntries') -and $runner.Contains("ConvertTo-NormalizedSourceEntries @(`$records) 'proof_source_entry_invalid'") -and $runner.Contains('Select-Object -Unique')) 'direct_runtime_source_entry_canonicalization_missing'
 Assert-True ($runner.Contains('$sourceClosure = Get-ProofSourceClosure') -and $runner.Contains("Assert-ProofSourceClosure `$sourceClosure 'direct_proof_source_changed_during_run'") -and $runner.Contains("Assert-ProofSourceClosure `$sourceClosure 'direct_verify_source_changed_during_run'")) 'direct_runtime_proof_source_closure_before_after_missing'
 
 # Runtime output must be non-secret by construction.  The ignored report is

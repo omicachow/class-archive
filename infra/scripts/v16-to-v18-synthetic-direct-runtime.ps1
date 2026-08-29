@@ -4,7 +4,7 @@ Runs one isolated, direct-current-source synthetic V16 -> V18 migration proof.
 
 .DESCRIPTION
 This is deliberately narrower than v18-synthetic-migration.ps1.  It has one
-hard-coded laboratory identity: attempt14 on loopback ports 9890/9891.  The
+hard-coded laboratory identity: attempt15 on loopback ports 9990/9991.  The
 runner may ask the existing runner to initialise and DB-only restore that
 fresh laboratory, but it never calls its historical V17 bootstrap or migrate
 actions.  The proof itself is always the current checked-out
@@ -12,8 +12,9 @@ v16-to-v18-synthetic-direct-proof.php script, executed as the image's nginx
 account with its explicit synthetic scope gates.
 
 No cleanup action exists. Any failed laboratory state is retained for
-forensics. attempt13 is preserved after an interrupted Docker recovery;
-attempt14 is its one new fixed, empty replacement laboratory.
+forensics. attempt13 is preserved after an interrupted Docker recovery and
+attempt14 is preserved after its valid proof plus rejected pre-fix attestation;
+attempt15 is the one new fixed, empty replacement laboratory.
 #>
 [CmdletBinding()]
 param(
@@ -31,10 +32,10 @@ $ProgressPreference = 'SilentlyContinue'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $windowsPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$attempt = 'attempt14'
-$httpPort = '9890'
-$compatPort = '9891'
-$composeProject = 'class_archive_v18_synthetic_migration_attempt14'
+$attempt = 'attempt15'
+$httpPort = '9990'
+$compatPort = '9991'
+$composeProject = 'class_archive_v18_synthetic_migration_attempt15'
 $baseRunner = Join-Path $PSScriptRoot 'v18-synthetic-migration.ps1'
 $proofPath = Join-Path $PSScriptRoot 'v16-to-v18-synthetic-direct-proof.php'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
@@ -53,6 +54,7 @@ $proofSourcePaths = @(
     'infra/scripts/restore-v4-synthetic-pre-migration-db.sh',
     'infra/scripts/v16-to-v18-synthetic-direct-proof.php',
     'infra/scripts/v16-to-v18-synthetic-direct-runtime.ps1',
+    'infra/scripts/attest-v16-to-v18-synthetic-direct-runtime.ps1',
     'plugins/ClassIdentity/src/Schema.php'
 )
 $script:stage = 'initialization'
@@ -115,9 +117,24 @@ function Get-Head {
     return ([string]$head[0]).Trim()
 }
 
+function ConvertTo-NormalizedSourceEntries([object[]]$Entries, [string]$InvalidCode) {
+    $normalized = @($Entries | ForEach-Object {
+        $path = [string]$_.path
+        $sha256 = [string]$_.sha256
+        if ($path -notmatch '^[A-Za-z0-9_./-]+$' -or $path.Contains('..') -or $sha256 -notmatch '^[a-f0-9]{64}$') {
+            Stop-V16ToV18DirectRuntime $InvalidCode
+        }
+        [pscustomobject]@{ path = $path; sha256 = $sha256 }
+    } | Sort-Object -Property path)
+    if ($normalized.Count -ne $Entries.Count -or @($normalized.path | Select-Object -Unique).Count -ne $normalized.Count) {
+        Stop-V16ToV18DirectRuntime $InvalidCode
+    }
+    return $normalized
+}
+
 function Get-ProofSourceClosure {
     # A runtime proof is evidence for exact executable sources, not merely the
-    # attempt14 database state. Require a clean, tracked source closure before
+    # attempt15 database state. Require a clean, tracked source closure before
     # it mutates the synthetic lab and record its deterministic digest.
     $head = Get-Head
     $records = [System.Collections.Generic.List[object]]::new()
@@ -130,9 +147,9 @@ function Get-ProofSourceClosure {
         if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'proof_source_worktree_not_head_bound' }
         & git -C $projectRoot diff --cached --quiet -- $relative
         if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'proof_source_index_not_head_bound' }
-        [void]$records.Add([ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() })
+        [void]$records.Add([pscustomobject]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() })
     }
-    $ordered = @($records | Sort-Object -Property path)
+    $ordered = ConvertTo-NormalizedSourceEntries @($records) 'proof_source_entry_invalid'
     $material = [string]::Join("`n", @($ordered | ForEach-Object { $_.path + "`0" + $_.sha256 })) + "`n"
     $bytes = [Text.Encoding]::UTF8.GetBytes($material)
     $digest = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','').ToLowerInvariant()
@@ -372,10 +389,10 @@ function Invoke-Initialize {
     Assert-DirectRuntimeSources
     $script:stage = 'initialize'
     $lines = @(Invoke-BaseRunner 'initialize')
-    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt14 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
+    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt15 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_initialize_evidence_invalid' }
     Get-SandboxValues | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt14 ports=127.0.0.1:9890_9891 source=V16_DB_ONLY media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt15 ports=127.0.0.1:9990_9991 source=V16_DB_ONLY media=NOT_MOUNTED'
 }
 
 function Invoke-Restore {
@@ -384,10 +401,10 @@ function Invoke-Restore {
     Get-SandboxValues | Out-Null
     $script:stage = 'restore'
     $lines = @(Invoke-BaseRunner 'restore' -RestoreConfirmation)
-    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt14 media=NOT_MOUNTED$' })
+    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt15 media=NOT_MOUNTED$' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_restore_evidence_invalid' }
     if ((Get-DirectSchemaVersion) -ne 16) { Stop-V16ToV18DirectRuntime 'direct_restore_not_v16' }
-    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt14 schema=16 target=ISOLATED media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt15 schema=16 target=ISOLATED media=NOT_MOUNTED'
 }
 
 function Invoke-Prove {
@@ -408,7 +425,7 @@ function Invoke-Prove {
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_proof_source_changed_during_run' | Out-Null
     Write-ProofReport $sourceClosure $fingerprint $first $replay $verify $failClosed
-    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt14 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt15 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 function Invoke-Verify {
@@ -425,7 +442,7 @@ function Invoke-Verify {
     $failClosed = Invoke-DirectProof '--fail-closed'
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_verify_source_changed_during_run' | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt14 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt15 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 try {
@@ -438,7 +455,7 @@ try {
             $initialized = (Test-Path -LiteralPath $envPath)
             $proof = (Test-Path -LiteralPath $reportPath)
             if ($initialized) { Get-SandboxValues | Out-Null }
-            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt14 ports=127.0.0.1:9890_9891 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
+            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt15 ports=127.0.0.1:9990_9991 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
         }
     }
 } catch {

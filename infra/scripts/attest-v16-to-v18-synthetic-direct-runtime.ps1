@@ -6,7 +6,7 @@ V18 synthetic runtime proof.
 .DESCRIPTION
 The attestation is deliberately separate from a Photo UI browser attestation.
 It is valid only when the current checked-out commit and the direct migration
-source closure exactly match the proof that ran in attempt14.  The emitted
+source closure exactly match the proof that ran in attempt15.  The emitted
 artifact lives under .codex-work, contains no credentials, and is not an
 authorization input for the application itself.  Owner migration tooling may
 use Verify as a release gate only.
@@ -23,9 +23,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$attempt = 'attempt14'
-$httpPort = '9890'
-$compatPort = '9891'
+$attempt = 'attempt15'
+$httpPort = '9990'
+$compatPort = '9991'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
 $reportRoot = Join-Path $sandboxRoot 'reports'
 $proofReportPath = Join-Path $reportRoot 'v16-to-v18-direct-proof.json'
@@ -39,6 +39,7 @@ $sourcePaths = @(
     'infra/scripts/restore-v4-synthetic-pre-migration-db.sh',
     'infra/scripts/v16-to-v18-synthetic-direct-proof.php',
     'infra/scripts/v16-to-v18-synthetic-direct-runtime.ps1',
+    'infra/scripts/attest-v16-to-v18-synthetic-direct-runtime.ps1',
     'plugins/ClassIdentity/src/Schema.php'
 )
 
@@ -90,6 +91,21 @@ function Get-Head {
     return ([string]$head[0]).Trim()
 }
 
+function ConvertTo-NormalizedSourceEntries([object[]]$Entries, [string]$InvalidCode) {
+    $normalized = @($Entries | ForEach-Object {
+        $path = [string]$_.path
+        $sha256 = [string]$_.sha256
+        if ($path -notmatch '^[A-Za-z0-9_./-]+$' -or $path.Contains('..') -or $sha256 -notmatch '^[a-f0-9]{64}$') {
+            Stop-V16ToV18DirectAttestation $InvalidCode
+        }
+        [pscustomobject]@{ path = $path; sha256 = $sha256 }
+    } | Sort-Object -Property path)
+    if ($normalized.Count -ne $Entries.Count -or @($normalized.path | Select-Object -Unique).Count -ne $normalized.Count) {
+        Stop-V16ToV18DirectAttestation $InvalidCode
+    }
+    return $normalized
+}
+
 function Get-SourceClosure {
     $head = Get-Head
     $records = [System.Collections.Generic.List[object]]::new()
@@ -104,12 +120,12 @@ function Get-SourceClosure {
         if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectAttestation 'source_worktree_not_head_bound' }
         & git -C $projectRoot diff --cached --quiet -- $relative
         if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectAttestation 'source_index_not_head_bound' }
-        [void]$records.Add([ordered]@{
+        [void]$records.Add([pscustomobject]@{
             path = $relative
             sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
         })
     }
-    $ordered = @($records | Sort-Object -Property path)
+    $ordered = ConvertTo-NormalizedSourceEntries @($records) 'source_entry_invalid'
     $material = [string]::Join("`n", @($ordered | ForEach-Object { $_.path + "`0" + $_.sha256 })) + "`n"
     $bytes = [Text.Encoding]::UTF8.GetBytes($material)
     $digest = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','').ToLowerInvariant()
@@ -170,7 +186,7 @@ function Get-RuntimeLockMetadata {
         if (-not $values.ContainsKey($key)) { Stop-V16ToV18DirectAttestation ('runtime_env_required_key_missing_' + $key.ToLowerInvariant()) }
         $safe[$key] = [string]$values[$key]
     }
-    if ($safe.COMPOSE_PROJECT_NAME -ne 'class_archive_v18_synthetic_migration_attempt14' -or $safe.CLASS_ARCHIVE_HTTP_PORT -ne $httpPort -or
+    if ($safe.COMPOSE_PROJECT_NAME -ne 'class_archive_v18_synthetic_migration_attempt15' -or $safe.CLASS_ARCHIVE_HTTP_PORT -ne $httpPort -or
         $safe.CLASS_ARCHIVE_COMPAT_HTTP_PORT -ne $compatPort -or $safe.CLASS_ARCHIVE_BASE_URL -ne ('http://127.0.0.1:' + $httpPort) -or
         $safe.PIWIGO_IMAGE -notmatch '^piwigo/piwigo:16\.4\.0a@sha256:[a-f0-9]{64}$' -or $safe.MARIADB_IMAGE -notmatch '^mariadb:11\.8\.8@sha256:[a-f0-9]{64}$') {
         Stop-V16ToV18DirectAttestation 'runtime_lock_metadata_invalid'
@@ -224,7 +240,7 @@ function Create-Attestation {
     $json = $record | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($attestationPath, ($json + "`n"), [Text.UTF8Encoding]::new($false))
     Assert-IgnoredUntracked $attestationPath $false | Out-Null
-    Write-V16ToV18DirectAttestation 'PASS' ('action=create commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt14 media=NOT_MOUNTED')
+    Write-V16ToV18DirectAttestation 'PASS' ('action=create commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt15 media=NOT_MOUNTED')
 }
 
 function Verify-Attestation {
@@ -248,15 +264,18 @@ function Verify-Attestation {
     foreach ($key in @('COMPOSE_PROJECT_NAME','CLASS_ARCHIVE_HTTP_PORT','CLASS_ARCHIVE_COMPAT_HTTP_PORT','CLASS_ARCHIVE_BASE_URL','PIWIGO_IMAGE','MARIADB_IMAGE')) {
         if ([string]$recordRuntime.$key -ne [string]$material.runtime.$key) { Stop-V16ToV18DirectAttestation 'attestation_runtime_lock_stale' }
     }
-    $recordSources = @($record.sources | Sort-Object -Property path)
-    $materialSources = @($material.sources | Sort-Object -Property path)
+    # JSON restores entries as PSCustomObject while a fresh source closure
+    # uses ordered dictionaries. Normalize both before sorting so a valid
+    # attestation cannot fail merely due to PowerShell object representation.
+    $recordSources = ConvertTo-NormalizedSourceEntries @($record.sources) 'attestation_source_entry_invalid'
+    $materialSources = ConvertTo-NormalizedSourceEntries @($material.sources) 'attestation_source_entry_invalid'
     if ($recordSources.Count -ne $materialSources.Count) { Stop-V16ToV18DirectAttestation 'attestation_source_set_stale' }
     for ($index = 0; $index -lt $recordSources.Count; ++$index) {
         if ($recordSources[$index].path -ne $materialSources[$index].path -or $recordSources[$index].sha256 -ne $materialSources[$index].sha256) {
             Stop-V16ToV18DirectAttestation 'attestation_source_hash_stale'
         }
     }
-    Write-V16ToV18DirectAttestation 'PASS' ('action=verify commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt14 media=NOT_MOUNTED')
+    Write-V16ToV18DirectAttestation 'PASS' ('action=verify commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt15 media=NOT_MOUNTED')
 }
 
 try {
@@ -265,7 +284,7 @@ try {
         'verify' { Verify-Attestation }
         'status' {
             $exists = Test-Path -LiteralPath $attestationPath
-            Write-V16ToV18DirectAttestation 'STATUS' ('attempt=attempt14 attestation=' + $exists.ToString().ToUpperInvariant() + ' ports=127.0.0.1:9890_9891 media=NOT_MOUNTED')
+            Write-V16ToV18DirectAttestation 'STATUS' ('attempt=attempt15 attestation=' + $exists.ToString().ToUpperInvariant() + ' ports=127.0.0.1:9990_9991 media=NOT_MOUNTED')
         }
     }
 } catch {

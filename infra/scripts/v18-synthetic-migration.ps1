@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -99,6 +99,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '9890'; CompatPort = '9891'
             AppSubnet = '10.255.9.0/24'; GatewaySubnet = '10.234.0.0/16'
             BffGatewayIp = '10.234.0.10'
+        }
+    }
+    'attempt15' {
+        # attempt14 remains preserved with its successful direct runtime proof
+        # and a rejected attestation generated before canonical source-entry
+        # sorting was repaired. attempt15 is the next fresh direct V16 -> V18
+        # laboratory; it shares no Docker project, volumes, bridge, or ports
+        # with a prior attempt and does not bootstrap historical V17 code.
+        @{
+            HttpPort = '9990'; CompatPort = '9991'
+            AppSubnet = '10.255.10.0/24'; GatewaySubnet = '10.232.0.0/16'
+            BffGatewayIp = '10.232.0.10'
         }
     }
 }
