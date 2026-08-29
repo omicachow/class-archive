@@ -26,6 +26,9 @@ $boundedNativeHelper = Join-Path $PSScriptRoot 'class-archive-bounded-native-pro
 $planRoot = Join-Path $projectRoot '.codex-work\private-real-full\migration-v16-to-v18'
 $lockPath = Join-Path $projectRoot '.codex-work\private-real-full\runtime\class-v16-to-v18-owner-migration.lock'
 $script:snapshotStage = 'NOT_STARTED'
+$script:snapshotPrimaryStage = 'NOT_STARTED'
+$script:snapshotPrimaryFailureLine = 0
+$script:snapshotRecoveryStage = 'NOT_STARTED'
 $sourceVersion = 16
 $targetVersion = 18
 $rollbackSchemaCommit = 'd6f15c7bd366d9dcf7fc8792b50d0965a8ee33d4'
@@ -187,10 +190,15 @@ function Assert-SourceV16 { if ((Get-SchemaState) -ne 'V16') { Stop-V16ToV18 'so
 function Assert-TargetV18 { if ((Get-SchemaState) -ne 'V18') { Stop-V16ToV18 'target_schema_not_exact_v18' } }
 
 function Wait-Maintenance {
+    # Do not use `docker compose exec` here. Docker Desktop may replace or
+    # transiently reconnect the service control channel immediately after the
+    # maintenance marker is written even though the live container already
+    # serves the exact fail-closed response. The dynamic probe below resolves
+    # the current service container for each attempt and never treats an
+    # unverified response as active.
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     do {
-        try { $lines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') -Capture -TimeoutSeconds 10 } catch { $lines = @() }
-        if ($lines.Count -eq 2 -and $lines[0] -eq 'Class Archive maintenance mode.' -and $lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') { return }
+        if ((Get-SnapshotMaintenanceState) -eq 'ACTIVE') { return }
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $deadline)
     Stop-V16ToV18 'maintenance_not_ready'
@@ -200,7 +208,10 @@ function Assert-PiwigoStoppedForSnapshot {
     # writer has exited.  The DB-only snapshot must not race a still-running
     # Piwigo process, so inspect the fixed Owner service before starting the
     # snapshot container.  This checks no media and exposes no runtime data.
-    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}','class_archive_private_full_v3_piwigo-piwigo-1') 'writer_stop_inspection_failed' -Capture -TimeoutSeconds 15
+    $containerIds = Invoke-Piwigo @('ps','-aq','piwigo') -Capture -TimeoutSeconds 15
+    if ($containerIds.Count -ne 1 -or $containerIds[0] -notmatch '^[a-f0-9]{12,64}$') { Stop-V16ToV18 'writer_stop_container_resolution_invalid' }
+    $containerId = [string]$containerIds[0]
+    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}',$containerId) 'writer_stop_inspection_failed' -Capture -TimeoutSeconds 15
     if ($lines.Count -ne 1 -or $lines[0] -ne 'false|exited') { Stop-V16ToV18 'writer_not_stopped' }
 }
 function Enter-Maintenance {
@@ -230,10 +241,18 @@ function Get-SnapshotMaintenanceState {
     # normal response bodies out of the host process; the maintenance body is
     # an exact fixed string and is the only accepted ACTIVE signal.
     try {
-        $statusLines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--output','/dev/null','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') -Capture -TimeoutSeconds 10
+        # Resolve the live service container from this compose project for every
+        # probe. Docker Desktop can replace a stopped service during recovery;
+        # a fixed container name can then inspect an exited predecessor instead
+        # of the newly-started writer. The opaque container id never leaves this
+        # function or the Owner-only process.
+        $containerIds = Invoke-Piwigo @('ps','-q','piwigo') -Capture -TimeoutSeconds 15
+        if ($containerIds.Count -ne 1 -or $containerIds[0] -notmatch '^[a-f0-9]{12,64}$') { return 'UNKNOWN' }
+        $containerId = [string]$containerIds[0]
+        $statusLines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','exec',$containerId,'curl','--silent','--show-error','--output','/dev/null','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') 'snapshot_maintenance_probe_failed' -Capture -TimeoutSeconds 10
         if ($statusLines.Count -eq 1 -and $statusLines[0] -match '^CLASS_ARCHIVE_STATUS:(2[0-9]{2}|3[0-9]{2})$') { return 'INACTIVE' }
         if ($statusLines.Count -ne 1 -or $statusLines[0] -ne 'CLASS_ARCHIVE_STATUS:503') { return 'UNKNOWN' }
-        $lines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--output','-','--write-out',"`nCLASS_ARCHIVE_STATUS:%{http_code}",'http://127.0.0.1/') -Capture -TimeoutSeconds 10
+        $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','exec',$containerId,'curl','--silent','--show-error','--output','-','--write-out',"`nCLASS_ARCHIVE_STATUS:%{http_code}",'http://127.0.0.1/') 'snapshot_maintenance_probe_failed' -Capture -TimeoutSeconds 10
         if ($lines.Count -eq 2 -and $lines[0] -eq 'Class Archive maintenance mode.' -and $lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') { return 'ACTIVE' }
         return 'UNKNOWN'
     }
@@ -271,6 +290,7 @@ function Restore-SnapshotOwnerAvailability {
     # observed maintenance marker, then demand the normal fail-closed runtime
     # boundary. Do not use this for Migrate: a partial schema change requires
     # explicit manual rollback instead.
+    $script:snapshotRecoveryStage = 'RESTORE_WRITER'
     Ensure-SnapshotWriterForRecovery
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     do {
@@ -279,7 +299,11 @@ function Restore-SnapshotOwnerAvailability {
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($maintenance -eq 'UNKNOWN') { Stop-V16ToV18 'snapshot_recovery_maintenance_state_unknown' }
-    if ($maintenance -eq 'ACTIVE') { Finalize-SnapshotRecoveryMaintenance }
+    if ($maintenance -eq 'ACTIVE') {
+        $script:snapshotRecoveryStage = 'FINALIZE_MAINTENANCE'
+        Finalize-SnapshotRecoveryMaintenance
+    }
+    $script:snapshotRecoveryStage = 'ASSERT_OWNER_RUNTIME'
     Assert-OwnerRuntime
 }
 function Create-PreMigrationSnapshot {
@@ -294,13 +318,25 @@ function Create-PreMigrationSnapshot {
     # refuses open AI jobs, so this boundary cannot race a queued index
     # mutation and cannot be mistaken for an atomic backup of media.
     Set-SnapshotStage 'CAPTURE_BASELINE'
-    $baseline = Capture-Baseline
+    try {
+        $baseline = Capture-Baseline
+    }
+    catch {
+        if ((Get-V16ToV18FailureCode $_.Exception) -ne 'unexpected_snapshot_failure') { throw }
+        Stop-V16ToV18 'snapshot_capture_baseline_unexpected'
+    }
     Set-SnapshotStage 'CAPTURE_DB_SNAPSHOT'
-    $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=snapshot','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM=true','pre-migration-db-backup') -Capture -TimeoutSeconds 300
-    $pattern = '^PRE_MIGRATION_DB_SNAPSHOT=PASS bundle=(pre-migration-db-v16-to-v18-[0-9]{8}T[0-9]{6}Z) schema_from=16 schema_to=18 scope=DB_ONLY media=NOT_INCLUDED$'
-    $records = @($lines | Where-Object { $_ -match $pattern })
-    if ($records.Count -ne 1) { Stop-V16ToV18 'pre_migration_snapshot_evidence_invalid' }
-    return @{ Name = [regex]::Match($records[0], $pattern).Groups[1].Value; Baseline = $baseline }
+    try {
+        $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=snapshot','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM=true','pre-migration-db-backup') -Capture -TimeoutSeconds 300
+        $pattern = '^PRE_MIGRATION_DB_SNAPSHOT=PASS bundle=(pre-migration-db-v16-to-v18-[0-9]{8}T[0-9]{6}Z) schema_from=16 schema_to=18 scope=DB_ONLY media=NOT_INCLUDED$'
+        $records = @($lines | Where-Object { $_ -match $pattern })
+        if ($records.Count -ne 1) { Stop-V16ToV18 'pre_migration_snapshot_evidence_invalid' }
+        return @{ Name = [regex]::Match($records[0], $pattern).Groups[1].Value; Baseline = $baseline }
+    }
+    catch {
+        if ((Get-V16ToV18FailureCode $_.Exception) -ne 'unexpected_snapshot_failure') { throw }
+        Stop-V16ToV18 'snapshot_capture_db_unexpected'
+    }
 }
 function Get-SnapshotBinding([string]$Name) {
     if ($Name -notmatch '^pre-migration-db-v16-to-v18-[0-9]{8}T[0-9]{6}Z$') { Stop-V16ToV18 'snapshot_name_invalid' }
@@ -490,6 +526,8 @@ try {
             return
         }
         catch {
+            $script:snapshotPrimaryStage = [string]$script:snapshotStage
+            $script:snapshotPrimaryFailureLine = [int]$_.InvocationInfo.ScriptLineNumber
             $snapshotPrimaryFailure=Get-V16ToV18FailureCode $_.Exception
             throw
         }
@@ -499,7 +537,8 @@ try {
                 catch {
                     $recoveryFailure=Get-V16ToV18FailureCode $_.Exception
                     $primary=if ([string]::IsNullOrWhiteSpace([string]$snapshotPrimaryFailure)) { 'unknown' } else { [string]$snapshotPrimaryFailure }
-                    Stop-V16ToV18 ('snapshot_primary_' + $primary.Substring(0,[Math]::Min(32,$primary.Length)) + '_recovery_' + $recoveryFailure.Substring(0,[Math]::Min(32,$recoveryFailure.Length)))
+                    $line=[string][Math]::Max(0,[int]$script:snapshotPrimaryFailureLine)
+                    Stop-V16ToV18 ('snapshot_primary_' + $primary.Substring(0,[Math]::Min(24,$primary.Length)) + '_line_' + $line + '_recovery_' + $recoveryFailure.Substring(0,[Math]::Min(24,$recoveryFailure.Length)))
                 }
             }
         }
@@ -520,7 +559,11 @@ catch {
     $message=[string]$_.Exception.Message
     $code=if ($message -match '^PRIVATE_V16_TO_V18_OWNER_STOP:([a-z0-9_]{1,96})$') { $Matches[1] } else { 'private_v16_to_v18_owner_migration_failed' }
     if ($code -eq 'private_v16_to_v18_owner_migration_failed') { $code='unexpected_' + $_.Exception.GetType().Name.ToLowerInvariant() + '_line_' + [string]$_.InvocationInfo.ScriptLineNumber }
-    $snapshotStageSuffix=if ($Action -eq 'Snapshot') { ' stage=' + [string]$script:snapshotStage } else { '' }
+    $snapshotStageSuffix=if ($Action -eq 'Snapshot') {
+        ' stage=' + [string]$script:snapshotStage +
+        ' primary_stage=' + [string]$script:snapshotPrimaryStage +
+        ' recovery_stage=' + [string]$script:snapshotRecoveryStage
+    } else { '' }
     Write-Output "PRIVATE_V16_TO_V18_OWNER_MIGRATION=FAIL action=$Action endpoint=$Endpoint code=$code$snapshotStageSuffix manual_rollback_required"
     exit 2
 }
