@@ -172,6 +172,7 @@ $temporaryPassword = $null
 $rotationPassword = $null
 $fixtureCredentialChanged = $false
 $exitCode = 0
+$wrapperStage = 'initialization'
 $oldValues = @{}
 $environmentNames = @(
     'NODE_PATH',
@@ -188,6 +189,7 @@ foreach ($name in $environmentNames) {
 }
 
 try {
+    $wrapperStage = 'private_paths'
     foreach ($root in @($runtimeRoot, $profileRoot, $screenshotRoot)) {
         if (-not (Test-Path -LiteralPath $root)) { [void][IO.Directory]::CreateDirectory($root) }
         Assert-IgnoredPrivateChild -Candidate (Join-Path $root '.path-probe') -Root $root -Code 'private_root' | Out-Null
@@ -201,12 +203,14 @@ try {
     Assert-IgnoredPrivateChild -Candidate $runScreenshots -Root $screenshotRoot -Code 'screenshots' | Out-Null
     Assert-IgnoredPrivateChild -Candidate $credentialPath -Root $runtimeRoot -Code 'credential' | Out-Null
 
+    $wrapperStage = 'fixture_prepare'
     $temporaryPassword = New-SecretText
     # From this point on finally must attempt a second independent rotation,
     # even when the first provisioner invocation changes the hashes and then
     # fails while validating or cleaning its bounded transport.
     $fixtureCredentialChanged = $true
     Set-ExistingFixturePasswords -Password $temporaryPassword -Run $run -HostPasswordPath $fixturePasswordPath -Code 'fixture_prepare'
+    $wrapperStage = 'credential_document'
     $roles = [ordered]@{
         classmate = [ordered]@{ username = 'fixture-classmate'; password = $temporaryPassword }
         family = [ordered]@{ username = 'fixture-family'; password = $temporaryPassword }
@@ -225,6 +229,7 @@ try {
     $roles = $null
     $document = $null
 
+    $wrapperStage = 'chrome_runner'
     $env:NODE_PATH = Get-NodeModulesPath
     $env:CLASS_ARCHIVE_V4_OWNER_FIXTURE_RUN_ID = $run
     $env:CLASS_ARCHIVE_V4_OWNER_FIXTURE_CORE_ORIGIN = $coreOrigin
@@ -256,7 +261,11 @@ try {
 catch {
     $code = if ($_.Exception.Message -match '^V4_OWNER_FIXTURE_BROWSER_STOP:([A-Za-z0-9_]{1,120})$') {
         [string]$Matches[1]
-    } else { 'unexpected_' + $_.Exception.GetType().Name }
+    } else {
+        $exceptionType = $_.Exception.GetType().Name
+        $innerType = if ($null -ne $_.Exception.InnerException) { $_.Exception.InnerException.GetType().Name } else { 'none' }
+        'unexpected_' + $wrapperStage + '_' + $exceptionType + '_' + $innerType
+    }
     if ($code -notmatch '^[A-Za-z0-9_]{1,120}$') { $code = 'unexpected' }
     Write-Output ('V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=wrapper code=' + $code.ToLowerInvariant())
     $exitCode = 2
@@ -271,6 +280,7 @@ finally {
     # browser session, then both the host/container secret files are removed.
     if ($fixtureCredentialChanged) {
         try {
+            $wrapperStage = 'fixture_final_rotation'
             $rotationPassword = New-SecretText
             Set-ExistingFixturePasswords -Password $rotationPassword -Run $run -HostPasswordPath $rotationPasswordPath -Code 'fixture_final_rotation'
         }
