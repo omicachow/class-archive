@@ -424,7 +424,7 @@ function Invoke-V4Gate([string]$Name) {
 function Invoke-DirectV16ToV18ProofGate {
     if (-not (Test-Path -LiteralPath $directProofAttestationHelper -PathType Leaf)) { Stop-V16ToV18 'direct_runtime_proof_gate_missing' }
     $lines = Invoke-ChildPowerShell $directProofAttestationHelper @('-Action','verify') 'direct_runtime_proof_gate_invalid' 60
-    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt37 media=NOT_MOUNTED$'
+    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt38 media=NOT_MOUNTED$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1) { Stop-V16ToV18 'direct_runtime_proof_gate_evidence_invalid' }
     $match = [regex]::Match($rows[0],$pattern)
