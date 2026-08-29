@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt29 orchestration layer. It opens
+# Static-only contract for the attempt30 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -41,11 +41,12 @@ $runner = [IO.File]::ReadAllText($runnerPath)
 $restore = [IO.File]::ReadAllText($restorePath)
 $enginePipeFunction = Slice-Function $runner 'function Assert-DockerDesktopEnginePipe' 'function Invoke-BaseRunner' 'direct_runtime_engine_pipe_function_boundary_missing'
 $baseRunnerFunction = Slice-Function $runner 'function Invoke-BaseRunner' 'function Get-SandboxValues' 'direct_runtime_base_runner_function_boundary_missing'
-$directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 'function Get-DirectSchemaVersion' 'direct_runtime_direct_compose_function_boundary_missing'
+$directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 'function Invoke-DirectDocker' 'direct_runtime_direct_compose_function_boundary_missing'
+$directDockerFunction = Slice-Function $runner 'function Invoke-DirectDocker' 'function Get-DirectContainerName' 'direct_runtime_direct_docker_function_boundary_missing'
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt29'") -and $runner.Contains("`$httpPort = '11390'") -and $runner.Contains("`$compatPort = '11391'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt29'")) 'direct_runtime_attempt29_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt30'") -and $runner.Contains("`$httpPort = '11490'") -and $runner.Contains("`$compatPort = '11491'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt30'")) 'direct_runtime_attempt30_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -65,6 +66,7 @@ $composePipeIndex = $directComposeFunction.IndexOf('Assert-DockerDesktopEnginePi
 $composeWslPathIndex = $directComposeFunction.IndexOf('Get-WslPath', [StringComparison]::Ordinal)
 Assert-True ($basePipeIndex -ge 0 -and $baseCaptureIndex -gt $basePipeIndex -and $baseStartIndex -gt $baseCaptureIndex) 'direct_runtime_engine_pipe_must_precede_base_runner'
 Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeIndex) 'direct_runtime_engine_pipe_must_precede_direct_compose'
+Assert-True ($directDockerFunction.Contains('Assert-DockerDesktopEnginePipe') -and $directDockerFunction.Contains("@('-d','Ubuntu','--exec','docker')") -and $directDockerFunction.Contains('Invoke-NativeCapture')) 'direct_runtime_bounded_raw_docker_adapter_missing'
 $wslPathFunction = Slice-Function $runner 'function Get-WslPath' 'function Assert-DockerDesktopEnginePipe' 'direct_runtime_utf8_wsl_path_function_boundary_missing'
 Assert-True ($wslPathFunction.Contains('StandardOutputEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('StandardErrorEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('wsl_path_argument_invalid') -and -not $wslPathFunction.Contains('Invoke-NativeCapture $wsl')) 'direct_runtime_utf8_wsl_path_contract_missing'
 
@@ -73,6 +75,7 @@ Assert-True ($wslPathFunction.Contains('StandardOutputEncoding = [Text.UTF8Encod
 # its V17->V18 migration action.
 Assert-True ($runner.Contains('function Invoke-BaseRunner') -and $runner.Contains("@('initialize','restore')") -and $runner.Contains("Invoke-BaseRunner 'initialize'") -and $runner.Contains("Invoke-BaseRunner 'restore' -RestoreConfirmation")) 'direct_runtime_base_restore_reuse_missing'
 Assert-True ($runner.Contains('function New-BaseRunnerCapturePaths') -and $runner.Contains('base-runner-capture') -and $runner.Contains('Start-Process -FilePath $windowsPowerShell') -and $runner.Contains('-RedirectStandardOutput $capture.Stdout') -and $runner.Contains('-RedirectStandardError $capture.Stderr') -and $runner.Contains('base_capture_too_large') -and $runner.Contains("'base_runner_' + `$BaseAction + '_timeout'")) 'direct_runtime_owner_only_base_capture_missing'
+Assert-True ($runner.Contains("`$baseRunnerTimeoutSeconds = 720") -and $runner.Contains('base_runner_timeout_invalid') -and $runner.Contains('WaitForExit($baseRunnerTimeoutSeconds * 1000)')) 'direct_runtime_composed_restore_budget_missing'
 Assert-True ($runner.Contains('if (-not $process.HasExited)') -and $runner.Contains("Stop-V16ToV18DirectRuntime 'base_runner_exit_state_invalid'") -and $runner.Contains('$exitCode = [int]$process.ExitCode')) 'direct_runtime_child_exit_state_validation_missing'
 Assert-True ($runner.Contains('function Invoke-RestoreAndProve') -and $runner.Contains('synthetic_restore_and_migration_confirmation_required') -and $runner.Contains('Invoke-Restore') -and $runner.Contains('Invoke-Prove') -and $runner.Contains("'restore-and-prove' { Invoke-RestoreAndProve }")) 'direct_runtime_bounded_restore_and_prove_missing'
 Assert-True ($runner.Contains('create-pre-migration-db-snapshot.sh') -and $runner.Contains('restore-v4-synthetic-pre-migration-db.sh')) 'direct_runtime_snapshot_producer_in_source_closure_missing'
@@ -87,6 +90,7 @@ Assert-True ($runner.Contains('source=V16_DB_ONLY') -and $runner.Contains('media
 # strict: first migration, replay, read-only verification, and unknown-ledger
 # fail closed each have a fixed evidence contract.
 Assert-True ($runner.Contains("'--user','nginx'") -and $runner.Contains("'CLASS_ARCHIVE_V16_TO_V18_DIRECT_PROOF=1'") -and $runner.Contains("'CLASS_ARCHIVE_RUNTIME_SCOPE=SYNTHETIC_V4_MIGRATION'") -and $runner.Contains('/workspace/infra/scripts/v16-to-v18-synthetic-direct-proof.php')) 'direct_runtime_nginx_scope_gate_missing'
+Assert-True ($runner.Contains('function Assert-DirectContainer') -and $runner.Contains('label=com.docker.compose.project=') -and $runner.Contains('--format={{.Names}}') -and $runner.Contains('direct_container_identity_invalid_') -and $runner.Contains('direct_schema_probe')) 'direct_runtime_container_identity_and_schema_boundary_missing'
 Assert-True ($runner.Contains("Invoke-DirectProof '--migrate-current-source'") -and $runner.Contains("Invoke-DirectProof '--verify-current-source'") -and $runner.Contains("Invoke-DirectProof '--fail-closed'")) 'direct_runtime_current_source_proof_modes_missing'
 Assert-True ($runner.Contains('schema_from=16 schema_to=18 sequential=17_18 replay=NOT_APPLICABLE') -and $runner.Contains('legacy_tables_preserved=PASS') -and $runner.Contains('new_table_count=7')) 'direct_runtime_first_migration_evidence_missing'
 Assert-True ($runner.Contains('schema_from=18 schema_to=18 sequential=NOT_APPLICABLE replay=PASS') -and $runner.Contains('stage=verify_current_source schema=18 ledger=18') -and $runner.Contains('unknown_schema=DENY scratch=DISPOSED')) 'direct_runtime_replay_verify_fail_closed_evidence_missing'

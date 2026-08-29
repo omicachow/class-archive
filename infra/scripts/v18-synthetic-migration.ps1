@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -268,6 +268,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11390'; CompatPort = '11391'
             AppSubnet = '10.255.24.0/24'; GatewaySubnet = '10.204.0.0/16'
             BffGatewayIp = '10.204.0.10'
+        }
+    }
+    'attempt30' {
+        # attempt29 remains preserved after one of its unbounded Compose
+        # control calls exceeded the direct runner's outer deadline. attempt30
+        # uses bounded raw Docker inspection/execution for state and proof
+        # calls, while Compose remains bounded for lifecycle commands only.
+        # It shares no project, volumes, bridges, or ports with any prior lab.
+        @{
+            HttpPort = '11490'; CompatPort = '11491'
+            AppSubnet = '10.255.25.0/24'; GatewaySubnet = '10.202.0.0/16'
+            BffGatewayIp = '10.202.0.10'
         }
     }
 }
@@ -546,7 +558,8 @@ function Assert-Initialized([hashtable]$Snapshot) {
     }
 }
 
-function Invoke-V18Compose([string[]]$Arguments, [switch]$Capture) {
+function Invoke-V18Compose([string[]]$Arguments, [switch]$Capture, [int]$TimeoutSeconds = 180) {
+    if ($TimeoutSeconds -lt 15 -or $TimeoutSeconds -gt 300) { Stop-V18SyntheticMigration 'compose_timeout_invalid' }
     $wslRoot = Get-WslPath $projectRoot
     $wslEnv = Get-WslPath $envPath
     $all = @('-d','Ubuntu','--cd',$wslRoot,'--exec','docker','compose','--env-file',$wslEnv,'-f',$composePath,'-f',$overridePath) + $Arguments
@@ -575,7 +588,11 @@ function Invoke-V18Compose([string[]]$Arguments, [switch]$Capture) {
     try {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try { $process.Kill() } catch { }
+            $process.WaitForExit()
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         $exitCode = $process.ExitCode
@@ -583,9 +600,50 @@ function Invoke-V18Compose([string[]]$Arguments, [switch]$Capture) {
         $process.Dispose()
     }
     $lines = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
-    if ($exitCode -ne 0) { Stop-V18SyntheticMigration ('compose_failed_' + $script:stage) }
+    $stageCode = ([string]$script:stage -replace '[^a-z0-9_]', '_')
+    if ($timedOut) { Stop-V18SyntheticMigration ('compose_timeout_' + $stageCode) }
+    if ($exitCode -ne 0) { Stop-V18SyntheticMigration ('compose_failed_' + $stageCode) }
     if ($Capture) { return $lines }
     return @()
+}
+
+function Invoke-V18Docker([string[]]$Arguments, [string]$FailureCode, [int]$TimeoutSeconds = 20) {
+    if ($FailureCode -notmatch '^[a-z0-9_]{3,96}$') { Stop-V18SyntheticMigration 'docker_failure_code_invalid' }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 60) { Stop-V18SyntheticMigration 'docker_timeout_invalid' }
+    $all = @('-d','Ubuntu','--exec','docker') + $Arguments
+    $nativeArgs = [System.Collections.Generic.List[string]]::new()
+    foreach ($argument in $all) {
+        $value = [string]$argument
+        if ($value -match '[\s\"]' -or $value.Contains("`0")) { Stop-V18SyntheticMigration 'docker_argument_invalid' }
+        [void]$nativeArgs.Add($value)
+    }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $wsl
+    $info.Arguments = $nativeArgs -join ' '
+    $info.WorkingDirectory = $projectRoot
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V18SyntheticMigration ($FailureCode + '_start_failed') }
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try { $process.Kill() } catch { }
+            $process.WaitForExit()
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    if ($timedOut) { Stop-V18SyntheticMigration ($FailureCode + '_timeout') }
+    if ($exitCode -ne 0) { Stop-V18SyntheticMigration ($FailureCode + '_failed') }
+    return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
 }
 
 function Assert-FreshSyntheticAttempt {
@@ -621,27 +679,34 @@ function Assert-FreshSyntheticAttempt {
     if ((Get-V18TableCount) -ne 0) { Stop-V18SyntheticMigration 'resume_empty_bootstrap_database_not_empty' }
 }
 
-function Get-V18ServiceRecord([string]$Service) {
-    if ($Service -notmatch '^[a-z0-9-]+$') { Stop-V18SyntheticMigration 'service_name_invalid' }
-    # Docker Compose can prepend benign progress/status records around its
-    # JSON service line after a Desktop cold start.  Only a unique parsed
-    # record for the requested fixed service is authoritative; unrelated or
-    # non-JSON stdout is ignored rather than turning a healthy service into an
-    # unbounded wait.
-    $records = [System.Collections.Generic.List[object]]::new()
-    foreach ($line in @(Invoke-V18Compose @('ps','--format','json',$Service) -Capture)) {
-        try {
-            $candidate = ([string]$line | ConvertFrom-Json -ErrorAction Stop)
-            if ([string]$candidate.Service -eq $Service) { [void]$records.Add($candidate) }
-        } catch { }
+function Get-V18ContainerName([string]$Service) {
+    if ($Service -notin @('db','piwigo','v18-synthetic-recovery-db')) { Stop-V18SyntheticMigration 'service_name_invalid' }
+    return ($projectName + '-' + $Service + '-1')
+}
+
+function Get-V18ServiceRecord([string]$Service, [int]$TimeoutSeconds = 5) {
+    $container = Get-V18ContainerName $Service
+    # Compose control traffic can hang on a cold Desktop engine. Query only a
+    # unique container name selected by both project label and exact expected
+    # name, then inspect the narrowly formatted state/health fields. Neither
+    # command emits container configuration or environment values.
+    $nameLines = @(Invoke-V18Docker @('ps','-a','--filter',('label=com.docker.compose.project=' + $projectName),'--filter',('name=' + $container),'--format={{.Names}}') ('service_lookup_' + ($Service -replace '-','_')) $TimeoutSeconds)
+    if ($nameLines.Count -eq 0) { return $null }
+    if ($nameLines.Count -ne 1 -or $nameLines[0] -ne $container) { Stop-V18SyntheticMigration ('service_identity_invalid_' + ($Service -replace '-','_')) }
+    $stateLines = @(Invoke-V18Docker @('inspect','--format={{.State.Status}}|{{.State.Health.Status}}',$container) ('service_state_' + ($Service -replace '-','_')) $TimeoutSeconds)
+    if ($stateLines.Count -ne 1 -or $stateLines[0] -notmatch '^(created|restarting|running|removing|paused|exited|dead)\|(starting|healthy|unhealthy)$') {
+        Stop-V18SyntheticMigration ('service_state_invalid_' + ($Service -replace '-','_'))
     }
-    if ($records.Count -eq 1) { return $records[0] }
-    return $null
+    $parts = $stateLines[0] -split '\|', 2
+    return [pscustomobject]@{ Service = $Service; State = $parts[0]; Health = $parts[1] }
 }
 
 function Wait-V18Service([string]$Service, [string]$Expected = 'healthy', [int]$Seconds = 180) {
-    for ($i = 0; $i -lt $Seconds; ++$i) {
-        $item = Get-V18ServiceRecord $Service
+    if ($Seconds -lt 1 -or $Seconds -gt 180) { Stop-V18SyntheticMigration 'service_wait_seconds_invalid' }
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $remaining = [Math]::Max(1, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalSeconds))
+        $item = Get-V18ServiceRecord $Service ([Math]::Min(5, $remaining))
         if ($null -ne $item) {
             if ([string]$item.Health -eq $Expected -or ([string]$item.State -eq $Expected)) { return }
         }
@@ -651,20 +716,24 @@ function Wait-V18Service([string]$Service, [string]$Expected = 'healthy', [int]$
 }
 
 function Get-V18SchemaVersion {
-    $lines = @(Invoke-V18Compose @('exec','-T','db','sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','schema') -Capture)
+    $db = Get-V18ContainerName 'db'
+    $lines = @(Invoke-V18Docker @('exec',$db,'sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','schema') 'schema_probe' 30)
     if ($lines.Count -ne 1 -or $lines[0] -notmatch '^(16|17|18)$') { Stop-V18SyntheticMigration 'schema_probe_invalid' }
     return [int]$lines[0]
 }
 
 function Get-V18TableCount {
-    $lines = @(Invoke-V18Compose @('exec','-T','db','sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','table-count') -Capture)
+    $db = Get-V18ContainerName 'db'
+    $lines = @(Invoke-V18Docker @('exec',$db,'sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','table-count') 'table_count_probe' 30)
     if ($lines.Count -ne 1 -or $lines[0] -notmatch '^[0-9]+$') { Stop-V18SyntheticMigration 'table_count_probe_invalid' }
     return [int]$lines[0]
 }
 
 function Invoke-Proof([string]$Mode) {
     $script:stage = $Mode.TrimStart('-')
-    $lines = @(Invoke-V18Compose @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/v18-synthetic-migration-proof.php',$Mode) -Capture)
+    $piwigo = Get-V18ContainerName 'piwigo'
+    $proofCode = ('proof_' + ($script:stage -replace '[^a-z0-9_]', '_'))
+    $lines = @(Invoke-V18Docker @('exec','--user','nginx',$piwigo,'php','/workspace/infra/scripts/v18-synthetic-migration-proof.php',$Mode) $proofCode 60)
     $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_PROOF=PASS ' })
     if ($record.Count -ne 1) { Stop-V18SyntheticMigration ('proof_evidence_invalid_' + $script:stage) }
     return [string]$record[0]
@@ -710,15 +779,15 @@ function Invoke-Restore([hashtable]$Snapshot) {
     # 500 before its restored DB config exists. Wait for the database through
     # Compose, then require only the Piwigo process state; the restore helper
     # below verifies its code volume before importing anything.
-    Invoke-V18Compose @('up','-d','--wait','--wait-timeout','180','db') | Out-Null
-    Invoke-V18Compose @('up','-d','piwigo') | Out-Null
+    Invoke-V18Compose @('up','-d','--wait','--wait-timeout','180','db') -TimeoutSeconds 240 | Out-Null
+    Invoke-V18Compose @('up','-d','piwigo') -TimeoutSeconds 90 | Out-Null
     Wait-V18Service 'piwigo' 'running'
     if ((Get-V18TableCount) -ne 0) { Stop-V18SyntheticMigration 'restore_target_not_empty' }
-    Invoke-V18Compose @('stop','piwigo') | Out-Null
+    Invoke-V18Compose @('stop','piwigo') -TimeoutSeconds 90 | Out-Null
     $script:stage = 'restore_import'
-    $lines = @(Invoke-V18Compose @('--profile','v18-synthetic-migration','run','--rm','v18-synthetic-db-restore-v16') -Capture)
+    $lines = @(Invoke-V18Compose @('--profile','v18-synthetic-migration','run','--rm','--no-deps','-T','v18-synthetic-db-restore-v16') -Capture -TimeoutSeconds 180)
     if (@($lines | Where-Object { $_ -eq 'V4_SYNTHETIC_DB_RESTORE=PASS schema=16 scope=DB_ONLY media=NOT_MOUNTED target=ISOLATED maintenance=FAIL_CLOSED' }).Count -ne 1) { Stop-V18SyntheticMigration 'restore_evidence_invalid' }
-    Invoke-V18Compose @('up','-d','piwigo') | Out-Null
+    Invoke-V18Compose @('up','-d','piwigo') -TimeoutSeconds 90 | Out-Null
     Wait-V18Service 'piwigo' 'running'
     if ((Get-V18SchemaVersion) -ne 16) { Stop-V18SyntheticMigration 'restore_not_v16' }
     Write-V18SyntheticMigration 'PASS' 'restore' ('schema=16 source=' + $Snapshot.Name + ' target=' + $Attempt + ' media=NOT_MOUNTED')
@@ -795,22 +864,22 @@ function Invoke-RecoveryV18 {
     } else {
         if ($recoveryVolume -in $existingVolumes) { Stop-V18SyntheticMigration 'recovery_target_already_present' }
         $script:stage = 'recovery_backup'
-        $lines = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','v18-synthetic-db-backup') -Capture)
+        $lines = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','--no-deps','-T','v18-synthetic-db-backup') -Capture -TimeoutSeconds 180)
         $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_DB_BACKUP=PASS bundle=class-archive-v18-synthetic-[0-9]{8}T[0-9]{6}Z ' })
         if ($record.Count -ne 1) { Stop-V18SyntheticMigration 'recovery_backup_evidence_invalid' }
         $bundle = Get-Field ([string]$record[0]) 'bundle'
         Write-Report 'v18-recovery-bundle.txt' $bundle
         $script:stage = 'recovery_target'
-        Invoke-V18Compose @('--profile','v18-synthetic-recovery','up','-d','v18-synthetic-recovery-db') | Out-Null
+        Invoke-V18Compose @('--profile','v18-synthetic-recovery','up','-d','v18-synthetic-recovery-db') -TimeoutSeconds 90 | Out-Null
         Wait-V18Service 'v18-synthetic-recovery-db'
     }
     if (-not $ResumeRestoredRecovery) {
         $script:stage = 'recovery_restore'
-        $restore = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','-e',('CLASS_ARCHIVE_V18_SYNTHETIC_RESTORE_BUNDLE=' + $bundle),'v18-synthetic-db-restore') -Capture)
+        $restore = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','--no-deps','-T','-e',('CLASS_ARCHIVE_V18_SYNTHETIC_RESTORE_BUNDLE=' + $bundle),'v18-synthetic-db-restore') -Capture -TimeoutSeconds 180)
         if (@($restore | Where-Object { $_ -eq 'V18_SYNTHETIC_DB_RESTORE=PASS format=10 schema=18 scope=DB_ONLY target=SECOND_EMPTY_DB media=NOT_MOUNTED media_guard=NOT_CLAIMED photos=72' }).Count -ne 1) { Stop-V18SyntheticMigration 'recovery_restore_evidence_invalid' }
     }
     $script:stage = 'recovery_verify'
-    $target = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','v18-synthetic-recovery-verify') -Capture)
+    $target = @(Invoke-V18Compose @('--profile','v18-synthetic-recovery','run','--rm','--no-deps','-T','v18-synthetic-recovery-verify') -Capture -TimeoutSeconds 180)
     $targetRecord = @($target | Where-Object { $_ -match '^V18_SYNTHETIC_PROOF=PASS stage=verify_v18 schema=18 ' })
     if ($targetRecord.Count -ne 1) { Stop-V18SyntheticMigration 'recovery_fixture_mismatch' }
     $targetProof = [string]$targetRecord[0]

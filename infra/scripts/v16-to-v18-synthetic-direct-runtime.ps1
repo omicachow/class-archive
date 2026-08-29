@@ -4,7 +4,7 @@ Runs one isolated, direct-current-source synthetic V16 -> V18 migration proof.
 
 .DESCRIPTION
 This is deliberately narrower than v18-synthetic-migration.ps1.  It has one
-hard-coded laboratory identity: attempt29 on loopback ports 11390/11391.  The
+hard-coded laboratory identity: attempt30 on loopback ports 11490/11491.  The
 runner may ask the existing runner to initialise and DB-only restore that
 fresh laboratory, but it never calls its historical V17 bootstrap or migrate
 actions.  The proof itself is always the current checked-out
@@ -20,8 +20,9 @@ preserved after its cold-start Compose record ambiguity; attempt24 is
 preserved after its nested pipe stall; attempt25 is preserved after its
 unexpected child exit; attempt26 is preserved after its ambiguous exit object;
 attempt27 is preserved after its custom cold-start wait; attempt28 is
-preserved after its temporary HTTP health wait; attempt29 is the one new
-fixed, empty replacement laboratory.
+preserved after its temporary HTTP health wait; attempt29 is preserved after
+an unbounded Compose control call exhausted the outer deadline; attempt30 is
+the one new, bounded-control replacement laboratory.
 #>
 [CmdletBinding()]
 param(
@@ -39,10 +40,10 @@ $ProgressPreference = 'SilentlyContinue'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $windowsPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$attempt = 'attempt29'
-$httpPort = '11390'
-$compatPort = '11391'
-$composeProject = 'class_archive_v18_synthetic_migration_attempt29'
+$attempt = 'attempt30'
+$httpPort = '11490'
+$compatPort = '11491'
+$composeProject = 'class_archive_v18_synthetic_migration_attempt30'
 $baseRunner = Join-Path $PSScriptRoot 'v18-synthetic-migration.ps1'
 $proofPath = Join-Path $PSScriptRoot 'v16-to-v18-synthetic-direct-proof.php'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
@@ -66,6 +67,7 @@ $proofSourcePaths = @(
     'plugins/ClassIdentity/src/Schema.php'
 )
 $script:stage = 'initialization'
+$baseRunnerTimeoutSeconds = 720
 
 function Stop-V16ToV18DirectRuntime([string]$Code) {
     throw [InvalidOperationException]::new('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_STOP:' + $Code)
@@ -307,6 +309,7 @@ function New-BaseRunnerCapturePaths([string]$BaseAction) {
 function Invoke-BaseRunner([string]$BaseAction, [switch]$RestoreConfirmation) {
     if ($BaseAction -notin @('initialize','restore')) { Stop-V16ToV18DirectRuntime 'base_action_forbidden' }
     Assert-DockerDesktopEnginePipe
+    if ($baseRunnerTimeoutSeconds -lt 300 -or $baseRunnerTimeoutSeconds -gt 900) { Stop-V16ToV18DirectRuntime 'base_runner_timeout_invalid' }
     Assert-TrackedLeaf $baseRunner | Out-Null
     if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { Stop-V16ToV18DirectRuntime 'windows_powershell_missing' }
     $arguments = [System.Collections.Generic.List[string]]::new()
@@ -316,7 +319,7 @@ function Invoke-BaseRunner([string]$BaseAction, [switch]$RestoreConfirmation) {
     if ($RestoreConfirmation) { [void]$arguments.Add('-ConfirmSyntheticRestore') }
     $capture = New-BaseRunnerCapturePaths $BaseAction
     $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments.ToArray() -RedirectStandardOutput $capture.Stdout -RedirectStandardError $capture.Stderr -PassThru
-    if (-not $process.WaitForExit(240000)) {
+    if (-not $process.WaitForExit($baseRunnerTimeoutSeconds * 1000)) {
         try { Stop-Process -Id $process.Id -Force } catch { }
         $process.WaitForExit()
         Stop-V16ToV18DirectRuntime ('base_runner_' + $BaseAction + '_timeout')
@@ -390,11 +393,35 @@ function Invoke-DirectCompose([string[]]$ComposeArguments) {
     $wslRoot = Get-WslPath $projectRoot
     $wslEnv = Get-WslPath $envPath
     $all = @('-d','Ubuntu','--cd',$wslRoot,'--exec','docker','compose','--env-file',$wslEnv,'-f',$composePath,'-f',$overridePath) + $ComposeArguments
-    return @(Invoke-NativeCapture $wsl $all ('direct_compose_failed_' + $script:stage))
+    $stageCode = ([string]$script:stage -replace '[^a-z0-9_]', '_')
+    return @(Invoke-NativeCapture $wsl $all ('direct_compose_failed_' + $stageCode))
+}
+
+function Invoke-DirectDocker([string[]]$DockerArguments, [string]$FailureCode, [int]$TimeoutSeconds = 30) {
+    Assert-DockerDesktopEnginePipe
+    if ($FailureCode -notmatch '^[a-z0-9_]{3,96}$') { Stop-V16ToV18DirectRuntime 'direct_docker_failure_code_invalid' }
+    return @(Invoke-NativeCapture $wsl (@('-d','Ubuntu','--exec','docker') + $DockerArguments) $FailureCode '' $TimeoutSeconds)
+}
+
+function Get-DirectContainerName([string]$Service) {
+    if ($Service -notin @('db','piwigo')) { Stop-V16ToV18DirectRuntime 'direct_service_name_invalid' }
+    return ($composeProject + '-' + $Service + '-1')
+}
+
+function Assert-DirectContainer([string]$Service) {
+    $container = Get-DirectContainerName $Service
+    # Docker's narrow name projection is used instead of Compose ps so the
+    # direct proof does not rely on an unbounded Compose control call. The
+    # fixed project label and exact expected name must both match before an
+    # exec command can address the synthetic laboratory.
+    $lines = @(Invoke-DirectDocker @('ps','-a','--filter',('label=com.docker.compose.project=' + $composeProject),'--filter',('name=' + $container),'--format={{.Names}}') ('direct_container_lookup_' + $Service) 15)
+    if ($lines.Count -ne 1 -or $lines[0] -ne $container) { Stop-V16ToV18DirectRuntime ('direct_container_identity_invalid_' + $Service) }
+    return $container
 }
 
 function Get-DirectSchemaVersion {
-    $lines = @(Invoke-DirectCompose @('exec','-T','db','sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','schema'))
+    $db = Assert-DirectContainer 'db'
+    $lines = @(Invoke-DirectDocker @('exec',$db,'sh','/workspace/infra/scripts/v18-synthetic-db-probe.sh','schema') 'direct_schema_probe' 30)
     if ($lines.Count -ne 1 -or $lines[0] -notmatch '^(16|18)$') { Stop-V16ToV18DirectRuntime 'direct_schema_probe_invalid' }
     return [int]$lines[0]
 }
@@ -402,12 +429,14 @@ function Get-DirectSchemaVersion {
 function Invoke-DirectProof([string]$Mode) {
     if ($Mode -notin @('--migrate-current-source','--verify-current-source','--fail-closed')) { Stop-V16ToV18DirectRuntime 'direct_proof_mode_invalid' }
     $script:stage = $Mode.TrimStart('-')
-    $lines = @(Invoke-DirectCompose @(
-        'exec','-T','--user','nginx',
+    $piwigo = Assert-DirectContainer 'piwigo'
+    $proofCode = ('direct_proof_' + ($script:stage -replace '[^a-z0-9_]', '_'))
+    $lines = @(Invoke-DirectDocker @(
+        'exec','--user','nginx',
         '-e','CLASS_ARCHIVE_V16_TO_V18_DIRECT_PROOF=1',
         '-e','CLASS_ARCHIVE_RUNTIME_SCOPE=SYNTHETIC_V4_MIGRATION',
-        'piwigo','php','/workspace/infra/scripts/v16-to-v18-synthetic-direct-proof.php',$Mode
-    ))
+        $piwigo,'php','/workspace/infra/scripts/v16-to-v18-synthetic-direct-proof.php',$Mode
+    ) $proofCode 120)
     $records = @($lines | Where-Object { $_ -match '^V16_TO_V18_SYNTHETIC_DIRECT_PROOF=PASS ' })
     if ($records.Count -ne 1) { Stop-V16ToV18DirectRuntime ('direct_proof_evidence_invalid_' + $script:stage) }
     return [string]$records[0]
@@ -494,10 +523,10 @@ function Invoke-Initialize {
     Assert-DirectRuntimeSources
     $script:stage = 'initialize'
     $lines = @(Invoke-BaseRunner 'initialize')
-    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt29 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
+    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt30 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_initialize_evidence_invalid' }
     Get-SandboxValues | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt29 ports=127.0.0.1:11390_11391 source=V16_DB_ONLY media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt30 ports=127.0.0.1:11490_11491 source=V16_DB_ONLY media=NOT_MOUNTED'
 }
 
 function Invoke-Restore {
@@ -506,10 +535,10 @@ function Invoke-Restore {
     Get-SandboxValues | Out-Null
     $script:stage = 'restore'
     $lines = @(Invoke-BaseRunner 'restore' -RestoreConfirmation)
-    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt29 media=NOT_MOUNTED$' })
+    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt30 media=NOT_MOUNTED$' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_restore_evidence_invalid' }
     if ((Get-DirectSchemaVersion) -ne 16) { Stop-V16ToV18DirectRuntime 'direct_restore_not_v16' }
-    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt29 schema=16 target=ISOLATED media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt30 schema=16 target=ISOLATED media=NOT_MOUNTED'
 }
 
 function Invoke-RestoreAndProve {
@@ -543,7 +572,7 @@ function Invoke-Prove {
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_proof_source_changed_during_run' | Out-Null
     Write-ProofReport $sourceClosure $fingerprint $first $replay $verify $failClosed
-    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt29 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt30 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 function Invoke-Verify {
@@ -560,7 +589,7 @@ function Invoke-Verify {
     $failClosed = Invoke-DirectProof '--fail-closed'
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_verify_source_changed_during_run' | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt29 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt30 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 try {
@@ -574,7 +603,7 @@ try {
             $initialized = (Test-Path -LiteralPath $envPath)
             $proof = (Test-Path -LiteralPath $reportPath)
             if ($initialized) { Get-SandboxValues | Out-Null }
-            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt29 ports=127.0.0.1:11390_11391 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
+            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt30 ports=127.0.0.1:11490_11491 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
         }
     }
 } catch {
