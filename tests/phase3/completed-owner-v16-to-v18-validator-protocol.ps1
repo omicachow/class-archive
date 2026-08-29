@@ -27,9 +27,41 @@ function Slice-Function([string]$Text, [string]$StartName, [string]$NextName, [s
 Assert-True (Test-Path -LiteralPath $validatorPath -PathType Leaf) 'completed_v16_to_v18_validator_missing'
 $tokens = $null
 $parseErrors = $null
-[System.Management.Automation.Language.Parser]::ParseFile($validatorPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
+$validatorAst = [System.Management.Automation.Language.Parser]::ParseFile($validatorPath, [ref]$tokens, [ref]$parseErrors)
 Assert-True ($parseErrors.Count -eq 0) 'completed_v16_to_v18_validator_parse_invalid'
 $validator = [IO.File]::ReadAllText($validatorPath)
+
+# Exercise the validator's actual timestamp helper in isolation. PowerShell 7.6
+# converts a JSON RFC3339 token ending in Z to DateTime(Utc), whereas Windows
+# PowerShell leaves it as a string. Both representations must pass without a
+# culture-sensitive string cast; invalid calendar values and non-UTC forms
+# must remain fail closed.
+$timeHelperAsts = @($validatorAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Test-StrictUtcRfc3339Value'
+}, $true))
+Assert-True ($timeHelperAsts.Count -eq 1) 'completed_v16_to_v18_utc_timestamp_helper_shape_invalid'
+Invoke-Expression ([string]$timeHelperAsts[0].Extent.Text)
+Assert-True (Test-StrictUtcRfc3339Value '2026-08-29T13:31:09Z') 'completed_v16_to_v18_raw_utc_timestamp_rejected'
+Assert-True (Test-StrictUtcRfc3339Value '2026-08-29T13:31:09.1234567Z') 'completed_v16_to_v18_fractional_utc_timestamp_rejected'
+$utcDate = [DateTime]::SpecifyKind([DateTime]::new(2026, 8, 29, 13, 31, 9), [DateTimeKind]::Utc)
+Assert-True (Test-StrictUtcRfc3339Value $utcDate) 'completed_v16_to_v18_utc_datetime_rejected'
+$jsonUtcValue = (([pscustomobject]@{ created_at = '2026-08-29T13:31:09Z' } | ConvertTo-Json -Compress) | ConvertFrom-Json).created_at
+Assert-True (Test-StrictUtcRfc3339Value $jsonUtcValue) 'completed_v16_to_v18_version_specific_json_utc_value_rejected'
+foreach ($invalidTime in @(
+    '2026-02-30T13:31:09Z',
+    '2026-08-29T24:00:00Z',
+    '2026-08-29T13:31:09+00:00',
+    '2026-08-29T13:31:09',
+    '2026-08-29T13:31:09.12345678Z',
+    '1999-08-29T13:31:09Z',
+    [DateTime]::SpecifyKind([DateTime]::new(2026, 8, 29, 13, 31, 9), [DateTimeKind]::Local),
+    [DateTime]::SpecifyKind([DateTime]::new(2026, 8, 29, 13, 31, 9), [DateTimeKind]::Unspecified),
+    [DateTimeOffset]::new(2026, 8, 29, 13, 31, 9, [TimeSpan]::Zero)
+)) {
+    Assert-True (-not (Test-StrictUtcRfc3339Value $invalidTime)) 'completed_v16_to_v18_invalid_or_non_utc_timestamp_accepted'
+}
 
 # The public surface is a fixed validator, never a concealed state-changing
 # action. It accepts only opaque local leaf names for a historical plan and a
@@ -55,6 +87,8 @@ Assert-True ($validator.Contains("merge-base','--is-ancestor") -and $validator.C
 Assert-True ($validator.Contains('function Assert-SchemaEquivalence') -and $validator.Contains('Get-HistoricalSchemaText') -and $validator.Contains('Get-TextSha256') -and $validator.Contains('historical_schema_current_sha_mismatch')) 'completed_v16_to_v18_schema_equivalence_guard_missing'
 Assert-True ($validator.Contains('CURRENT_VERSION\s*=\s*18') -and $validator.Contains('0017_photos_app_v4_collection_snapshots') -and $validator.Contains('0018_photos_app_v4_spotlight_rotation_state')) 'completed_v16_to_v18_schema_ledger_guard_missing'
 Assert-True ($validator.Contains('tracked_source_worktree_not_head_bound') -and $validator.Contains('tracked_source_index_not_head_bound')) 'completed_v16_to_v18_schema_checkout_binding_missing'
+Assert-True ($validator.Contains('Test-StrictUtcRfc3339Value') -and $validator.Contains('[DateTimeKind]::Utc') -and $validator.Contains('[Globalization.CultureInfo]::InvariantCulture')) 'completed_v16_to_v18_utc_timestamp_contract_missing'
+Assert-True (-not $validator.Contains("[string](Get-Property `$plan 'created_at')")) 'completed_v16_to_v18_culture_sensitive_timestamp_cast_forbidden'
 
 # All historical evidence classes are checked independently. A fresh V4 gate
 # is separately verified by the head-bound acceptance helper instead of reusing

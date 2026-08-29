@@ -147,6 +147,34 @@ function Get-Property([object]$Object, [string]$Name) {
     return $property.Value
 }
 
+function Test-StrictUtcRfc3339Value([AllowNull()][object]$Value) {
+    # Windows PowerShell returns JSON date tokens as strings, while newer
+    # PowerShell versions may materialize an RFC3339 value ending in Z as a
+    # DateTime whose Kind is Utc. Never stringify a DateTime here: that would
+    # make validation depend on the process culture and discard the UTC marker.
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [DateTime]) {
+        $dateTime = [DateTime]$Value
+        return $dateTime.Kind -eq [DateTimeKind]::Utc -and $dateTime.Year -ge 2000 -and $dateTime.Year -le 2099
+    }
+    if ($Value -isnot [string]) { return $false }
+
+    $text = [string]$Value
+    if ($text -notmatch '^20[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,7})?Z$') {
+        return $false
+    }
+    $parsed = [DateTimeOffset]::MinValue
+    [string[]]$formats = @("yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'")
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    return [DateTimeOffset]::TryParseExact(
+        $text,
+        $formats,
+        [Globalization.CultureInfo]::InvariantCulture,
+        $styles,
+        [ref]$parsed
+    ) -and $parsed.Offset -eq [TimeSpan]::Zero
+}
+
 function Assert-ExactPropertySet([object]$Object, [string[]]$Expected, [string]$Code) {
     if ($null -eq $Object) { Stop-CompletedOwnerV16ToV18 $Code }
     $actual = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
@@ -218,7 +246,7 @@ function Read-HistoricalPlan([string]$Name) {
         [int](Get-Property $plan 'source_schema') -ne 16 -or [int](Get-Property $plan 'target_schema') -ne 18 -or
         [string](Get-Property $plan 'rollback_schema_commit') -ne $rollbackSchemaCommit -or
         [string](Get-Property $plan 'privacy') -ne 'OPAQUE_LEAF_NAMES_AND_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_MEDIA_OR_SECRETS' -or
-        [string](Get-Property $plan 'created_at') -notmatch '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+$') {
+        -not (Test-StrictUtcRfc3339Value (Get-Property $plan 'created_at'))) {
         Stop-CompletedOwnerV16ToV18 'migration_plan_contract_invalid'
     }
     $sequential = @((Get-Property $plan 'sequential_migrations'))
