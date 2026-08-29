@@ -88,6 +88,7 @@ jobs:
           ./tests/phase3/v4-synthetic-migration-sandbox-protocol.ps1
           ./tests/phase3/v4-synthetic-phase-ab-attestation-protocol.ps1
           ./tests/phase3/private-v18-owner-migration-protocol.ps1
+          ./tests/phase3/completed-owner-v16-to-v18-validator-protocol.ps1
 
       - name: Verify V4 Chrome acceptance protocol
         shell: pwsh
@@ -96,6 +97,8 @@ jobs:
           ./tests/phase3/photos-app-v4-chrome-deep-qa-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-scope-projection-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1
+          ./tests/phase3/photos-app-v4-owner-browser-qa-protocol.ps1
+          ./tests/phase3/photos-app-v4-owner-cold-restart-protocol.ps1
 
       - name: Reject high-risk credential material
         shell: bash

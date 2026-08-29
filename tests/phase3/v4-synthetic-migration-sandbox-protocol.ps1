@@ -125,7 +125,7 @@ Assert-True ($restore.Contains('CLASS_ARCHIVE_V4_SYNTHETIC_RESTORE') -and $resto
 Assert-True ($restore.Contains('for secret in "$DB_PASSWORD" "$DB_ROOT_PASSWORD"; do') -and -not $restore.Contains('case "${DB_PASSWORD}:${DB_ROOT_PASSWORD}" in')) 'v4_sandbox_restore_secret_validation_must_not_reject_its_separator'
 Assert-True ($restore.Contains("expected_files='COMPLETE MANIFEST.json SHA256SUMS database.sql.gz'") -and $restore.Contains('snapshot_file_set_invalid')) 'v4_sandbox_restore_exact_file_set_missing'
 Assert-True ($restore.Contains('schema_current":16') -and $restore.Contains('schema_from":16') -and $restore.Contains('schema_to":17') -and $restore.Contains('media":"NOT_INCLUDED')) 'v4_sandbox_restore_manifest_transition_missing'
-Assert-True ($restore.Contains('snapshot_not_created_by_current_mechanism') -and $restore.Contains('/workspace/infra/scripts/create-pre-migration-db-snapshot.sh')) 'v4_sandbox_restore_snapshot_provenance_missing'
+Assert-True ($restore.Contains('snapshot_not_created_by_reviewed_mechanism') -and $restore.Contains('snapshot_restore_mechanism_unreviewed') -and $restore.Contains('/workspace/infra/scripts/create-pre-migration-db-snapshot.sh')) 'v4_sandbox_restore_snapshot_provenance_missing'
 Assert-True ($restore.Contains('sha256sum -c SHA256SUMS') -and $restore.Contains('gzip -t')) 'v4_sandbox_restore_checksum_or_gzip_check_missing'
 Assert-True ($restore.Contains('target_database_not_empty') -and $restore.Contains('restored_schema_not_v16')) 'v4_sandbox_restore_empty_target_or_v16_gate_missing'
 Assert-True ($restore.Contains('database.inc.php') -and $restore.Contains('target_database_config_already_exists')) 'v4_sandbox_restore_config_overwrite_guard_missing'
