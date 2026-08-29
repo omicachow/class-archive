@@ -6,7 +6,7 @@ V18 synthetic runtime proof.
 .DESCRIPTION
 The attestation is deliberately separate from a Photo UI browser attestation.
 It is valid only when the current checked-out commit and the direct migration
-source closure exactly match the proof that ran in attempt39.  The emitted
+source closure exactly match the proof that ran in attempt40.  The emitted
 artifact lives under .codex-work, contains no credentials, and is not an
 authorization input for the application itself.  Owner migration tooling may
 use Verify as a release gate only.
@@ -23,9 +23,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$attempt = 'attempt39'
-$httpPort = '11802'
-$compatPort = '11803'
+$attempt = 'attempt40'
+$httpPort = '11804'
+$compatPort = '11805'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
 $reportRoot = Join-Path $sandboxRoot 'reports'
 $proofReportPath = Join-Path $reportRoot 'v16-to-v18-direct-proof.json'
@@ -204,7 +204,7 @@ function Get-RuntimeLockMetadata {
         if (-not $values.ContainsKey($key)) { Stop-V16ToV18DirectAttestation ('runtime_env_required_key_missing_' + $key.ToLowerInvariant()) }
         $safe[$key] = [string]$values[$key]
     }
-    if ($safe.COMPOSE_PROJECT_NAME -ne 'class_archive_v18_synthetic_migration_attempt39' -or $safe.CLASS_ARCHIVE_HTTP_PORT -ne $httpPort -or
+    if ($safe.COMPOSE_PROJECT_NAME -ne 'class_archive_v18_synthetic_migration_attempt40' -or $safe.CLASS_ARCHIVE_HTTP_PORT -ne $httpPort -or
         $safe.CLASS_ARCHIVE_COMPAT_HTTP_PORT -ne $compatPort -or $safe.CLASS_ARCHIVE_BASE_URL -ne ('http://127.0.0.1:' + $httpPort) -or
         $safe.PIWIGO_IMAGE -notmatch '^piwigo/piwigo:16\.4\.0a@sha256:[a-f0-9]{64}$' -or $safe.MARIADB_IMAGE -notmatch '^mariadb:11\.8\.8@sha256:[a-f0-9]{64}$') {
         Stop-V16ToV18DirectAttestation 'runtime_lock_metadata_invalid'
@@ -258,7 +258,7 @@ function Create-Attestation {
     $json = $record | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($attestationPath, ($json + "`n"), [Text.UTF8Encoding]::new($false))
     Assert-IgnoredUntracked $attestationPath $false | Out-Null
-    Write-V16ToV18DirectAttestation 'PASS' ('action=create commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt39 media=NOT_MOUNTED')
+    Write-V16ToV18DirectAttestation 'PASS' ('action=create commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt40 media=NOT_MOUNTED')
 }
 
 function Verify-Attestation {
@@ -293,7 +293,7 @@ function Verify-Attestation {
             Stop-V16ToV18DirectAttestation 'attestation_source_hash_stale'
         }
     }
-    Write-V16ToV18DirectAttestation 'PASS' ('action=verify commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt39 media=NOT_MOUNTED')
+    Write-V16ToV18DirectAttestation 'PASS' ('action=verify commit=' + $material.head + ' source_digest=' + $material.source_digest + ' proof_sha256=' + $material.direct_proof_sha256 + ' attempt=attempt40 media=NOT_MOUNTED')
 }
 
 try {
@@ -302,7 +302,7 @@ try {
         'verify' { Verify-Attestation }
         'status' {
             $exists = Test-Path -LiteralPath $attestationPath
-            Write-V16ToV18DirectAttestation 'STATUS' ('attempt=attempt39 attestation=' + $exists.ToString().ToUpperInvariant() + ' ports=127.0.0.1:11802_11803 media=NOT_MOUNTED')
+            Write-V16ToV18DirectAttestation 'STATUS' ('attempt=attempt40 attestation=' + $exists.ToString().ToUpperInvariant() + ' ports=127.0.0.1:11804_11805 media=NOT_MOUNTED')
         }
     }
 } catch {
