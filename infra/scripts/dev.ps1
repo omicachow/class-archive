@@ -611,6 +611,9 @@ switch ($Action) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $projectRoot 'tests\phase3\photos-app-v4-chrome-upload-lifecycle-protocol.ps1')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\photos-app-v4-chrome-performance-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\search-context-contract.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & wsl.exe @($composeArguments + @(

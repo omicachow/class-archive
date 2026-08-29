@@ -100,6 +100,7 @@ jobs:
           ./tests/phase3/photos-app-v4-chrome-deep-qa-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-scope-projection-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1
+          ./tests/phase3/photos-app-v4-chrome-performance-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-browser-qa-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-cold-restart-protocol.ps1
