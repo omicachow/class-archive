@@ -48,10 +48,13 @@ $piwigoProject = 'class_archive_private_full_v3_piwigo'
 $immichProject = 'class_archive_private_full_v3_immich'
 $immichEnvWindows = Join-Path $projectRoot $immichEnv.Replace('/', '\')
 $immichCompose = $null
+$boundedNativeHelper = Join-Path $PSScriptRoot 'class-archive-bounded-native-process.ps1'
 
 function Stop-V16ToV18Baseline([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_V16_TO_V18_BASELINE_STOP:' + $Code)
 }
+if (-not (Test-Path -LiteralPath $boundedNativeHelper -PathType Leaf)) { Stop-V16ToV18Baseline 'bounded_native_helper_missing' }
+. $boundedNativeHelper
 
 function Get-FileSha256([string]$Path) {
     try {
@@ -71,42 +74,29 @@ function Get-FileSha256([string]$Path) {
     return ([string]$hash).ToLowerInvariant()
 }
 
-function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
-    $previous = $ErrorActionPreference
+function Invoke-WslCapture([string[]]$Arguments, [string]$Code, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     try {
-        $ErrorActionPreference = 'Continue'
-        $lines = @(& "$env:SystemRoot\System32\wsl.exe" @Arguments 2>&1)
-        $exitCode = $LASTEXITCODE
+        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+        $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $boundedArgs -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
     }
-    finally { $ErrorActionPreference = $previous }
-    if ($exitCode -ne 0) { Stop-V16ToV18Baseline $Code }
-    return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
+    catch { Stop-V16ToV18Baseline ($Code + '_start_failed') }
+    if ($result.TimedOut) { Stop-V16ToV18Baseline ($Code + '_timeout') }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-V16ToV18Baseline $Code }
+    return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
 }
 
 function Get-WslPath([string]$WindowsPath) {
     $full = [IO.Path]::GetFullPath($WindowsPath)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { Stop-V16ToV18Baseline 'immich_env_missing' }
     if ($full -match '[\s\"]' -or $full.Contains("`0")) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
-    $info = [Diagnostics.ProcessStartInfo]::new()
-    $info.FileName = "$env:SystemRoot\System32\wsl.exe"
-    $info.Arguments = (@('-d','Ubuntu','--exec','wslpath','-a',$full) -join ' ')
-    $info.UseShellExecute = $false
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
-    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
-    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $info
-    if (-not $process.Start()) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
     try {
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        $exit = $process.ExitCode
+        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments @('-d','Ubuntu','--exec','wslpath','-a',$full) -TimeoutSeconds 15
+        $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $boundedArgs -TimeoutSeconds 30 -WorkingDirectory $projectRoot
     }
-    finally { $process.Dispose() }
-    if ($exit -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
-    $lines = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
+    catch { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
+    if ($result.TimedOut) { Stop-V16ToV18Baseline 'immich_env_path_timeout' }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$result.Stderr)) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
+    $lines = @(([string]$result.Stdout -split "`r?`n") | Where-Object { $_ -ne '' })
     if ($lines.Count -ne 1 -or $lines[0] -notmatch '^/mnt/[a-z]/') { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
     return [string]$lines[0]
 }
@@ -176,13 +166,13 @@ function Initialize-ImmichCompose {
     )
 }
 
-function Invoke-PiwigoComposeCapture([string[]]$Arguments, [string]$Code) {
-    return Invoke-WslCapture @($script:piwigoCompose + $Arguments) $Code
+function Invoke-PiwigoComposeCapture([string[]]$Arguments, [string]$Code, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
+    return Invoke-WslCapture @($script:piwigoCompose + $Arguments) $Code -TimeoutSeconds $TimeoutSeconds
 }
 
-function Invoke-ImmichComposeCapture([string[]]$Arguments, [string]$Code) {
+function Invoke-ImmichComposeCapture([string[]]$Arguments, [string]$Code, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     Initialize-ImmichCompose
-    return Invoke-WslCapture @($script:immichCompose + $Arguments) $Code
+    return Invoke-WslCapture @($script:immichCompose + $Arguments) $Code -TimeoutSeconds $TimeoutSeconds
 }
 
 function ConvertTo-StrictCounts([string[]]$Lines, [string[]]$ExpectedKeys, [string]$Code) {
@@ -285,7 +275,7 @@ printf 'ai_jobs_open=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_index_job WHERE 
         'comments','replies','visible_people','person_merges','person_rules','spotlights','memories','audit_events','ai_asset_index',
         'ai_jobs_total','ai_jobs_complete','ai_jobs_open'
     )
-    $maria = ConvertTo-StrictCounts (Invoke-PiwigoComposeCapture @('exec','-T','db','sh','-eu','-c',$mariaSql) 'mariadb_count_query_failed') $mariaKeys 'mariadb_count_output_invalid'
+    $maria = ConvertTo-StrictCounts (Invoke-PiwigoComposeCapture @('exec','-T','db','sh','-eu','-c',$mariaSql) 'mariadb_count_query_failed' 90) $mariaKeys 'mariadb_count_output_invalid'
     if ([int]$maria.class_identity_schema_version -ne $Schema -or [int]$maria.migration_ledger_rows -ne $Schema) { Stop-V16ToV18Baseline 'schema_not_expected' }
 
     $pgSql = @'
@@ -296,7 +286,7 @@ UNION ALL SELECT 'immich_face_search='||COUNT(*) FROM face_search
 UNION ALL SELECT 'immich_search_index='||COUNT(*) FROM smart_search;
 '@
     $pgKeys = @('immich_assets','immich_face_records','immich_raw_persons','immich_face_search','immich_search_index')
-    $postgres = ConvertTo-StrictCounts (Invoke-ImmichComposeCapture @('exec','-T','--user','postgres','database','psql','--no-psqlrc','--tuples-only','--no-align','--set','ON_ERROR_STOP=1','--dbname=immich','--command',$pgSql) 'immich_count_query_failed') $pgKeys 'immich_count_output_invalid'
+    $postgres = ConvertTo-StrictCounts (Invoke-ImmichComposeCapture @('exec','-T','--user','postgres','database','psql','--no-psqlrc','--tuples-only','--no-align','--set','ON_ERROR_STOP=1','--dbname=immich','--command',$pgSql) 'immich_count_query_failed' 90) $pgKeys 'immich_count_output_invalid'
 
     $all = [ordered]@{}
     foreach ($entry in $maria.GetEnumerator()) { $all[[string]$entry.Key] = [uint64]$entry.Value }
@@ -356,10 +346,10 @@ fingerprint comments "SELECT * FROM ${base}photo_comment ORDER BY comment_id;"
 fingerprint person_curation "SELECT 'person'; SELECT * FROM ${base}person ORDER BY class_person_id; SELECT 'person_merge'; SELECT * FROM ${base}person_merge ORDER BY merge_id; SELECT 'person_photo_rule'; SELECT * FROM ${base}person_photo_rule ORDER BY class_person_id,class_photo_id;"
 fingerprint spotlight_collections "SELECT 'spotlight'; SELECT * FROM ${base}spotlight ORDER BY spotlight_id; SELECT 'auto_collection'; SELECT * FROM ${base}auto_collection ORDER BY auto_collection_id; SELECT 'auto_collection_photo'; SELECT * FROM ${base}auto_collection_photo ORDER BY auto_collection_id,ordinal,class_photo_id;"
 fingerprint ai_control "SELECT 'ai_asset_index'; SELECT * FROM ${base}ai_asset_index ORDER BY class_photo_id; SELECT 'ai_index_job'; SELECT * FROM ${base}ai_index_job ORDER BY job_id; SELECT 'native_source_epoch'; SELECT * FROM ${base}native_source_epoch ORDER BY source_key;"
-  fingerprint identity_and_audit "SELECT 'identity'; SELECT * FROM ${base}identity ORDER BY id; SELECT 'seat'; SELECT * FROM ${base}seat ORDER BY id; SELECT 'account'; SELECT * FROM ${base}account ORDER BY id; SELECT 'principal'; SELECT * FROM ${base}principal ORDER BY id; SELECT 'token'; SELECT * FROM ${base}token ORDER BY id; SELECT 'audit_event'; SELECT * FROM ${base}audit_event ORDER BY id; SELECT 'pwg_users'; SELECT * FROM ${pwg}users ORDER BY id; SELECT 'pwg_user_access'; SELECT * FROM ${pwg}user_access ORDER BY user_id,category_id; SELECT 'pwg_user_group'; SELECT * FROM ${pwg}user_group ORDER BY user_id,group_id; SELECT 'pwg_user_infos'; SELECT * FROM ${pwg}user_infos ORDER BY user_id; SELECT 'pwg_groups'; SELECT * FROM ${pwg}groups ORDER BY id;"
+  fingerprint identity_and_audit "SELECT 'identity'; SELECT * FROM ${base}identity ORDER BY id; SELECT 'seat'; SELECT * FROM ${base}seat ORDER BY id; SELECT 'account'; SELECT * FROM ${base}account ORDER BY id; SELECT 'principal'; SELECT * FROM ${base}principal ORDER BY id; SELECT 'token'; SELECT * FROM ${base}token ORDER BY id; SELECT 'audit_event'; SELECT * FROM ${base}audit_event ORDER BY id; SELECT 'pwg_users'; SELECT * FROM ${pwg}users ORDER BY id; SELECT 'pwg_user_access'; SELECT * FROM ${pwg}user_access ORDER BY user_id,cat_id; SELECT 'pwg_user_group'; SELECT * FROM ${pwg}user_group ORDER BY user_id,group_id; SELECT 'pwg_user_infos'; SELECT * FROM ${pwg}user_infos ORDER BY user_id; SELECT 'pwg_groups'; SELECT * FROM ${pwg}groups ORDER BY id;"
 '@
     $mariaKeys = @('canonical_media','album_membership','comments','person_curation','spotlight_collections','ai_control','identity_and_audit')
-    $lines = Invoke-PiwigoComposeCapture @('exec','-T','db','sh','-eu','-c',$semanticSql) 'mariadb_semantic_fingerprint_failed'
+    $lines = Invoke-PiwigoComposeCapture @('exec','-T','db','sh','-eu','-c',$semanticSql) 'mariadb_semantic_fingerprint_failed' 300
     $mariaFingerprints = ConvertTo-StrictFingerprints $lines $mariaKeys 'mariadb_semantic_fingerprint_output_invalid'
     # The immutable index state lives in Immich Postgres. Compute a single
     # ordered, opaque digest inside that container so no face embedding, asset
@@ -375,10 +365,11 @@ trap cleanup EXIT HUP INT TERM
 # keeps the failure exit status authoritative and is removed by the trap.
 psql --no-psqlrc --tuples-only --no-align --set ON_ERROR_STOP=1 --dbname=immich --command "$fingerprint_sql" > "$tmp"
 digest=$(sha256sum "$tmp" | awk '{print $1}')
-case "$digest" in [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;; *) exit 97 ;; esac
+case "$digest" in ''|*[!a-f0-9]*) exit 97 ;; esac
+[ "${#digest}" -eq 64 ] || exit 97
 printf 'immich_ai_state=%s\n' "$digest"
 '@
-    $postgresFingerprint = ConvertTo-StrictFingerprints (Invoke-ImmichComposeCapture @('exec','-T','--user','postgres','database','sh','-eu','-c',$postgresFingerprintSql) 'immich_semantic_fingerprint_failed') @('immich_ai_state') 'immich_semantic_fingerprint_output_invalid'
+    $postgresFingerprint = ConvertTo-StrictFingerprints (Invoke-ImmichComposeCapture @('exec','-T','--user','postgres','database','sh','-eu','-c',$postgresFingerprintSql) 'immich_semantic_fingerprint_failed' 300) @('immich_ai_state') 'immich_semantic_fingerprint_output_invalid'
     $fingerprints = [ordered]@{}
     foreach ($entry in $mariaFingerprints.GetEnumerator()) { $fingerprints[[string]$entry.Key] = [string]$entry.Value }
     $fingerprints['immich_ai_state'] = [string]$postgresFingerprint['immich_ai_state']

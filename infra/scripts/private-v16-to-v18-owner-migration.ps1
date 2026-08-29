@@ -22,6 +22,7 @@ $lifecycle = Join-Path $PSScriptRoot 'private-full.ps1'
 $baselineHelper = Join-Path $PSScriptRoot 'capture-private-v16-to-v18-migration-baseline.ps1'
 $attestationHelper = Join-Path $PSScriptRoot 'attest-v4-synthetic-phase-ab.ps1'
 $directProofAttestationHelper = Join-Path $PSScriptRoot 'attest-v16-to-v18-synthetic-direct-runtime.ps1'
+$boundedNativeHelper = Join-Path $PSScriptRoot 'class-archive-bounded-native-process.ps1'
 $planRoot = Join-Path $projectRoot '.codex-work\private-real-full\migration-v16-to-v18'
 $lockPath = Join-Path $projectRoot '.codex-work\private-real-full\runtime\class-v16-to-v18-owner-migration.lock'
 $sourceVersion = 16
@@ -35,6 +36,8 @@ $immichCompose = $null
 function Stop-V16ToV18([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_V16_TO_V18_OWNER_STOP:' + $Code)
 }
+if (-not (Test-Path -LiteralPath $boundedNativeHelper -PathType Leaf)) { Stop-V16ToV18 'bounded_native_helper_missing' }
+. $boundedNativeHelper
 function Get-FileSha256([string]$Path) {
     try {
         $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -52,42 +55,30 @@ function Get-FileSha256([string]$Path) {
     if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') { Stop-V16ToV18 'file_hash_result_invalid' }
     return ([string]$hash).ToLowerInvariant()
 }
-function Invoke-Wsl([string[]]$Args, [string]$Code, [switch]$Capture) {
-    $prior = $ErrorActionPreference
+function Invoke-Wsl([string[]]$Args, [string]$Code, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     try {
-        $ErrorActionPreference = 'Continue'
-        $lines = @(& "$env:SystemRoot\System32\wsl.exe" @Args 2>&1)
-        $exit = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $prior }
-    if ($exit -ne 0) { Stop-V16ToV18 $Code }
-    if ($Capture) { return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' }) }
+        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments $Args -TimeoutSeconds $TimeoutSeconds
+        $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $boundedArgs -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
+    }
+    catch { Stop-V16ToV18 ($Code + '_start_failed') }
+    if ($result.TimedOut) { Stop-V16ToV18 ($Code + '_timeout') }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-V16ToV18 $Code }
+    if ($Capture) { return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' }) }
 }
 function Get-WslPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { Stop-V16ToV18 'env_file_missing' }
     if ($full -match '[\s\"]' -or $full.Contains("`0")) { Stop-V16ToV18 'wsl_path_invalid' }
-    $info = [Diagnostics.ProcessStartInfo]::new()
-    $info.FileName = "$env:SystemRoot\System32\wsl.exe"
-    $info.Arguments = (@('-d','Ubuntu','--exec','wslpath','-a',$full) -join ' ')
-    $info.UseShellExecute = $false
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
-    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
-    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $info
-    if (-not $process.Start()) { Stop-V16ToV18 'wsl_path_invalid' }
     try {
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        $exit = $process.ExitCode
+        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments @('-d','Ubuntu','--exec','wslpath','-a',$full) -TimeoutSeconds 15
+        $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $boundedArgs -TimeoutSeconds 30 -WorkingDirectory $projectRoot
     }
-    finally { $process.Dispose() }
-    if ($exit -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) { Stop-V16ToV18 'wsl_path_invalid' }
-    $result = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
-    if ($result.Count -ne 1 -or $result[0] -notmatch '^/mnt/[a-z]/') { Stop-V16ToV18 'wsl_path_invalid' }
-    return [string]$result[0]
+    catch { Stop-V16ToV18 'wsl_path_invalid' }
+    if ($result.TimedOut) { Stop-V16ToV18 'wsl_path_timeout' }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$result.Stderr)) { Stop-V16ToV18 'wsl_path_invalid' }
+    $lines = @(([string]$result.Stdout -split "`r?`n") | Where-Object { $_ -ne '' })
+    if ($lines.Count -ne 1 -or $lines[0] -notmatch '^/mnt/[a-z]/') { Stop-V16ToV18 'wsl_path_invalid' }
+    return [string]$lines[0]
 }
 $piwigoCompose = @('-d','Ubuntu','--cd',$projectRoot,'--','docker','compose','--env-file','infra/private-full/.env.piwigo.owner','-f','infra/docker-compose.yml','-f','infra/private-full/docker-compose.override.yml','-p','class_archive_private_full_v3_piwigo','--profile','ops')
 function Initialize-ImmichCompose {
@@ -98,8 +89,19 @@ function Initialize-ImmichCompose {
     $immichEnv = Get-WslPath $script:immichEnvWindows
     $script:immichCompose = @('-d','Ubuntu','--cd',$projectRoot,'--','env',('IMMICH_SPIKE_ENV_FILE=' + $immichEnv),'docker','compose','--env-file','infra/private-full/.env.immich.owner','-f','infra/immich-spike/docker-compose.yml','-f','infra/private-full/docker-compose.immich.override.yml','-p','class_archive_private_full_v3_immich','--profile','immich-spike','--profile','immich-ml','--profile','immich-web-compat','--profile','immich-gateway-integration')
 }
-function Invoke-Piwigo([string[]]$Args, [switch]$Capture) { return Invoke-Wsl @($script:piwigoCompose + $Args) 'piwigo_compose_failed' -Capture:$Capture }
-function Invoke-Immich([string[]]$Args) { Initialize-ImmichCompose; Invoke-Wsl @($script:immichCompose + $Args) 'compat_compose_failed' }
+function Invoke-Piwigo([string[]]$Args, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) { return Invoke-Wsl @($script:piwigoCompose + $Args) 'piwigo_compose_failed' -Capture:$Capture -TimeoutSeconds $TimeoutSeconds }
+function Invoke-Immich([string[]]$Args, [ValidateRange(1,900)][int]$TimeoutSeconds = 180) { Initialize-ImmichCompose; Invoke-Wsl @($script:immichCompose + $Args) 'compat_compose_failed' -TimeoutSeconds $TimeoutSeconds }
+function Invoke-ChildPowerShell([string]$ScriptPath, [string[]]$Arguments, [string]$Code, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { Stop-V16ToV18 ($Code + '_script_missing') }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    try {
+        $result = Invoke-ClassArchiveBoundedNative -Executable $powershell -Arguments (@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$ScriptPath) + $Arguments) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $projectRoot
+    }
+    catch { Stop-V16ToV18 ($Code + '_start_failed') }
+    if ($result.TimedOut) { Stop-V16ToV18 ($Code + '_timeout') }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-V16ToV18 $Code }
+    return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
+}
 
 function Assert-OwnerTarget {
     if ($Endpoint -ne 'owner') { Stop-V16ToV18 'owner_endpoint_required' }
@@ -146,19 +148,13 @@ function Assert-OwnerRuntime {
         $match = [regex]::Match(([string]::Join([Environment]::NewLine, $line)), 'CLASS_ARCHIVE_STATUS:(\d{3})\z')
         if ($exit -ne 0 -or -not $match.Success -or [int]$match.Groups[1].Value -notin @(200,301,302,303)) { Stop-V16ToV18 'owner_loopback_endpoint_unhealthy' }
     }
-    $prior = $ErrorActionPreference
-    try {
-        # Lifecycle diagnostics can contain host-specific runtime details. The
-        # migration contract only needs its exit status, so retain no child
-        # output and expose a stable failure code instead.
-        $ErrorActionPreference = 'Continue'
-        $ignored = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lifecycle runtime-owner 2>&1)
-        $exit = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $prior }
-    if ($exit -ne 0) { Stop-V16ToV18 'owner_lifecycle_invalid' }
+    # Lifecycle diagnostics can contain host-specific runtime details. The
+    # migration contract only needs its exit status, so retain no child output
+    # and put a hard cap around nested WSL/Docker validation.
+    [void](Invoke-ChildPowerShell $lifecycle @('runtime-owner') 'owner_lifecycle_invalid' 240)
 }
 function Get-SchemaState {
-    $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=probe','pre-migration-db-backup') -Capture
+    $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=probe','pre-migration-db-backup') -Capture -TimeoutSeconds 90
     $v16 = 'PRE_MIGRATION_DB_SNAPSHOT=REQUIRED_CURRENT_V16 schema_current=16 schema_from=16 schema_to=18 scope=DB_ONLY media=NOT_INCLUDED'
     $v18 = 'PRE_MIGRATION_DB_SNAPSHOT=NOT_REQUIRED_CURRENT_V18 schema_current=18 schema_from=18 schema_to=18 scope=NONE media=NOT_INCLUDED'
     if (@($lines | Where-Object { $_ -eq $v16 }).Count -eq 1) { return 'V16' }
@@ -169,11 +165,12 @@ function Assert-SourceV16 { if ((Get-SchemaState) -ne 'V16') { Stop-V16ToV18 'so
 function Assert-TargetV18 { if ((Get-SchemaState) -ne 'V18') { Stop-V16ToV18 'target_schema_not_exact_v18' } }
 
 function Wait-Maintenance {
-    foreach ($attempt in 1..60) {
-        try { $lines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') -Capture } catch { $lines = @() }
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    do {
+        try { $lines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') -Capture -TimeoutSeconds 10 } catch { $lines = @() }
         if ($lines.Count -eq 2 -and $lines[0] -eq 'Class Archive maintenance mode.' -and $lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') { return }
         Start-Sleep -Seconds 1
-    }
+    } while ([DateTime]::UtcNow -lt $deadline)
     Stop-V16ToV18 'maintenance_not_ready'
 }
 function Assert-PiwigoStoppedForSnapshot {
@@ -181,38 +178,100 @@ function Assert-PiwigoStoppedForSnapshot {
     # writer has exited.  The DB-only snapshot must not race a still-running
     # Piwigo process, so inspect the fixed Owner service before starting the
     # snapshot container.  This checks no media and exposes no runtime data.
-    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}','class_archive_private_full_v3_piwigo-piwigo-1') 'writer_stop_inspection_failed' -Capture
+    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}','class_archive_private_full_v3_piwigo-piwigo-1') 'writer_stop_inspection_failed' -Capture -TimeoutSeconds 15
     if ($lines.Count -ne 1 -or $lines[0] -ne 'false|exited') { Stop-V16ToV18 'writer_not_stopped' }
 }
+function Get-PiwigoWriterStateForRecovery {
+    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}','class_archive_private_full_v3_piwigo-piwigo-1') 'writer_recovery_inspection_failed' -Capture -TimeoutSeconds 15
+    if ($lines.Count -ne 1 -or $lines[0] -notin @('true|running','false|exited')) { Stop-V16ToV18 'writer_recovery_state_invalid' }
+    return [string]$lines[0]
+}
 function Enter-Maintenance {
-    Invoke-Piwigo @('exec','-T','--user','root','piwigo','php','/workspace/infra/scripts/prepare-class-archive-maintenance.php','--prepare')
+    Invoke-Piwigo @('exec','-T','--user','root','piwigo','php','/workspace/infra/scripts/prepare-class-archive-maintenance.php','--prepare') -TimeoutSeconds 60
     Wait-Maintenance
 }
 function RecreatePiwigoUnderMaintenance {
-    Invoke-Piwigo @('up','-d','--force-recreate','--no-deps','piwigo')
+    Invoke-Piwigo @('up','-d','--force-recreate','--no-deps','piwigo') -TimeoutSeconds 180
     Wait-Maintenance
-    Invoke-Piwigo @('exec','-T','--user','root','piwigo','php','/workspace/infra/scripts/prepare-class-archive-maintenance.php','--prepare')
+    Invoke-Piwigo @('exec','-T','--user','root','piwigo','php','/workspace/infra/scripts/prepare-class-archive-maintenance.php','--prepare') -TimeoutSeconds 60
 }
 function Finalize-Maintenance {
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--finalize-maintenance')
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--finalize-maintenance') -TimeoutSeconds 90
+}
+function Get-SnapshotMaintenanceState {
+    # Snapshot has no schema or archive mutation.  Its recovery path may
+    # safely reopen the Owner UI, but only after it has established whether
+    # the trusted fail-closed maintenance marker is actually active.  Keep
+    # normal response bodies out of the host process; the maintenance body is
+    # an exact fixed string and is the only accepted ACTIVE signal.
+    try {
+        $statusLines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--output','/dev/null','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') -Capture -TimeoutSeconds 10
+        if ($statusLines.Count -eq 1 -and $statusLines[0] -match '^CLASS_ARCHIVE_STATUS:(2[0-9]{2}|3[0-9]{2})$') { return 'INACTIVE' }
+        if ($statusLines.Count -ne 1 -or $statusLines[0] -ne 'CLASS_ARCHIVE_STATUS:503') { return 'UNKNOWN' }
+        $lines = Invoke-Piwigo @('exec','-T','piwigo','curl','--silent','--show-error','--output','-','--write-out',"`nCLASS_ARCHIVE_STATUS:%{http_code}",'http://127.0.0.1/') -Capture -TimeoutSeconds 10
+        if ($lines.Count -eq 2 -and $lines[0] -eq 'Class Archive maintenance mode.' -and $lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') { return 'ACTIVE' }
+        return 'UNKNOWN'
+    }
+    catch { return 'UNKNOWN' }
+}
+function Ensure-SnapshotWriterForRecovery {
+    # Treat an unreadable writer state as recovery-required rather than as an
+    # excuse to leave 8191 unavailable. This runs only in Snapshot's
+    # DB-only, pre-migration path; Migrate failures remain fail-closed.
+    $state = $null
+    try { $state = Get-PiwigoWriterStateForRecovery } catch { $state = $null }
+    if ($state -ne 'true|running') {
+        Invoke-Piwigo @('up','-d','--force-recreate','--no-deps','piwigo') -TimeoutSeconds 180
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    do {
+        try {
+            if ((Get-PiwigoWriterStateForRecovery) -eq 'true|running') { return }
+        }
+        catch { }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Stop-V16ToV18 'snapshot_recovery_writer_not_running'
+}
+function Restore-SnapshotOwnerAvailability {
+    # A Snapshot failure cannot leave the otherwise unchanged Owner runtime
+    # locked in maintenance. Re-establish a running writer, finalize only an
+    # observed maintenance marker, then demand the normal fail-closed runtime
+    # boundary. Do not use this for Migrate: a partial schema change requires
+    # explicit manual rollback instead.
+    Ensure-SnapshotWriterForRecovery
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    do {
+        $maintenance = Get-SnapshotMaintenanceState
+        if ($maintenance -in @('ACTIVE','INACTIVE')) { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($maintenance -eq 'UNKNOWN') { Stop-V16ToV18 'snapshot_recovery_maintenance_state_unknown' }
+    if ($maintenance -eq 'ACTIVE') { Finalize-Maintenance }
+    Assert-OwnerRuntime
 }
 function Create-PreMigrationSnapshot {
+    $writerStopAttempted = $false
     $writerStopped = $false
     try {
-        Invoke-Piwigo @('stop','piwigo'); $writerStopped = $true
+        $writerStopAttempted = $true
+        Invoke-Piwigo @('stop','piwigo') -TimeoutSeconds 120; $writerStopped = $true
         Assert-PiwigoStoppedForSnapshot
         # Capture the numeric/semantic source evidence after the last Piwigo
         # writer has exited and immediately before the DB-only dump. The helper
         # refuses open AI jobs, so this boundary cannot race a queued index
         # mutation and cannot be mistaken for an atomic backup of media.
         $baseline = Capture-Baseline
-        $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=snapshot','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM=true','pre-migration-db-backup') -Capture
+        $lines = Invoke-Piwigo @('run','--rm','-e','CLASS_ARCHIVE_PRE_MIGRATION_FROM_VERSION=16','-e','CLASS_ARCHIVE_PRE_MIGRATION_TO_VERSION=18','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_MODE=snapshot','-e','CLASS_ARCHIVE_PRE_MIGRATION_SNAPSHOT_CONFIRM=true','pre-migration-db-backup') -Capture -TimeoutSeconds 300
         $pattern = '^PRE_MIGRATION_DB_SNAPSHOT=PASS bundle=(pre-migration-db-v16-to-v18-[0-9]{8}T[0-9]{6}Z) schema_from=16 schema_to=18 scope=DB_ONLY media=NOT_INCLUDED$'
         $records = @($lines | Where-Object { $_ -match $pattern })
         if ($records.Count -ne 1) { Stop-V16ToV18 'pre_migration_snapshot_evidence_invalid' }
         return @{ Name = [regex]::Match($records[0], $pattern).Groups[1].Value; Baseline = $baseline }
     } finally {
-        if ($writerStopped) { RecreatePiwigoUnderMaintenance }
+        if ($writerStopAttempted) {
+            $state = Get-PiwigoWriterStateForRecovery
+            if ($state -eq 'false|exited') { RecreatePiwigoUnderMaintenance }
+        }
     }
 }
 function Get-SnapshotBinding([string]$Name) {
@@ -237,7 +296,7 @@ grep -F "\"dump_sha256\":\"$dump_sha256\"" MANIFEST.json >/dev/null
 grep -F "\"dump_bytes\":$dump_bytes" MANIFEST.json >/dev/null
 printf 'PRIVATE_V16_TO_V18_SNAPSHOT_BINDING=PASS bundle=%s manifest_sha256=%s dump_sha256=%s dump_bytes=%s scope=DB_ONLY media=NOT_INCLUDED\n' "$b" "$manifest_sha256" "$dump_sha256" "$dump_bytes"
 '@
-    $lines = Invoke-Piwigo @('run','--rm','--entrypoint','/bin/sh','pre-migration-db-backup','-eu','-c',$script,'snapshot-binding',$Name) -Capture
+    $lines = Invoke-Piwigo @('run','--rm','--entrypoint','/bin/sh','pre-migration-db-backup','-eu','-c',$script,'snapshot-binding',$Name) -Capture -TimeoutSeconds 120
     $pattern = '^PRIVATE_V16_TO_V18_SNAPSHOT_BINDING=PASS bundle=' + [regex]::Escape($Name) + ' manifest_sha256=([a-f0-9]{64}) dump_sha256=([a-f0-9]{64}) dump_bytes=([1-9][0-9]*) scope=DB_ONLY media=NOT_INCLUDED$'
     $records = @($lines | Where-Object { $_ -match $pattern })
     if ($records.Count -ne 1) { Stop-V16ToV18 'snapshot_binding_evidence_invalid' }
@@ -254,9 +313,7 @@ function Assert-Snapshot([hashtable]$Snapshot) {
 
 function Invoke-Baseline([string[]]$Args,[string]$Code) {
     if (-not (Test-Path -LiteralPath $baselineHelper -PathType Leaf)) { Stop-V16ToV18 'baseline_helper_missing' }
-    $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $baselineHelper @Args 2>&1)
-    if ($LASTEXITCODE -ne 0) { Stop-V16ToV18 $Code }
-    return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
+    return Invoke-ChildPowerShell $baselineHelper $Args $Code 600
 }
 function Assert-Baseline([hashtable]$Baseline) {
     if ($null -eq $Baseline -or [string]$Baseline.Name -notmatch '^owner-v16-to-v18-baseline-[0-9]{8}T[0-9]{6}Z\.json$' -or [string]$Baseline.Sha256 -notmatch '^[a-f0-9]{64}$') { Stop-V16ToV18 'baseline_reference_invalid' }
@@ -293,8 +350,7 @@ function Assert-IgnoredPlanRoot {
 }
 function Invoke-V4Gate([string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Name) -or -not (Test-Path -LiteralPath $attestationHelper -PathType Leaf)) { Stop-V16ToV18 'v4_acceptance_gate_missing' }
-    $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $attestationHelper -Action Verify -GateName $Name 2>&1)
-    if ($LASTEXITCODE -ne 0) { Stop-V16ToV18 'v4_acceptance_gate_invalid' }
+    $lines = Invoke-ChildPowerShell $attestationHelper @('-Action','Verify','-GateName',$Name) 'v4_acceptance_gate_invalid' 60
     $pattern = '^V4_SYNTHETIC_PHASE_AB_ATTESTATION=PASS action=Verify gate=(v4-synthetic-phase-ab-[0-9]{8}T[0-9]{6}Z\.json) sha256=([a-f0-9]{64}) scope=SYNTHETIC_8091 browser=GOOGLE_CHROME_STABLE media=MEDIAGUARD_REGRESSION$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1 -or [regex]::Match($rows[0],$pattern).Groups[1].Value -ne $Name) { Stop-V16ToV18 'v4_acceptance_gate_evidence_invalid' }
@@ -303,13 +359,7 @@ function Invoke-V4Gate([string]$Name) {
 }
 function Invoke-DirectV16ToV18ProofGate {
     if (-not (Test-Path -LiteralPath $directProofAttestationHelper -PathType Leaf)) { Stop-V16ToV18 'direct_runtime_proof_gate_missing' }
-    $prior = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $directProofAttestationHelper -Action verify 2>&1)
-        $exit = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $prior }
-    if ($exit -ne 0) { Stop-V16ToV18 'direct_runtime_proof_gate_invalid' }
+    $lines = Invoke-ChildPowerShell $directProofAttestationHelper @('-Action','verify') 'direct_runtime_proof_gate_invalid' 60
     $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt32 media=NOT_MOUNTED$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1) { Stop-V16ToV18 'direct_runtime_proof_gate_evidence_invalid' }
@@ -352,9 +402,9 @@ function Read-Plan([string]$Name,[string]$GateName) {
 }
 
 function Install-Migrations {
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php')
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php')
-    Invoke-Piwigo @('exec','-T','--user','root','piwigo','/bin/ash','/workspace/infra/scripts/restore-piwigo-user-script.sh')
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php') -TimeoutSeconds 180
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php') -TimeoutSeconds 180
+    Invoke-Piwigo @('exec','-T','--user','root','piwigo','/bin/ash','/workspace/infra/scripts/restore-piwigo-user-script.sh') -TimeoutSeconds 90
     RecreatePiwigoUnderMaintenance
     Verify-ClassIdentityRuntime
 }
@@ -362,12 +412,12 @@ function Verify-ClassIdentityRuntime {
     # Verification is deliberately separate from installation so Validate and
     # an idempotent replay can re-check the exact V18 runtime contract without
     # opening a write path or rebuilding any AI artifact.
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--verify-runtime')
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php','--verify-only')
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--verify-runtime') -TimeoutSeconds 90
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php','--verify-only') -TimeoutSeconds 90
 }
 function Refresh-ReadProjection {
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/rebuild-photo-read-projection.php','--scope=all','--json')
-    Invoke-Immich @('up','-d','--wait','--wait-timeout','60','--force-recreate','immich-web-compat')
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/rebuild-photo-read-projection.php','--scope=all','--json') -TimeoutSeconds 600
+    Invoke-Immich @('up','-d','--wait','--wait-timeout','60','--force-recreate','immich-web-compat') -TimeoutSeconds 180
 }
 
 $lock = $null
@@ -389,11 +439,21 @@ try {
     if ($Action -eq 'Snapshot') {
         if ([string]::IsNullOrWhiteSpace($V4AcceptanceGateName)) { Stop-V16ToV18 'v4_acceptance_gate_required' }
         Assert-CleanCheckout; $gate=Invoke-V4Gate $V4AcceptanceGateName; $directProof=Invoke-DirectV16ToV18ProofGate; Assert-OwnerRuntime; Assert-SourceV16
-        $lock=Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath; Enter-Maintenance; Assert-SourceV16
-        $captured=Create-PreMigrationSnapshot; $baseline=$captured.Baseline; $snapshotName=$captured.Name; $snapshot=Get-SnapshotBinding $snapshotName; Assert-SourceV16; Assert-SourceBaseline $baseline; $plan=Write-Plan $baseline $snapshot $gate $directProof
-        Finalize-Maintenance; Assert-OwnerRuntime
-        Write-Output ('PRIVATE_V16_TO_V18_OWNER_MIGRATION=PASS action=Snapshot endpoint=owner ports=8190_8191 schema_from=16 schema_to=18 plan=' + $plan.Name + ' plan_sha256=' + $plan.Sha256 + ' snapshot=' + $snapshot.Name + ' snapshot_manifest_sha256=' + $snapshot.ManifestSha256 + ' baseline=' + $baseline.Name + ' baseline_sha256=' + $baseline.Sha256 + ' scope=DB_ONLY media=UNTOUCHED ai=UNCHANGED manual_rollback_required')
-        return
+        $lock=Enter-ClassArchivePluginWorkflowLock -LockPath $lockPath
+        # Set this before publishing maintenance: even a timeout part way
+        # through Enter-Maintenance must not strand the private Owner UI.
+        $snapshotRecoveryPending=$true
+        try {
+            Enter-Maintenance; Assert-SourceV16
+            $captured=Create-PreMigrationSnapshot; $baseline=$captured.Baseline; $snapshotName=$captured.Name; $snapshot=Get-SnapshotBinding $snapshotName; Assert-SourceV16; Assert-SourceBaseline $baseline; $plan=Write-Plan $baseline $snapshot $gate $directProof
+            Finalize-Maintenance; Assert-OwnerRuntime
+            $snapshotRecoveryPending=$false
+            Write-Output ('PRIVATE_V16_TO_V18_OWNER_MIGRATION=PASS action=Snapshot endpoint=owner ports=8190_8191 schema_from=16 schema_to=18 plan=' + $plan.Name + ' plan_sha256=' + $plan.Sha256 + ' snapshot=' + $snapshot.Name + ' snapshot_manifest_sha256=' + $snapshot.ManifestSha256 + ' baseline=' + $baseline.Name + ' baseline_sha256=' + $baseline.Sha256 + ' scope=DB_ONLY media=UNTOUCHED ai=UNCHANGED manual_rollback_required')
+            return
+        }
+        finally {
+            if ($snapshotRecoveryPending) { Restore-SnapshotOwnerAvailability }
+        }
     }
     if ([string]::IsNullOrWhiteSpace($MigrationPlanName) -or [string]::IsNullOrWhiteSpace($V4AcceptanceGateName)) { Stop-V16ToV18 'migration_plan_or_v4_gate_required' }
     Assert-CleanCheckout; Assert-OwnerRuntime; $state=Get-SchemaState; $plan=Read-Plan $MigrationPlanName $V4AcceptanceGateName

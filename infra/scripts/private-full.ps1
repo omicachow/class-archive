@@ -44,6 +44,7 @@ $gatewaySubnet = '10.241.0.0/16'
 $gatewayCompatAddress = '10.241.0.10'
 $legacyRunner = Join-Path $PSScriptRoot 'private-qa.ps1'
 $wsl = "$env:SystemRoot\System32\wsl.exe"
+$boundedNativeHelper = Join-Path $PSScriptRoot 'class-archive-bounded-native-process.ps1'
 $script:stage = 'initialization'
 $script:managedStorageMode = ''
 $script:legacyStopped = $false
@@ -63,6 +64,8 @@ function Stop-PrivateFull([string]$Code) {
     # safety gate. Carry a narrow, non-sensitive code to the outer handler.
     throw [InvalidOperationException]::new('PRIVATE_FULL_STOP:' + $Code)
 }
+if (-not (Test-Path -LiteralPath $boundedNativeHelper -PathType Leaf)) { Stop-PrivateFull 'bounded_native_helper_missing' }
+. $boundedNativeHelper
 
 function Set-PrivateFullUtf8ConsoleEncoding {
     # Docker Compose configuration is emitted by WSL as UTF-8 JSON. Windows
@@ -191,17 +194,39 @@ function Get-WindowsPath([string]$Path) {
     return $full
 }
 
+function Invoke-PrivateFullWsl([string[]]$Arguments, [string]$FailureCode, [ValidateRange(1,900)][int]$TimeoutSeconds = 120, [switch]$Capture) {
+    if ($FailureCode -notmatch '^[a-z0-9_]{3,112}$') { Stop-PrivateFull 'native_failure_code_invalid' }
+    try {
+        $boundedArguments = Add-ClassArchiveWslTimeout -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+        $result = Invoke-ClassArchiveBoundedNative -Executable $wsl -Arguments $boundedArguments -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
+    }
+    catch { Stop-PrivateFull ($FailureCode + '_start_failed') }
+    if ($result.TimedOut) { Stop-PrivateFull ($FailureCode + '_timeout') }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-PrivateFull $FailureCode }
+    $lines = @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { [string]$_ } | Where-Object { $_ -ne '' })
+    if ($Capture) { return $lines }
+    return @()
+}
+
+function Invoke-PrivateFullDocker([string[]]$DockerArguments, [string]$FailureCode, [ValidateRange(1,900)][int]$TimeoutSeconds = 60, [switch]$Capture) {
+    return Invoke-PrivateFullWsl (@('-d','Ubuntu','--exec','docker') + $DockerArguments) $FailureCode $TimeoutSeconds -Capture:$Capture
+}
+
+function Invoke-PrivateFullChildPowerShell([string]$ScriptPath, [string[]]$Arguments, [string]$FailureCode, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { Stop-PrivateFull ($FailureCode + '_script_missing') }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    try {
+        $result = Invoke-ClassArchiveBoundedNative -Executable $powershell -Arguments (@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$ScriptPath) + $Arguments) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $projectRoot
+    }
+    catch { Stop-PrivateFull ($FailureCode + '_start_failed') }
+    if ($result.TimedOut) { Stop-PrivateFull ($FailureCode + '_timeout') }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-PrivateFull $FailureCode }
+    return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { [string]$_ })
+}
+
 function Invoke-PrivateFullStorage([string]$StorageAction) {
     if (-not (Test-Path -LiteralPath $storageRunner -PathType Leaf)) { Stop-PrivateFull 'storage_runner_missing' }
-    $previous = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $storageRunner $StorageAction 2>&1)
-        $exitCode = $LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previous }
-    if ($exitCode -ne 0) { Stop-PrivateFull ('storage_' + $StorageAction + '_failed') }
-    return @($lines | ForEach-Object { [string]$_ })
+    return Invoke-PrivateFullChildPowerShell $storageRunner @($StorageAction) ('storage_' + $StorageAction + '_failed') 180
 }
 
 function Assert-DockerManagedStorage([hashtable]$Values) {
@@ -277,15 +302,14 @@ function Get-PropertyValue([object]$Object, [string]$Name) {
 }
 
 function Invoke-ComposeJson([string[]]$Arguments) {
-    $output = @(& $wsl -d Ubuntu --cd $projectRoot -- @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $output.Count -lt 1) { Stop-PrivateFull 'compose_config_failed' }
+    $output = @(Invoke-PrivateFullWsl (@('-d','Ubuntu','--cd',$projectRoot,'--') + $Arguments) 'compose_config_failed' 90 -Capture)
+    if ($output.Count -lt 1) { Stop-PrivateFull 'compose_config_failed' }
     try { return ([string]::Join("`n", $output) | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-PrivateFull 'compose_config_invalid' }
 }
 
 function Invoke-Compose([string[]]$Prefix, [string[]]$Command) {
     $arguments = $Prefix + $Command
-    & $wsl -d Ubuntu --cd $projectRoot -- @arguments
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'compose_command_failed' }
+    [void](Invoke-PrivateFullWsl (@('-d','Ubuntu','--cd',$projectRoot,'--') + $arguments) 'compose_command_failed' 180)
 }
 
 function Get-EndpointSpec([string]$Mode) {
@@ -551,13 +575,11 @@ function Test-CidrOverlap([string]$Left, [string]$Right) {
 }
 
 function Assert-GatewaySubnetAvailable {
-    $names = @(& $wsl -d Ubuntu --exec docker network ls --format '{{.Name}}' 2>&1)
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'docker_network_list_failed' }
+    $names = @(Invoke-PrivateFullDocker @('network','ls','--format','{{.Name}}') 'docker_network_list_failed' 20 -Capture)
     foreach ($name in $names) {
         $networkName = [string]$name
         if ([string]::IsNullOrWhiteSpace($networkName) -or $networkName -eq $gatewayNetwork) { continue }
-        $recordText = @(& $wsl -d Ubuntu --exec docker network inspect $networkName 2>$null)
-        if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'docker_network_inspect_failed' }
+        $recordText = @(Invoke-PrivateFullDocker @('network','inspect',$networkName) 'docker_network_inspect_failed' 20 -Capture)
         try { $records = ([string]::Join("`n", $recordText) | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-PrivateFull 'docker_network_inspect_invalid' }
         foreach ($record in @($records)) {
             foreach ($config in @((Get-PropertyValue (Get-PropertyValue $record 'IPAM') 'Config'))) {
@@ -570,20 +592,17 @@ function Assert-GatewaySubnetAvailable {
 }
 
 function Assert-FullOwnerNotBound {
-    $lines = @(& $wsl -d Ubuntu --exec docker ps --filter 'label=com.classarchive.scope=private-real-full' --format '{{.Ports}}' 2>&1)
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'docker_ps_failed' }
+    $lines = @(Invoke-PrivateFullDocker @('ps','--filter','label=com.classarchive.scope=private-real-full','--format','{{.Ports}}') 'docker_ps_failed' 20 -Capture)
     if (([string]::Join("`n", $lines)) -match '127\.0\.0\.1:8190->') { Stop-PrivateFull 'owner_runtime_currently_bound' }
 }
 
 function Assert-LegacyVolumesPresent {
     $names = @('class_archive_private_qa_piwigo_data','class_archive_private_qa_piwigo_uploads','class_archive_private_qa_piwigo_galleries','class_archive_private_qa_piwigo_derivatives','class_archive_private_qa_piwigo_db','class_archive_private_qa_piwigo_scripts','class_archive_private_qa_piwigo_backups','class_archive_private_qa_immich_upload','class_archive_private_qa_immich_model_cache','class_archive_private_qa_immich_db','class_archive_private_qa_immich_gateway_secret')
-    & $wsl -d Ubuntu --exec docker volume inspect @names 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'legacy_private_qa_volumes_missing' }
+    [void](Invoke-PrivateFullDocker (@('volume','inspect') + $names) 'legacy_private_qa_volumes_missing' 30)
 }
 
 function Invoke-PrivateQa([string]$LegacyAction) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $legacyRunner $LegacyAction
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull ('legacy_private_qa_' + $LegacyAction + '_failed') }
+    [void](Invoke-PrivateFullChildPowerShell $legacyRunner @($LegacyAction) ('legacy_private_qa_' + $LegacyAction + '_failed') 180)
 }
 
 function Assert-CleanCheckout {
@@ -665,8 +684,7 @@ function Wait-ForContainerRunning([string]$Name, [string]$Code) {
 }
 
 function Get-RuntimeContainer([string]$Name) {
-    $output = @(& $wsl -d Ubuntu --exec docker inspect $Name 2>$null)
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'runtime_container_missing' }
+    $output = @(Invoke-PrivateFullDocker @('inspect',$Name) 'runtime_container_missing' 20 -Capture)
     try { $records = ([string]::Join("`n", $output) | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-PrivateFull 'runtime_container_inspect_invalid' }
     if (@($records).Count -ne 1) { Stop-PrivateFull 'runtime_container_inspect_invalid' }
     return @($records)[0]
@@ -686,8 +704,7 @@ function Wait-ForContainerHealthy([string]$Name, [string]$Code) {
 }
 
 function Assert-RuntimeDockerPorts([string]$Container, [string[]]$Expected) {
-    $ports = @(& $wsl -d Ubuntu --exec docker port $Container 2>$null)
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'runtime_port_inspect_failed' }
+    $ports = @(Invoke-PrivateFullDocker @('port',$Container) 'runtime_port_inspect_failed' 20 -Capture)
     $actual = @($ports | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim() } | Sort-Object)
     $wanted = @($Expected | Sort-Object)
     if ($actual.Count -ne $wanted.Count) { Stop-PrivateFull 'runtime_port_binding_invalid' }
@@ -697,8 +714,7 @@ function Assert-RuntimeDockerPorts([string]$Container, [string[]]$Expected) {
 }
 
 function Assert-RuntimeDockerVolume([string]$Name, [switch]$Control) {
-    $output = @(& $wsl -d Ubuntu --exec docker volume inspect $Name 2>$null)
-    if ($LASTEXITCODE -ne 0) { Stop-PrivateFull 'runtime_volume_missing' }
+    $output = @(Invoke-PrivateFullDocker @('volume','inspect',$Name) 'runtime_volume_missing' 20 -Capture)
     try { $records = ([string]::Join("`n", $output) | ConvertFrom-Json -ErrorAction Stop) } catch { Stop-PrivateFull 'runtime_volume_inspect_invalid' }
     if (@($records).Count -ne 1) { Stop-PrivateFull 'runtime_volume_inspect_invalid' }
     $record = @($records)[0]
@@ -791,8 +807,8 @@ function Assert-OwnerPiwigoStoppedForBackup {
     # owner writer container has reached the non-running state, while MariaDB
     # and the compatibility BFF remain available.
     $name = $piwigoProject + '-piwigo-1'
-    $state = @(& $wsl -d Ubuntu --exec docker inspect --format '{{.State.Running}}|{{.State.Status}}' $name 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $state.Count -ne 1 -or ([string]$state[0]).Trim() -ne 'false|exited') {
+    $state = @(Invoke-PrivateFullDocker @('inspect','--format','{{.State.Running}}|{{.State.Status}}',$name) 'owner_backup_piwigo_not_stopped' 20 -Capture)
+    if ($state.Count -ne 1 -or ([string]$state[0]).Trim() -ne 'false|exited') {
         Stop-PrivateFull 'owner_backup_piwigo_not_stopped'
     }
 }

@@ -20,16 +20,24 @@ $ErrorActionPreference = 'Stop'
 
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $piwigoImage = 'piwigo/piwigo:16.4.0a@sha256:0ec6f159a3f972338b64e299d56ac37c442dd26cbeec39320d76ea826b5e0b84'
+$boundedNativeHelper = Join-Path $PSScriptRoot 'class-archive-bounded-native-process.ps1'
 $script:stage = 'initialization'
 
 function Stop-Storage([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_FULL_STORAGE_STOP:' + $Code)
 }
+if (-not (Test-Path -LiteralPath $boundedNativeHelper -PathType Leaf)) { Stop-Storage 'bounded_native_helper_missing' }
+. $boundedNativeHelper
 
-function Invoke-Docker([string[]]$Arguments) {
-    $output = @(& $wsl -d Ubuntu --exec docker @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) { Stop-Storage 'docker_command_failed' }
-    return @($output | ForEach-Object { [string]$_ })
+function Invoke-Docker([string[]]$Arguments, [ValidateRange(1,300)][int]$TimeoutSeconds = 60) {
+    try {
+        $wslArguments = Add-ClassArchiveWslTimeout -Arguments (@('-d','Ubuntu','--exec','docker') + $Arguments) -TimeoutSeconds $TimeoutSeconds
+        $result = Invoke-ClassArchiveBoundedNative -Executable $wsl -Arguments $wslArguments -TimeoutSeconds ($TimeoutSeconds + 15)
+    }
+    catch { Stop-Storage 'docker_command_start_failed' }
+    if ($result.TimedOut) { Stop-Storage 'docker_command_timeout' }
+    if ($null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-Storage 'docker_command_failed' }
+    return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { [string]$_ })
 }
 
 function Assert-DockerEngine {
@@ -61,7 +69,7 @@ function Invoke-PosixVolumeProbe {
         $previous = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $null = & $wsl -d Ubuntu --exec docker volume rm $volume 2>$null
+            $cleanup = Invoke-Docker @('volume','rm',$volume) 30
         }
         finally { $ErrorActionPreference = $previous }
     }
