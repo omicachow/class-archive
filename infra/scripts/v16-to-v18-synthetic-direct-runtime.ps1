@@ -44,6 +44,7 @@ $proofPath = Join-Path $PSScriptRoot 'v16-to-v18-synthetic-direct-proof.php'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
 $configRoot = Join-Path $sandboxRoot 'config'
 $reportRoot = Join-Path $sandboxRoot 'reports'
+$captureRoot = Join-Path $sandboxRoot 'base-runner-capture'
 $envPath = Join-Path $configRoot '.env.piwigo'
 $reportPath = Join-Path $reportRoot 'v16-to-v18-direct-proof.json'
 $composePath = 'infra/docker-compose.yml'
@@ -280,6 +281,25 @@ function Assert-DockerDesktopEnginePipe {
     }
 }
 
+function New-BaseRunnerCapturePaths([string]$BaseAction) {
+    if ($BaseAction -notin @('initialize','restore')) { Stop-V16ToV18DirectRuntime 'base_capture_action_invalid' }
+    if (-not (Test-Path -LiteralPath $captureRoot)) {
+        New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
+    }
+    Assert-IgnoredUntracked $captureRoot $true | Out-Null
+    # Nested PowerShell pipe capture can stall while Docker Desktop emits
+    # cold-start compose status. Capture child output only in this ignored,
+    # owner-only root instead. The files can contain synthetic diagnostics, so
+    # they are never echoed and never become tracked evidence.
+    & icacls.exe $captureRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Stop-V16ToV18DirectRuntime 'base_capture_acl_failed' }
+    $name = $BaseAction + '-' + [guid]::NewGuid().ToString('N')
+    return [ordered]@{
+        Stdout = Join-Path $captureRoot ($name + '.stdout.log')
+        Stderr = Join-Path $captureRoot ($name + '.stderr.log')
+    }
+}
+
 function Invoke-BaseRunner([string]$BaseAction, [switch]$RestoreConfirmation) {
     if ($BaseAction -notin @('initialize','restore')) { Stop-V16ToV18DirectRuntime 'base_action_forbidden' }
     Assert-DockerDesktopEnginePipe
@@ -290,7 +310,27 @@ function Invoke-BaseRunner([string]$BaseAction, [switch]$RestoreConfirmation) {
         [void]$arguments.Add([string]$part)
     }
     if ($RestoreConfirmation) { [void]$arguments.Add('-ConfirmSyntheticRestore') }
-    return @(Invoke-NativeCapture $windowsPowerShell $arguments.ToArray() ('base_runner_' + $BaseAction + '_failed') 'V18_SYNTHETIC_MIGRATION_STOP:')
+    $capture = New-BaseRunnerCapturePaths $BaseAction
+    $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments.ToArray() -RedirectStandardOutput $capture.Stdout -RedirectStandardError $capture.Stderr -PassThru
+    if (-not $process.WaitForExit(240000)) {
+        try { Stop-Process -Id $process.Id -Force } catch { }
+        $process.WaitForExit()
+        Stop-V16ToV18DirectRuntime ('base_runner_' + $BaseAction + '_timeout')
+    }
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    foreach ($path in @([string]$capture.Stdout,[string]$capture.Stderr)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Stop-V16ToV18DirectRuntime 'base_capture_missing' }
+        if ((Get-Item -LiteralPath $path -Force).Length -gt 1048576) { Stop-V16ToV18DirectRuntime 'base_capture_too_large' }
+    }
+    $stdout = [IO.File]::ReadAllText([string]$capture.Stdout,[Text.UTF8Encoding]::new($false))
+    $stderr = [IO.File]::ReadAllText([string]$capture.Stderr,[Text.UTF8Encoding]::new($false))
+    if ($exitCode -ne 0) {
+        $match = [regex]::Match($stderr, ([regex]::Escape('V18_SYNTHETIC_MIGRATION_STOP:') + '([a-z0-9_]{1,96})'))
+        if ($match.Success) { Stop-V16ToV18DirectRuntime ('base_runner_' + $BaseAction + '_failed_' + $match.Groups[1].Value) }
+        Stop-V16ToV18DirectRuntime ('base_runner_' + $BaseAction + '_failed')
+    }
+    return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
 }
 
 function Get-SandboxValues {

@@ -59,10 +59,11 @@ foreach ($forbiddenTarget in @('8091','8191','8291','private-real','runtime-owne
 Assert-True ($enginePipeFunction.Contains('dockerDesktopLinuxEngine') -and $enginePipeFunction.Contains('docker_engine') -and $enginePipeFunction.Contains('Test-Path -LiteralPath $_') -and $enginePipeFunction.Contains("Stop-V16ToV18DirectRuntime 'docker_engine_pipe_unavailable'")) 'direct_runtime_engine_pipe_fail_closed_contract_missing'
 Assert-True (-not $enginePipeFunction.Contains('Invoke-NativeCapture') -and -not $enginePipeFunction.Contains('Get-WslPath') -and -not $enginePipeFunction.Contains('docker compose')) 'direct_runtime_engine_pipe_guard_must_not_probe_runtime'
 $basePipeIndex = $baseRunnerFunction.IndexOf('Assert-DockerDesktopEnginePipe', [StringComparison]::Ordinal)
-$baseNativeIndex = $baseRunnerFunction.IndexOf('Invoke-NativeCapture', [StringComparison]::Ordinal)
+$baseCaptureIndex = $baseRunnerFunction.IndexOf('New-BaseRunnerCapturePaths', [StringComparison]::Ordinal)
+$baseStartIndex = $baseRunnerFunction.IndexOf('Start-Process', [StringComparison]::Ordinal)
 $composePipeIndex = $directComposeFunction.IndexOf('Assert-DockerDesktopEnginePipe', [StringComparison]::Ordinal)
 $composeWslPathIndex = $directComposeFunction.IndexOf('Get-WslPath', [StringComparison]::Ordinal)
-Assert-True ($basePipeIndex -ge 0 -and $baseNativeIndex -gt $basePipeIndex) 'direct_runtime_engine_pipe_must_precede_base_runner'
+Assert-True ($basePipeIndex -ge 0 -and $baseCaptureIndex -gt $basePipeIndex -and $baseStartIndex -gt $baseCaptureIndex) 'direct_runtime_engine_pipe_must_precede_base_runner'
 Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeIndex) 'direct_runtime_engine_pipe_must_precede_direct_compose'
 $wslPathFunction = Slice-Function $runner 'function Get-WslPath' 'function Assert-DockerDesktopEnginePipe' 'direct_runtime_utf8_wsl_path_function_boundary_missing'
 Assert-True ($wslPathFunction.Contains('StandardOutputEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('StandardErrorEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('wsl_path_argument_invalid') -and -not $wslPathFunction.Contains('Invoke-NativeCapture $wsl')) 'direct_runtime_utf8_wsl_path_contract_missing'
@@ -71,6 +72,7 @@ Assert-True ($wslPathFunction.Contains('StandardOutputEncoding = [Text.UTF8Encod
 # lab runner.  The direct orchestrator cannot invoke historical bootstrap or
 # its V17->V18 migration action.
 Assert-True ($runner.Contains('function Invoke-BaseRunner') -and $runner.Contains("@('initialize','restore')") -and $runner.Contains("Invoke-BaseRunner 'initialize'") -and $runner.Contains("Invoke-BaseRunner 'restore' -RestoreConfirmation")) 'direct_runtime_base_restore_reuse_missing'
+Assert-True ($runner.Contains('function New-BaseRunnerCapturePaths') -and $runner.Contains('base-runner-capture') -and $runner.Contains('Start-Process -FilePath $windowsPowerShell') -and $runner.Contains('-RedirectStandardOutput $capture.Stdout') -and $runner.Contains('-RedirectStandardError $capture.Stderr') -and $runner.Contains('base_capture_too_large') -and $runner.Contains("'base_runner_' + `$BaseAction + '_timeout'")) 'direct_runtime_owner_only_base_capture_missing'
 Assert-True ($runner.Contains('function Invoke-RestoreAndProve') -and $runner.Contains('synthetic_restore_and_migration_confirmation_required') -and $runner.Contains('Invoke-Restore') -and $runner.Contains('Invoke-Prove') -and $runner.Contains("'restore-and-prove' { Invoke-RestoreAndProve }")) 'direct_runtime_bounded_restore_and_prove_missing'
 Assert-True ($runner.Contains('create-pre-migration-db-snapshot.sh') -and $runner.Contains('restore-v4-synthetic-pre-migration-db.sh')) 'direct_runtime_snapshot_producer_in_source_closure_missing'
 Assert-True ($restore.Contains("expected_current_snapshot_script_sha='1897ea83db59c9126125ce63afe538e7a73e58ee1386db5acf518b6ddafaf7c5'") -and $restore.Contains('9c5035e26aec9b3f616272f48d4a0c5a3ce81b0a505ac7bc71ad5a47176db7c0') -and $restore.Contains('snapshot_restore_mechanism_unreviewed') -and $restore.Contains('snapshot_not_created_by_reviewed_mechanism')) 'direct_runtime_restore_producer_allowlist_missing'
