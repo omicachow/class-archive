@@ -241,19 +241,35 @@ function Get-SnapshotMaintenanceState {
     # normal response bodies out of the host process; the maintenance body is
     # an exact fixed string and is the only accepted ACTIVE signal.
     try {
-        # Resolve the live service container from this compose project for every
-        # probe. Docker Desktop can replace a stopped service during recovery;
-        # a fixed container name can then inspect an exited predecessor instead
-        # of the newly-started writer. The opaque container id never leaves this
-        # function or the Owner-only process.
-        $containerIds = Invoke-Piwigo @('ps','-q','piwigo') -Capture -TimeoutSeconds 15
-        if ($containerIds.Count -ne 1 -or $containerIds[0] -notmatch '^[a-f0-9]{12,64}$') { return 'UNKNOWN' }
-        $containerId = [string]$containerIds[0]
-        $statusLines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','exec',$containerId,'curl','--silent','--show-error','--output','/dev/null','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}','http://127.0.0.1/') 'snapshot_maintenance_probe_failed' -Capture -TimeoutSeconds 10
-        if ($statusLines.Count -eq 1 -and $statusLines[0] -match '^CLASS_ARCHIVE_STATUS:(2[0-9]{2}|3[0-9]{2})$') { return 'INACTIVE' }
-        if ($statusLines.Count -ne 1 -or $statusLines[0] -ne 'CLASS_ARCHIVE_STATUS:503') { return 'UNKNOWN' }
-        $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','exec',$containerId,'curl','--silent','--show-error','--output','-','--write-out',"`nCLASS_ARCHIVE_STATUS:%{http_code}",'http://127.0.0.1/') 'snapshot_maintenance_probe_failed' -Capture -TimeoutSeconds 10
-        if ($lines.Count -eq 2 -and $lines[0] -eq 'Class Archive maintenance mode.' -and $lines[1] -eq 'CLASS_ARCHIVE_STATUS:503') { return 'ACTIVE' }
+        # Probe the fixed Owner loopback boundary rather than composing
+        # `ps -q` followed by `docker exec`. During a Docker Desktop service
+        # replacement those two control-plane calls can observe different
+        # containers even though the externally relevant 8190 boundary already
+        # serves the exact fail-closed maintenance response. `--noproxy '*'`
+        # prevents any inherited host proxy setting from participating.
+        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (-not (Test-Path -LiteralPath $curl -PathType Leaf)) { return 'UNKNOWN' }
+        $uri = 'http://127.0.0.1:8190/'
+        $status = Invoke-ClassArchiveBoundedNative -Executable $curl -Arguments @(
+            '--noproxy','*','--silent','--show-error','--max-time','5',
+            '--output','NUL','--write-out','CLASS_ARCHIVE_STATUS:%{http_code}',$uri
+        ) -TimeoutSeconds 15 -WorkingDirectory $projectRoot
+        if ($status.TimedOut -or $status.ExitCode -ne 0) { return 'UNKNOWN' }
+        $statusText = ([string]$status.Stdout).Trim()
+        if ($statusText -match '^CLASS_ARCHIVE_STATUS:(2[0-9]{2}|3[0-9]{2})$') { return 'INACTIVE' }
+        if ($statusText -ne 'CLASS_ARCHIVE_STATUS:503') { return 'UNKNOWN' }
+
+        # Fetch a body only for the maintenance status. The accepted body is a
+        # fixed, non-sensitive constant; any other 503 remains unknown and
+        # therefore fails closed.
+        $body = Invoke-ClassArchiveBoundedNative -Executable $curl -Arguments @(
+            '--noproxy','*','--silent','--show-error','--max-time','5',
+            '--output','-','--write-out',"`nCLASS_ARCHIVE_STATUS:%{http_code}",$uri
+        ) -TimeoutSeconds 15 -WorkingDirectory $projectRoot
+        if ($body.TimedOut -or $body.ExitCode -ne 0) { return 'UNKNOWN' }
+        $match = [regex]::Match([string]$body.Stdout, '(?s)\A(?<body>.*)\r?\nCLASS_ARCHIVE_STATUS:(?<status>\d{3})\z')
+        if ($match.Success -and $match.Groups['status'].Value -eq '503' -and
+            $match.Groups['body'].Value.TrimEnd("`r", "`n") -eq 'Class Archive maintenance mode.') { return 'ACTIVE' }
         return 'UNKNOWN'
     }
     catch { return 'UNKNOWN' }
