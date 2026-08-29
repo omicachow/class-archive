@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -133,6 +133,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10190'; CompatPort = '10191'
             AppSubnet = '10.255.12.0/24'; GatewaySubnet = '10.228.0.0/16'
             BffGatewayIp = '10.228.0.10'
+        }
+    }
+    'attempt18' {
+        # attempt17 is preserved after the host's implicit Get-FileHash module
+        # autoload failed before any lab state could be created. attempt18 is
+        # the next empty direct V16 -> V18 laboratory after that dependency is
+        # made explicit. It shares no project, volumes, bridges, or ports with
+        # any prior attempt.
+        @{
+            HttpPort = '10290'; CompatPort = '10291'
+            AppSubnet = '10.255.13.0/24'; GatewaySubnet = '10.226.0.0/16'
+            BffGatewayIp = '10.226.0.10'
         }
     }
 }
@@ -258,9 +270,23 @@ function Get-InputSnapshot {
     if ($manifest.format -ne 1 -or $manifest.scope -ne 'DB_ONLY_PRE_MIGRATION_ROLLBACK' -or $manifest.schema_current -ne 16 -or $manifest.schema_from -ne 16 -or $manifest.schema_to -ne 17 -or $manifest.media -ne 'NOT_INCLUDED' -or $manifest.dump_file -ne 'database.sql.gz' -or [string]$manifest.dump_sha256 -notmatch '^[a-f0-9]{64}$') {
         Stop-V18SyntheticMigration 'input_bundle_manifest_invalid'
     }
-    $dumpHash = (Get-FileHash -LiteralPath (Join-Path $path 'database.sql.gz') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $dumpHash = Get-FileSha256 (Join-Path $path 'database.sql.gz')
     if (-not [string]::Equals($dumpHash, [string]$manifest.dump_sha256, [StringComparison]::Ordinal)) { Stop-V18SyntheticMigration 'input_bundle_hash_invalid' }
     return @{ Path = $path; Name = $bundle[0].Name }
+}
+
+function Get-FileSha256([string]$Path) {
+    # The direct lab starts a fresh Windows PowerShell process. Do not rely on
+    # implicit module autoloading for its integrity gate: explicitly load the
+    # built-in utility module before resolving the hash command. A missing or
+    # blocked module remains fail-closed through the existing bounded catch.
+    $command = Get-Command -Name Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
+        $command = Get-Command -Name Get-FileHash -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $command) { Stop-V18SyntheticMigration 'file_hash_command_unavailable' }
+    return ((Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant())
 }
 
 function Get-VolumeName([string]$Logical) {
@@ -315,7 +341,7 @@ function Initialize-V18Sandbox([hashtable]$Snapshot) {
         Assert-IgnoredUntracked $directory $true | Out-Null
     }
     Export-PinnedGitBlob -Revision $v17Commit -RepositoryPath 'plugins/ClassIdentity/src/Schema.php' -Destination $v17SchemaPath
-    $digest = (Get-FileHash -LiteralPath $v17SchemaPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $digest = Get-FileSha256 $v17SchemaPath
     if (-not [string]::Equals($digest, $v17SchemaSha256, [StringComparison]::Ordinal)) { Stop-V18SyntheticMigration 'historical_schema_hash_invalid' }
     $values = Get-ExpectedValues -Snapshot $Snapshot
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -337,7 +363,7 @@ function Assert-Initialized([hashtable]$Snapshot) {
     Assert-IgnoredUntracked $reportRoot $true | Out-Null
     Assert-IgnoredUntracked $envPath $false | Out-Null
     Assert-IgnoredUntracked $v17SchemaPath $false | Out-Null
-    $digest = (Get-FileHash -LiteralPath $v17SchemaPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $digest = Get-FileSha256 $v17SchemaPath
     if (-not [string]::Equals($digest, $v17SchemaSha256, [StringComparison]::Ordinal)) { Stop-V18SyntheticMigration 'historical_schema_hash_invalid' }
     # Windows PowerShell 5 defaults Get-Content to the local ANSI code page when
     # a UTF-8 file has no BOM. The project path includes Chinese characters, so
