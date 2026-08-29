@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -244,6 +244,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11190'; CompatPort = '11191'
             AppSubnet = '10.255.22.0/24'; GatewaySubnet = '10.208.0.0/16'
             BffGatewayIp = '10.208.0.10'
+        }
+    }
+    'attempt28' {
+        # attempt27 remains preserved after an interrupted custom service wait
+        # during a cold engine start. attempt28 delegates bounded health waits
+        # to Docker Compose itself, retaining the direct runner's owner-only
+        # child capture. It shares no project, volumes, bridges, or ports with
+        # any prior laboratory.
+        @{
+            HttpPort = '11290'; CompatPort = '11291'
+            AppSubnet = '10.255.23.0/24'; GatewaySubnet = '10.206.0.0/16'
+            BffGatewayIp = '10.206.0.10'
         }
     }
 }
@@ -682,15 +694,16 @@ function Invoke-Restore([hashtable]$Snapshot) {
     if (-not $ConfirmSyntheticRestore) { Stop-V18SyntheticMigration 'synthetic_restore_confirmation_required' }
     Assert-FreshSyntheticAttempt
     $script:stage = 'restore_bootstrap'
-    Invoke-V18Compose @('up','-d','db','piwigo') | Out-Null
-    Wait-V18Service 'db'
+    # Delegate cold-start readiness to Docker Compose rather than repeatedly
+    # parsing host-side status output. The native 180-second bound remains
+    # explicit and a timeout fails the synthetic laboratory closed.
+    Invoke-V18Compose @('up','-d','--wait','--wait-timeout','180','db','piwigo') | Out-Null
     if ((Get-V18TableCount) -ne 0) { Stop-V18SyntheticMigration 'restore_target_not_empty' }
     Invoke-V18Compose @('stop','piwigo') | Out-Null
     $script:stage = 'restore_import'
     $lines = @(Invoke-V18Compose @('--profile','v18-synthetic-migration','run','--rm','v18-synthetic-db-restore-v16') -Capture)
     if (@($lines | Where-Object { $_ -eq 'V4_SYNTHETIC_DB_RESTORE=PASS schema=16 scope=DB_ONLY media=NOT_MOUNTED target=ISOLATED maintenance=FAIL_CLOSED' }).Count -ne 1) { Stop-V18SyntheticMigration 'restore_evidence_invalid' }
-    Invoke-V18Compose @('up','-d','piwigo') | Out-Null
-    Wait-V18Service 'piwigo' 'running'
+    Invoke-V18Compose @('up','-d','--wait','--wait-timeout','180','piwigo') | Out-Null
     if ((Get-V18SchemaVersion) -ne 16) { Stop-V18SyntheticMigration 'restore_not_v16' }
     Write-V18SyntheticMigration 'PASS' 'restore' ('schema=16 source=' + $Snapshot.Name + ' target=' + $Attempt + ' media=NOT_MOUNTED')
 }

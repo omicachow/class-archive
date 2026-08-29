@@ -41,7 +41,7 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
@@ -94,6 +94,10 @@ $assert(str_contains($source['runner'], "'attempt27'") && str_contains($source['
     && str_contains($source['runner'], "'10.255.22.0/24'") && str_contains($source['runner'], "'10.208.0.0/16'")
     && str_contains($source['runner'], "'10.208.0.10'") && str_contains($source['runner'], 'attempt27 validates')
     && str_contains($source['runner'], 'exit state'), 'attempt27_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], "'attempt28'") && str_contains($source['runner'], "'11290'") && str_contains($source['runner'], "'11291'")
+    && str_contains($source['runner'], "'10.255.23.0/24'") && str_contains($source['runner'], "'10.206.0.0/16'")
+    && str_contains($source['runner'], "'10.206.0.10'") && str_contains($source['runner'], 'attempt28 delegates')
+    && str_contains($source['runner'], 'Docker Compose itself'), 'attempt28_direct_v16_to_v18_identity_not_fixed');
 $assert(str_contains($source['runner'], 'function Get-FileSha256') && str_contains($source['runner'], '[Security.Cryptography.SHA256]::Create()')
     && str_contains($source['runner'], '[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)')
     && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_runtime_failed'")
@@ -103,6 +107,8 @@ $assert(str_contains($source['runner'], 'StandardOutputEncoding = [Text.UTF8Enco
     && str_contains($source['runner'], 'StandardErrorEncoding = [Text.UTF8Encoding]::new($false)')
     && str_contains($source['runner'], 'wsl_path_argument_invalid'), 'utf8_wsl_path_conversion_missing');
 $assert(str_contains($source['runner'], "function Wait-V18Service([string]\$Service, [string]\$Expected = 'healthy', [int]\$Seconds = 180)"), 'cold_engine_readiness_window_not_bounded_or_extended');
+$assert(str_contains($source['runner'], "@('up','-d','--wait','--wait-timeout','180','db','piwigo')")
+    && str_contains($source['runner'], "@('up','-d','--wait','--wait-timeout','180','piwigo')"), 'restore_compose_native_wait_not_bounded');
 $assert(str_contains($source['runner'], 'function Get-V18ServiceRecord') && str_contains($source['runner'], "[string]\$candidate.Service -eq \$Service")
     && str_contains($source['runner'], 'if ($records.Count -eq 1) { return $records[0] }'), 'compose_health_record_parser_not_fail_closed');
 $assert(str_contains($source['runner'], '52ff3a7ba91155efc7bed1572e2b1740973e484c')
