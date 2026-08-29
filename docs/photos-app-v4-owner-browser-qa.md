@@ -1,74 +1,81 @@
-# Photos App V4 owner-private existing-fixture Chrome gate
+# Photos App V4 owner-private FQA lease gate
 
-`tests/phase3/photos-app-v4-owner-browser-qa.ps1` is a local-only, read-only
-product acceptance harness for the full-v3 owner instance on ports 8190/8191.
-It uses only the existing bound fixture principals:
+`tests/phase3/photos-app-v4-owner-browser-qa.ps1` is a local-only acceptance
+harness for ports 8190/8191. It leases one historical QA aggregate that was
+already frozen after its original test run:
 
-- `fixture-classmate`
-- `fixture-family`
-- `fixture-teacher`
-- `fixture-anonymous`
+- roster marker: `FQA-C-99CA3B3B6AF1`;
+- roles covered: Classmate, Family, Anonymous;
+- Teacher is deliberately not covered because the owner runtime has no
+  existing FQA/V4 Teacher fixture. The harness never substitutes a Classmate
+  for a Teacher and never uses a real Teacher identity.
 
-The harness does not create identities, seats, claims, invitations, accounts,
-or tokens. It does not upload media, write comments, alter albums, modify AI
-state, start/stop containers, or touch the private source folders.
+## Bounded lease
 
-## Credential lifecycle
+The broker refuses to open unless every expected invariant still holds:
 
-Execution requires an explicit acknowledgement because even a password
-rotation changes owner runtime state:
+- the exact marker identity is `CLASSMATE/FROZEN`;
+- exactly one active Classmate, Family, and Anonymous current account is bound;
+- every seat, account, principal, Core status, and managed group is valid;
+- no issued token, submission, active pin, unfinished provisioning operation,
+  live fixture comment, or active auth key exists;
+- ClassIdentity schema attestation and fail-closed enforcement are active;
+- exactly one active SYSTEM_ADMIN can author the security audit.
+
+The PowerShell wrapper holds an exclusive ignored host lock. The PHP broker
+holds a MariaDB advisory lock for the whole run and has a 15-minute maximum
+TTL. Passwords are generated inside the broker and cross the process boundary
+only in a one-link 0600 file copied to an ignored, owner-only path. Passwords,
+usernames, and paths never appear in stdout.
+
+Opening order is fail-closed:
+
+1. rotate and revoke credentials while the Identity is still frozen;
+2. append `PRINCIPAL_SECURITY_CHANGE` audit events;
+3. unfreeze the Identity as the final opening action.
+
+EOF, `STOP`, timeout, a handled signal, or any exception enters the same
+cleanup. Cleanup freezes first, increments principal authorization epochs and
+revokes sessions, then rotates every account to a second unknown secret while
+still frozen. Audit rows are retained. No identity, seat, account, token,
+content, comment, media, album, or AI record is created or deleted.
+
+The post-run state is security-equivalent rather than byte-identical:
+`lock_version`, `auth_epoch`, password hashes, and append-only audit history
+advance intentionally.
+
+## Browser boundary
+
+Chrome Stable launches with fresh ignored profiles and localhost-only network
+guards. The browser performs only read journeys plus one Family comment request
+that must be denied with 403 and leave the payload unchanged. Its successful
+content-write count must remain zero.
+
+Classmate and Anonymous must see the same FULL projection. Family must see the
+exact HERITAGE_ONLY projection, including safe counts, covers, People, search,
+albums, Spotlight, Viewer, and known-LIVING GET/HEAD/Range denial. Anonymous
+responses and markup are checked against all three leased usernames as well as
+identity/account/seat/principal fields.
+
+## Current runtime gate
+
+The executable lease is deliberately **blocked** in this revision. The broker
+advisory lock serializes brokers, but the ordinary administrator mutation path
+does not yet participate in that lock. A concurrent administrator could race
+the final freeze verifier. The wrapper therefore returns
+`lease_runtime_disabled_pending_mutation_exclusion` even when its confirmation
+switch is supplied. This is a fail-closed protocol implementation, not 8191
+browser evidence. The PHP broker carries the same hard-coded false gate, so a
+direct container invocation cannot bypass the wrapper block.
+
+After a lease-aware administrator mutation exclusion/CAS is implemented and
+reviewed, the intended local command is:
 
 ```powershell
 pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File .\tests\phase3\photos-app-v4-owner-browser-qa.ps1 `
-  -ConfirmExistingFixtureCredentialRotation
+  -ConfirmFqaCredentialLease
 ```
 
-The wrapper generates a per-run secret and passes it through an ignored,
-owner-only file to the existing `provision-access-users.php` helper. That
-helper refuses missing or incorrectly bound principals, stores only Core
-password hashes, and revokes existing credentials. In `finally`, the wrapper
-rotates all four fixture accounts again to a second unknown random secret,
-revokes the Chrome sessions, removes the temporary credential/profile files,
-and never prints either secret.
-
-## Browser and privacy boundary
-
-The runner launches installed Google Chrome Stable with Playwright
-`channel: 'chrome'`, a fresh ignored profile, disabled extensions/service
-workers/background networking, and both process-level and request-level
-localhost guards. Real-library screenshots remain only under the ignored
-private screenshot root. Stdout is restricted to aggregate stages and a final
-record containing assertion/screenshot/photo counts and `writes=0`; it never
-contains account credentials, photo identifiers, URLs, page text, filenames,
-or screenshot paths.
-
-## Read-only coverage
-
-The browser gate compares the role-scoped timeline, Home, pins, albums,
-People, Spotlight, search suggestions/results, album/person details, and
-Viewer media paths:
-
-- Classmate, Teacher, and Anonymous must receive the same `FULL` catalog.
-- Family must receive the exact `HERITAGE_ONLY` timeline.
-- Family responses, counts, covers, People details, search results, viewer,
-  known-LIVING GET/HEAD/Range probes, and Spotlight are checked for LIVING
-  leakage.
-- Anonymous API/HTML is checked for account, identity, seat, principal, and
-  fixture-username disclosure.
-- Family has no comment composer. One deliberately denied comment request is
-  allowed through the network guard, must return 403, and the comments payload
-  must remain byte-for-byte equivalent before/after. No successful business
-  mutation is permitted.
-
-The gate intentionally performs no upload lifecycle. The synthetic instance
-owns upload/browser mutation evidence; in-place private uploads remain blocked
-until exact cleanup can restore every immutable projection and audit reference
-without risking owner data.
-
-Run the non-mutating contract first:
-
-```powershell
-pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File .\tests\phase3\photos-app-v4-owner-browser-qa-protocol.ps1
-```
+This gate does not test Teacher or owner-private uploads. Those remain separate
+gates and must not be reported as passing from this run.

@@ -1,23 +1,27 @@
 [CmdletBinding()]
 param(
-    # The only owner-state mutation performed by this harness is a bounded
-    # password rotation of the four pre-existing, explicitly bound fixture
-    # principals. Requiring this switch prevents an accidental invocation from
-    # changing even those credentials.
-    [switch]$ConfirmExistingFixtureCredentialRotation
+    # This is an audited, time-bounded lease of one already-frozen FQA
+    # aggregate. It never creates or deletes a business record.
+    [switch]$ConfirmFqaCredentialLease
 )
-
-# Owner-private Photos App V4 Chrome Stable role acceptance wrapper.
-#
-# This runner never creates an Identity, Seat, Account, Claim, Invitation, or
-# token. It rotates the already-bound fixture accounts through the established
-# provision-access-users.php helper, runs read-only browser journeys, then
-# revokes every fixture session by rotating the same four accounts to a fresh
-# unknown secret in finally. The temporary credentials exist only in ignored,
-# owner-only files and are never written to argv, stdout, Git, or documentation.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $ConfirmFqaCredentialLease) {
+    Write-Output 'V4_OWNER_FQA_CHROME_QA=BLOCKED code=explicit_fqa_credential_lease_confirmation_required'
+    exit 3
+}
+
+# The broker protocol is complete, but the ordinary AdminService mutation path
+# does not yet participate in its advisory lock. Until that exclusion becomes
+# a production invariant, even an explicitly confirmed run remains disabled:
+# an out-of-band unfreeze could race the final verifier and leave access open.
+$runtimeLeaseMutationExclusionProven = $false
+if (-not $runtimeLeaseMutationExclusionProven) {
+    Write-Output 'V4_OWNER_FQA_CHROME_QA=BLOCKED code=lease_runtime_disabled_pending_mutation_exclusion'
+    exit 4
+}
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $separator = [IO.Path]::DirectorySeparatorChar
@@ -26,14 +30,66 @@ $photoOrigin = 'http://127.0.0.1:8191/'
 $envRelative = 'infra/private-full/.env.piwigo.owner'
 $composeProject = 'class_archive_private_full_v3_piwigo'
 $composeFiles = @('infra/docker-compose.yml', 'infra/private-full/docker-compose.override.yml')
-$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\runtime\photos-app-v4-owner-existing-fixtures'))
-$profileRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\browser\photos-app-v4-owner-existing-fixtures'))
+$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\runtime\photos-app-v4-owner-fqa-lease'))
+$profileRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\browser\photos-app-v4-owner-fqa-lease'))
 $screenshotRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\screenshots\photos-app-v4'))
+$leaseTtlSeconds = 900
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
+. (Join-Path $projectRoot 'infra\scripts\class-archive-bounded-native-process.ps1')
 
-function Stop-V4OwnerFixtureBrowser([string]$Code) {
-    throw [InvalidOperationException]::new('V4_OWNER_FIXTURE_BROWSER_STOP:' + $Code)
+function Stop-V4OwnerFqa([string]$Code) {
+    throw [InvalidOperationException]::new('V4_OWNER_FQA_STOP:' + $Code)
+}
+
+function Assert-NoReparseAncestor([string]$Candidate, [string]$Code) {
+    $full = [IO.Path]::GetFullPath($Candidate)
+    $boundary = $projectRoot.TrimEnd('\', '/')
+    $cursor = if (Test-Path -LiteralPath $full) { $full } else { [IO.Path]::GetDirectoryName($full) }
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Stop-V4OwnerFqa ($Code + '_reparse_ancestor')
+        }
+        if ([string]::Equals($item.FullName.TrimEnd('\', '/'), $boundary, [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+        $parent = [IO.Directory]::GetParent($item.FullName)
+        if ($null -eq $parent) { break }
+        $cursor = $parent.FullName
+    }
+    Stop-V4OwnerFqa ($Code + '_ancestor_outside_project')
+}
+
+function Set-OwnerOnlyDirectoryAcl([string]$Path) {
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-V4OwnerFqa 'private_directory_untrusted'
+    }
+    try {
+        Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
+        return
+    } catch {}
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($null -eq $identity) { Stop-V4OwnerFqa 'private_directory_identity_unavailable' }
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($sid in @($identity, $systemSid, $administratorsSid)) {
+        [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+    }
+    Set-Acl -LiteralPath $resolved -AclObject $acl
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
 }
 
 function New-RunId {
@@ -43,29 +99,23 @@ function New-RunId {
     return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
-function New-SecretText {
-    $bytes = New-Object byte[] 48
-    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-}
-
 function Assert-IgnoredPrivateChild([string]$Candidate, [string]$Root, [string]$Code) {
     $full = [IO.Path]::GetFullPath($Candidate)
     $projectBoundary = $projectRoot.TrimEnd('\', '/') + $separator
     $rootBoundary = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + $separator
     if (-not $full.StartsWith($projectBoundary, [StringComparison]::OrdinalIgnoreCase)) {
-        Stop-V4OwnerFixtureBrowser ($Code + '_outside_project')
+        Stop-V4OwnerFqa ($Code + '_outside_project')
     }
     if (-not $full.StartsWith($rootBoundary, [StringComparison]::OrdinalIgnoreCase)) {
-        Stop-V4OwnerFixtureBrowser ($Code + '_outside_root')
+        Stop-V4OwnerFqa ($Code + '_outside_root')
     }
     $relative = $full.Substring($projectRoot.Length + 1).Replace('\', '/')
     & git -C $projectRoot check-ignore --quiet --no-index -- $relative
-    if ($LASTEXITCODE -ne 0) { Stop-V4OwnerFixtureBrowser ($Code + '_not_ignored') }
+    if ($LASTEXITCODE -ne 0) { Stop-V4OwnerFqa ($Code + '_not_ignored') }
     if (@(& git -C $projectRoot ls-files -- $relative).Count -ne 0) {
-        Stop-V4OwnerFixtureBrowser ($Code + '_tracked')
+        Stop-V4OwnerFqa ($Code + '_tracked')
     }
+    Assert-NoReparseAncestor -Candidate $full -Code $Code
     return $full
 }
 
@@ -73,7 +123,7 @@ function Remove-VerifiedPrivateFile([string]$Path, [string]$Root, [string]$Code)
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Stop-V4OwnerFixtureBrowser ($Code + '_untrusted')
+        Stop-V4OwnerFqa ($Code + '_untrusted')
     }
     Assert-IgnoredPrivateChild -Candidate $item.FullName -Root $Root -Code $Code | Out-Null
     Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
@@ -83,100 +133,125 @@ function Remove-VerifiedPrivateDirectory([string]$Path, [string]$Root, [string]$
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Stop-V4OwnerFixtureBrowser ($Code + '_untrusted')
+        Stop-V4OwnerFqa ($Code + '_untrusted')
     }
     $full = Assert-IgnoredPrivateChild -Candidate $item.FullName -Root $Root -Code $Code
     $reparse = @(Get-ChildItem -LiteralPath $full -Force -Recurse -ErrorAction Stop | Where-Object {
         $_.Attributes -band [IO.FileAttributes]::ReparsePoint
     })
-    if ($reparse.Count -ne 0) { Stop-V4OwnerFixtureBrowser ($Code + '_contains_reparse') }
+    if ($reparse.Count -ne 0) { Stop-V4OwnerFqa ($Code + '_contains_reparse') }
     Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
 }
 
 function Get-NodePath {
     $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
     $node = Join-Path $userProfile '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { Stop-V4OwnerFixtureBrowser 'node_unavailable' }
+    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { Stop-V4OwnerFqa 'node_unavailable' }
     return $node
 }
 
 function Get-NodeModulesPath {
     $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
     $modules = Join-Path $userProfile '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
-    if (-not (Test-Path -LiteralPath $modules -PathType Container)) { Stop-V4OwnerFixtureBrowser 'node_modules_unavailable' }
+    if (-not (Test-Path -LiteralPath $modules -PathType Container)) { Stop-V4OwnerFqa 'node_modules_unavailable' }
     return $modules
 }
 
-function Invoke-Piwigo([string[]]$Arguments, [string]$Code) {
-    $compose = [Collections.Generic.List[string]]::new()
+function Get-ComposeArguments([string[]]$Tail) {
+    $arguments = [Collections.Generic.List[string]]::new()
     foreach ($argument in @('-d', 'Ubuntu', '--cd', $projectRoot, '--exec', 'docker', 'compose', '--env-file', $envRelative)) {
-        $compose.Add($argument)
+        $arguments.Add($argument)
     }
-    foreach ($file in $composeFiles) { $compose.Add('-f'); $compose.Add($file) }
-    $compose.Add('-p'); $compose.Add($composeProject)
+    foreach ($file in $composeFiles) { $arguments.Add('-f'); $arguments.Add($file) }
+    $arguments.Add('-p'); $arguments.Add($composeProject)
+    foreach ($argument in $Tail) { $arguments.Add($argument) }
+    return [string[]]$arguments.ToArray()
+}
+
+function Invoke-Piwigo([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $commandArguments = [string[]]($compose.ToArray() + $Arguments)
-        $lines = @(& "$env:SystemRoot\System32\wsl.exe" @commandArguments 2>&1)
+        $lines = @(& "$env:SystemRoot\System32\wsl.exe" @(Get-ComposeArguments $Arguments) 2>&1)
         $exit = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
-    if ($exit -ne 0) { Stop-V4OwnerFixtureBrowser $Code }
-    # Docker commands such as `compose cp` legitimately emit no stdout.
-    # Passing PowerShell's $null pipeline result to String.Join selects an
-    # overload that throws ArgumentNullException before the bounded workflow
-    # can continue, so always provide a real (possibly empty) string array.
+    if ($exit -ne 0) { Stop-V4OwnerFqa $Code }
     return [string]::Join("`n", [string[]]@($lines | ForEach-Object { [string]$_ }))
 }
 
-function Set-ExistingFixturePasswords([string]$Password, [string]$Run, [string]$HostPasswordPath, [string]$Code) {
-    if ($Password -notmatch '^[A-Za-z0-9_-]{32,190}$' -or $Run -notmatch '^[a-f0-9]{24}$') {
-        Stop-V4OwnerFixtureBrowser ($Code + '_secret_invalid')
+function Start-FqaLeaseBroker([string]$Run, [string]$ContainerCredentialPath) {
+    $tail = @(
+        'exec', '-T', '--user', 'nginx',
+        '-e', 'CLASS_ARCHIVE_V4_OWNER_FQA_LEASE=1',
+        '-e', ('CLASS_ARCHIVE_V4_OWNER_FQA_RUN_ID=' + $Run),
+        '-e', ('CLASS_ARCHIVE_V4_OWNER_FQA_CREDENTIAL_FILE=' + $ContainerCredentialPath),
+        '-e', ('CLASS_ARCHIVE_V4_OWNER_FQA_TTL_SECONDS=' + $leaseTtlSeconds),
+        'piwigo', 'php', '/workspace/tests/phase3/photos-app-v4-owner-fqa-lease.php'
+    )
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = "$env:SystemRoot\System32\wsl.exe"
+    $info.Arguments = ((Get-ComposeArguments $tail) | ForEach-Object { ConvertTo-ClassArchiveWin32Argument ([string]$_) }) -join ' '
+    $info.WorkingDirectory = $projectRoot
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V4OwnerFqa 'lease_broker_start_failed' }
+    [void]$process.StandardError.ReadToEndAsync() # drain without reflecting private runtime diagnostics
+    $readyTask = $process.StandardOutput.ReadLineAsync()
+    if (-not $readyTask.Wait([TimeSpan]::FromSeconds(60))) {
+        try { $process.StandardInput.Close() } catch {}
+        try { [void]$process.WaitForExit(120000) } catch {}
+        $process.Dispose()
+        Stop-V4OwnerFqa 'lease_broker_ready_timeout'
     }
-    Assert-IgnoredPrivateChild -Candidate $HostPasswordPath -Root $runtimeRoot -Code ($Code + '_host_secret') | Out-Null
-    if (Test-Path -LiteralPath $HostPasswordPath) { Stop-V4OwnerFixtureBrowser ($Code + '_host_secret_exists') }
-    [IO.File]::WriteAllText($HostPasswordPath, $Password, [Text.UTF8Encoding]::new($false))
-    Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPasswordPath
-    Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPasswordPath
-    $containerSecret = '/tmp/class-archive-fixture-password-' + $Run.Substring(0, 16) + '.txt'
-    try {
-        $relative = $HostPasswordPath.Substring($projectRoot.Length + 1).Replace('\', '/')
-        [void](Invoke-Piwigo -Arguments @('cp', $relative, ('piwigo:' + $containerSecret)) -Code ($Code + '_copy_failed'))
-        [void](Invoke-Piwigo -Arguments @('exec', '-T', 'piwigo', 'sh', '-lc', ('chown nginx:nginx ' + $containerSecret + ' && chmod 0600 ' + $containerSecret)) -Code ($Code + '_mode_failed'))
-        $result = Invoke-Piwigo -Arguments @(
-            'exec', '-T', '--user', 'nginx', '-e', ('CLASS_ARCHIVE_FIXTURE_PASSWORD_FILE=' + $containerSecret),
-            'piwigo', 'php', '/workspace/tests/fixtures/provision-access-users.php'
-        ) -Code ($Code + '_provisioner_failed')
-        if ($result.Trim() -ne 'ACCESS_FIXTURES_READY') { Stop-V4OwnerFixtureBrowser ($Code + '_provisioner_rejected') }
+    $ready = [string]$readyTask.Result
+    if ($ready -ne ('V4_OWNER_FQA_LEASE=READY roles=3 ttl=' + $leaseTtlSeconds)) {
+        try { $process.StandardInput.Close() } catch {}
+        try { [void]$process.WaitForExit(120000) } catch {}
+        $process.Dispose()
+        Stop-V4OwnerFqa 'lease_broker_rejected'
     }
-    finally {
-        try {
-            [void](Invoke-Piwigo -Arguments @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $containerSecret) -Code ($Code + '_container_cleanup_failed'))
-        }
-        finally {
-            Remove-VerifiedPrivateFile -Path $HostPasswordPath -Root $runtimeRoot -Code ($Code + '_host_cleanup')
-        }
-    }
+    return $process
 }
 
-if (-not $ConfirmExistingFixtureCredentialRotation) {
-    Write-Output 'V4_OWNER_EXISTING_FIXTURE_CHROME_QA=BLOCKED code=explicit_fixture_credential_rotation_confirmation_required'
-    exit 3
+function Close-FqaLeaseBroker([Diagnostics.Process]$Process, [string]$Run) {
+    if ($null -eq $Process) { return $false }
+    if (-not $Process.HasExited) {
+        $Process.StandardInput.WriteLine('STOP ' + $Run)
+        $Process.StandardInput.Flush()
+        $Process.StandardInput.Close()
+    }
+    if (-not $Process.WaitForExit(120000)) {
+        return $false # broker TTL remains the independent fail-safe
+    }
+    $remaining = @($Process.StandardOutput.ReadToEnd() -split "`r?`n" | Where-Object { $_ -ne '' })
+    $safe = @($remaining | Where-Object {
+        $_ -match '^V4_OWNER_FQA_LEASE=(?:CLOSED identity=FROZEN credentials=unknown sessions=revoked|FAIL stage=(?:bootstrap|runtime) code=[a-z0-9_]+)$'
+    })
+    return $Process.ExitCode -eq 0 -and $safe.Count -eq 1 -and $safe[0] -eq 'V4_OWNER_FQA_LEASE=CLOSED identity=FROZEN credentials=unknown sessions=revoked'
 }
 
 $run = New-RunId
 $runRuntime = Join-Path $runtimeRoot $run
 $runProfile = Join-Path $profileRoot $run
-$runScreenshots = Join-Path $screenshotRoot ('owner-existing-fixtures-' + $run)
+$runScreenshots = Join-Path $screenshotRoot ('owner-fqa-lease-' + $run)
 $credentialPath = Join-Path $runRuntime 'credentials.json'
-$fixturePasswordPath = Join-Path $runRuntime 'fixture-password.txt'
-$rotationPasswordPath = Join-Path $runRuntime 'rotation-password.txt'
-$temporaryPassword = $null
-$rotationPassword = $null
-$fixtureCredentialChanged = $false
+$lockPath = Join-Path $runtimeRoot 'owner-fqa-lease.lock'
+$containerCredentialPath = '/tmp/class-archive-v4-fqa-credentials-' + $run.Substring(0, 16) + '.json'
+$leaseBroker = $null
+$hostLeaseLock = $null
 $exitCode = 0
 $wrapperStage = 'initialization'
+$browserPassRecord = $null
+$failureRecord = $null
+$cleanupFailed = $false
 $oldValues = @{}
 $environmentNames = @(
     'NODE_PATH',
@@ -196,42 +271,25 @@ try {
     $wrapperStage = 'private_paths'
     foreach ($root in @($runtimeRoot, $profileRoot, $screenshotRoot)) {
         if (-not (Test-Path -LiteralPath $root)) { [void][IO.Directory]::CreateDirectory($root) }
+        Set-OwnerOnlyDirectoryAcl -Path $root
         Assert-IgnoredPrivateChild -Candidate (Join-Path $root '.path-probe') -Root $root -Code 'private_root' | Out-Null
     }
+    Assert-IgnoredPrivateChild -Candidate $lockPath -Root $runtimeRoot -Code 'lease_lock' | Out-Null
+    $hostLeaseLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     foreach ($path in @($runRuntime, $runProfile, $runScreenshots)) {
-        if (Test-Path -LiteralPath $path) { Stop-V4OwnerFixtureBrowser 'run_path_not_fresh' }
+        if (Test-Path -LiteralPath $path) { Stop-V4OwnerFqa 'run_path_not_fresh' }
         [void][IO.Directory]::CreateDirectory($path)
+        Set-OwnerOnlyDirectoryAcl -Path $path
     }
-    Assert-IgnoredPrivateChild -Candidate $runRuntime -Root $runtimeRoot -Code 'runtime' | Out-Null
-    Assert-IgnoredPrivateChild -Candidate $runProfile -Root $profileRoot -Code 'profile' | Out-Null
-    Assert-IgnoredPrivateChild -Candidate $runScreenshots -Root $screenshotRoot -Code 'screenshots' | Out-Null
     Assert-IgnoredPrivateChild -Candidate $credentialPath -Root $runtimeRoot -Code 'credential' | Out-Null
 
-    $wrapperStage = 'fixture_prepare'
-    $temporaryPassword = New-SecretText
-    # From this point on finally must attempt a second independent rotation,
-    # even when the first provisioner invocation changes the hashes and then
-    # fails while validating or cleaning its bounded transport.
-    $fixtureCredentialChanged = $true
-    Set-ExistingFixturePasswords -Password $temporaryPassword -Run $run -HostPasswordPath $fixturePasswordPath -Code 'fixture_prepare'
-    $wrapperStage = 'credential_document'
-    $roles = [ordered]@{
-        classmate = [ordered]@{ username = 'fixture-classmate'; password = $temporaryPassword }
-        family = [ordered]@{ username = 'fixture-family'; password = $temporaryPassword }
-        teacher = [ordered]@{ username = 'fixture-teacher'; password = $temporaryPassword }
-        anonymous = [ordered]@{ username = 'fixture-anonymous'; password = $temporaryPassword }
-    }
-    $document = [ordered]@{
-        version = 1
-        environment = 'PRIVATE_REAL_FULL_OWNER_V4_EXISTING_FIXTURES'
-        roles = $roles
-        run = $run
-    }
-    [IO.File]::WriteAllText($credentialPath, ($document | ConvertTo-Json -Compress -Depth 5), [Text.UTF8Encoding]::new($false))
+    $wrapperStage = 'lease_open'
+    $leaseBroker = Start-FqaLeaseBroker -Run $run -ContainerCredentialPath $containerCredentialPath
+    $relative = $credentialPath.Substring($projectRoot.Length + 1).Replace('\', '/')
+    [void](Invoke-Piwigo -Arguments @('cp', ('piwigo:' + $containerCredentialPath), $relative) -Code 'credential_copy_failed')
     Set-ClassArchiveOwnerOnlyFileAcl -Path $credentialPath
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $credentialPath
-    $roles = $null
-    $document = $null
+    [void](Invoke-Piwigo -Arguments @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $containerCredentialPath) -Code 'container_credential_cleanup_failed')
 
     $wrapperStage = 'chrome_runner'
     $env:NODE_PATH = Get-NodeModulesPath
@@ -251,27 +309,25 @@ try {
     finally { $ErrorActionPreference = $previous }
     $safe = @($output | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^V4_OWNER_EXISTING_FIXTURE_STAGE=[a-z0-9_-]+$' -or
-        $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=[0-9]+ screenshots=[0-9]+ roles=4 full_photos=[0-9]+ heritage_photos=[0-9]+ living_photos=[0-9]+ channel=chrome chrome_product=chrome chrome_version=[0-9.]+ writes=0$' -or
+        $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=[0-9]+ screenshots=[0-9]+ roles=3 full_photos=[0-9]+ heritage_photos=[0-9]+ living_photos=[0-9]+ channel=chrome chrome_product=chrome chrome_version=[0-9.]+ writes=0$' -or
         $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=[a-z0-9_-]+ code=[a-z0-9_]+$'
     })
     $pass = @($safe | Where-Object { $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS\b' })
     if ($nodeExit -ne 0 -or $pass.Count -ne 1) {
         $failure = @($safe | Where-Object { $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL\b' } | Select-Object -Last 1)
         if ($failure.Count -eq 1) { Write-Output $failure[0] }
-        Stop-V4OwnerFixtureBrowser 'node_runner_failed'
+        Stop-V4OwnerFqa 'node_runner_failed'
     }
-    Write-Output $pass[0]
+    $browserPassRecord = $pass[0]
 }
 catch {
-    $code = if ($_.Exception.Message -match '^V4_OWNER_FIXTURE_BROWSER_STOP:([A-Za-z0-9_]{1,120})$') {
+    $code = if ($_.Exception.Message -match '^V4_OWNER_FQA_STOP:([A-Za-z0-9_]{1,120})$') {
         [string]$Matches[1]
     } else {
-        $exceptionType = $_.Exception.GetType().Name
-        $innerType = if ($null -ne $_.Exception.InnerException) { $_.Exception.InnerException.GetType().Name } else { 'none' }
-        'unexpected_' + $wrapperStage + '_' + $exceptionType + '_' + $innerType
+        'unexpected_' + $wrapperStage + '_' + $_.Exception.GetType().Name
     }
     if ($code -notmatch '^[A-Za-z0-9_]{1,120}$') { $code = 'unexpected' }
-    Write-Output ('V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=wrapper code=' + $code.ToLowerInvariant())
+    $failureRecord = 'V4_OWNER_FQA_CHROME_QA=FAIL stage=wrapper code=' + $code.ToLowerInvariant()
     $exitCode = 2
 }
 finally {
@@ -279,23 +335,22 @@ finally {
         Remove-Item -LiteralPath ("Env:$name") -ErrorAction SilentlyContinue
         if ($null -ne $oldValues[$name]) { Set-Item -LiteralPath ("Env:$name") -Value $oldValues[$name] }
     }
-    # This second independent password is intentionally never written into the
-    # credential document. The trusted provisioner hashes it and revokes every
-    # browser session, then both the host/container secret files are removed.
-    if ($fixtureCredentialChanged) {
-        try {
-            $wrapperStage = 'fixture_final_rotation'
-            $rotationPassword = New-SecretText
-            Set-ExistingFixturePasswords -Password $rotationPassword -Run $run -HostPasswordPath $rotationPasswordPath -Code 'fixture_final_rotation'
-        }
-        catch { $exitCode = 2 }
-        finally { $rotationPassword = $null }
-    }
-    $temporaryPassword = $null
-    try { Remove-VerifiedPrivateFile -Path $credentialPath -Root $runtimeRoot -Code 'credential_cleanup' } catch { $exitCode = 2 }
-    try { Remove-VerifiedPrivateDirectory -Path $runProfile -Root $profileRoot -Code 'profile_cleanup' } catch { $exitCode = 2 }
-    try { Remove-VerifiedPrivateDirectory -Path $runRuntime -Root $runtimeRoot -Code 'runtime_cleanup' } catch { $exitCode = 2 }
+    try {
+        if ($null -ne $leaseBroker -and -not (Close-FqaLeaseBroker -Process $leaseBroker -Run $run)) { $cleanupFailed = $true; $exitCode = 2 }
+    } catch { $cleanupFailed = $true; $exitCode = 2 }
+    try { Remove-VerifiedPrivateFile -Path $credentialPath -Root $runtimeRoot -Code 'credential_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+    try { Remove-VerifiedPrivateDirectory -Path $runProfile -Root $profileRoot -Code 'profile_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+    try { Remove-VerifiedPrivateDirectory -Path $runRuntime -Root $runtimeRoot -Code 'runtime_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+    if ($null -ne $hostLeaseLock) { $hostLeaseLock.Dispose() }
+    if ($null -ne $leaseBroker) { $leaseBroker.Dispose() }
 }
 
-if ($exitCode -eq 0) { Write-Output 'V4_OWNER_EXISTING_FIXTURE_CHROME_QA_COMPLETE=PASS sessions=revoked credentials=unknown' }
+if ($exitCode -eq 0) {
+    Write-Output $browserPassRecord
+    Write-Output 'V4_OWNER_FQA_CHROME_QA_COMPLETE=PASS roles=3 identity=FROZEN sessions=revoked credentials=unknown security_lease_writes=audited content_writes=0 teacher=not_tested'
+} elseif ($null -ne $failureRecord) {
+    Write-Output $failureRecord
+} elseif ($cleanupFailed) {
+    Write-Output 'V4_OWNER_FQA_CHROME_QA=FAIL stage=wrapper code=lease_cleanup_failed'
+}
 exit $exitCode

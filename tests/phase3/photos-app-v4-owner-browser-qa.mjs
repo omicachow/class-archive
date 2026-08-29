@@ -1,7 +1,7 @@
 /*
- * Owner-private V4 role acceptance over the four pre-existing full-v3
- * fixture principals. The companion PowerShell wrapper is the only component
- * allowed to rotate their passwords; this browser process performs no
+ * Owner-private V4 role acceptance over one leased, already-frozen FQA
+ * Classmate aggregate. The companion broker is the only component allowed to
+ * rotate credentials or toggle the Identity; this browser process performs no
  * successful business write and never creates an identity, seat, claim,
  * invitation, account, media, comment, or AI job.
  */
@@ -17,10 +17,9 @@ class GateError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 
-const roles = Object.freeze(['classmate', 'family', 'teacher', 'anonymous']);
-const fullRoles = Object.freeze(['classmate', 'teacher', 'anonymous']);
+const roles = Object.freeze(['classmate', 'family', 'anonymous']);
+const fullRoles = Object.freeze(['classmate', 'anonymous']);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const fixtureUsernames = Object.freeze(['fixture-classmate', 'fixture-family', 'fixture-teacher', 'fixture-anonymous']);
 const forbiddenIdentityKeys = new Set([
   'classmateid', 'classmate_id', 'identityid', 'identity_id', 'seatid', 'seat_id',
   'accountid', 'account_id', 'userid', 'user_id', 'underlyinguserid', 'underlying_user_id',
@@ -68,23 +67,29 @@ function child(root, name, code) {
 const runId = setting('CLASS_ARCHIVE_V4_OWNER_FIXTURE_RUN_ID', /^[a-f0-9]{24}$/);
 const coreOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CORE_ORIGIN', 8190);
 const photoOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PHOTO_ORIGIN', 8191);
-const credentialPath = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE', '/.codex-work/private-real-qa/runtime/photos-app-v4-owner-existing-fixtures/');
-const profileRoot = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT', '/.codex-work/private-real-qa/browser/photos-app-v4-owner-existing-fixtures/');
+const credentialPath = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE', '/.codex-work/private-real-qa/runtime/photos-app-v4-owner-fqa-lease/');
+const profileRoot = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT', '/.codex-work/private-real-qa/browser/photos-app-v4-owner-fqa-lease/');
 const screenshotDir = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR', '/.codex-work/private-real-qa/screenshots/photos-app-v4/');
 
 let credentials;
 try { credentials = JSON.parse(fs.readFileSync(credentialPath, 'utf8')); }
 catch { fail('credential_document_invalid'); }
-check(credentials?.version === 1 && credentials.environment === 'PRIVATE_REAL_FULL_OWNER_V4_EXISTING_FIXTURES'
+check(credentials?.version === 2 && credentials.environment === 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE'
   && credentials.run === runId, 'credential_document_scope');
-check(Object.keys(credentials ?? {}).sort().join(',') === 'environment,roles,run,version', 'credential_document_shape');
-check(Object.keys(credentials.roles ?? {}).sort().join(',') === 'anonymous,classmate,family,teacher', 'credential_role_shape');
+check(Object.keys(credentials ?? {}).sort().join(',') === 'environment,lease,roles,run,version', 'credential_document_shape');
+check(credentials.lease?.roster === 'FQA-C-99CA3B3B6AF1' && credentials.lease?.roles === 3, 'credential_lease_scope');
+check(Object.keys(credentials.roles ?? {}).sort().join(',') === 'anonymous,classmate,family', 'credential_role_shape');
 for (const role of roles) {
-  const expectedUsername = `fixture-${role}`;
   const value = credentials.roles[role];
-  check(value?.username === expectedUsername && typeof value?.password === 'string'
+  const usernameValid = role === 'classmate'
+    ? value?.username === 'fqa_99ca3b3b6af1_classmate'
+    : role === 'family'
+      ? value?.username === 'fqa_99ca3b3b6af1_family'
+      : /^anon_[a-f0-9]{20}$/.test(value?.username ?? '');
+  check(usernameValid && typeof value?.password === 'string'
     && /^[A-Za-z0-9_-]{32,190}$/.test(value.password), `credential_${role}_invalid`);
 }
+const leasedUsernames = Object.freeze(roles.map((role) => credentials.roles[role].username));
 
 const CHROME_OWNER_LOCALHOST_ONLY_LAUNCH_ARGS = Object.freeze([
   '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1',
@@ -239,7 +244,7 @@ function assertAnonymousRedaction(payload, code) {
   let leakedKey = false;
   recursiveWalk(payload, (key) => { if (forbiddenIdentityKeys.has(key.toLowerCase())) leakedKey = true; });
   const encoded = JSON.stringify(payload ?? null).toLowerCase();
-  check(!leakedKey && !fixtureUsernames.some((username) => encoded.includes(username)), code);
+  check(!leakedKey && !leasedUsernames.some((username) => encoded.includes(username.toLowerCase())), code);
 }
 function assertAllowedPhotoId(value, allowedIds, code) {
   check(allowedIds.has(canonicalId(value, code)), code);
@@ -330,17 +335,19 @@ function peopleMap(payload, allowedIds, code) {
   return result;
 }
 function assertSpotlight(payload, allowedIds, code) {
-  check(typeof payload?.active === 'boolean' && Number.isInteger(payload?.total) && Array.isArray(payload?.items), `${code}_shape`);
+  check(typeof payload?.active === 'boolean' && Number.isInteger(payload?.total) && Array.isArray(payload?.items)
+    && payload.total === payload.items.length, `${code}_shape`);
   for (const item of payload.items) assertAllowedPhotoId(item?.coverPhotoId, allowedIds, `${code}_cover_scope`);
 }
 function assertSearch(payload, allowedIds, code) {
   check(typeof payload?.query === 'string' && payload?.photos && Array.isArray(payload.photos.items)
     && Number.isInteger(payload.photos.total) && Number.isInteger(payload.photos.count)
-    && payload.photos.total >= payload.photos.count && payload.photos.count === payload.photos.items.length, `${code}_shape`);
+    && payload.photos.total >= payload.photos.count && payload.photos.count === payload.photos.items.length
+    && typeof payload.has_more === 'boolean', `${code}_shape`);
   for (const photo of payload.photos.items) assertAllowedPhotoId(photo?.id, allowedIds, `${code}_photo_scope`);
   for (const sectionName of ['people', 'albums', 'events', 'archiveTime', 'semantic']) {
     const section = payload[sectionName];
-    check(section && Number.isInteger(section.total) && Array.isArray(section.items) && section.total >= section.items.length,
+    check(section && Number.isInteger(section.total) && Array.isArray(section.items) && section.total === section.items.length,
       `${code}_${sectionName}_shape`);
     for (const item of section.items) {
       const cover = item?.coverPhotoId ?? item?.cover_photo_id ?? null;
@@ -348,6 +355,34 @@ function assertSearch(payload, allowedIds, code) {
       if (sectionName === 'semantic') assertAllowedPhotoId(item?.id, allowedIds, `${code}_semantic_scope`);
     }
   }
+}
+async function completeSearchPhotoIds(page, initial, allowedIds, role) {
+  const seen = new Set();
+  let payload = initial;
+  let pages = 0;
+  const expectedTotal = payload.photos.total;
+  while (true) {
+    check(payload.photos.total === expectedTotal && payload.photos.count === payload.photos.items.length, `${role}_search_page_shape`);
+    for (const photo of payload.photos.items) {
+      const id = canonicalId(photo?.id, `${role}_search_page_id`);
+      check(allowedIds.has(id) && !seen.has(id), `${role}_search_page_scope`);
+      seen.add(id);
+    }
+    pages += 1;
+    check(pages <= Math.ceil(Math.max(1, expectedTotal) / 120) + 1, `${role}_search_page_bound`);
+    if (!payload.has_more) {
+      check(payload.next_cursor === null, `${role}_search_final_cursor`);
+      break;
+    }
+    check(typeof payload.next_cursor === 'string', `${role}_search_next_cursor`);
+    payload = await requiredJson(
+      page,
+      `/api/class-archive/search/grouped?q=%E6%AF%95%E4%B8%9A&contextType=ALL&limit=120&cursor=${encodeURIComponent(payload.next_cursor)}`,
+      `${role}_search_page`,
+    );
+  }
+  check(seen.size === expectedTotal, `${role}_search_exact_total`);
+  return seen;
 }
 function compareMapsExact(actual, expected, valueKey, code) {
   check(actual.size === expected.size, `${code}_size`);
@@ -361,32 +396,45 @@ function compareMapsSubset(actual, full, valueKey, code) {
   }
 }
 
-async function albumDetailSamples(page, albums, allowedIds, forbiddenIds, role) {
-  let sampled = 0;
+async function albumDetailsComplete(page, albums, allowedIds, forbiddenIds, role) {
   for (const [albumId, summary] of albums) {
-    if (sampled >= 12) break;
-    const payload = await requiredJson(page, `/api/class-archive/albums/${albumId}?limit=240`, `${role}_album_detail`);
-    const items = payload.items;
-    check(Array.isArray(items) && Number.isInteger(payload.total) && payload.total === summary.total, `${role}_album_detail_shape`);
-    for (const photo of items) assertAllowedPhotoId(photo?.id, allowedIds, `${role}_album_detail_scope`);
-    if (role === 'family') assertNoPhotoIds(payload, forbiddenIds, 'family_album_detail_living_leak');
-    sampled += 1;
+    const seen = new Set();
+    let cursor = null;
+    let pageCount = 0;
+    do {
+      const params = new URLSearchParams({ limit: '240' });
+      if (cursor !== null) params.set('cursor', cursor);
+      const payload = await requiredJson(page, `/api/class-archive/albums/${albumId}?${params}`, `${role}_album_detail`);
+      const items = payload.items;
+      check(Array.isArray(items) && Number.isInteger(payload.total) && Number.isInteger(payload.count)
+        && payload.total === summary.total && payload.count === items.length
+        && typeof payload.has_more === 'boolean', `${role}_album_detail_shape`);
+      for (const photo of items) {
+        const id = canonicalId(photo?.id, `${role}_album_detail_id`);
+        check(!seen.has(id), `${role}_album_detail_duplicate`);
+        seen.add(id);
+        assertAllowedPhotoId(id, allowedIds, `${role}_album_detail_scope`);
+      }
+      if (role === 'family') assertNoPhotoIds(payload, forbiddenIds, 'family_album_detail_living_leak');
+      cursor = payload.has_more ? payload.next_cursor : null;
+      check((payload.has_more && typeof cursor === 'string') || (!payload.has_more && cursor === null), `${role}_album_detail_cursor`);
+      pageCount += 1;
+      check(pageCount <= Math.ceil(Math.max(1, payload.total) / 240) + 1, `${role}_album_detail_page_bound`);
+    } while (cursor !== null);
+    check(seen.size === summary.total, `${role}_album_detail_exact_total`);
   }
-  check(sampled > 0, `${role}_album_detail_sample_missing`);
+  check(albums.size > 0, `${role}_album_detail_missing`);
 }
-async function peopleDetailSamples(page, people, allowedIds, forbiddenIds, role) {
-  let sampled = 0;
+async function peopleDetailsComplete(page, people, allowedIds, forbiddenIds, role) {
   for (const [personId, summary] of people) {
-    if (sampled >= 12) break;
     const payload = await requiredJson(page, `/api/class-archive/people/${personId}`, `${role}_person_detail`);
     const items = payload.items ?? payload.photos;
     const count = payload.photoCount ?? payload.photo_count ?? payload.total;
     check(Array.isArray(items) && Number.isInteger(count) && count === items.length && count === summary.count, `${role}_person_detail_shape`);
     for (const photo of items) assertAllowedPhotoId(photo?.id, allowedIds, `${role}_person_detail_scope`);
     if (role === 'family') assertNoPhotoIds(payload, forbiddenIds, 'family_person_detail_living_leak');
-    sampled += 1;
   }
-  check(sampled > 0, `${role}_person_detail_sample_missing`);
+  check(people.size > 0, `${role}_person_detail_missing`);
 }
 
 async function assertBrowserSurface(page, role) {
@@ -395,9 +443,9 @@ async function assertBrowserSurface(page, role) {
   const body = await page.locator('body').innerText();
   check(!/(?:HERITAGE|LIVING|ownerId|assetId|personId|CLIP|embedding|Gateway|MediaGuard|Piwigo|Immich)/i.test(body), `${role}_technical_copy_visible`);
   if (role === 'anonymous') {
-    const markup = await page.locator('[data-photo-app="true"]').innerHTML();
-    check(!/(?:classmate_id|identity_id|seat_id|account_id|user_id|principal_id|pseudonym_subject)/i.test(markup)
-      && !fixtureUsernames.some((username) => markup.includes(username)), 'anonymous_html_identity_leak');
+    const markup = await page.content();
+    check(!/(?:classmate|identity|seat|account|user|underlying[_-]?user|principal|pseudonym[_-]?subject)[_-]?id/i.test(markup)
+      && !leasedUsernames.some((username) => markup.toLowerCase().includes(username.toLowerCase())), 'anonymous_html_identity_leak');
   }
 }
 
@@ -425,6 +473,7 @@ async function assertFamilyKnownLivingDenied(page, livingId) {
   const probes = [
     [`/api/assets/${livingId}`, { method: 'GET' }],
     [`/api/assets/${livingId}`, { method: 'HEAD' }],
+    [`/api/assets/${livingId}`, { method: 'GET', headers: { Range: 'bytes=0-31' } }],
     [`/api/assets/${livingId}/thumbnail?size=grid`, { method: 'GET' }],
     [`/api/assets/${livingId}/thumbnail?size=grid`, { method: 'HEAD' }],
     [`/api/assets/${livingId}/thumbnail?size=preview`, { method: 'GET' }],
@@ -441,9 +490,30 @@ async function assertFamilyKnownLivingDenied(page, livingId) {
     && !markup.toLowerCase().includes(livingId), 'family_known_living_viewer_denied');
 }
 
+async function completeCommentDigest(page, photoId, code) {
+  const items = [];
+  let cursor = null;
+  let expectedTotal = null;
+  let pages = 0;
+  do {
+    const params = new URLSearchParams({ limit: '200' });
+    if (cursor !== null) params.set('cursor', cursor);
+    const payload = await requiredJson(page, `/api/class-archive/comments/${photoId}?${params}`, code);
+    check(Number.isInteger(payload?.total) && Array.isArray(payload?.items) && typeof payload?.hasMore === 'boolean', `${code}_shape`);
+    expectedTotal ??= payload.total;
+    check(payload.total === expectedTotal, `${code}_stable_total`);
+    items.push(...payload.items);
+    cursor = payload.hasMore ? payload.nextCursor : null;
+    check((payload.hasMore && typeof cursor === 'string') || (!payload.hasMore && cursor === null), `${code}_cursor`);
+    pages += 1;
+    check(pages <= Math.ceil(Math.max(1, expectedTotal) / 200) + 1, `${code}_page_bound`);
+  } while (cursor !== null);
+  check(items.length === expectedTotal, `${code}_complete`);
+  return JSON.stringify({ total: expectedTotal, items });
+}
+
 async function assertFamilyCommentServerDenied(session, photoId) {
-  const before = await requiredJson(session.page, `/api/class-archive/comments/${photoId}?limit=100`, 'family_comments_before');
-  const beforeDigest = JSON.stringify(before);
+  const beforeDigest = await completeCommentDigest(session.page, photoId, 'family_comments_before');
   session.beginFamilyDeniedCommentProbe();
   let denied;
   try {
@@ -460,8 +530,8 @@ async function assertFamilyCommentServerDenied(session, photoId) {
     }, { id: photoId });
   } finally { session.endFamilyDeniedCommentProbe(); }
   check(denied?.state === 200 && denied?.status === 403, 'family_comment_server_denied');
-  const after = await requiredJson(session.page, `/api/class-archive/comments/${photoId}?limit=100`, 'family_comments_after');
-  check(JSON.stringify(after) === beforeDigest, 'family_comment_denial_no_write');
+  const afterDigest = await completeCommentDigest(session.page, photoId, 'family_comments_after');
+  check(afterDigest === beforeDigest, 'family_comment_denial_no_write');
 }
 
 async function openSearch(page, role) {
@@ -476,7 +546,8 @@ async function openSearch(page, role) {
   check(await input.count() === 1 && await input.evaluate((node) => document.activeElement === node), `${role}_search_focus`);
   await input.fill('毕业');
   await input.press('Enter');
-  check(await dialog.locator('.hybrid-results, .error-state').waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false), `${role}_search_results`);
+  check(await dialog.locator('.hybrid-results').waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false)
+    && await dialog.locator('.error-state').count() === 0, `${role}_search_results`);
   await save(page, `${role}-search`);
   await page.keyboard.press('Escape');
   check(await page.locator('dialog[data-search-overlay="true"][open]').count() === 0, `${role}_search_escape`);
@@ -487,7 +558,7 @@ async function inspectRole(session, role, expectedIds, forbiddenLivingIds) {
   stageAt(`${role}_read_projections`);
   const state = await requiredJson(page, '/api/class-archive/product-state', `${role}_state`);
   check(state.role === role.toUpperCase(), `${role}_state_role`);
-  check(state.canEraUpload === (role === 'classmate' || role === 'teacher'), `${role}_state_member_upload`);
+  check(state.canEraUpload === (role === 'classmate'), `${role}_state_member_upload`);
   check(state.canFamilySubmission === (role === 'family'), `${role}_state_family_upload`);
   const timeline = await timelineCatalog(page, role);
   check(setEquals(new Set(timeline.keys()), expectedIds), `${role}_timeline_exact_scope`);
@@ -504,6 +575,7 @@ async function inspectRole(session, role, expectedIds, forbiddenLivingIds) {
   const people = peopleMap(peoplePayload, expectedIds, `${role}_people`);
   assertSpotlight(spotlight, expectedIds, `${role}_spotlight`);
   assertSearch(grouped, expectedIds, `${role}_search`);
+  await completeSearchPhotoIds(page, grouped, expectedIds, role);
   if (role === 'family') {
     for (const [name, payload] of Object.entries({ home, pins, albumsPayload, peoplePayload, spotlight, suggestions, grouped })) {
       assertNoPhotoIds(payload, forbiddenLivingIds, `family_${name}_living_leak`);
@@ -514,8 +586,8 @@ async function inspectRole(session, role, expectedIds, forbiddenLivingIds) {
       assertAnonymousRedaction(payload, 'anonymous_api_identity_leak');
     }
   }
-  await albumDetailSamples(page, albums, expectedIds, forbiddenLivingIds, role);
-  await peopleDetailSamples(page, people, expectedIds, forbiddenLivingIds, role);
+  await albumDetailsComplete(page, albums, expectedIds, forbiddenLivingIds, role);
+  await peopleDetailsComplete(page, people, expectedIds, forbiddenLivingIds, role);
   await page.goto(new URL('/people', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   check(await page.getByRole('heading', { name: '人物', exact: true }).count() >= 1, `${role}_people_surface`);
   await assertBrowserSurface(page, role);
@@ -543,7 +615,7 @@ async function main() {
     await assertBrowserSurface(classmateSession.page, 'classmate');
     await save(classmateSession.page, 'classmate-home');
 
-    for (const role of ['family', 'teacher', 'anonymous']) {
+    for (const role of ['family', 'anonymous']) {
       stageAt(`${role}_login`);
       const session = await openRole(role, role === 'family' || role === 'anonymous' ? { width: 390, height: 844 } : { width: 1920, height: 1080 });
       try {
@@ -579,7 +651,7 @@ async function main() {
     check(unexpectedNetwork.size === 0, 'unexpected_network_request');
     check(forbiddenBusinessMutations.size === 0, 'forbidden_business_mutation_attempt');
     check(successfulBusinessWrites === 0, 'business_write_observed');
-    process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=4 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0\n`);
+    process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=3 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0\n`);
   } finally { await classmateSession.context.close().catch(() => null); }
 }
 
