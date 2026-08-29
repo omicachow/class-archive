@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt31 orchestration layer. It opens
+# Static-only contract for the attempt32 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -46,7 +46,7 @@ $directDockerFunction = Slice-Function $runner 'function Invoke-DirectDocker' 'f
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt31'") -and $runner.Contains("`$httpPort = '11590'") -and $runner.Contains("`$compatPort = '11591'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt31'")) 'direct_runtime_attempt31_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt32'") -and $runner.Contains("`$httpPort = '11690'") -and $runner.Contains("`$compatPort = '11691'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt32'")) 'direct_runtime_attempt32_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -116,6 +116,7 @@ Assert-True ($runner.Contains('$record.format -ne 2') -and $runner.Contains('dir
 Assert-True ($runner.Contains('Deliberately never echo stderr') -and -not $runner.Contains('Write-Output $stderr') -and -not $runner.Contains('Write-Error $stderr')) 'direct_runtime_stderr_secret_boundary_missing'
 Assert-True ($runner.Contains("'V18_SYNTHETIC_MIGRATION_STOP:'") -and $runner.Contains('child_failure_prefix_invalid') -and $runner.Contains('[regex]::Match($stderr') -and $runner.Contains("'([a-z0-9_]{1,96})'")) 'direct_runtime_bounded_child_failure_diagnostic_missing'
 Assert-True ($runner.Contains('[int]$TimeoutSeconds = 240') -and $runner.Contains("Stop-V16ToV18DirectRuntime 'native_timeout_invalid'") -and $runner.Contains("Stop-V16ToV18DirectRuntime (`$FailureCode + '_timeout')")) 'direct_runtime_bounded_child_timeout_missing'
+Assert-True ($runner.Contains('if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 600)')) 'direct_runtime_short_raw_probe_timeout_range_missing'
 
 # Every fail-closed path is a single, bounded, path-free record.  In
 # particular, PowerShell's Write-Error formatting would add a script path and
