@@ -440,9 +440,17 @@ try {
         }
     }
 } catch {
-    $message = $_.Exception.Message
-    $safe = [regex]::Replace($message, '[^A-Za-z0-9_:-]', '_')
-    $line = [string]$_.InvocationInfo.ScriptLineNumber
-    Write-Error ('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME=FAIL stage=' + $script:stage + ' code=' + $safe + ' line=' + $line)
+    # Keep failure evidence single-line and path-free. Write-Error adds the
+    # host script location and invocation context, which is not needed for a
+    # fail-closed gate and can leak private workstation details into logs.
+    $message = [string]$_.Exception.Message
+    $code = if ($message -match '^V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_STOP:([a-z0-9_]{1,96})$') {
+        $Matches[1]
+    } else {
+        $type = $_.Exception.GetType().Name
+        if ($type -notmatch '^[A-Za-z0-9]{1,64}$') { $type = 'Exception' }
+        'unexpected_' + $type.ToLowerInvariant()
+    }
+    Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME=FAIL stage=' + $script:stage + ' code=' + $code)
     exit 1
 }

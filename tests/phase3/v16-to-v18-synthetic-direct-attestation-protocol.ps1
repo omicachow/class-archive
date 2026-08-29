@@ -47,4 +47,20 @@ foreach ($forbidden in @('8091','8191','8291','private-real',$privateSourceMarke
     Assert-True (-not $source.Contains($forbidden)) ('direct_attestation_forbidden_surface_' + ($forbidden -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }
 
+# Failures are consumed as a machine-readable gate.  The catch must emit one
+# bounded record, rather than PowerShell's path-rich error formatting or the
+# original exception text from an ignored local proof artifact.
+Assert-True ($source.Contains("`$message -match '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION_STOP:([a-z0-9_]{1,96})`$'")) 'direct_attestation_stop_code_parser_not_bounded'
+Assert-True ($source.Contains("`$type -notmatch '^[A-Za-z0-9]{1,64}`$'") -and $source.Contains("'unexpected_' + `$type.ToLowerInvariant()")) 'direct_attestation_unexpected_code_parser_not_bounded'
+Assert-True ($source.Contains("Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=FAIL code=' + `$code)") -and $source.Contains('    exit 1')) 'direct_attestation_single_line_fail_output_missing'
+Assert-True (@($tokens | Where-Object { $_.Kind -eq 'Generic' -and $_.Text -ieq 'Write-Error' }).Count -eq 0) 'direct_attestation_write_error_command_forbidden'
+foreach ($forbiddenFailureOutput in @('Write-Host', 'Write-Warning', 'Write-Verbose', 'Write-Debug', 'Write-Information', 'Write-Output $message', 'Write-Output $_', 'Exception.ToString()', 'InvocationInfo', 'ScriptStackTrace')) {
+    Assert-True (-not $source.Contains($forbiddenFailureOutput)) ('direct_attestation_path_rich_failure_output_forbidden_' + ($forbiddenFailureOutput -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+$attestationCatchIndex = $source.LastIndexOf('} catch {', [StringComparison]::Ordinal)
+Assert-True ($attestationCatchIndex -ge 0) 'direct_attestation_final_catch_missing'
+$attestationFinalCatch = $source.Substring($attestationCatchIndex)
+Assert-True ($attestationFinalCatch.Contains('$message = [string]$_.Exception.Message') -and $attestationFinalCatch.Contains("`$message -match '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION_STOP:([a-z0-9_]{1,96})`$'") -and $attestationFinalCatch.Contains("Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=FAIL code=' + `$code)") -and $attestationFinalCatch.Contains('exit 1')) 'direct_attestation_final_catch_path_free_contract_missing'
+Assert-True (([regex]::Matches($attestationFinalCatch, '(?m)^\s*Write-Output\s+\(')).Count -eq 1) 'direct_attestation_final_catch_must_emit_exactly_one_line'
+
 Write-Output "V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION_PROTOCOL=PASS assertions=$assertions"

@@ -97,6 +97,24 @@ Assert-True ($runner.Contains('$sourceClosure = Get-ProofSourceClosure') -and $r
 Assert-True ($runner.Contains('v16-to-v18-direct-proof.json') -and $runner.Contains('Assert-IgnoredUntracked $reportPath') -and $runner.Contains('format = 2') -and $runner.Contains("source_commit = `$SourceClosure.Commit") -and $runner.Contains("source_digest = `$SourceClosure.SourceDigest") -and $runner.Contains("legacy_fingerprint = `$Fingerprint") -and $runner.Contains("media = 'NOT_MOUNTED'")) 'direct_runtime_ignored_evidence_report_missing'
 Assert-True ($runner.Contains('$record.format -ne 2') -and $runner.Contains('direct_proof_source_closure_stale') -and $runner.Contains('source_commit) -notmatch') -and $runner.Contains('source_digest) -notmatch')) 'direct_runtime_proof_report_source_binding_missing'
 Assert-True ($runner.Contains('Deliberately never echo stderr') -and -not $runner.Contains('Write-Output $stderr') -and -not $runner.Contains('Write-Error $stderr')) 'direct_runtime_stderr_secret_boundary_missing'
+
+# Every fail-closed path is a single, bounded, path-free record.  In
+# particular, PowerShell's Write-Error formatting would add a script path and
+# invocation context.  The runner may inspect an exception only to select a
+# safe STOP code; it must not echo that exception (or any native stderr) back
+# to the caller.
+Assert-True ($runner.Contains("`$message -match '^V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_STOP:([a-z0-9_]{1,96})`$'")) 'direct_runtime_stop_code_parser_not_bounded'
+Assert-True ($runner.Contains("`$type -notmatch '^[A-Za-z0-9]{1,64}`$'") -and $runner.Contains("'unexpected_' + `$type.ToLowerInvariant()")) 'direct_runtime_unexpected_code_parser_not_bounded'
+Assert-True ($runner.Contains("Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME=FAIL stage=' + `$script:stage + ' code=' + `$code)") -and $runner.Contains('    exit 1')) 'direct_runtime_single_line_fail_output_missing'
+Assert-True (@($tokens | Where-Object { $_.Kind -eq 'Generic' -and $_.Text -ieq 'Write-Error' }).Count -eq 0) 'direct_runtime_write_error_command_forbidden'
+foreach ($forbiddenFailureOutput in @('Write-Host', 'Write-Warning', 'Write-Verbose', 'Write-Debug', 'Write-Information', 'Write-Output $message', 'Write-Output $_', 'Exception.ToString()', 'InvocationInfo', 'ScriptStackTrace')) {
+    Assert-True (-not $runner.Contains($forbiddenFailureOutput)) ('direct_runtime_path_rich_failure_output_forbidden_' + ($forbiddenFailureOutput -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
+}
+$runtimeCatchIndex = $runner.LastIndexOf('} catch {', [StringComparison]::Ordinal)
+Assert-True ($runtimeCatchIndex -ge 0) 'direct_runtime_final_catch_missing'
+$runtimeFinalCatch = $runner.Substring($runtimeCatchIndex)
+Assert-True ($runtimeFinalCatch.Contains('$message = [string]$_.Exception.Message') -and $runtimeFinalCatch.Contains("`$message -match '^V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME_STOP:([a-z0-9_]{1,96})`$'") -and $runtimeFinalCatch.Contains("Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_RUNTIME=FAIL stage=' + `$script:stage + ' code=' + `$code)") -and $runtimeFinalCatch.Contains('exit 1')) 'direct_runtime_final_catch_path_free_contract_missing'
+Assert-True (([regex]::Matches($runtimeFinalCatch, '(?m)^\s*Write-Output\s+\(')).Count -eq 1) 'direct_runtime_final_catch_must_emit_exactly_one_line'
 foreach ($forbiddenDestructive in @('docker compose down','docker volume rm','docker rm ','Remove-Item','Move-Item','Copy-Item','Clear-Content','Set-Content')) {
     Assert-True (-not $runner.Contains($forbiddenDestructive)) ('direct_runtime_destructive_operation_forbidden_' + ($forbiddenDestructive -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }

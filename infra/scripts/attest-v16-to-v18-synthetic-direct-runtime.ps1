@@ -268,9 +268,16 @@ try {
         }
     }
 } catch {
-    $message = $_.Exception.Message
-    $safe = [regex]::Replace($message, '[^A-Za-z0-9_:-]', '_')
-    $line = [string]$_.InvocationInfo.ScriptLineNumber
-    Write-Error ('V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=FAIL code=' + $safe + ' line=' + $line)
+    # Do not emit PowerShell's path-rich error record for an ignored local
+    # proof artifact. The consumer only needs a bounded fail-closed code.
+    $message = [string]$_.Exception.Message
+    $code = if ($message -match '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION_STOP:([a-z0-9_]{1,96})$') {
+        $Matches[1]
+    } else {
+        $type = $_.Exception.GetType().Name
+        if ($type -notmatch '^[A-Za-z0-9]{1,64}$') { $type = 'Exception' }
+        'unexpected_' + $type.ToLowerInvariant()
+    }
+    Write-Output ('V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=FAIL code=' + $code)
     exit 1
 }
