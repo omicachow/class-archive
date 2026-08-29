@@ -134,6 +134,16 @@ Assert-True ($validator.Contains('sha256sum -c SHA256SUMS') -and $validator.Cont
 $normalVerifier = Slice-Function $validator 'function Assert-NormalRuntimeVerifyOnly' 'function ConvertTo-StrictCounts' 'completed_v16_to_v18_normal_verifier_slice_invalid'
 Assert-True ([regex]::Matches($normalVerifier, '--verify-only').Count -eq 2) 'completed_v16_to_v18_normal_verifier_verify_only_count_invalid'
 Assert-True ($normalVerifier.Contains('install-class-archive-plugins.php') -and $normalVerifier.Contains('install-locked-piwigo-extensions.php')) 'completed_v16_to_v18_normal_verifier_targets_missing'
+foreach ($probeCode in @(
+    'target_schema_probe_failed',
+    'historical_snapshot_probe_failed',
+    'class_archive_plugin_verify_failed',
+    'locked_extension_verify_failed',
+    'current_mariadb_count_probe_failed',
+    'current_mariadb_fingerprint_probe_failed'
+)) {
+    Assert-True ($validator.Contains("-Code '$probeCode'")) ('completed_v16_to_v18_stage_specific_probe_code_missing_' + $probeCode)
+}
 foreach ($forbidden in @('--verify-runtime','--prepare','--finalize-maintenance','Enter-Maintenance','Finalize-Maintenance','rebuild-photo-read-projection.php','AiIndexService','queue','upload','import','media-gateway.php')) {
     Assert-True (-not $normalVerifier.Contains($forbidden)) ('completed_v16_to_v18_normal_verifier_forbidden_' + ($forbidden -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
