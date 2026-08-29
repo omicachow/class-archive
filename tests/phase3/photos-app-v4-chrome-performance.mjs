@@ -186,6 +186,7 @@ async function findStructuredQuery(page) {
 
 async function measureHome(page) {
   const values = [];
+  const diagnostics = [];
   let fullTimelineRequests = 0;
   for (let index = 0; index < WARMUP_SAMPLES + MEASURED_SAMPLES; index += 1) {
     await gotoApp(page, '/photos', 'home_sample_library_route');
@@ -207,10 +208,58 @@ async function measureHome(page) {
       page.off('request', listener);
     }
     const elapsed = performance.now() - started;
-    if (index >= WARMUP_SAMPLES) values.push(elapsed);
+    if (index >= WARMUP_SAMPLES) {
+      values.push(elapsed);
+      diagnostics.push(await page.evaluate(() => {
+        const rounded = (value) => Math.round(Number.isFinite(value) && value >= 0 ? value : 0);
+        const navigation = performance.getEntriesByType('navigation')[0] ?? {};
+        const allowedResources = new Map([
+          ['/api/class-archive/product-state', 'productState'],
+          ['/api/class-archive/collections/home', 'collectionsHome'],
+          ['/api/class-archive/collections/pins', 'collectionPins'],
+          ['/photo-ui/app.js', 'applicationScript'],
+        ]);
+        const resource = {};
+        for (const entry of performance.getEntriesByType('resource')) {
+          let key = null;
+          try { key = allowedResources.get(new URL(entry.name).pathname) ?? null; } catch { }
+          if (!key) continue;
+          resource[key] = {
+            start: rounded(entry.startTime),
+            responseEnd: rounded(entry.responseEnd),
+            duration: rounded(entry.duration),
+          };
+        }
+        return {
+          firstCollectionVisible: rounded(performance.now()),
+          navigation: {
+            responseStart: rounded(navigation.responseStart),
+            responseEnd: rounded(navigation.responseEnd),
+            domContentLoaded: rounded(navigation.domContentLoadedEventEnd),
+            load: rounded(navigation.loadEventEnd),
+          },
+          resource,
+        };
+      }));
+    }
   }
   check(fullTimelineRequests === 0, 'home_full_timeline_preload');
-  return percentile50(values, 'home_samples');
+  const diagnosticMedian = (reader) => percentile50(diagnostics.map(reader), 'home_diagnostic_samples');
+  const resourceMedian = (key, field) => diagnosticMedian((sample) => sample.resource[key]?.[field] ?? 0);
+  return {
+    p50: percentile50(values, 'home_samples'),
+    diagnostics: {
+      firstCollectionVisibleP50Ms: diagnosticMedian((sample) => sample.firstCollectionVisible),
+      navigationResponseStartP50Ms: diagnosticMedian((sample) => sample.navigation.responseStart),
+      navigationResponseEndP50Ms: diagnosticMedian((sample) => sample.navigation.responseEnd),
+      domContentLoadedP50Ms: diagnosticMedian((sample) => sample.navigation.domContentLoaded),
+      loadP50Ms: diagnosticMedian((sample) => sample.navigation.load),
+      productStateResponseEndP50Ms: resourceMedian('productState', 'responseEnd'),
+      collectionsHomeResponseEndP50Ms: resourceMedian('collectionsHome', 'responseEnd'),
+      collectionPinsResponseEndP50Ms: resourceMedian('collectionPins', 'responseEnd'),
+      applicationScriptResponseEndP50Ms: resourceMedian('applicationScript', 'responseEnd'),
+    },
+  };
 }
 
 async function measureOverlayAndSuggestions(page) {
@@ -262,7 +311,7 @@ async function measureStructuredSearch(page, query) {
   return percentile50(values, 'structured_search_samples');
 }
 
-function writeEvidence(metrics, result) {
+function writeEvidence(metrics, diagnostics, result) {
   const target = privatePath(settings.evidence, 'evidence_path');
   check(!fs.existsSync(target), 'evidence_exists');
   const record = {
@@ -274,6 +323,7 @@ function writeEvidence(metrics, result) {
     warmupSamples: WARMUP_SAMPLES,
     homeFullTimelineRequests: 0,
     metrics,
+    diagnostics,
     result,
     createdAt: new Date().toISOString(),
   };
@@ -328,10 +378,10 @@ async function main() {
       SEARCH_OVERLAY_OPEN_P50_MS: searchChrome.overlay,
       SEARCH_SUGGESTIONS_VISIBLE_P50_MS: searchChrome.suggestions,
       STRUCTURED_SEARCH_P50_MS: structured,
-      COLLECTIONS_HOME_WARM_P50_MS: home,
+      COLLECTIONS_HOME_WARM_P50_MS: home.p50,
     };
     const violations = Object.entries(LIMITS).filter(([name, limit]) => !Number.isInteger(metrics[name]) || metrics[name] >= limit);
-    writeEvidence(metrics, violations.length === 0 ? 'PASS' : 'FAIL');
+    writeEvidence(metrics, { collectionsHome: home.diagnostics }, violations.length === 0 ? 'PASS' : 'FAIL');
     for (const name of Object.keys(LIMITS)) process.stdout.write(`${name}=${metrics[name]}\n`);
     if (violations.length !== 0) fail(`${violations[0][0].toLowerCase()}_limit`);
     process.stdout.write(`V4_CHROME_PERFORMANCE=PASS samples=${MEASURED_SAMPLES} warmups=${WARMUP_SAMPLES} channel=chrome chrome_version=${chromeVersion}\n`);

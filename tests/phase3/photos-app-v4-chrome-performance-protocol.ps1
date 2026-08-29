@@ -10,6 +10,7 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runnerPath = Join-Path $projectRoot 'tests\phase3\photos-app-v4-chrome-performance.mjs'
 $wrapperPath = Join-Path $projectRoot 'tests\phase3\photos-app-v4-chrome-performance.ps1'
 $docsPath = Join-Path $projectRoot 'docs\photos-app-v4-chrome-performance.md'
+$appPath = Join-Path $projectRoot 'infra\immich-spike\photo-ui\app.js'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -25,6 +26,7 @@ function Read-Source([string]$Path, [string]$Code) {
 $runner = Read-Source $runnerPath 'v4_chrome_performance_runner_missing'
 $wrapper = Read-Source $wrapperPath 'v4_chrome_performance_wrapper_missing'
 $docs = Read-Source $docsPath 'v4_chrome_performance_docs_missing'
+$app = Read-Source $appPath 'v4_chrome_performance_photo_app_missing'
 
 Assert-True ($runner.Contains("const MEASURED_SAMPLES = 7") -and $runner.Contains("const WARMUP_SAMPLES = 2")) 'v4_chrome_performance_sample_contract_missing'
 Assert-True ($runner.Contains('values.sort') -or $runner.Contains("[...values].sort((a, b) => a - b)")) 'v4_chrome_performance_median_sort_missing'
@@ -50,6 +52,12 @@ Assert-True ($runner.IndexOf("await page.waitForLoadState('networkidle'", [Strin
 Assert-True ($runner.Contains('dialog.locator(''[role="listbox"]'')') -and $runner.Contains('dialog.locator(''.search-structured-group, .search-photo-grid'')')) 'v4_chrome_performance_visible_milestone_missing'
 Assert-True ($runner.Contains('page.waitForResponse') -and $runner.Contains("target.pathname === '/api/class-archive/search/grouped'")) 'v4_chrome_performance_structured_network_proof_missing'
 Assert-True ($runner.Contains("homeFullTimelineRequests: 0") -and $runner.Contains("violations.length === 0 ? 'PASS' : 'FAIL'")) 'v4_chrome_performance_evidence_shape_missing'
+Assert-True ($runner.Contains('firstCollectionVisibleP50Ms') -and $runner.Contains('navigationResponseStartP50Ms') -and $runner.Contains('collectionsHomeResponseEndP50Ms') -and $runner.Contains('collectionPinsResponseEndP50Ms')) 'v4_chrome_performance_home_diagnostics_missing'
+Assert-True ($app.Contains('const SEARCH_RESULT_DEBOUNCE_MS = 120') -and $app.Contains('requestSearch(query, requestGeneration), SEARCH_RESULT_DEBOUNCE_MS')) 'v4_chrome_performance_search_debounce_missing'
+Assert-True ($app.Contains('searchController?.abort()') -and $app.Contains('requestGeneration !== generation') -and $app.Contains('overlay.input.value.trim() !== query')) 'v4_chrome_performance_stale_search_guard_missing'
+Assert-True ($app.Contains("return { value: normalizeCollectionsHome(cached), cacheHit: true, legacy: false, refresh }") -and $app.Contains("collectionRead.refresh().then((fresh) =>")) 'v4_chrome_performance_warm_home_refresh_missing'
+Assert-True ($app.IndexOf('const state = await productState()', $app.IndexOf('async function readCollectionsHome()', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -lt $app.IndexOf('const cached = readPresentationCache(path)', $app.IndexOf('async function readCollectionsHome()', [StringComparison]::Ordinal), [StringComparison]::Ordinal)) 'v4_chrome_performance_warm_home_scope_check_missing'
+Assert-True ($app.Contains("runtime.cacheScope !== cacheScope") -and $app.Contains(".catch((error) => failClosedPresentation(error))")) 'v4_chrome_performance_warm_home_fail_closed_missing'
 Assert-True ($runner.IndexOf('for (const name of Object.keys(LIMITS)) process.stdout.write', [StringComparison]::Ordinal) -lt $runner.IndexOf('if (violations.length !== 0) fail(', [StringComparison]::Ordinal)) 'v4_chrome_performance_failure_metrics_missing'
 Assert-True (-not $runner.Contains('familyDeniedPhotoId') -and -not $runner.Contains('source_reference') -and -not $runner.Contains('absolutePath')) 'v4_chrome_performance_private_identifier_output_forbidden'
 

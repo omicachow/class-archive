@@ -63,6 +63,12 @@ const SEARCH_CONTEXT_MEMORY_ID = /^memory-[a-f0-9]{56}$/;
 const SEARCH_CONTEXT_COLLECTION_ID = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,95}$/;
 const SEARCH_CURSOR = /^[A-Za-z0-9_-]{48}$/;
 const SEARCH_PAGE_LIMIT = 60;
+// Start a settled structured lookup quickly enough to feel direct while the
+// generation counter and AbortController below remain the authority for rapid
+// input.  This is intentionally longer than a frame, but shorter than the
+// previous 320 ms delay that made the product's 300 ms response target
+// impossible before a request could even leave the browser.
+const SEARCH_RESULT_DEBOUNCE_MS = 120;
 
 const runtime = {
   productStatePromise: null,
@@ -3345,7 +3351,7 @@ async function openGlobalSearch({ replaceLegacyRoute = false, prevalidatedState 
     if (supportsScopedSuggestions(activeScope)) {
       suggestionTimer = setTimeout(() => void requestSuggestions(query, requestGeneration), 150);
     }
-    searchTimer = setTimeout(() => void requestSearch(query, requestGeneration), 320);
+    searchTimer = setTimeout(() => void requestSearch(query, requestGeneration), SEARCH_RESULT_DEBOUNCE_MS);
   };
   overlay.input.addEventListener('input', () => runQuery(overlay.input.value));
   overlay.input.addEventListener('keydown', (event) => {
@@ -3881,26 +3887,34 @@ async function readCollectionsHome() {
   }
   const cacheScope = state.cacheScope;
   const cached = readPresentationCache(path);
-  try {
+  const refresh = async () => {
     const payload = await apiJson(path, { cache: 'no-cache' });
     if (runtime.presentationFailureActive || runtime.cacheScope !== cacheScope || document.visibilityState !== 'visible') {
       throw new Error('safe_collection_home_session_changed');
     }
     const normalized = normalizeCollectionsHome(payload);
     writePresentationCache(path, payload);
-    return { value: normalized, cacheHit: false, legacy: false };
+    return normalized;
+  };
+  // A warm snapshot may paint only after this document has revalidated its
+  // role and presentation epoch above.  The cache key includes that epoch, so
+  // it cannot cross a freeze, account switch or projection revision.  The
+  // fresh request still runs immediately after first paint and any failure
+  // conceals the cached presentation rather than broadening access.
+  if (cached !== null) {
+    try {
+      return { value: normalizeCollectionsHome(cached), cacheHit: true, legacy: false, refresh };
+    } catch {
+      // Ignore an invalid local entry and continue to the server-owned copy.
+    }
+  }
+  try {
+    return { value: await refresh(), cacheHit: false, legacy: false, refresh: null };
   } catch (error) {
     // Only a truly older Gateway may use the retained legacy home contract.
     // An active V4 snapshot that is unavailable, corrupt, or stale is never
     // substituted with a dynamic full-library fallback.
     if (error?.status === 404) return { value: null, cacheHit: false, legacy: true };
-    if (cached !== null) {
-      try {
-        return { value: normalizeCollectionsHome(cached), cacheHit: true, legacy: false };
-      } catch {
-        // fall through to fail closed below
-      }
-    }
     failClosedPresentation(error);
     throw error;
   }
@@ -4241,9 +4255,18 @@ async function renderHome() {
     if (!collectionRead.legacy && collectionRead.value) {
       const pins = await readCollectionPins();
       assertPresentationActive();
-      shell('home', collectionsHomePage(collectionRead.value, pins, async () => {
+      const paint = (snapshot) => shell('home', collectionsHomePage(snapshot, pins, async () => {
         await renderHome();
       }));
+      paint(collectionRead.value);
+      if (typeof collectionRead.refresh === 'function') {
+        collectionRead.refresh().then((fresh) => {
+          assertPresentationActive();
+          if (location.pathname !== '/home') return;
+          if (JSON.stringify(fresh) === JSON.stringify(collectionRead.value)) return;
+          paint(fresh);
+        }).catch((error) => failClosedPresentation(error));
+      }
       return;
     }
     const home = normalizeHome((await presentationJson('/api/class-archive/home')).value);

@@ -19,6 +19,14 @@ synthetic library. Search
 timings stop only at browser-visible UI milestones, and structured search also
 requires the real grouped-search response.
 
+Warm Collections rendering remains authorization-bound: every new document
+first confirms the current role and presentation epoch, then may paint only the
+snapshot stored under that exact scope. A fresh snapshot check follows the
+first paint and fails closed if the session or projection changed. The ignored
+evidence splits Home into document response, application startup, product-state
+validation, collection endpoints and first visible collection so a passing
+number cannot hide a slow network or application stage.
+
 Run locally with the already-running 8090/8091 synthetic services:
 
 ```powershell
