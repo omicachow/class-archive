@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32', 'attempt33', 'attempt34', 'attempt35', 'attempt36')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32', 'attempt33', 'attempt34', 'attempt35', 'attempt36', 'attempt37')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -350,6 +350,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11796'; CompatPort = '11797'
             AppSubnet = '10.255.31.0/24'; GatewaySubnet = '10.193.0.0/16'
             BffGatewayIp = '10.193.0.10'
+        }
+    }
+    'attempt37' {
+        # attempt36 remains preserved with its valid proof bound to the prior
+        # recovery-orchestration commit. attempt37 is a newly allocated,
+        # empty direct laboratory for the current immutable source closure;
+        # it shares no project, volume, bridge, capture directory, or loopback
+        # port with any prior evidence.
+        @{
+            HttpPort = '11798'; CompatPort = '11799'
+            AppSubnet = '10.255.32.0/24'; GatewaySubnet = '10.190.0.0/16'
+            BffGatewayIp = '10.190.0.10'
         }
     }
 }

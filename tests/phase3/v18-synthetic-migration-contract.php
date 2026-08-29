@@ -41,7 +41,7 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32', 'attempt33', 'attempt34', 'attempt35', 'attempt36')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32', 'attempt33', 'attempt34', 'attempt35', 'attempt36', 'attempt37')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
@@ -130,6 +130,10 @@ $assert(str_contains($source['runner'], "'attempt36'") && str_contains($source['
     && str_contains($source['runner'], "'10.255.31.0/24'") && str_contains($source['runner'], "'10.193.0.0/16'")
     && str_contains($source['runner'], "'10.193.0.10'") && str_contains($source['runner'], 'attempt36 is a newly')
     && str_contains($source['runner'], 'no project, volume, bridge,') , 'attempt36_fresh_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], "'attempt37'") && str_contains($source['runner'], "'11798'") && str_contains($source['runner'], "'11799'")
+    && str_contains($source['runner'], "'10.255.32.0/24'") && str_contains($source['runner'], "'10.190.0.0/16'")
+    && str_contains($source['runner'], "'10.190.0.10'") && str_contains($source['runner'], 'attempt37 is a newly')
+    && str_contains($source['runner'], 'no project, volume, bridge,') , 'attempt37_fresh_direct_v16_to_v18_identity_not_fixed');
 $assert(str_contains($source['runner'], 'function Get-FileSha256') && str_contains($source['runner'], '[Security.Cryptography.SHA256]::Create()')
     && str_contains($source['runner'], '[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)')
     && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_runtime_failed'")
