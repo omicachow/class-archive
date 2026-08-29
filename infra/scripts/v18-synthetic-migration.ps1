@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -186,6 +186,16 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10690'; CompatPort = '10691'
             AppSubnet = '10.255.17.0/24'; GatewaySubnet = '10.218.0.0/16'
             BffGatewayIp = '10.218.0.10'
+        }
+    }
+    'attempt23' {
+        # attempt22 is preserved after Docker's post-restart first health
+        # transition exceeded the old 60-second bounded wait. attempt23 keeps
+        # a still-bounded 180-second cold-engine readiness window.
+        @{
+            HttpPort = '10790'; CompatPort = '10791'
+            AppSubnet = '10.255.18.0/24'; GatewaySubnet = '10.216.0.0/16'
+            BffGatewayIp = '10.216.0.10'
         }
     }
 }
@@ -539,7 +549,7 @@ function Assert-FreshSyntheticAttempt {
     if ((Get-V18TableCount) -ne 0) { Stop-V18SyntheticMigration 'resume_empty_bootstrap_database_not_empty' }
 }
 
-function Wait-V18Service([string]$Service, [string]$Expected = 'healthy', [int]$Seconds = 60) {
+function Wait-V18Service([string]$Service, [string]$Expected = 'healthy', [int]$Seconds = 180) {
     for ($i = 0; $i -lt $Seconds; ++$i) {
         $lines = @(Invoke-V18Compose @('ps','--format','json',$Service) -Capture)
         if ($lines.Count -eq 1) {
