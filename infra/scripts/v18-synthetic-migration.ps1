@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -196,6 +196,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10790'; CompatPort = '10791'
             AppSubnet = '10.255.18.0/24'; GatewaySubnet = '10.216.0.0/16'
             BffGatewayIp = '10.216.0.10'
+        }
+    }
+    'attempt24' {
+        # attempt23 remains preserved after a cold Docker engine emitted
+        # additional non-JSON compose output alongside an otherwise healthy
+        # service record.  attempt24 uses a parser that selects the matching service record
+        # instead of treating harmless extra output as a health failure.  It shares no project, volumes, bridges, or ports with any
+        # prior laboratory.
+        @{
+            HttpPort = '10890'; CompatPort = '10891'
+            AppSubnet = '10.255.19.0/24'; GatewaySubnet = '10.214.0.0/16'
+            BffGatewayIp = '10.214.0.10'
         }
     }
 }
@@ -549,14 +561,29 @@ function Assert-FreshSyntheticAttempt {
     if ((Get-V18TableCount) -ne 0) { Stop-V18SyntheticMigration 'resume_empty_bootstrap_database_not_empty' }
 }
 
+function Get-V18ServiceRecord([string]$Service) {
+    if ($Service -notmatch '^[a-z0-9-]+$') { Stop-V18SyntheticMigration 'service_name_invalid' }
+    # Docker Compose can prepend benign progress/status records around its
+    # JSON service line after a Desktop cold start.  Only a unique parsed
+    # record for the requested fixed service is authoritative; unrelated or
+    # non-JSON stdout is ignored rather than turning a healthy service into an
+    # unbounded wait.
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in @(Invoke-V18Compose @('ps','--format','json',$Service) -Capture)) {
+        try {
+            $candidate = ([string]$line | ConvertFrom-Json -ErrorAction Stop)
+            if ([string]$candidate.Service -eq $Service) { [void]$records.Add($candidate) }
+        } catch { }
+    }
+    if ($records.Count -eq 1) { return $records[0] }
+    return $null
+}
+
 function Wait-V18Service([string]$Service, [string]$Expected = 'healthy', [int]$Seconds = 180) {
     for ($i = 0; $i -lt $Seconds; ++$i) {
-        $lines = @(Invoke-V18Compose @('ps','--format','json',$Service) -Capture)
-        if ($lines.Count -eq 1) {
-            try {
-                $item = $lines[0] | ConvertFrom-Json -ErrorAction Stop
-                if ([string]$item.Health -eq $Expected -or ([string]$item.State -eq $Expected)) { return }
-            } catch { }
+        $item = Get-V18ServiceRecord $Service
+        if ($null -ne $item) {
+            if ([string]$item.Health -eq $Expected -or ([string]$item.State -eq $Expected)) { return }
         }
         Start-Sleep -Seconds 1
     }
