@@ -123,7 +123,11 @@ function Invoke-Piwigo([string[]]$Arguments, [string]$Code) {
     }
     finally { $ErrorActionPreference = $previous }
     if ($exit -ne 0) { Stop-V4OwnerFixtureBrowser $Code }
-    return [string]::Join("`n", ($lines | ForEach-Object { [string]$_ }))
+    # Docker commands such as `compose cp` legitimately emit no stdout.
+    # Passing PowerShell's $null pipeline result to String.Join selects an
+    # overload that throws ArgumentNullException before the bounded workflow
+    # can continue, so always provide a real (possibly empty) string array.
+    return [string]::Join("`n", [string[]]@($lines | ForEach-Object { [string]$_ }))
 }
 
 function Set-ExistingFixturePasswords([string]$Password, [string]$Run, [string]$HostPasswordPath, [string]$Code) {
