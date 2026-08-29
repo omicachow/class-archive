@@ -97,7 +97,9 @@ try {
 }
 if ([string]::IsNullOrWhiteSpace($result)) { throw 'v4_chrome_qa_result_missing' }
 Write-Output $result
-Write-Output ('V4_CHROME_SCREENSHOTS=' + $screenshotDir)
+# Screenshots remain in the ignored run directory, but the runner transcript
+# is intentionally ASCII-only. It is later narrowed into a head-bound safe
+# attestation and must never contain a workstation-private path.
 # This must remain the terminal runner record: it proves the success result
 # survived finally cleanup of the dedicated Chrome profile.
 Write-Output 'V4_CHROME_QA_COMPLETE=PASS'

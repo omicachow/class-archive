@@ -115,6 +115,8 @@ Assert-True ($wrapper.Contains('check-ignore --quiet --no-index') -and $wrapper.
 Assert-True ($wrapper.Contains('Assert-ClassArchiveOwnerOnlyFileAcl')) 'v4_chrome_credential_acl_gate_missing'
 Assert-True ($wrapper.Contains("CLASS_ARCHIVE_V4_PIWIGO_ORIGIN = 'http://127.0.0.1:8090/'") -and $wrapper.Contains("CLASS_ARCHIVE_V4_PHOTO_ORIGIN = 'http://127.0.0.1:8091/'")) 'v4_chrome_wrapper_synthetic_origin_missing'
 Assert-True ($wrapper.Contains("channel=chrome chrome_product=chrome chrome_version=[0-9.]+")) 'v4_chrome_bounded_wrapper_output_missing'
+$mainPathOutput = 'Write-Output (' + "'V4_CHROME_SCREENSHOTS='" + ' + $screenshotDir)'
+Assert-True (-not $wrapper.Contains($mainPathOutput)) 'v4_chrome_wrapper_path_output_forbidden'
 Assert-True ($wrapper.Contains('Remove-Item -LiteralPath $userDataRoot -Recurse -Force') -and $wrapper.Contains('ReparsePoint')) 'v4_chrome_ephemeral_profile_cleanup_missing'
 Assert-True ($wrapper.Contains('v4_chrome_profile_cleanup_boundary') -and $wrapper.Contains('v4_chrome_profile_cleanup_failed') -and $wrapper.Contains('-ErrorAction Stop')) 'v4_chrome_profile_cleanup_must_fail_closed'
 Assert-True ($wrapper.Contains('V4_CHROME_QA_COMPLETE=PASS')) 'v4_chrome_post_finally_completion_missing'

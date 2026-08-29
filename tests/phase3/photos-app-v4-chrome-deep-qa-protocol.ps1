@@ -101,6 +101,8 @@ foreach ($forbidden in @('unlink(', 'delete_elements(', '8191', '8190', '0.0.0.0
 Assert-True ($wrapper.Contains('[switch]$RunMediaGuardRegression') -and $wrapper.Contains("'V4_CHROME_DEEP_MEDIAGUARD=PASS source=dev.ps1:test-phase0+test-phase1'")) 'v4_chrome_deep_mediaguard_opt_in_missing'
 Assert-True ($wrapper.Contains('infra\scripts\dev.ps1') -and $wrapper.Contains('test-phase0') -and $wrapper.Contains('MEDIA_GUARD_HTTP=PASS') -and $wrapper.Contains('test-phase1') -and $wrapper.Contains('CLASS_IDENTITY_HTTP=PASS')) 'v4_chrome_deep_mediaguard_and_freeze_boundary_missing'
 Assert-True ($wrapper.Contains('V4_CHROME_DEEP_COMPLETE=PASS mediaguard=PASS') -and $wrapper.Contains('V4_CHROME_DEEP_COMPLETE=PASS mediaguard=SKIPPED')) 'v4_chrome_deep_post_finally_completion_missing'
+$deepPathOutput = 'Write-Output (' + "'V4_CHROME_DEEP_SCREENSHOTS='" + ' + $screenshotDir)'
+Assert-True (-not $wrapper.Contains($deepPathOutput)) 'v4_chrome_deep_path_output_forbidden'
 $deepFinally = $wrapper.LastIndexOf('finally {', [StringComparison]::Ordinal)
 $deepCompletion = $wrapper.IndexOf("Write-Output 'V4_CHROME_DEEP_COMPLETE=PASS mediaguard=PASS'", [StringComparison]::Ordinal)
 Assert-True ($deepFinally -ge 0 -and $deepCompletion -gt $deepFinally) 'v4_chrome_deep_completion_must_follow_finally'

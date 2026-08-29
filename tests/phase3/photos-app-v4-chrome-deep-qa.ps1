@@ -228,7 +228,8 @@ finally {
 }
 if ([string]::IsNullOrWhiteSpace($result)) { throw 'v4_chrome_deep_result_missing' }
 Write-Output $result
-Write-Output ('V4_CHROME_DEEP_SCREENSHOTS=' + $screenshotDir)
+# Keep screenshots in their ignored local directory without emitting its
+# workstation path into a transcript that later becomes safe evidence.
 if ($RunMediaGuardRegression) {
     if ($mediaResult -cne 'V4_CHROME_DEEP_MEDIAGUARD=PASS source=dev.ps1:test-phase0+test-phase1') { throw 'v4_chrome_deep_mediaguard_result_missing' }
     Write-Output $mediaResult
