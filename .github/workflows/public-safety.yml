@@ -20,20 +20,23 @@ jobs:
         env:
           PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
           PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
+          PUBLIC_BOUNDARY_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           & ./infra/scripts/verify-public-boundary.ps1 -Mode Head
 
-          $base = ''
-          if ($env:PUBLIC_BOUNDARY_PR_BASE -match '^[0-9a-fA-F]{40,64}$') {
-            $base = $env:PUBLIC_BOUNDARY_PR_BASE
-          } elseif ($env:PUBLIC_BOUNDARY_PUSH_BASE -match '^[0-9a-fA-F]{40,64}$' -and $env:PUBLIC_BOUNDARY_PUSH_BASE -notmatch '^0+$') {
-            $base = $env:PUBLIC_BOUNDARY_PUSH_BASE
+          $baseOutput = @(& ./infra/scripts/resolve-public-boundary-base.ps1 `
+            -PullRequestBase $env:PUBLIC_BOUNDARY_PR_BASE `
+            -PushBase $env:PUBLIC_BOUNDARY_PUSH_BASE `
+            -DefaultBranch $env:PUBLIC_BOUNDARY_DEFAULT_BRANCH)
+          $baseCode = $LASTEXITCODE
+          if ($baseCode -ne 0) {
+            $baseOutput | Write-Output
+            throw 'public_boundary_base_resolution_failed'
           }
-          if ($base -ne '') {
-            & ./infra/scripts/verify-public-boundary.ps1 -Mode Outgoing -BaseRef $base
-          } else {
-            Write-Output 'PUBLIC_BOUNDARY_OUTGOING=SKIP reason=base_unavailable'
+          if ($baseOutput.Count -ne 1 -or [string]$baseOutput[0] -notmatch '^[0-9a-f]{40,64}$') {
+            throw 'public_boundary_base_shape_invalid'
           }
+          & ./infra/scripts/verify-public-boundary.ps1 -Mode Outgoing -BaseRef ([string]$baseOutput[0])
 
       - name: Verify public boundary protocol
         shell: pwsh
@@ -106,6 +109,7 @@ jobs:
         env:
           PUBLIC_BOUNDARY_PR_BASE: ${{ github.event.pull_request.base.sha }}
           PUBLIC_BOUNDARY_PUSH_BASE: ${{ github.event.before }}
+          PUBLIC_BOUNDARY_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           gh_prefix="gh""o_"
@@ -113,17 +117,20 @@ jobs:
           key_marker="BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY"
           aws_prefix="AKIA[0-9A-Z]{16}"
           pattern="${gh_prefix}[A-Za-z0-9]{20,}|${pat_prefix}[A-Za-z0-9_]{20,}|${aws_prefix}|${key_marker}"
-          base=""
-          if [[ "${PUBLIC_BOUNDARY_PR_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
-            base="$PUBLIC_BOUNDARY_PR_BASE"
-          elif [[ "${PUBLIC_BOUNDARY_PUSH_BASE:-}" =~ ^[0-9a-fA-F]{40,64}$ ]] && [[ ! "$PUBLIC_BOUNDARY_PUSH_BASE" =~ ^0+$ ]]; then
-            base="$PUBLIC_BOUNDARY_PUSH_BASE"
+          base_output=""
+          if ! base_output="$(pwsh -NoProfile -NonInteractive -File ./infra/scripts/resolve-public-boundary-base.ps1 \
+            -PullRequestBase "${PUBLIC_BOUNDARY_PR_BASE:-}" \
+            -PushBase "${PUBLIC_BOUNDARY_PUSH_BASE:-}" \
+            -DefaultBranch "${PUBLIC_BOUNDARY_DEFAULT_BRANCH:-}")"; then
+            printf '%s\n' "$base_output" >&2
+            exit 1
           fi
-          if [[ -n "$base" ]]; then
-            mapfile -t commits < <(git rev-list --reverse "$base..HEAD")
-          else
-            commits=(HEAD)
+          if [[ ! "$base_output" =~ ^[0-9a-f]{40,64}$ ]]; then
+            printf 'PUBLIC_CREDENTIAL_GATE=FAIL reason=base_shape_invalid count=1\n' >&2
+            exit 1
           fi
+          base="$base_output"
+          mapfile -t commits < <(git rev-list --reverse "$base..HEAD")
           contaminated=0
           for commit in "${commits[@]}"; do
             if git grep -q -I -E "$pattern" "$commit" -- .; then

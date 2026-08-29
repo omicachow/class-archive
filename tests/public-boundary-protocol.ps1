@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gate = Join-Path $projectRoot 'infra\scripts\verify-public-boundary.ps1'
+$baseResolver = Join-Path $projectRoot 'infra\scripts\resolve-public-boundary-base.ps1'
+$workflowPath = Join-Path $projectRoot '.github\workflows\public-safety.yml'
 $shell = (Get-Process -Id $PID).Path
 $workParent = Join-Path $projectRoot '.codex-work\public-boundary-protocol'
 $runRoot = Join-Path $workParent ([Guid]::NewGuid().ToString('N'))
@@ -74,6 +76,45 @@ function Invoke-BoundaryGate([string]$Repository, [string]$Mode, [string]$BaseRe
     }
 }
 
+function Invoke-BaseResolver(
+    [string]$Repository,
+    [string]$PullRequestBase,
+    [string]$PushBase,
+    [string]$DefaultBranch
+) {
+    $arguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $baseResolver,
+        '-RepositoryRoot', $Repository,
+        '-PullRequestBase', $PullRequestBase,
+        '-PushBase', $PushBase,
+        '-DefaultBranch', $DefaultBranch
+    )
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $shell @arguments 2>$null)
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return [pscustomobject]@{
+        ExitCode = $code
+        Output = (($lines | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    }
+}
+
+function Assert-ResolverPass($Result, [string]$ExpectedBase) {
+    Assert-Protocol ($Result.ExitCode -eq 0) 'protocol_resolver_expected_pass'
+    Assert-Protocol ($Result.Output -ceq $ExpectedBase) 'protocol_resolver_base_mismatch'
+    Assert-Protocol ($Result.Output -match '^[0-9a-f]{40,64}$') 'protocol_resolver_output_invalid'
+}
+
+function Assert-ResolverFail($Result, [string]$Reason) {
+    Assert-Protocol ($Result.ExitCode -ne 0) 'protocol_resolver_expected_failure'
+    Assert-Protocol ($Result.Output -ceq ('PUBLIC_BOUNDARY_BASE=FAIL reason=' + $Reason)) 'protocol_resolver_failure_invalid'
+    Assert-Protocol (@($Result.Output -split "`n").Count -eq 1) 'protocol_resolver_failure_was_not_single_line'
+}
+
 function Assert-Pass($Result, [string]$Mode) {
     Assert-Protocol ($Result.ExitCode -eq 0) 'protocol_expected_pass'
     Assert-Protocol ($Result.Output -match ('^PUBLIC_BOUNDARY=PASS mode=' + $Mode.ToUpperInvariant() + ' commits=[0-9]+ blobs=[0-9]+$')) 'protocol_pass_output_invalid'
@@ -88,7 +129,42 @@ function Assert-Fail($Result, [string]$Reason, [string]$PrivateMarker) {
 
 try {
     if (!(Test-Path -LiteralPath $gate -PathType Leaf)) { throw 'protocol_gate_missing' }
+    if (!(Test-Path -LiteralPath $baseResolver -PathType Leaf)) { throw 'protocol_base_resolver_missing' }
+    if (!(Test-Path -LiteralPath $workflowPath -PathType Leaf)) { throw 'protocol_workflow_missing' }
     [void](New-Item -ItemType Directory -Path $runRoot -Force)
+
+    # A new branch push has an all-zero event base.  The resolver must use the
+    # merge-base with the exact validated origin/default-branch commit, not the
+    # default tip itself and never a HEAD-only fallback.
+    $newBranch = New-TestRepository 'new-branch-fallback'
+    $newBranchBase = Get-TestGitValue $newBranch @('rev-parse', 'HEAD')
+    [IO.File]::WriteAllText((Join-Path $newBranch 'default-change.md'), "synthetic default branch change`n", [Text.UTF8Encoding]::new($false))
+    Invoke-TestGit $newBranch @('add', '--', 'default-change.md')
+    Invoke-TestGit $newBranch @('commit', '-q', '-m', 'synthetic default branch change')
+    $defaultTip = Get-TestGitValue $newBranch @('rev-parse', 'HEAD')
+    Invoke-TestGit $newBranch @('update-ref', 'refs/remotes/origin/main', $defaultTip)
+    Invoke-TestGit $newBranch @('checkout', '-q', '-b', 'synthetic-feature', $newBranchBase)
+    [IO.File]::WriteAllText((Join-Path $newBranch 'feature-change.md'), "synthetic feature branch change`n", [Text.UTF8Encoding]::new($false))
+    Invoke-TestGit $newBranch @('add', '--', 'feature-change.md')
+    Invoke-TestGit $newBranch @('commit', '-q', '-m', 'synthetic feature branch change')
+    Assert-ResolverPass (Invoke-BaseResolver $newBranch '' ('0' * 40) 'main') $newBranchBase
+    Assert-ResolverPass (Invoke-BaseResolver $newBranch '' '' 'main') $newBranchBase
+    Assert-ResolverPass (Invoke-BaseResolver $newBranch $newBranchBase '' 'invalid..unused') $newBranchBase
+    Assert-ResolverFail (Invoke-BaseResolver $newBranch '' 'not-a-commit' 'main') 'push_base_invalid'
+    Assert-ResolverFail (Invoke-BaseResolver $newBranch '' ('0' * 40) 'invalid..branch') 'default_branch_invalid'
+
+    $missingDefault = New-TestRepository 'missing-default-ref'
+    Assert-ResolverFail (Invoke-BaseResolver $missingDefault '' ('0' * 40) 'main') 'default_branch_commit_unavailable'
+
+    # Both workflow consumers must use the same resolver.  In particular the
+    # initial-push path may no longer emit SKIP or reduce credential scanning to
+    # the final HEAD tree.
+    $workflow = [IO.File]::ReadAllText($workflowPath)
+    Assert-Protocol (([regex]::Matches($workflow, [regex]::Escape('${{ github.event.repository.default_branch }}'))).Count -eq 2) 'protocol_default_branch_env_missing'
+    Assert-Protocol (([regex]::Matches($workflow, 'resolve-public-boundary-base\.ps1')).Count -eq 2) 'protocol_base_resolver_not_shared'
+    Assert-Protocol (!$workflow.Contains('PUBLIC_BOUNDARY_OUTGOING=SKIP')) 'protocol_outgoing_skip_remains'
+    Assert-Protocol (!$workflow.Contains('commits=(HEAD)')) 'protocol_credential_head_fallback_remains'
+    Assert-Protocol ($workflow.Contains('git rev-list --reverse "$base..HEAD"')) 'protocol_credential_outgoing_range_missing'
 
     $safe = New-TestRepository 'safe-index'
     Assert-Pass (Invoke-BoundaryGate $safe 'Index') 'Index'
