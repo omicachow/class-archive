@@ -37,8 +37,14 @@ function Stop-V16ToV18([string]$Code) {
 }
 function Get-FileSha256([string]$Path) {
     try {
-        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
-        $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try { $bytes = $algorithm.ComputeHash($stream) }
+            finally { $algorithm.Dispose() }
+        }
+        finally { $stream.Dispose() }
+        $hash = [BitConverter]::ToString($bytes).Replace('-','')
     }
     catch {
         Stop-V16ToV18 'file_hash_runtime_failed'
@@ -284,7 +290,7 @@ function Invoke-DirectV16ToV18ProofGate {
         $exit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prior }
     if ($exit -ne 0) { Stop-V16ToV18 'direct_runtime_proof_gate_invalid' }
-    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt20 media=NOT_MOUNTED$'
+    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt21 media=NOT_MOUNTED$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1) { Stop-V16ToV18 'direct_runtime_proof_gate_evidence_invalid' }
     $match = [regex]::Match($rows[0],$pattern)

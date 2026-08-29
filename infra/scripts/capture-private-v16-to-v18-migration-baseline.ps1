@@ -55,8 +55,14 @@ function Stop-V16ToV18Baseline([string]$Code) {
 
 function Get-FileSha256([string]$Path) {
     try {
-        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
-        $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try { $bytes = $algorithm.ComputeHash($stream) }
+            finally { $algorithm.Dispose() }
+        }
+        finally { $stream.Dispose() }
+        $hash = [BitConverter]::ToString($bytes).Replace('-','')
     }
     catch {
         Stop-V16ToV18Baseline 'file_hash_runtime_failed'

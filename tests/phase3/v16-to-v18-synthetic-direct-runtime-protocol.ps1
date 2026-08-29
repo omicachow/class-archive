@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt20 orchestration layer. It opens
+# Static-only contract for the attempt21 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -45,7 +45,7 @@ $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt20'") -and $runner.Contains("`$httpPort = '10490'") -and $runner.Contains("`$compatPort = '10491'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt20'")) 'direct_runtime_attempt20_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt21'") -and $runner.Contains("`$httpPort = '10590'") -and $runner.Contains("`$compatPort = '10591'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt21'")) 'direct_runtime_attempt21_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'

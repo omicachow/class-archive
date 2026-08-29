@@ -97,7 +97,7 @@ Assert-True ($adapter.Contains('Assert-SourceBaseline $plan.Baseline; Assert-Sna
 # alone.  Snapshot binds an actual isolated V16 -> V18 runtime attestation to
 # the exact commit, then every later plan read re-verifies that binding before
 # the owner migration can proceed.
-Assert-True ($adapter.Contains("'attest-v16-to-v18-synthetic-direct-runtime.ps1'") -and $adapter.Contains('function Invoke-DirectV16ToV18ProofGate') -and $adapter.Contains("-Action verify") -and $adapter.Contains('attempt=attempt20') -and $adapter.Contains('direct_runtime_proof_gate_missing') -and $adapter.Contains('direct_runtime_proof_gate_head_stale')) 'private_v16_to_v18_direct_runtime_gate_invocation_missing'
+Assert-True ($adapter.Contains("'attest-v16-to-v18-synthetic-direct-runtime.ps1'") -and $adapter.Contains('function Invoke-DirectV16ToV18ProofGate') -and $adapter.Contains("-Action verify") -and $adapter.Contains('attempt=attempt21') -and $adapter.Contains('direct_runtime_proof_gate_missing') -and $adapter.Contains('direct_runtime_proof_gate_head_stale')) 'private_v16_to_v18_direct_runtime_gate_invocation_missing'
 Assert-True ($adapter.Contains('$directProof=Invoke-DirectV16ToV18ProofGate; Assert-OwnerRuntime; Assert-SourceV16') -and $adapter.Contains('$plan=Write-Plan $baseline $snapshot $gate $directProof')) 'private_v16_to_v18_snapshot_direct_runtime_gate_order_missing'
 Assert-True ($adapter.Contains('direct_v16_to_v18_proof=[ordered]@{commit=$DirectProof.Commit;source_digest=$DirectProof.SourceDigest;proof_sha256=$DirectProof.ProofSha256}') -and $adapter.Contains('migration_plan_direct_runtime_proof_stale') -and $adapter.Contains('$currentDirectProof = Invoke-DirectV16ToV18ProofGate')) 'private_v16_to_v18_plan_direct_runtime_binding_missing'
 $privateDriveMarker = ([string][char]77) + ':' + [char]92
@@ -113,7 +113,7 @@ Assert-True ($helper.Contains('OWNER_V16_TO_V18_NUMERIC_BASELINE')) 'private_v16
 Assert-True ($helper.Contains('owner-v16-to-v18-baseline-') -and $helper.Contains("[0-9]{8}T[0-9]{6}Z")) 'private_v16_to_v18_leaf_pattern_missing'
 Assert-True ($helper.Contains('COUNTS_AND_OPAQUE_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_OR_SECRETS')) 'private_v16_to_v18_privacy_contract_missing'
 Assert-True ($helper.Contains('check-ignore --quiet --no-index') -and $helper.Contains('output_directory_not_ignored') -and $helper.Contains('baseline_already_exists')) 'private_v16_to_v18_ignored_immutable_boundary_missing'
-Assert-True ($helper.Contains('[string]$ExpectedSha256') -and $helper.Contains('baseline_sha256_mismatch') -and $helper.Contains('Get-FileHash')) 'private_v16_to_v18_sha256_binding_missing'
+Assert-True ($helper.Contains('[string]$ExpectedSha256') -and $helper.Contains('baseline_sha256_mismatch') -and $helper.Contains('[Security.Cryptography.SHA256]::Create()')) 'private_v16_to_v18_sha256_binding_missing'
 
 # Both database probes accept only V16/V18. The source and compare actions
 # then narrow those states further: V16 for capture/verify, V18 for compare.

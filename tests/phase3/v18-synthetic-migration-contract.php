@@ -41,7 +41,7 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
@@ -66,12 +66,15 @@ $assert(str_contains($source['runner'], "'attempt20'") && str_contains($source['
     && str_contains($source['runner'], "'10.255.15.0/24'") && str_contains($source['runner'], "'10.222.0.0/16'")
     && str_contains($source['runner'], "'10.222.0.10'") && str_contains($source['runner'], 'attempt20 is')
     && str_contains($source['runner'], 'separated module-import and hash-command diagnostics'), 'attempt20_direct_v16_to_v18_identity_not_fixed');
-$assert(str_contains($source['runner'], 'function Get-FileSha256') && str_contains($source['runner'], 'Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop')
-    && str_contains($source['runner'], 'Microsoft.PowerShell.Utility\\Get-FileHash')
-    && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_module_import_failed'")
-    && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_command_failed'")
+$assert(str_contains($source['runner'], "'attempt21'") && str_contains($source['runner'], "'10590'") && str_contains($source['runner'], "'10591'")
+    && str_contains($source['runner'], "'10.255.16.0/24'") && str_contains($source['runner'], "'10.220.0.0/16'")
+    && str_contains($source['runner'], "'10.220.0.10'") && str_contains($source['runner'], 'attempt21 is')
+    && str_contains($source['runner'], '.NET BCL stream hashing'), 'attempt21_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], 'function Get-FileSha256') && str_contains($source['runner'], '[Security.Cryptography.SHA256]::Create()')
+    && str_contains($source['runner'], '[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)')
+    && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_runtime_failed'")
     && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_result_invalid'")
-    && !str_contains($source['runner'], 'file_hash_command_unavailable') && !str_contains($source['runner'], 'file_hash_runtime_failed'), 'explicit_file_hash_module_gate_missing');
+    && !str_contains($source['runner'], 'file_hash_command_unavailable') && !str_contains($source['runner'], 'Microsoft.PowerShell.Utility\\Get-FileHash'), 'bcl_file_hash_gate_missing');
 $assert(str_contains($source['runner'], '52ff3a7ba91155efc7bed1572e2b1740973e484c')
     && str_contains($source['runner'], 'aee8ced818747a8f81c816ef5aef112005af280b694ef3bdf8f7ac453e6f7413')
     && str_contains($source['runner'], 'historical_schema_extract_failed'), 'historical_v17_source_not_pinned');
