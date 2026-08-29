@@ -27,7 +27,7 @@ $parseErrors = $null
 Assert-True ($parseErrors.Count -eq 0) 'direct_attestation_parse_error'
 
 $source = [IO.File]::ReadAllText($attestationPath)
-Assert-True ($source.Contains("[ValidateSet('create', 'verify', 'status')]") -and $source.Contains("`$attempt = 'attempt21'") -and $source.Contains("`$httpPort = '10590'") -and $source.Contains("`$compatPort = '10591'")) 'direct_attestation_surface_or_attempt_invalid'
+Assert-True ($source.Contains("[ValidateSet('create', 'verify', 'status')]") -and $source.Contains("`$attempt = 'attempt22'") -and $source.Contains("`$httpPort = '10690'") -and $source.Contains("`$compatPort = '10691'")) 'direct_attestation_surface_or_attempt_invalid'
 Assert-True ($source.Contains("'SYNTHETIC_DIRECT_V16_TO_V18_RUNTIME'") -and $source.Contains("'CURRENT_SOURCE_DIRECT_17_18'") -and $source.Contains("'SYNTHETIC_V4_MIGRATION'")) 'direct_attestation_identity_missing'
 Assert-True ($source.Contains('Get-Head') -and $source.Contains('git -C $projectRoot rev-parse --verify HEAD') -and $source.Contains('source_worktree_not_head_bound') -and $source.Contains('source_index_not_head_bound')) 'direct_attestation_head_clean_boundary_missing'
 Assert-True ($source.Contains('Get-SourceClosure') -and $source.Contains('source_digest') -and $source.Contains('[Security.Cryptography.SHA256]::Create()') -and $source.Contains('plugins/ClassIdentity/src/Schema.php') -and $source.Contains('v16-to-v18-synthetic-direct-proof.php') -and $source.Contains('v16-to-v18-synthetic-direct-runtime.ps1') -and $source.Contains('create-pre-migration-db-snapshot.sh') -and $source.Contains('restore-v4-synthetic-pre-migration-db.sh')) 'direct_attestation_source_closure_missing'

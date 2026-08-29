@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt21 orchestration layer. It opens
+# Static-only contract for the attempt22 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -45,7 +45,7 @@ $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt21'") -and $runner.Contains("`$httpPort = '10590'") -and $runner.Contains("`$compatPort = '10591'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt21'")) 'direct_runtime_attempt21_identity_not_fixed'
+Assert-True ($runner.Contains("`$attempt = 'attempt22'") -and $runner.Contains("`$httpPort = '10690'") -and $runner.Contains("`$compatPort = '10691'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt22'")) 'direct_runtime_attempt22_identity_not_fixed'
 Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
@@ -64,6 +64,8 @@ $composePipeIndex = $directComposeFunction.IndexOf('Assert-DockerDesktopEnginePi
 $composeWslPathIndex = $directComposeFunction.IndexOf('Get-WslPath', [StringComparison]::Ordinal)
 Assert-True ($basePipeIndex -ge 0 -and $baseNativeIndex -gt $basePipeIndex) 'direct_runtime_engine_pipe_must_precede_base_runner'
 Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeIndex) 'direct_runtime_engine_pipe_must_precede_direct_compose'
+$wslPathFunction = Slice-Function $runner 'function Get-WslPath' 'function Assert-DockerDesktopEnginePipe' 'direct_runtime_utf8_wsl_path_function_boundary_missing'
+Assert-True ($wslPathFunction.Contains('StandardOutputEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('StandardErrorEncoding = [Text.UTF8Encoding]::new($false)') -and $wslPathFunction.Contains('wsl_path_argument_invalid') -and -not $wslPathFunction.Contains('Invoke-NativeCapture $wsl')) 'direct_runtime_utf8_wsl_path_contract_missing'
 
 # Initialisation/restore are delegated to the existing guarded V16 DB-only
 # lab runner.  The direct orchestrator cannot invoke historical bootstrap or

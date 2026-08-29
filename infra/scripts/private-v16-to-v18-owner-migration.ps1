@@ -65,7 +65,27 @@ function Invoke-Wsl([string[]]$Args, [string]$Code, [switch]$Capture) {
 function Get-WslPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { Stop-V16ToV18 'env_file_missing' }
-    $result = Invoke-Wsl @('-d','Ubuntu','--exec','wslpath','-a',$full) 'wsl_path_invalid' -Capture
+    if ($full -match '[\s\"]' -or $full.Contains("`0")) { Stop-V16ToV18 'wsl_path_invalid' }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = "$env:SystemRoot\System32\wsl.exe"
+    $info.Arguments = (@('-d','Ubuntu','--exec','wslpath','-a',$full) -join ' ')
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V16ToV18 'wsl_path_invalid' }
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exit = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+    if ($exit -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) { Stop-V16ToV18 'wsl_path_invalid' }
+    $result = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
     if ($result.Count -ne 1 -or $result[0] -notmatch '^/mnt/[a-z]/') { Stop-V16ToV18 'wsl_path_invalid' }
     return [string]$result[0]
 }
@@ -290,7 +310,7 @@ function Invoke-DirectV16ToV18ProofGate {
         $exit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prior }
     if ($exit -ne 0) { Stop-V16ToV18 'direct_runtime_proof_gate_invalid' }
-    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt21 media=NOT_MOUNTED$'
+    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt22 media=NOT_MOUNTED$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1) { Stop-V16ToV18 'direct_runtime_proof_gate_evidence_invalid' }
     $match = [regex]::Match($rows[0],$pattern)

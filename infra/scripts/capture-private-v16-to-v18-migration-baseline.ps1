@@ -86,7 +86,27 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
 function Get-WslPath([string]$WindowsPath) {
     $full = [IO.Path]::GetFullPath($WindowsPath)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { Stop-V16ToV18Baseline 'immich_env_missing' }
-    $lines = Invoke-WslCapture @('-d','Ubuntu','--exec','wslpath','-a',$full) 'immich_env_path_invalid'
+    if ($full -match '[\s\"]' -or $full.Contains("`0")) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = "$env:SystemRoot\System32\wsl.exe"
+    $info.Arguments = (@('-d','Ubuntu','--exec','wslpath','-a',$full) -join ' ')
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exit = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+    if ($exit -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
+    $lines = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
     if ($lines.Count -ne 1 -or $lines[0] -notmatch '^/mnt/[a-z]/') { Stop-V16ToV18Baseline 'immich_env_path_invalid' }
     return [string]$lines[0]
 }

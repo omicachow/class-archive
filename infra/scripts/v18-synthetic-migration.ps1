@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -178,6 +178,16 @@ $attemptSpec = switch ($Attempt) {
             BffGatewayIp = '10.220.0.10'
         }
     }
+    'attempt22' {
+        # attempt21 is preserved after proving that WSL's UTF-8 wslpath output
+        # was decoded as the host ANSI code page. attempt22 is the next direct
+        # laboratory with explicit UTF-8 native-output decoding.
+        @{
+            HttpPort = '10690'; CompatPort = '10691'
+            AppSubnet = '10.255.17.0/24'; GatewaySubnet = '10.218.0.0/16'
+            BffGatewayIp = '10.218.0.10'
+        }
+    }
 }
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $Attempt)
 $configRoot = Join-Path $sandboxRoot 'config'
@@ -242,8 +252,28 @@ function Assert-IgnoredUntracked([string]$Path, [bool]$Directory) {
 
 function Get-WslPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
-    $result = @(& $wsl -d Ubuntu --exec wslpath -a $full 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) { Stop-V18SyntheticMigration 'wsl_path_conversion_failed' }
+    if ($full -match '[\s\"]' -or $full.Contains("`0")) { Stop-V18SyntheticMigration 'wsl_path_argument_invalid' }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $wsl
+    $info.Arguments = (@('-d','Ubuntu','--exec','wslpath','-a',$full) -join ' ')
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { Stop-V18SyntheticMigration 'wsl_path_conversion_start_failed' }
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+    if ($exitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr)) { Stop-V18SyntheticMigration 'wsl_path_conversion_failed' }
+    $result = @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
+    if ($result.Count -ne 1) { Stop-V18SyntheticMigration 'wsl_path_conversion_failed' }
     $value = ([string]$result[0]).Trim()
     if ($value -notmatch '^/mnt/[a-z]/' -or $value.Contains('..') -or $value.Contains('//')) { Stop-V18SyntheticMigration 'wsl_path_invalid' }
     return $value
