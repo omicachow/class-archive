@@ -90,7 +90,7 @@ Assert-True ($validator.Contains('OPAQUE_LEAF_NAMES_AND_HASHES_ONLY_NO_PATHS_IDS
 # remains reachable from current HEAD and its schema bytes still equal both the
 # plan SHA-256 and current checked-out Schema.php bytes.
 Assert-True ($validator.Contains("merge-base','--is-ancestor") -and $validator.Contains('historical_head_not_current_ancestor') -and $validator.Contains("cat-file','-e")) 'completed_v16_to_v18_historical_ancestor_guard_missing'
-Assert-True ($validator.Contains('$gitCandidates = @(Get-Command git.exe') -and $validator.Contains('$gitCandidates[0].Source') -and $validator.Contains('-Executable $gitPath')) 'completed_v16_to_v18_multiple_git_candidates_not_resolved'
+Assert-True ($validator.Contains("foreach (`$gitName in @('git.exe', 'git'))") -and $validator.Contains('Get-Command $gitName -CommandType Application -All') -and $validator.Contains('$gitCandidates[0].Source') -and $validator.Contains('-Executable $gitPath')) 'completed_v16_to_v18_multiple_git_candidates_not_resolved'
 Assert-True ($validator.Contains('function Assert-SchemaEquivalence') -and $validator.Contains('Get-HistoricalSchemaText') -and $validator.Contains('Get-TextSha256') -and $validator.Contains('historical_schema_current_sha_mismatch')) 'completed_v16_to_v18_schema_equivalence_guard_missing'
 Assert-True ($validator.Contains('CURRENT_VERSION\s*=\s*18') -and $validator.Contains('0017_photos_app_v4_collection_snapshots') -and $validator.Contains('0018_photos_app_v4_spotlight_rotation_state')) 'completed_v16_to_v18_schema_ledger_guard_missing'
 Assert-True ($validator.Contains('tracked_source_worktree_not_head_bound') -and $validator.Contains('tracked_source_index_not_head_bound')) 'completed_v16_to_v18_schema_checkout_binding_missing'

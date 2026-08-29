@@ -185,10 +185,16 @@ function Assert-ExactPropertySet([object]$Object, [string[]]$Expected, [string]$
 }
 
 function Invoke-Git([string[]]$Arguments, [string]$Code, [ValidateRange(1,120)][int]$TimeoutSeconds = 30) {
-    # Get-Command may return every git.exe found on PATH (for example both
+    # Get-Command may return every Git executable found on PATH (for example
     # Git's cmd/bin shims and a bundled runtime). Preserve PATH precedence,
-    # but bind exactly one leaf path to the bounded native-process helper.
-    $gitCandidates = @(Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue)
+    # but bind exactly one leaf path to the bounded native-process helper. The
+    # plain `git` fallback keeps this isolated wrapper testable on Linux Public
+    # Safety runners; the complete Owner validator remains Windows/WSL-only.
+    $gitCandidates = @(
+        foreach ($gitName in @('git.exe', 'git')) {
+            @(Get-Command $gitName -CommandType Application -All -ErrorAction SilentlyContinue)
+        }
+    )
     if ($gitCandidates.Count -lt 1) { Stop-CompletedOwnerV16ToV18 'git_executable_unavailable' }
     $gitPath = [string]$gitCandidates[0].Source
     if ([string]::IsNullOrWhiteSpace($gitPath) -or -not (Test-Path -LiteralPath $gitPath -PathType Leaf)) { Stop-CompletedOwnerV16ToV18 'git_executable_unavailable' }
