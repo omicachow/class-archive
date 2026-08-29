@@ -185,9 +185,14 @@ function Assert-ExactPropertySet([object]$Object, [string[]]$Expected, [string]$
 }
 
 function Invoke-Git([string[]]$Arguments, [string]$Code, [ValidateRange(1,120)][int]$TimeoutSeconds = 30) {
-    $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $git -or -not (Test-Path -LiteralPath $git.Source -PathType Leaf)) { Stop-CompletedOwnerV16ToV18 'git_executable_unavailable' }
-    try { $result = Invoke-ClassArchiveBoundedNative -Executable $git.Source -Arguments (@('-C', $projectRoot) + $Arguments) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $projectRoot }
+    # Get-Command may return every git.exe found on PATH (for example both
+    # Git's cmd/bin shims and a bundled runtime). Preserve PATH precedence,
+    # but bind exactly one leaf path to the bounded native-process helper.
+    $gitCandidates = @(Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue)
+    if ($gitCandidates.Count -lt 1) { Stop-CompletedOwnerV16ToV18 'git_executable_unavailable' }
+    $gitPath = [string]$gitCandidates[0].Source
+    if ([string]::IsNullOrWhiteSpace($gitPath) -or -not (Test-Path -LiteralPath $gitPath -PathType Leaf)) { Stop-CompletedOwnerV16ToV18 'git_executable_unavailable' }
+    try { $result = Invoke-ClassArchiveBoundedNative -Executable $gitPath -Arguments (@('-C', $projectRoot) + $Arguments) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $projectRoot }
     catch { Stop-CompletedOwnerV16ToV18 ($Code + '_start_failed') }
     if ($result.TimedOut -or $null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-CompletedOwnerV16ToV18 $Code }
     return $result

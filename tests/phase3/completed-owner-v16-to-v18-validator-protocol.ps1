@@ -1,15 +1,17 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the completed V16 -> V18 Owner validator. This test
-# reads tracked source text only: it starts no container, opens no Owner
-# database, reads no private plan/snapshot/baseline, and never accesses media.
+# Public-safe contract for the completed V16 -> V18 Owner validator. This test
+# reads tracked source text and starts one bounded, read-only local Git probe;
+# it starts no container, opens no Owner database, reads no private
+# plan/snapshot/baseline, and never accesses media.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $validatorPath = Join-Path $projectRoot 'infra\scripts\validate-completed-owner-v16-to-v18.ps1'
+$boundedNativePath = Join-Path $projectRoot 'infra\scripts\class-archive-bounded-native-process.ps1'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -84,11 +86,29 @@ Assert-True ($validator.Contains('OPAQUE_LEAF_NAMES_AND_HASHES_ONLY_NO_PATHS_IDS
 # remains reachable from current HEAD and its schema bytes still equal both the
 # plan SHA-256 and current checked-out Schema.php bytes.
 Assert-True ($validator.Contains("merge-base','--is-ancestor") -and $validator.Contains('historical_head_not_current_ancestor') -and $validator.Contains("cat-file','-e")) 'completed_v16_to_v18_historical_ancestor_guard_missing'
+Assert-True ($validator.Contains('$gitCandidates = @(Get-Command git.exe') -and $validator.Contains('$gitCandidates[0].Source') -and $validator.Contains('-Executable $gitPath')) 'completed_v16_to_v18_multiple_git_candidates_not_resolved'
 Assert-True ($validator.Contains('function Assert-SchemaEquivalence') -and $validator.Contains('Get-HistoricalSchemaText') -and $validator.Contains('Get-TextSha256') -and $validator.Contains('historical_schema_current_sha_mismatch')) 'completed_v16_to_v18_schema_equivalence_guard_missing'
 Assert-True ($validator.Contains('CURRENT_VERSION\s*=\s*18') -and $validator.Contains('0017_photos_app_v4_collection_snapshots') -and $validator.Contains('0018_photos_app_v4_spotlight_rotation_state')) 'completed_v16_to_v18_schema_ledger_guard_missing'
 Assert-True ($validator.Contains('tracked_source_worktree_not_head_bound') -and $validator.Contains('tracked_source_index_not_head_bound')) 'completed_v16_to_v18_schema_checkout_binding_missing'
 Assert-True ($validator.Contains('Test-StrictUtcRfc3339Value') -and $validator.Contains('[DateTimeKind]::Utc') -and $validator.Contains('[Globalization.CultureInfo]::InvariantCulture')) 'completed_v16_to_v18_utc_timestamp_contract_missing'
 Assert-True (-not $validator.Contains("[string](Get-Property `$plan 'created_at')")) 'completed_v16_to_v18_culture_sensitive_timestamp_cast_forbidden'
+
+# Exercise the validator's actual bounded Git wrapper. On developer machines
+# Get-Command can return several git.exe applications; the wrapper must select
+# one PATH-preferred leaf instead of passing a Source array to -Executable.
+Assert-True (Test-Path -LiteralPath $boundedNativePath -PathType Leaf) 'completed_v16_to_v18_bounded_native_helper_missing'
+. $boundedNativePath
+$gitFunctionAsts = @($validatorAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Invoke-Git'
+}, $true))
+Assert-True ($gitFunctionAsts.Count -eq 1) 'completed_v16_to_v18_git_wrapper_shape_invalid'
+Invoke-Expression ([string]$gitFunctionAsts[0].Extent.Text)
+function Stop-CompletedOwnerV16ToV18([string]$Code) { throw $Code }
+$gitProbe = Invoke-Git @('cat-file','-e','HEAD^{commit}') 'protocol_head_commit_unavailable'
+Assert-True (-not $gitProbe.TimedOut -and [int]$gitProbe.ExitCode -eq 0) 'completed_v16_to_v18_git_wrapper_runtime_failed'
+Assert-True ([string]::IsNullOrWhiteSpace([string]$gitProbe.Stdout) -and [string]::IsNullOrWhiteSpace([string]$gitProbe.Stderr)) 'completed_v16_to_v18_git_wrapper_runtime_output_unexpected'
 
 # All historical evidence classes are checked independently. A fresh V4 gate
 # is separately verified by the head-bound acceptance helper instead of reusing
