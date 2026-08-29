@@ -49,8 +49,12 @@ Assert-True (Test-StrictUtcRfc3339Value '2026-08-29T13:31:09Z') 'completed_v16_t
 Assert-True (Test-StrictUtcRfc3339Value '2026-08-29T13:31:09.1234567Z') 'completed_v16_to_v18_fractional_utc_timestamp_rejected'
 $utcDate = [DateTime]::SpecifyKind([DateTime]::new(2026, 8, 29, 13, 31, 9), [DateTimeKind]::Utc)
 Assert-True (Test-StrictUtcRfc3339Value $utcDate) 'completed_v16_to_v18_utc_datetime_rejected'
-$jsonUtcValue = (([pscustomobject]@{ created_at = '2026-08-29T13:31:09Z' } | ConvertTo-Json -Compress) | ConvertFrom-Json).created_at
+$jsonUtcValue = (([pscustomobject]@{ created_at_utc = '2026-08-29T13:31:09Z' } | ConvertTo-Json -Compress) | ConvertFrom-Json).created_at_utc
 Assert-True (Test-StrictUtcRfc3339Value $jsonUtcValue) 'completed_v16_to_v18_version_specific_json_utc_value_rejected'
+foreach ($nonUtcJsonTimestamp in @('2026-08-29T13:31:09+00:00','2026-08-29T13:31:09+08:00','2026-08-29T13:31:09')) {
+    $nonUtcJsonValue = (([pscustomobject]@{ created_at_utc = $nonUtcJsonTimestamp } | ConvertTo-Json -Compress) | ConvertFrom-Json).created_at_utc
+    Assert-True (-not (Test-StrictUtcRfc3339Value $nonUtcJsonValue)) 'completed_v16_to_v18_json_offset_or_unzoned_timestamp_accepted'
+}
 foreach ($invalidTime in @(
     '2026-02-30T13:31:09Z',
     '2026-08-29T24:00:00Z',
@@ -92,6 +96,9 @@ Assert-True ($validator.Contains('CURRENT_VERSION\s*=\s*18') -and $validator.Con
 Assert-True ($validator.Contains('tracked_source_worktree_not_head_bound') -and $validator.Contains('tracked_source_index_not_head_bound')) 'completed_v16_to_v18_schema_checkout_binding_missing'
 Assert-True ($validator.Contains('Test-StrictUtcRfc3339Value') -and $validator.Contains('[DateTimeKind]::Utc') -and $validator.Contains('[Globalization.CultureInfo]::InvariantCulture')) 'completed_v16_to_v18_utc_timestamp_contract_missing'
 Assert-True (-not $validator.Contains("[string](Get-Property `$plan 'created_at')")) 'completed_v16_to_v18_culture_sensitive_timestamp_cast_forbidden'
+$directProofReader = Slice-Function $validator 'function Read-HistoricalDirectProof' 'function Invoke-Wsl' 'completed_v16_to_v18_direct_proof_reader_slice_invalid'
+Assert-True ([regex]::Matches($directProofReader, 'Test-StrictUtcRfc3339Value \(Get-Property \$(?:attestation|proof) ''created_at_utc''\)').Count -eq 2) 'completed_v16_to_v18_direct_timestamps_not_strictly_validated'
+Assert-True (-not $directProofReader.Contains("[string](Get-Property `$attestation 'created_at_utc')") -and -not $directProofReader.Contains("[string](Get-Property `$proof 'created_at_utc')")) 'completed_v16_to_v18_direct_timestamp_culture_cast_forbidden'
 
 # Exercise the validator's actual bounded Git wrapper. On developer machines
 # Get-Command can return several git.exe applications; the wrapper must select

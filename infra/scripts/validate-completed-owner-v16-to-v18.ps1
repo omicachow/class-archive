@@ -359,7 +359,7 @@ function Read-HistoricalDirectProof([object]$Plan, [string]$HistoricalHead) {
     if ([int](Get-Property $attestation 'format') -ne 1 -or [string](Get-Property $attestation 'kind') -ne 'SYNTHETIC_DIRECT_V16_TO_V18_RUNTIME' -or
         [string](Get-Property $attestation 'result') -ne 'PASS' -or [string](Get-Property $attestation 'attempt') -ne 'attempt40' -or
         [string](Get-Property $attestation 'scope') -ne 'SYNTHETIC_V4_MIGRATION' -or [string](Get-Property $attestation 'ports') -ne '127.0.0.1:11804_11805' -or
-        [string](Get-Property $attestation 'created_at_utc') -notmatch '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z$' -or
+        -not (Test-StrictUtcRfc3339Value (Get-Property $attestation 'created_at_utc')) -or
         [string](Get-Property $attestation 'commit') -ne $commit -or [string](Get-Property $attestation 'source_digest') -ne $sourceDigest -or
         [string](Get-Property $attestation 'direct_proof_report_sha256') -ne $proofSha -or [string](Get-Property $attestation 'legacy_fingerprint') -notmatch '^[a-f0-9]{64}$') {
         Stop-CompletedOwnerV16ToV18 'historical_direct_attestation_contract_invalid'
@@ -376,7 +376,7 @@ function Read-HistoricalDirectProof([object]$Plan, [string]$HistoricalHead) {
     Assert-ExactPropertySet $proof @('format','attempt','scope','ports','created_at_utc','source_schema','target_schema','migration','source_commit','source_digest','legacy_fingerprint','first_migration','replay','verify','fail_closed','media') 'historical_direct_proof_property_set_invalid'
     if ([int](Get-Property $proof 'format') -ne 2 -or [string](Get-Property $proof 'attempt') -ne 'attempt40' -or
         [string](Get-Property $proof 'scope') -ne 'SYNTHETIC_V4_MIGRATION' -or [string](Get-Property $proof 'ports') -ne '127.0.0.1:11804_11805' -or
-        [string](Get-Property $proof 'created_at_utc') -notmatch '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z$' -or
+        -not (Test-StrictUtcRfc3339Value (Get-Property $proof 'created_at_utc')) -or
         [int](Get-Property $proof 'source_schema') -ne 16 -or [int](Get-Property $proof 'target_schema') -ne 18 -or
         [string](Get-Property $proof 'migration') -ne 'CURRENT_SOURCE_DIRECT_17_18' -or [string](Get-Property $proof 'media') -ne 'NOT_MOUNTED' -or
         [string](Get-Property $proof 'source_commit') -ne $commit -or [string](Get-Property $proof 'source_digest') -ne $sourceDigest -or
