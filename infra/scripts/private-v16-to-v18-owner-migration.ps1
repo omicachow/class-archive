@@ -208,10 +208,14 @@ function Assert-PiwigoStoppedForSnapshot {
     # writer has exited.  The DB-only snapshot must not race a still-running
     # Piwigo process, so inspect the fixed Owner service before starting the
     # snapshot container.  This checks no media and exposes no runtime data.
-    $containerIds = Invoke-Piwigo @('ps','-aq','piwigo') -Capture -TimeoutSeconds 15
+    # A single line emitted by a PowerShell function is unwrapped to a scalar
+    # at assignment time.  Normalise both probes to arrays before accessing
+    # `.Count`/`[0]`; otherwise StrictMode turns the valid one-container
+    # snapshot state into a PropertyNotFoundException.
+    $containerIds = @(Invoke-Piwigo @('ps','-aq','piwigo') -Capture -TimeoutSeconds 15)
     if ($containerIds.Count -ne 1 -or $containerIds[0] -notmatch '^[a-f0-9]{12,64}$') { Stop-V16ToV18 'writer_stop_container_resolution_invalid' }
     $containerId = [string]$containerIds[0]
-    $lines = Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}',$containerId) 'writer_stop_inspection_failed' -Capture -TimeoutSeconds 15
+    $lines = @(Invoke-Wsl @('-d','Ubuntu','--exec','docker','inspect','--format','{{.State.Running}}|{{.State.Status}}',$containerId) 'writer_stop_inspection_failed' -Capture -TimeoutSeconds 15)
     if ($lines.Count -ne 1 -or $lines[0] -ne 'false|exited') { Stop-V16ToV18 'writer_not_stopped' }
 }
 function Enter-Maintenance {

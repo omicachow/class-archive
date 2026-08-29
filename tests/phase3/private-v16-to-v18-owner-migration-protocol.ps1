@@ -61,6 +61,7 @@ $ownerInvokeWslFunction = Slice-Function $adapter 'function Invoke-Wsl' 'functio
 $baselineInvokeWslFunction = Slice-Function $helper 'function Invoke-WslCapture' 'function Get-WslPath' 'private_v16_to_v18_baseline_invoke_wsl_function_boundary_missing'
 $snapshotMaintenanceStateFunction = Slice-Function $adapter 'function Get-SnapshotMaintenanceState' 'function Ensure-SnapshotWriterForRecovery' 'private_v16_to_v18_snapshot_maintenance_state_function_boundary_missing'
 $waitMaintenanceFunction = Slice-Function $adapter 'function Wait-Maintenance' 'function Assert-PiwigoStoppedForSnapshot' 'private_v16_to_v18_wait_maintenance_function_boundary_missing'
+$snapshotWriterStopFunction = Slice-Function $adapter 'function Assert-PiwigoStoppedForSnapshot' 'function Enter-Maintenance' 'private_v16_to_v18_snapshot_writer_stop_function_boundary_missing'
 $snapshotWriterRecoveryFunction = Slice-Function $adapter 'function Ensure-SnapshotWriterForRecovery' 'function Restore-SnapshotOwnerAvailability' 'private_v16_to_v18_snapshot_writer_recovery_function_boundary_missing'
 $snapshotAvailabilityRecoveryFunction = Slice-Function $adapter 'function Restore-SnapshotOwnerAvailability' 'function Create-PreMigrationSnapshot' 'private_v16_to_v18_snapshot_availability_recovery_function_boundary_missing'
 $snapshotRecoveryFinalizerFunction = Slice-Function $adapter 'function Finalize-SnapshotRecoveryMaintenance' 'function Get-SnapshotMaintenanceState' 'private_v16_to_v18_snapshot_recovery_finalizer_function_boundary_missing'
@@ -118,6 +119,11 @@ Assert-True ($adapter.Contains('$sourceVersion = 16') -and $adapter.Contains('$t
 Assert-True ($adapter.Contains('[switch]$ConfirmOwnerV16ToV18Migration') -and $adapter.Contains("if (`$Action -in @('Snapshot','Migrate') -and -not `$ConfirmOwnerV16ToV18Migration)")) 'private_v16_to_v18_adapter_confirmation_missing'
 Assert-True ($adapter.Contains('function Assert-CleanCheckout') -and $adapter.Contains('migration_checkout_not_clean') -and $adapter.Contains('function Invoke-V4Gate')) 'private_v16_to_v18_adapter_preflight_missing'
 Assert-True ($adapter.Contains('function Assert-PiwigoStoppedForSnapshot') -and $adapter.Contains("Set-SnapshotStage 'STOP_WRITER'") -and $adapter.Contains("Invoke-Piwigo @('stop','piwigo') -TimeoutSeconds 120") -and $adapter.Contains('Assert-PiwigoStoppedForSnapshot')) 'private_v16_to_v18_snapshot_writer_stop_proof_missing'
+# `Invoke-Wsl`/`Invoke-Piwigo` intentionally stream captured output.  A
+# one-line Docker response therefore arrives as a scalar unless the consumer
+# explicitly wraps it; this must remain stable under StrictMode before the
+# snapshot can safely decide whether the stopped writer is unique and exited.
+Assert-True ($snapshotWriterStopFunction.Contains('$containerIds = @(Invoke-Piwigo') -and $snapshotWriterStopFunction.Contains('$lines = @(Invoke-Wsl') -and $snapshotWriterStopFunction.Contains('$containerIds.Count -ne 1') -and $snapshotWriterStopFunction.Contains('$lines.Count -ne 1')) 'private_v16_to_v18_snapshot_writer_scalar_normalization_missing'
 Assert-True ($adapter.Contains('$captured=Create-PreMigrationSnapshot') -and $adapter.Contains('Ensure-SnapshotWriterForRecovery') -and $adapter.Contains('$baseline=$captured.Baseline; $snapshotName=$captured.Name; $snapshot=Get-SnapshotBinding $snapshotName; Assert-SourceV16; Assert-SourceBaseline $baseline; $plan=Write-Plan')) 'private_v16_to_v18_snapshot_atomic_baseline_recheck_missing'
 # Snapshot has no schema/content mutation. A failing DB-only snapshot must
 # restore the Owner writer and remove only an observed maintenance marker;
