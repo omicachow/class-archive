@@ -151,11 +151,13 @@ async function open(role, credentials) {
     const page = context.pages()[0] ?? await context.newPage();
     sessionStep = 'stable_version';
     await recordChromeStableVersion(context, page);
-    // Exercise the same bounded post-login bridge that the product uses. A
-    // direct cross-port navigation can race Piwigo's successful-login redirect
-    // and turn an authentication proof into a timing-dependent test.
+    // Exercise the same owned post-login entrypoint that the product uses.
+    // Going through the BFF preserves Piwigo's intentionally double-encoded
+    // same-origin redirect value; constructing that Piwigo URL in browser
+    // code can otherwise normalize it before Piwigo completes the form round
+    // trip, making a valid cross-port authentication bridge look flaky.
     const homeTarget = new URL('/home', settings.photos);
-    const loginTarget = new URL('identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app', settings.piwigo);
+    const loginTarget = new URL('/class-archive-core/login', settings.photos);
     sessionStep = 'login_navigation';
     await page.goto(loginTarget.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
     const form = page.locator('form[name="login_form"]');
