@@ -431,8 +431,13 @@ function Initialize-ImmichCompose {
     $script:immichCompose = @('-d','Ubuntu','--cd',$projectRoot,'--','env',('IMMICH_SPIKE_ENV_FILE=' + $envPath),'docker','compose','--env-file','infra/private-full/.env.immich.owner','-f','infra/immich-spike/docker-compose.yml','-f','infra/private-full/docker-compose.immich.override.yml','-p','class_archive_private_full_v3_immich','--profile','immich-spike','--profile','immich-ml','--profile','immich-web-compat','--profile','immich-gateway-integration')
 }
 
-function Invoke-PiwigoReadOnly([string[]]$Arguments, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
-    return Invoke-Wsl -Arguments @($script:piwigoCompose + $Arguments) -Code 'piwigo_readonly_probe_failed' -Capture:$Capture -TimeoutSeconds $TimeoutSeconds
+function Invoke-PiwigoReadOnly(
+    [string[]]$Arguments,
+    [switch]$Capture,
+    [ValidateRange(1,900)][int]$TimeoutSeconds = 120,
+    [ValidatePattern('^[a-z0-9_]{3,120}$')][string]$Code = 'piwigo_readonly_probe_failed'
+) {
+    return Invoke-Wsl -Arguments @($script:piwigoCompose + $Arguments) -Code $Code -Capture:$Capture -TimeoutSeconds $TimeoutSeconds
 }
 
 function Invoke-ImmichReadOnly([string[]]$Arguments, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
@@ -478,7 +483,7 @@ shape=$(q "SELECT CONCAT(COUNT(*),':',COUNT(DISTINCT version),':',COALESCE(MIN(v
 [ "$shape" = '18:18:1:18' ] || exit 92
 printf 'ledger=18\n'
 '@
-    $lines = @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$sql) -Capture -TimeoutSeconds 90)
+    $lines = @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$sql) -Capture -TimeoutSeconds 90 -Code 'target_schema_probe_failed')
     if ($lines.Count -ne 1 -or $lines[0] -ne 'ledger=18') { Stop-CompletedOwnerV16ToV18 'target_schema_probe_invalid' }
 }
 
@@ -512,7 +517,7 @@ grep -F "\"dump_sha256\":\"$dump_sha256\"" MANIFEST.json >/dev/null
 grep -F "\"dump_bytes\":$dump_bytes" MANIFEST.json >/dev/null
 printf 'snapshot_binding=%s:%s:%s\n' "$manifest_sha256" "$dump_sha256" "$dump_bytes"
 '@
-    $lines = @(Invoke-PiwigoReadOnly @('run','--rm','--no-deps','--entrypoint','/bin/sh','pre-migration-db-backup','-eu','-c',$script,'snapshot-binding',$name) -Capture -TimeoutSeconds 120)
+    $lines = @(Invoke-PiwigoReadOnly @('run','--rm','--no-deps','--entrypoint','/bin/sh','pre-migration-db-backup','-eu','-c',$script,'snapshot-binding',$name) -Capture -TimeoutSeconds 120 -Code 'historical_snapshot_probe_failed')
     $pattern = '^snapshot_binding=([a-f0-9]{64}):([a-f0-9]{64}):([1-9][0-9]*)$'
     if ($lines.Count -ne 1 -or $lines[0] -notmatch $pattern) { Stop-CompletedOwnerV16ToV18 'historical_snapshot_binding_invalid' }
     $match = [regex]::Match($lines[0], $pattern)
@@ -537,8 +542,8 @@ function Assert-NormalRuntimeVerifyOnly {
     # These are the only ClassIdentity plugin commands in this completed-state
     # validator. Both modes inspect locked state only; neither changes a
     # projection, starts background work, nor touches stored files.
-    Invoke-PiwigoReadOnly @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--verify-only') -TimeoutSeconds 90
-    Invoke-PiwigoReadOnly @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php','--verify-only') -TimeoutSeconds 90
+    Invoke-PiwigoReadOnly @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--verify-only') -TimeoutSeconds 90 -Code 'class_archive_plugin_verify_failed'
+    Invoke-PiwigoReadOnly @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php','--verify-only') -TimeoutSeconds 90 -Code 'locked_extension_verify_failed'
 }
 
 function ConvertTo-StrictCounts([string[]]$Lines, [string[]]$ExpectedKeys, [string]$Code) {
@@ -621,7 +626,7 @@ printf 'ai_jobs_complete=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_index_job WH
 printf 'ai_jobs_open=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_index_job WHERE state IN ('PENDING','RUNNING','UNAVAILABLE');")"
 '@
     $mariaKeys = @('class_identity_schema_version','migration_ledger_rows','source_records','source_presentations','canonical_photos','piwigo_images','album_relationships','leaf_albums','comments','replies','visible_people','person_merges','person_rules','spotlights','memories','audit_events','ai_asset_index','ai_jobs_total','ai_jobs_complete','ai_jobs_open')
-    $maria = ConvertTo-StrictCounts @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$mariaSql) -Capture -TimeoutSeconds 120) $mariaKeys 'current_mariadb_count_output_invalid'
+    $maria = ConvertTo-StrictCounts @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$mariaSql) -Capture -TimeoutSeconds 120 -Code 'current_mariadb_count_probe_failed') $mariaKeys 'current_mariadb_count_output_invalid'
     $pgSql = @'
 SELECT 'immich_assets='||COUNT(*) FROM asset
 UNION ALL SELECT 'immich_face_records='||COUNT(*) FROM asset_face
@@ -673,7 +678,7 @@ fingerprint spotlight_collections "SELECT 'spotlight'; SELECT * FROM ${base}spot
 fingerprint ai_control "SELECT 'ai_asset_index'; SELECT * FROM ${base}ai_asset_index ORDER BY class_photo_id; SELECT 'ai_index_job'; SELECT * FROM ${base}ai_index_job ORDER BY job_id; SELECT 'native_source_epoch'; SELECT * FROM ${base}native_source_epoch ORDER BY source_key;"
 '@
     $mariaKeys = @('canonical_media','album_membership','comments','person_curation','spotlight_collections','ai_control')
-    $maria = ConvertTo-StrictFingerprints @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$mariaSql) -Capture -TimeoutSeconds 300) $mariaKeys 'current_mariadb_fingerprint_output_invalid'
+    $maria = ConvertTo-StrictFingerprints @(Invoke-PiwigoReadOnly @('exec','-T','db','sh','-eu','-c',$mariaSql) -Capture -TimeoutSeconds 300 -Code 'current_mariadb_fingerprint_probe_failed') $mariaKeys 'current_mariadb_fingerprint_output_invalid'
     $pgSql = @'
 set -eu
 fingerprint_sql="SELECT 'asset'; SELECT row_to_json(t)::text AS row FROM (SELECT * FROM asset) AS t ORDER BY row; SELECT 'asset_face'; SELECT row_to_json(t)::text AS row FROM (SELECT * FROM asset_face) AS t ORDER BY row; SELECT 'face_search'; SELECT row_to_json(t)::text AS row FROM (SELECT * FROM face_search) AS t ORDER BY row; SELECT 'person'; SELECT row_to_json(t)::text AS row FROM (SELECT * FROM person) AS t ORDER BY row; SELECT 'smart_search'; SELECT row_to_json(t)::text AS row FROM (SELECT * FROM smart_search) AS t ORDER BY row;"
