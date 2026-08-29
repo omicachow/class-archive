@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -122,6 +122,17 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10090'; CompatPort = '10091'
             AppSubnet = '10.255.11.0/24'; GatewaySubnet = '10.230.0.0/16'
             BffGatewayIp = '10.230.0.10'
+        }
+    }
+    'attempt17' {
+        # Attempts 13-16 remain preserved forensic laboratories. attempt17 is
+        # a new, empty, direct V16 -> V18 lab after the V4 Chrome acceptance
+        # harness changed; it shares no Docker project, volumes, bridges, or
+        # loopback ports with any earlier attempt.
+        @{
+            HttpPort = '10190'; CompatPort = '10191'
+            AppSubnet = '10.255.12.0/24'; GatewaySubnet = '10.228.0.0/16'
+            BffGatewayIp = '10.228.0.10'
         }
     }
 }

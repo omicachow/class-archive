@@ -41,7 +41,7 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
@@ -50,6 +50,10 @@ $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($sour
 $assert(str_contains($source['runner'], "'attempt16'") && str_contains($source['runner'], "'10090'") && str_contains($source['runner'], "'10091'")
     && str_contains($source['runner'], "'10.255.11.0/24'") && str_contains($source['runner'], "'10.230.0.0/16'")
     && str_contains($source['runner'], 'V16 -> V18 laboratory') && str_contains($source['runner'], 'does not bootstrap historical V17 code'), 'attempt16_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], "'attempt17'") && str_contains($source['runner'], "'10190'") && str_contains($source['runner'], "'10191'")
+    && str_contains($source['runner'], "'10.255.12.0/24'") && str_contains($source['runner'], "'10.228.0.0/16'")
+    && str_contains($source['runner'], "'10.228.0.10'") && str_contains($source['runner'], 'attempt17 is')
+    && str_contains($source['runner'], 'shares no Docker project, volumes, bridges, or'), 'attempt17_direct_v16_to_v18_identity_not_fixed');
 $assert(str_contains($source['runner'], '52ff3a7ba91155efc7bed1572e2b1740973e484c')
     && str_contains($source['runner'], 'aee8ced818747a8f81c816ef5aef112005af280b694ef3bdf8f7ac453e6f7413')
     && str_contains($source['runner'], 'historical_schema_extract_failed'), 'historical_v17_source_not_pinned');

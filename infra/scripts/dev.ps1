@@ -579,6 +579,18 @@ switch ($Action) {
             'php', '/workspace/tests/phase3/v18-synthetic-migration-contract.php'
         ))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\v16-to-v18-synthetic-direct-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\v16-to-v18-synthetic-direct-runtime-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\v16-to-v18-synthetic-direct-attestation-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $projectRoot 'tests\phase3\private-v16-to-v18-owner-migration-protocol.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-cache-contract.mjs')
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         & node.exe (Join-Path $projectRoot 'tests\phase3\photo-product-contract.mjs')
