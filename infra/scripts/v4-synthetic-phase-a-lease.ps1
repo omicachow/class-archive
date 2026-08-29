@@ -179,12 +179,24 @@ function Read-V4SyntheticPhaseALeaseRecord {
     catch {
         throw 'v4_synthetic_phase_a_lease_record_invalid'
     }
+
+    # Windows PowerShell 5.1 eagerly converts ISO-8601 JSON strings to
+    # DateTime.  Preserve the canonical UTC representation used when the
+    # marker was written so a freshly-created lease does not become falsely
+    # malformed merely because the host converted it through local time.
+    $processStartedAt = if ($record.process_started_at -is [datetime]) {
+        ([datetime]$record.process_started_at).ToUniversalTime().ToString('o')
+    }
+    else {
+        [string]$record.process_started_at
+    }
+    $record.process_started_at = $processStartedAt
     if (
         $record.version -ne 1 -or
         [string]$record.token -notmatch '^[a-f0-9]{64}$' -or
         [string]$record.purpose -notmatch '^[a-z][a-z0-9-]{2,63}$' -or
         [int]$record.process_id -lt 1 -or
-        [string]$record.process_started_at -notmatch '^\d{4}-\d{2}-\d{2}T'
+        $processStartedAt -notmatch '^\d{4}-\d{2}-\d{2}T'
     ) {
         throw 'v4_synthetic_phase_a_lease_record_shape_invalid'
     }
