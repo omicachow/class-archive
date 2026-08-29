@@ -1,8 +1,8 @@
-# Fixed attempt8 laboratory for a database-only V17 -> V18 proof.
+# Fixed-at-runtime attempt-isolated laboratory for a database-only V17 -> V18 proof.
 #
 # It has no source-media bind, no Owner-library bind, no Immich/ML
 # service and no host ports other than the inherited Piwigo ports, which the
-# runner verifies are loopback-only.  Every writable volume has an attempt8
+# runner verifies are loopback-only. Every writable volume has an attempt
 # name supplied by the ignored local env file.
 
 services:
