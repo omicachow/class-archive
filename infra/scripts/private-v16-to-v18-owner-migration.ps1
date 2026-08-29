@@ -207,6 +207,14 @@ function RecreatePiwigoUnderMaintenance {
 function Finalize-Maintenance {
     Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--finalize-maintenance') -TimeoutSeconds 90
 }
+function Finalize-SnapshotRecoveryMaintenance {
+    # Snapshot has not installed V18 bytes or altered the V16 ledger.  The
+    # normal finalizer must therefore remain strict (and reject the historical
+    # V16 tree).  This separate, one-purpose finalizer proves the exact locked
+    # V16 installation/read-only database state, then performs only the
+    # trusted maintenance-marker unlink.
+    Invoke-Piwigo @('exec','-T','--user','nginx','-e','CLASS_ARCHIVE_OWNER_V16_SNAPSHOT_RECOVERY=1','piwigo','php','/workspace/infra/scripts/finalize-owner-v16-snapshot-recovery.php','--finalize-owner-v16-snapshot-recovery') -TimeoutSeconds 120
+}
 function Get-SnapshotMaintenanceState {
     # Snapshot has no schema or archive mutation.  Its recovery path may
     # safely reopen the Owner UI, but only after it has established whether
@@ -232,7 +240,11 @@ function Ensure-SnapshotWriterForRecovery {
     if ($state -ne 'true|running') {
         Invoke-Piwigo @('up','-d','--force-recreate','--no-deps','piwigo') -TimeoutSeconds 180
     }
-    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    # Docker Desktop can take longer than the ordinary control timeout to
+    # reconnect a stopped Owner writer after a host restart.  Snapshot is
+    # still DB-only and marker-gated; wait for a real running container rather
+    # than abandoning the otherwise unchanged library in maintenance mode.
+    $deadline = [DateTime]::UtcNow.AddSeconds(300)
     do {
         try {
             if ((Get-PiwigoWriterStateForRecovery) -eq 'true|running') { return }
@@ -256,7 +268,7 @@ function Restore-SnapshotOwnerAvailability {
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($maintenance -eq 'UNKNOWN') { Stop-V16ToV18 'snapshot_recovery_maintenance_state_unknown' }
-    if ($maintenance -eq 'ACTIVE') { Finalize-Maintenance }
+    if ($maintenance -eq 'ACTIVE') { Finalize-SnapshotRecoveryMaintenance }
     Assert-OwnerRuntime
 }
 function Create-PreMigrationSnapshot {
@@ -455,7 +467,7 @@ try {
         try {
             Enter-Maintenance; Assert-SourceV16
             $captured=Create-PreMigrationSnapshot; $baseline=$captured.Baseline; $snapshotName=$captured.Name; $snapshot=Get-SnapshotBinding $snapshotName; Assert-SourceV16; Assert-SourceBaseline $baseline; $plan=Write-Plan $baseline $snapshot $gate $directProof
-            Finalize-Maintenance; Assert-OwnerRuntime
+            Finalize-SnapshotRecoveryMaintenance; Assert-OwnerRuntime
             $snapshotRecoveryPending=$false
             Write-Output ('PRIVATE_V16_TO_V18_OWNER_MIGRATION=PASS action=Snapshot endpoint=owner ports=8190_8191 schema_from=16 schema_to=18 plan=' + $plan.Name + ' plan_sha256=' + $plan.Sha256 + ' snapshot=' + $snapshot.Name + ' snapshot_manifest_sha256=' + $snapshot.ManifestSha256 + ' baseline=' + $baseline.Name + ' baseline_sha256=' + $baseline.Sha256 + ' scope=DB_ONLY media=UNTOUCHED ai=UNCHANGED manual_rollback_required')
             return
