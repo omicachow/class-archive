@@ -80,6 +80,30 @@ function Get-CurrentHead {
     return ([string]$lines[0]).Trim()
 }
 
+# This attester is also invoked by the bounded Owner migration child process.
+# That child intentionally runs Windows PowerShell with a minimal, inherited
+# environment, where module auto-loading can resolve a PowerShell 7 module
+# path ahead of Windows PowerShell's built-in Utility module.  Use the BCL
+# directly so gate verification remains deterministic and does not depend on
+# Get-FileHash being discoverable through PSModulePath.
+function Get-V4FileSha256([string]$Path) {
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try { $bytes = $algorithm.ComputeHash($stream) }
+            finally { $algorithm.Dispose() }
+        }
+        finally { $stream.Dispose() }
+        $hash = [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+    }
+    catch {
+        Stop-V4SyntheticAcceptance 'file_hash_runtime_failed'
+    }
+    if ($hash -notmatch '^[a-f0-9]{64}$') { Stop-V4SyntheticAcceptance 'file_hash_result_invalid' }
+    return $hash
+}
+
 function Assert-CleanAcceptanceCheckout {
     # A transcript is evidence for the code which actually ran, not merely for
     # the most recent committed revision.  Refuse both Record and Verify on a
@@ -267,7 +291,7 @@ function Get-SourceDigests {
         if ($relative -notmatch '^[A-Za-z0-9_./-]+$') { Stop-V4SyntheticAcceptance 'source_path_contract_invalid' }
         $path = Join-Path $projectRoot $relative.Replace('/', '\')
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Stop-V4SyntheticAcceptance 'acceptance_source_missing' }
-        $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $digest = Get-V4FileSha256 $path
         if ($digest -notmatch '^[a-f0-9]{64}$') { Stop-V4SyntheticAcceptance 'acceptance_source_digest_invalid' }
         $digests[$relative] = $digest
     }
@@ -304,7 +328,7 @@ function Assert-EvidenceRecord([string]$EvidenceRoot, [string]$Leaf, [string]$Pa
     # A transcript may contain safe stage records, but it can never contain a
     # failed gate alongside the claimed PASS evidence.
     if (@($lines | Where-Object { $_ -match '=FAIL\b' }).Count -ne 0) { Stop-V4SyntheticAcceptance $Code }
-    $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha256 = Get-V4FileSha256 $path
     if ($sha256 -notmatch '^[a-f0-9]{64}$') { Stop-V4SyntheticAcceptance $Code }
     return @{ leaf = $Leaf; sha256 = $sha256 }
 }
@@ -339,7 +363,7 @@ function Write-Attestation([string]$Path, [hashtable]$Evidence) {
     [IO.File]::WriteAllText($Path, (($record | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
     Set-ClassArchiveOwnerOnlyFileAcl -Path $Path
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $Path
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-V4FileSha256 $Path
 }
 
 function Read-Attestation([string]$Name) {
@@ -380,7 +404,7 @@ function Read-Attestation([string]$Name) {
         }
     }
     if (@($evidence.PSObject.Properties).Count -ne $expectedEvidence.Count) { Stop-V4SyntheticAcceptance 'gate_evidence_shape_invalid' }
-    $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha256 = Get-V4FileSha256 $path
     if ($sha256 -notmatch '^[a-f0-9]{64}$') { Stop-V4SyntheticAcceptance 'gate_sha256_invalid' }
     return @{ name = $requestedGateName; sha256 = $sha256; record = $record }
 }

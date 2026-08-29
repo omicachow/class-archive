@@ -33,6 +33,7 @@ Assert-True ($attester -match "(?s)\[ValidateSet\('Record', 'Verify'\)\]") 'v4_p
 Assert-True ($attester.Contains(".codex-work\v4-synthetic-acceptance")) 'v4_phase_ab_ignored_root_missing'
 Assert-True ($attester.Contains('function Assert-IgnoredDirectory') -and $attester.Contains('check-ignore --quiet --no-index') -and $attester.Contains('ls-files')) 'v4_phase_ab_git_ignore_boundary_missing'
 Assert-True ($attester.Contains('Set-ClassArchiveOwnerOnlyFileAcl') -and $attester.Contains('Assert-ClassArchiveOwnerOnlyFileAcl')) 'v4_phase_ab_owner_acl_boundary_missing'
+Assert-True ($attester.Contains('function Get-V4FileSha256') -and $attester.Contains('[Security.Cryptography.SHA256]::Create()') -and $attester -notmatch '\(Get-FileHash\b') 'v4_phase_ab_bounded_child_hash_independence_missing'
 Assert-True ($attester.Contains('gate_name_invalid') -and $attester.Contains('gate_already_exists') -and $attester.Contains('gate_sha256_invalid')) 'v4_phase_ab_immutable_gate_boundary_missing'
 Assert-True ($attester.Contains('source_head') -and $attester.Contains('source_digests') -and $attester.Contains('Get-CurrentHead') -and $attester.Contains('gate_source_head_stale') -and $attester.Contains('gate_source_digest_stale')) 'v4_phase_ab_source_drift_detection_missing'
 Assert-True ($attester.Contains('function Assert-CleanAcceptanceCheckout') -and $attester.Contains('status --porcelain=v1 --untracked-files=all') -and $attester.Contains('acceptance_checkout_not_clean')) 'v4_phase_ab_clean_checkout_requirement_missing'
