@@ -399,7 +399,13 @@ function Invoke-Wsl([string[]]$Arguments, [string]$Code, [switch]$Capture, [Vali
         $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $bounded -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
     }
     catch { Stop-CompletedOwnerV16ToV18 ($Code + '_start_failed') }
-    if ($result.TimedOut -or $null -eq $result.ExitCode -or [int]$result.ExitCode -ne 0) { Stop-CompletedOwnerV16ToV18 $Code }
+    if ($result.TimedOut) { Stop-CompletedOwnerV16ToV18 ($Code + '_timeout') }
+    if ($null -eq $result.ExitCode) { Stop-CompletedOwnerV16ToV18 ($Code + '_exit_missing') }
+    if ([int]$result.ExitCode -ne 0) {
+        $exitCode = [int]$result.ExitCode
+        $suffix = if ($exitCode -ge 1 -and $exitCode -le 255) { '_exit_' + $exitCode } else { '_exit_nonzero' }
+        Stop-CompletedOwnerV16ToV18 ($Code + $suffix)
+    }
     if ($Capture) { return @(([string]$result.Stdout -split "`r?`n") | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' }) }
 }
 
