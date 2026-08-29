@@ -65,6 +65,9 @@ foreach ($forbidden in @('8090','8091','8290','8291','0.0.0.0',$privateDriveBack
 # `docker restart` is the only lifecycle operation. The wrapper may inspect
 # and compose-exec the known owner Piwigo service to run the read-only snapshot,
 # but it must never materialize, replace, pull, build, remove or down a stack.
+Assert-True ($runner.Contains("`$dockerArguments = @('-d','Ubuntu','--cd',`$script:ProjectRoot,'--exec','docker') + `$Arguments")) 'docker_argument_array_concatenation_missing'
+Assert-True ($runner.Contains('Add-ClassArchiveWslTimeout -Arguments $dockerArguments')) 'bounded_docker_argument_array_missing'
+Assert-True (-not $runner.Contains("'--exec','docker'`r`n    + `$Arguments") -and -not $runner.Contains("'--exec','docker'`n    + `$Arguments")) 'unsafe_inline_array_addition_present'
 Assert-True ($runner.Contains("Invoke-OwnerDocker @('restart',`$containers[[string]`$spec.key].id)")) 'bounded_restart_command_missing'
 foreach ($forbidden in @(
     'docker compose up','docker compose down','docker compose stop','docker compose start','docker compose rm',

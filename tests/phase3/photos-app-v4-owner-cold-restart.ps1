@@ -40,9 +40,11 @@ function New-RunId {
 }
 
 function Invoke-OwnerDocker([string[]]$Arguments, [string]$Code, [ValidateRange(1,300)][int]$TimeoutSeconds = 120) {
-    $bounded = Add-ClassArchiveWslTimeout -Arguments @(
-        '-d','Ubuntu','--cd',$script:ProjectRoot,'--exec','docker'
-    + $Arguments) -TimeoutSeconds $TimeoutSeconds
+    # Build the fixed launcher prefix as its own array before concatenating the
+    # caller arguments. Putting `+ $Arguments` inside the @() literal makes
+    # PowerShell invoke op_Addition on String[] at runtime.
+    $dockerArguments = @('-d','Ubuntu','--cd',$script:ProjectRoot,'--exec','docker') + $Arguments
+    $bounded = Add-ClassArchiveWslTimeout -Arguments $dockerArguments -TimeoutSeconds $TimeoutSeconds
     try {
         $result = Invoke-ClassArchiveBoundedNative -Executable (Join-Path $env:SystemRoot 'System32\wsl.exe') `
             -Arguments $bounded -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $script:ProjectRoot
