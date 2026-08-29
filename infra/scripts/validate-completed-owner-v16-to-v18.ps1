@@ -395,7 +395,15 @@ function Read-HistoricalDirectProof([object]$Plan, [string]$HistoricalHead) {
 
 function Invoke-Wsl([string[]]$Arguments, [string]$Code, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     try {
-        $bounded = Add-ClassArchiveWslTimeout -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+        # PowerShell here-strings inherit the checkout's CRLF line endings.
+        # When one is passed as the argument to Linux `sh -c`, the carriage
+        # return becomes part of the shell token (for example `set -eu\r`) and
+        # dash exits 2. Normalize every Windows-to-WSL argument to LF; ordinary
+        # paths and scalar flags are unchanged because they contain no CR/LF.
+        $normalizedArguments = @($Arguments | ForEach-Object {
+            ([string]$_).Replace("`r`n", "`n").Replace("`r", "`n")
+        })
+        $bounded = Add-ClassArchiveWslTimeout -Arguments $normalizedArguments -TimeoutSeconds $TimeoutSeconds
         $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $bounded -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
     }
     catch { Stop-CompletedOwnerV16ToV18 ($Code + '_start_failed') }

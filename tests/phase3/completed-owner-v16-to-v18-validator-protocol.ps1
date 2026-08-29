@@ -168,6 +168,7 @@ foreach ($forbiddenSql in @('INSERT ', 'UPDATE ', 'DELETE ', 'ALTER ', 'DROP ', 
 Assert-True ($validator.Contains('function Assert-CompletedState') -and $validator.Contains("`$key -in @('class_identity_schema_version','migration_ledger_rows','audit_events')") -and $validator.Contains('completed_audit_event_regressed')) 'completed_v16_to_v18_audit_append_only_guard_missing'
 Assert-True ($validator.Contains("@('canonical_media','album_membership','comments','person_curation','spotlight_collections','ai_control','immich_ai_state')") -and $validator.Contains('completed_semantic_mismatch_')) 'completed_v16_to_v18_stable_semantic_exactness_missing'
 Assert-True ($validator.Contains("return 'APPEND_ONLY'")) 'completed_v16_to_v18_audit_drift_classification_missing'
+Assert-True ($validator.Contains('.Replace("`r`n", "`n").Replace("`r", "`n")') -and $validator.Contains('Add-ClassArchiveWslTimeout -Arguments $normalizedArguments')) 'completed_v16_to_v18_wsl_crlf_normalization_missing'
 
 # The protocol itself is source-only; it must not acquire a Docker/runtime
 # connection, browse loopback, or contain a private source path. Construct
