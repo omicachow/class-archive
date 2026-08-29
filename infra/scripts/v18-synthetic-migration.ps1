@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -208,6 +208,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10890'; CompatPort = '10891'
             AppSubnet = '10.255.19.0/24'; GatewaySubnet = '10.214.0.0/16'
             BffGatewayIp = '10.214.0.10'
+        }
+    }
+    'attempt25' {
+        # attempt24 remains preserved after the nested PowerShell pipe capture
+        # stalled during cold Docker startup. attempt25 keeps the repaired
+        # service-record parser and uses the direct runner's owner-only
+        # file-backed child capture. It shares no project, volumes, bridges,
+        # or ports with any prior laboratory.
+        @{
+            HttpPort = '10990'; CompatPort = '10991'
+            AppSubnet = '10.255.20.0/24'; GatewaySubnet = '10.212.0.0/16'
+            BffGatewayIp = '10.212.0.10'
         }
     }
 }

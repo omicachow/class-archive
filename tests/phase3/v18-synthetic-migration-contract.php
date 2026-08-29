@@ -41,7 +41,7 @@ $assert = static function (bool $condition, string $message) use (&$assertions, 
     }
 };
 
-$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24')]")
+$assert(str_contains($source['runner'], "[ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25')]")
     && str_contains($source['runner'], "'.codex-work\\v18-synthetic-migration-' + \$Attempt")
     && str_contains($source['runner'], "'9690'") && str_contains($source['runner'], "'9691'"), 'attempt12_identity_not_fixed');
 $assert(str_contains($source['runner'], "'10.255.7.0/24'") && str_contains($source['runner'], "'10.238.0.0/16'")
@@ -82,6 +82,10 @@ $assert(str_contains($source['runner'], "'attempt24'") && str_contains($source['
     && str_contains($source['runner'], "'10.255.19.0/24'") && str_contains($source['runner'], "'10.214.0.0/16'")
     && str_contains($source['runner'], "'10.214.0.10'") && str_contains($source['runner'], 'attempt24 uses a parser')
     && str_contains($source['runner'], 'matching service record'), 'attempt24_direct_v16_to_v18_identity_not_fixed');
+$assert(str_contains($source['runner'], "'attempt25'") && str_contains($source['runner'], "'10990'") && str_contains($source['runner'], "'10991'")
+    && str_contains($source['runner'], "'10.255.20.0/24'") && str_contains($source['runner'], "'10.212.0.0/16'")
+    && str_contains($source['runner'], "'10.212.0.10'") && str_contains($source['runner'], 'attempt25 keeps the repaired')
+    && str_contains($source['runner'], 'file-backed child capture'), 'attempt25_direct_v16_to_v18_identity_not_fixed');
 $assert(str_contains($source['runner'], 'function Get-FileSha256') && str_contains($source['runner'], '[Security.Cryptography.SHA256]::Create()')
     && str_contains($source['runner'], '[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)')
     && str_contains($source['runner'], "Stop-V18SyntheticMigration 'file_hash_runtime_failed'")
