@@ -53,6 +53,18 @@ function Stop-V16ToV18Baseline([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_V16_TO_V18_BASELINE_STOP:' + $Code)
 }
 
+function Get-FileSha256([string]$Path) {
+    try {
+        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
+        $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        Stop-V16ToV18Baseline 'file_hash_runtime_failed'
+    }
+    if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') { Stop-V16ToV18Baseline 'file_hash_result_invalid' }
+    return ([string]$hash).ToLowerInvariant()
+}
+
 function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
     try {
@@ -352,7 +364,7 @@ function Read-Baseline([string]$Name, [string]$ExpectedSha256) {
     if ($Name -notmatch '^owner-v16-to-v18-baseline-[0-9]{8}T[0-9]{6}Z\.json$') { Stop-V16ToV18Baseline 'baseline_name_invalid' }
     $safePath = Assert-PlainIgnoredBaseline (Join-Path $privateRoot $Name)
     if ($ExpectedSha256 -notmatch '^[a-f0-9]{64}$') { Stop-V16ToV18Baseline 'baseline_sha256_invalid' }
-    $actualSha256 = (Get-FileHash -LiteralPath $safePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualSha256 = Get-FileSha256 $safePath
     if (-not [string]::Equals($actualSha256, $ExpectedSha256, [StringComparison]::Ordinal)) { Stop-V16ToV18Baseline 'baseline_sha256_mismatch' }
     try { $document = Get-Content -LiteralPath $safePath -Raw | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-V16ToV18Baseline 'baseline_json_invalid' }
@@ -401,7 +413,7 @@ function Write-Baseline([string]$Path, [hashtable]$Counts, [hashtable]$Semantic)
     [IO.File]::WriteAllText($full, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     $item = Get-Item -LiteralPath $full -Force
     if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { Stop-V16ToV18Baseline 'baseline_write_untrusted' }
-    return (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+    return (Get-FileSha256 $full)
 }
 
 function Assert-SourceBaselineMatches([hashtable]$Baseline) {

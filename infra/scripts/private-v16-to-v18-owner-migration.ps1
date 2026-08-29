@@ -35,6 +35,17 @@ $immichCompose = $null
 function Stop-V16ToV18([string]$Code) {
     throw [InvalidOperationException]::new('PRIVATE_V16_TO_V18_OWNER_STOP:' + $Code)
 }
+function Get-FileSha256([string]$Path) {
+    try {
+        Import-Module -Name Microsoft.PowerShell.Utility -ErrorAction Stop
+        $hash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        Stop-V16ToV18 'file_hash_runtime_failed'
+    }
+    if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') { Stop-V16ToV18 'file_hash_result_invalid' }
+    return ([string]$hash).ToLowerInvariant()
+}
 function Invoke-Wsl([string[]]$Args, [string]$Code, [switch]$Capture) {
     $prior = $ErrorActionPreference
     try {
@@ -273,7 +284,7 @@ function Invoke-DirectV16ToV18ProofGate {
         $exit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prior }
     if ($exit -ne 0) { Stop-V16ToV18 'direct_runtime_proof_gate_invalid' }
-    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt18 media=NOT_MOUNTED$'
+    $pattern = '^V16_TO_V18_SYNTHETIC_DIRECT_ATTESTATION=PASS action=verify commit=([a-f0-9]{40}) source_digest=([a-f0-9]{64}) proof_sha256=([a-f0-9]{64}) attempt=attempt19 media=NOT_MOUNTED$'
     $rows = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match $pattern })
     if ($rows.Count -ne 1) { Stop-V16ToV18 'direct_runtime_proof_gate_evidence_invalid' }
     $match = [regex]::Match($rows[0],$pattern)
@@ -287,10 +298,10 @@ function Write-Plan([hashtable]$Baseline,[hashtable]$Snapshot,[hashtable]$Gate,[
     $path = Join-Path (Assert-IgnoredPlanRoot) $name
     if (Test-Path -LiteralPath $path) { Stop-V16ToV18 'migration_plan_already_exists' }
     $schema = Join-Path $projectRoot 'plugins\ClassIdentity\src\Schema.php'
-    $record = [ordered]@{ format=1; scope='OWNER_V16_TO_V18_MIGRATION_PLAN'; created_at=(Get-Date).ToUniversalTime().ToString('o'); source_head=Get-Head; schema_source_sha256=(Get-FileHash -LiteralPath $schema -Algorithm SHA256).Hash.ToLowerInvariant(); source_schema=16; target_schema=18; sequential_migrations=@('0017_photos_app_v4_collection_snapshots','0018_photos_app_v4_spotlight_rotation_state'); rollback_schema_commit=$rollbackSchemaCommit; baseline=[ordered]@{name=$Baseline.Name;sha256=$Baseline.Sha256}; snapshot=[ordered]@{name=$Snapshot.Name;manifest_sha256=$Snapshot.ManifestSha256;dump_sha256=$Snapshot.DumpSha256;dump_bytes=$Snapshot.DumpBytes}; v4_acceptance=[ordered]@{gate=$Gate.Name;sha256=$Gate.Sha256}; direct_v16_to_v18_proof=[ordered]@{commit=$DirectProof.Commit;source_digest=$DirectProof.SourceDigest;proof_sha256=$DirectProof.ProofSha256}; privacy='OPAQUE_LEAF_NAMES_AND_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_MEDIA_OR_SECRETS' }
+    $record = [ordered]@{ format=1; scope='OWNER_V16_TO_V18_MIGRATION_PLAN'; created_at=(Get-Date).ToUniversalTime().ToString('o'); source_head=Get-Head; schema_source_sha256=(Get-FileSha256 $schema); source_schema=16; target_schema=18; sequential_migrations=@('0017_photos_app_v4_collection_snapshots','0018_photos_app_v4_spotlight_rotation_state'); rollback_schema_commit=$rollbackSchemaCommit; baseline=[ordered]@{name=$Baseline.Name;sha256=$Baseline.Sha256}; snapshot=[ordered]@{name=$Snapshot.Name;manifest_sha256=$Snapshot.ManifestSha256;dump_sha256=$Snapshot.DumpSha256;dump_bytes=$Snapshot.DumpBytes}; v4_acceptance=[ordered]@{gate=$Gate.Name;sha256=$Gate.Sha256}; direct_v16_to_v18_proof=[ordered]@{commit=$DirectProof.Commit;source_digest=$DirectProof.SourceDigest;proof_sha256=$DirectProof.ProofSha256}; privacy='OPAQUE_LEAF_NAMES_AND_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_MEDIA_OR_SECRETS' }
     [IO.File]::WriteAllText($path,(($record | ConvertTo-Json -Depth 6 -Compress) + [Environment]::NewLine),[Text.UTF8Encoding]::new($false))
     Set-ClassArchiveOwnerOnlyFileAcl -Path $path; Assert-ClassArchiveOwnerOnlyFileAcl -Path $path
-    return @{ Name=$name; Sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    return @{ Name=$name; Sha256=(Get-FileSha256 $path) }
 }
 function Read-Plan([string]$Name,[string]$GateName) {
     if ($Name -notmatch '^owner-v16-to-v18-plan-[0-9]{8}T[0-9]{6}Z\.json$') { Stop-V16ToV18 'migration_plan_name_invalid' }
@@ -300,7 +311,7 @@ function Read-Plan([string]$Name,[string]$GateName) {
     try { $plan = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { Stop-V16ToV18 'migration_plan_json_invalid' }
     if ([int]$plan.format -ne 1 -or [string]$plan.scope -ne 'OWNER_V16_TO_V18_MIGRATION_PLAN' -or [int]$plan.source_schema -ne 16 -or [int]$plan.target_schema -ne 18 -or [string]$plan.source_head -ne (Get-Head) -or [string]$plan.rollback_schema_commit -ne $rollbackSchemaCommit -or [string]$plan.v4_acceptance.gate -ne $GateName) { Stop-V16ToV18 'migration_plan_contract_invalid' }
     $schema = Join-Path $projectRoot 'plugins\ClassIdentity\src\Schema.php'
-    if ([string]$plan.schema_source_sha256 -ne (Get-FileHash -LiteralPath $schema -Algorithm SHA256).Hash.ToLowerInvariant()) { Stop-V16ToV18 'migration_plan_schema_source_stale' }
+    if ([string]$plan.schema_source_sha256 -ne (Get-FileSha256 $schema)) { Stop-V16ToV18 'migration_plan_schema_source_stale' }
     $gate = Invoke-V4Gate $GateName
     if ([string]$plan.v4_acceptance.sha256 -ne [string]$gate.Sha256) { Stop-V16ToV18 'migration_plan_acceptance_gate_stale' }
     $directProof = @{ Commit=[string]$plan.direct_v16_to_v18_proof.commit; SourceDigest=[string]$plan.direct_v16_to_v18_proof.source_digest; ProofSha256=[string]$plan.direct_v16_to_v18_proof.proof_sha256 }
@@ -311,7 +322,7 @@ function Read-Plan([string]$Name,[string]$GateName) {
     $baseline=@{Name=[string]$plan.baseline.name;Sha256=[string]$plan.baseline.sha256}
     $snapshot=@{Name=[string]$plan.snapshot.name;ManifestSha256=[string]$plan.snapshot.manifest_sha256;DumpSha256=[string]$plan.snapshot.dump_sha256;DumpBytes=[string]$plan.snapshot.dump_bytes}
     Assert-Baseline $baseline; Assert-Snapshot $snapshot
-    return @{Name=$Name;Sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();Baseline=$baseline;Snapshot=$snapshot;DirectProof=$currentDirectProof}
+    return @{Name=$Name;Sha256=(Get-FileSha256 $path);Baseline=$baseline;Snapshot=$snapshot;DirectProof=$currentDirectProof}
 }
 
 function Install-Migrations {
