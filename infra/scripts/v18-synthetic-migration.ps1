@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31', 'attempt32', 'attempt33')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -302,6 +302,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11690'; CompatPort = '11691'
             AppSubnet = '10.255.27.0/24'; GatewaySubnet = '10.198.0.0/16'
             BffGatewayIp = '10.198.0.10'
+        }
+    }
+    'attempt33' {
+        # attempt32 is preserved with a valid direct proof whose head-bound
+        # attestation became stale after the owner-control timeout repair.
+        # attempt33 is a fresh replacement laboratory: it never shares an
+        # existing project, volume, bridge, capture directory, or loopback
+        # port with that preserved evidence.
+        @{
+            HttpPort = '11790'; CompatPort = '11791'
+            AppSubnet = '10.255.28.0/24'; GatewaySubnet = '10.196.0.0/16'
+            BffGatewayIp = '10.196.0.10'
         }
     }
 }
