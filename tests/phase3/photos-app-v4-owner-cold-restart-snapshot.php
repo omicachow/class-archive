@@ -108,6 +108,7 @@ if (!is_array($runtimeUser) || ($runtimeUser['name'] ?? null) !== 'nginx'
     ownerColdRestartSnapshotFail('runtime_root_untrusted');
 }
 
+$snapshotStage = 'bootstrap';
 try {
     chdir(CLASS_ARCHIVE_OWNER_SNAPSHOT_ROOT) || throw new RuntimeException('piwigo_chdir_failed');
     define('PHPWG_ROOT_PATH', './');
@@ -123,6 +124,7 @@ try {
     require_once PHPWG_ROOT_PATH . 'plugins/ClassIdentity/main.inc.php';
 
     $repository = \ClassIdentity\Repository::fromPiwigo();
+    $snapshotStage = 'migration';
     $migration = $repository->fetchOne(
         'SELECT COALESCE(MAX(`version`),0) AS `version` FROM `' . $repository->table('migration') . '`',
     );
@@ -131,6 +133,7 @@ try {
     }
     $repository->execute('SET SESSION `group_concat_max_len`=67108864');
 
+    $snapshotStage = 'table_map';
     $projectionTable = '`' . $repository->table('read_projection') . '`';
     $pointerTable = '`' . $repository->table('collection_snapshot_pointer') . '`';
     $snapshotTable = '`' . $repository->table('collection_snapshot') . '`';
@@ -140,6 +143,7 @@ try {
     $aiJobTable = '`' . $repository->table('ai_index_job') . '`';
     $rotationTable = '`' . $repository->table('spotlight_rotation_state') . '`';
 
+    $snapshotStage = 'projection';
     $projectionRows = $repository->fetchAll(
         "SELECT `projection_key`,`state`,`item_count`,HEX(`generation`) AS `generation`,HEX(`source_revision`) AS `source_revision`,"
         . "HEX(`payload_digest`) AS `payload_digest`,HEX(`dependency_revision`) AS `dependency_revision` FROM {$projectionTable} "
@@ -168,6 +172,7 @@ try {
     }
     sort($projectionParts, SORT_STRING);
 
+    $snapshotStage = 'pointers';
     $pointers = ownerColdRestartAggregate(
         $repository,
         "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',`scope`,`projection_kind`,HEX(`active_snapshot_id`),HEX(`active_revision`)) "
@@ -177,6 +182,7 @@ try {
     if ($pointers['count'] !== 8) {
         throw new RuntimeException('collection_pointer_count_invalid');
     }
+    $snapshotStage = 'active_snapshots';
     $activeSnapshots = ownerColdRestartAggregate(
         $repository,
         "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',`scope`,`projection_kind`,HEX(`snapshot_id`),"
@@ -187,14 +193,19 @@ try {
     if ($activeSnapshots['count'] !== 8) {
         throw new RuntimeException('active_snapshot_count_invalid');
     }
+    $snapshotStage = 'active_items';
     $activeSnapshotItems = ownerColdRestartAggregate(
         $repository,
-        "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',HEX(i.`snapshot_id`),i.`ordinal`,i.`item_kind`,"
-        . "SHA2(i.`item_key`,256),COALESCE(HEX(i.`cover_class_photo_id`),''),HEX(i.`payload_digest`)) "
+        // The item key/kind columns use ascii_bin while the connection uses
+        // utf8mb4. Hash their byte representation so CONCAT_WS cannot fail on
+        // a collation mix and the emitted aggregate remains content-safe.
+        "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',HEX(i.`snapshot_id`),i.`ordinal`,HEX(i.`item_kind`),"
+        . "SHA2(HEX(i.`item_key`),256),COALESCE(HEX(i.`cover_class_photo_id`),''),HEX(i.`payload_digest`)) "
         . "ORDER BY i.`snapshot_id`,i.`ordinal` SEPARATOR '\\n'),''),256) AS `digest` FROM {$itemTable} i "
         . "JOIN {$snapshotTable} s ON s.`snapshot_id`=i.`snapshot_id` WHERE s.`state`='ACTIVE'",
         'active_snapshot_item_aggregate_invalid',
     );
+    $snapshotStage = 'comments';
     $comments = ownerColdRestartAggregate(
         $repository,
         "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',HEX(`comment_id`),HEX(`class_photo_id`),"
@@ -203,7 +214,9 @@ try {
         . "ORDER BY `comment_id` SEPARATOR '\\n'),''),256) AS `digest` FROM {$commentTable}",
         'comment_aggregate_invalid',
     );
+    $snapshotStage = 'ai_index';
     $aiIndex = ownerColdRestartAiIndexAggregate($repository, $aiIndexTable);
+    $snapshotStage = 'ai_jobs';
     $aiJobs = ownerColdRestartAiJobAggregate($repository, $aiJobTable);
     if ($aiJobs['open'] !== 0) {
         throw new RuntimeException('ai_reindex_jobs_open');
@@ -211,6 +224,7 @@ try {
     // Rotation timing and display count may advance in a valid scheduled
     // rotation window. Retain only candidate-set integrity, not mutable timer
     // fields, so the restart gate does not misclassify a legitimate schedule.
+    $snapshotStage = 'rotation';
     $rotation = ownerColdRestartAggregate(
         $repository,
         "SELECT COUNT(*) AS `row_count`,SHA2(COALESCE(GROUP_CONCAT(CONCAT_WS('|',`scope`,HEX(`candidate_digest`)) "
@@ -221,6 +235,7 @@ try {
         throw new RuntimeException('spotlight_rotation_count_invalid');
     }
 
+    $snapshotStage = 'encode';
     $payload = [
         'result' => 'PASS',
         'schema_version' => 18,
@@ -250,5 +265,15 @@ try {
     fwrite(STDOUT, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
 } catch (Throwable $error) {
     $code = strtolower($error->getMessage());
-    ownerColdRestartSnapshotFail(preg_match('/\A[a-z0-9_]{1,96}\z/D', $code) === 1 ? $code : 'unexpected_runtime_error');
+    if (preg_match('/\A[a-z0-9_]{1,96}\z/D', $code) !== 1) {
+        if ($error instanceof mysqli_sql_exception && (int) $error->getCode() > 0) {
+            $code = $snapshotStage . '_mysqli_' . (int) $error->getCode();
+        } else {
+            $exceptionType = strtolower((new ReflectionClass($error))->getShortName());
+            $code = preg_match('/\A[a-z0-9_]{1,48}\z/D', $exceptionType) === 1
+                ? $snapshotStage . '_' . $exceptionType
+                : $snapshotStage . '_unexpected_error';
+        }
+    }
+    ownerColdRestartSnapshotFail($code);
 }

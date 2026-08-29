@@ -101,6 +101,8 @@ Assert-True ($runner.Contains("'V4_OWNER_COLD_RESTART=PASS projections=IMMEDIATE
 foreach ($token in @('CLASS_ARCHIVE_V4_OWNER_COLD_RESTART_SNAPSHOT','CLASS_ARCHIVE_RUNTIME_SCOPE','PRIVATE_REAL_FULL','CLASS_ARCHIVE_PRIVATE_REAL_FULL','posix_geteuid','nginx','SET SESSION `group_concat_max_len`','photo_comment','ai_asset_index','ai_index_job','collection_snapshot_pointer','spotlight_rotation_state','JSON_THROW_ON_ERROR')) {
     Assert-True ($snapshot.Contains($token)) ('snapshot_contract_token_missing_' + (($token -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()))
 }
+Assert-True ($snapshot.Contains('HEX(i.`item_kind`)') -and $snapshot.Contains('SHA2(HEX(i.`item_key`),256)')) 'snapshot_binary_item_digest_normalization_missing'
+Assert-True ($snapshot.Contains("`$snapshotStage = 'active_items'") -and $snapshot.Contains("`$snapshotStage . '_mysqli_'")) 'snapshot_safe_stage_diagnostics_missing'
 foreach ($forbidden in @('INSERT ','UPDATE ','DELETE ','ALTER ','CREATE ','DROP ','TRUNCATE ','unlink(','file_put_contents(','fopen(','scandir(','RecursiveDirectoryIterator','/private-real-full/staging','source_filename','absolute_path')) {
     Assert-True (-not $snapshot.Contains($forbidden)) ('snapshot_write_or_private_surface_' + (($forbidden -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()))
 }
