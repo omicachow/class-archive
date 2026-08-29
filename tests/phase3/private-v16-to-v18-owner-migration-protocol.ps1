@@ -147,7 +147,15 @@ Assert-True ($adapter.Contains('snapshotPrimaryStage') -and $adapter.Contains('s
 Assert-True ($adapter.IndexOf('Restore-SnapshotOwnerAvailability', $migrateActionStart, [StringComparison]::Ordinal) -eq -1) 'private_v16_to_v18_migrate_auto_open_forbidden'
 Assert-True ($adapter.Contains('[ ! -L MANIFEST.json ]') -and $adapter.Contains('"media":"NOT_INCLUDED"') -and $adapter.Contains('dump_sha256=$(sha256sum database.sql.gz') -and $adapter.Contains('dump_bytes=$(wc -c < database.sql.gz') -and $adapter.Contains('sha256sum -c SHA256SUMS')) 'private_v16_to_v18_snapshot_binding_hardening_missing'
 Assert-True ($adapter.Contains("install-locked-piwigo-extensions.php','--verify-only")) 'private_v16_to_v18_locked_extension_verify_missing'
-Assert-True ($adapter.Contains('function Verify-ClassIdentityRuntime') -and $adapter.Contains('Assert-TargetV18; Verify-ClassIdentityRuntime; Compare-Baseline')) 'private_v16_to_v18_post_migration_runtime_verify_missing'
+# ClassIdentity has two deliberately distinct read-only verification contracts:
+# while installation is still behind the trusted maintenance marker it must
+# require that marker; after finalization, Validate and an idempotent replay
+# must instead prove that the marker is closed.
+$installMigrationsFunction = Slice-Function $adapter 'function Install-Migrations' 'function Verify-ClassIdentityRuntime' 'private_v16_to_v18_install_migrations_function_boundary_missing'
+$classIdentityVerificationFunction = Slice-Function $adapter 'function Verify-ClassIdentityRuntime' 'function Refresh-ReadProjection' 'private_v16_to_v18_class_identity_verification_function_boundary_missing'
+Assert-True ($installMigrationsFunction.Contains('Verify-ClassIdentityRuntime -UnderMaintenance')) 'private_v16_to_v18_maintenance_runtime_verify_invocation_missing'
+Assert-True ($classIdentityVerificationFunction.Contains('[switch]$UnderMaintenance') -and $classIdentityVerificationFunction.Contains("if (`$UnderMaintenance) { '--verify-runtime' } else { '--verify-only' }") -and $classIdentityVerificationFunction.Contains("install-class-archive-plugins.php',`$verificationMode")) 'private_v16_to_v18_class_identity_verify_mode_switch_missing'
+Assert-True ($adapter.Contains('Assert-TargetV18; Verify-ClassIdentityRuntime; Compare-Baseline') -and $adapter.Contains('Finalize-Maintenance; Verify-ClassIdentityRuntime; Assert-OwnerRuntime')) 'private_v16_to_v18_normal_runtime_verify_after_maintenance_missing'
 Assert-True ($adapter.Contains('function Assert-SourceV16') -and $adapter.Contains('function Assert-TargetV18') -and $adapter.Contains('source_schema_not_exact_v16') -and $adapter.Contains('target_schema_not_exact_v18')) 'private_v16_to_v18_adapter_schema_gate_missing'
 Assert-True ($adapter.Contains('Assert-SourceBaseline $plan.Baseline; Assert-Snapshot $plan.Snapshot') -and $adapter.Contains('Compare-Baseline $plan.Baseline')) 'private_v16_to_v18_adapter_evidence_recheck_missing'
 # The private migration must not be authorized from a static source review

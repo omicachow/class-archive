@@ -490,13 +490,15 @@ function Install-Migrations {
     Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php') -TimeoutSeconds 180
     Invoke-Piwigo @('exec','-T','--user','root','piwigo','/bin/ash','/workspace/infra/scripts/restore-piwigo-user-script.sh') -TimeoutSeconds 90
     RecreatePiwigoUnderMaintenance
-    Verify-ClassIdentityRuntime
+    Verify-ClassIdentityRuntime -UnderMaintenance
 }
-function Verify-ClassIdentityRuntime {
-    # Verification is deliberately separate from installation so Validate and
-    # an idempotent replay can re-check the exact V18 runtime contract without
-    # opening a write path or rebuilding any AI artifact.
-    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php','--verify-runtime') -TimeoutSeconds 90
+function Verify-ClassIdentityRuntime([switch]$UnderMaintenance) {
+    # Installation verifies after the PHP-FPM recreation while the trusted
+    # maintenance marker remains active. Normal Validate and idempotent replay
+    # verification instead prove that the marker is closed; neither path opens
+    # a write path or rebuilds any AI artifact.
+    $verificationMode = if ($UnderMaintenance) { '--verify-runtime' } else { '--verify-only' }
+    Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-class-archive-plugins.php',$verificationMode) -TimeoutSeconds 90
     Invoke-Piwigo @('exec','-T','--user','nginx','piwigo','php','/workspace/infra/scripts/install-locked-piwigo-extensions.php','--verify-only') -TimeoutSeconds 90
 }
 function Refresh-ReadProjection {
