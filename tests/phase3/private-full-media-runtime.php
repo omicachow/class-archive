@@ -140,30 +140,67 @@ try {
         'item' => privateFullMediaTable($ci . 'private_library_import_item'),
     ];
 
-    $import = privateFullMediaRow(
+    // The owner library is append-only across a full import plus zero or more
+    // supplemental imports.  A latest-import count therefore cannot describe
+    // the canonical population.  Validate every successful terminal journal,
+    // then derive the expected canonical population from the globally unique
+    // APPLIED targets.  DEDUPLICATED items remain provenance only and must not
+    // increase the managed-original count.
+    $imports = privateFullMediaRows(
         $database,
         'SELECT `import_id`,`item_total`,`applied_count`,`deduplicated_count`,`failed_count`,`state` FROM '
-            . $tables['import'] . " WHERE `state`='COMPLETED' ORDER BY `completed_at` DESC LIMIT 1",
+            . $tables['import'] . " WHERE `state`='COMPLETED' ORDER BY `completed_at` ASC,`import_id` ASC",
     );
-    privateFullMediaAssert($import !== null, 'completed_import_missing');
-    privateFullMediaAssert(
-        is_string($import['import_id'] ?? null)
-            && strlen((string) $import['import_id']) === 16
-            && (int) ($import['item_total'] ?? 0) > 0
-            && (int) ($import['failed_count'] ?? -1) === 0
-            && (int) ($import['applied_count'] ?? -1) + (int) ($import['deduplicated_count'] ?? -1)
-                === (int) ($import['item_total'] ?? -1),
-        'completed_import_counts_invalid',
-    );
-    $importId = (string) $import['import_id'];
+    privateFullMediaAssert($imports !== [], 'completed_import_missing');
+    $expectedItems = 0;
+    $expectedCanonical = 0;
+    $expectedDeduplicated = 0;
+    foreach ($imports as $import) {
+        $itemTotal = (int) ($import['item_total'] ?? -1);
+        $applied = (int) ($import['applied_count'] ?? -1);
+        $deduplicated = (int) ($import['deduplicated_count'] ?? -1);
+        privateFullMediaAssert(
+            is_string($import['import_id'] ?? null)
+                && strlen((string) $import['import_id']) === 16
+                && $itemTotal > 0
+                && $applied >= 0
+                && $deduplicated >= 0
+                && (int) ($import['failed_count'] ?? -1) === 0
+                && $applied + $deduplicated === $itemTotal,
+            'completed_import_counts_invalid',
+        );
+        $expectedItems += $itemTotal;
+        $expectedCanonical += $applied;
+        $expectedDeduplicated += $deduplicated;
+    }
+    privateFullMediaAssert($expectedCanonical > 0 && $expectedItems >= $expectedCanonical, 'completed_import_aggregate_invalid');
 
-    $unresolved = privateFullMediaRow(
+    $journal = privateFullMediaRow(
         $database,
-        'SELECT COUNT(*) AS `total` FROM ' . $tables['item']
-            . " WHERE `import_id`=? AND `state` NOT IN ('APPLIED','DEDUPLICATED')",
-        [$importId],
+        'SELECT COUNT(*) AS `item_total`,'
+            . "COALESCE(SUM(ii.`state`='APPLIED'),0) AS `applied_count`,"
+            . "COALESCE(SUM(ii.`state`='DEDUPLICATED'),0) AS `deduplicated_count`,"
+            . "COALESCE(SUM(ii.`state` NOT IN ('APPLIED','DEDUPLICATED')),0) AS `unresolved_count`,"
+            . "COALESCE(SUM(ii.`class_photo_id` IS NULL OR ii.`piwigo_image_id` IS NULL),0) AS `target_missing_count`,"
+            . "COUNT(DISTINCT CASE WHEN ii.`state`='APPLIED' THEN ii.`class_photo_id` END) AS `unique_applied_photo_count`,"
+            . "COUNT(DISTINCT CASE WHEN ii.`state`='APPLIED' THEN ii.`piwigo_image_id` END) AS `unique_applied_image_count` "
+            . 'FROM ' . $tables['item'] . ' ii INNER JOIN ' . $tables['import'] . ' im ON im.`import_id`=ii.`import_id` '
+            . "WHERE im.`state`='COMPLETED'",
     );
-    privateFullMediaAssert((int) ($unresolved['total'] ?? -1) === 0, 'import_items_not_complete');
+    privateFullMediaAssert(
+        $journal !== null
+            && (int) ($journal['item_total'] ?? -1) === $expectedItems
+            && (int) ($journal['applied_count'] ?? -1) === $expectedCanonical
+            && (int) ($journal['deduplicated_count'] ?? -1) === $expectedDeduplicated
+            && (int) ($journal['unresolved_count'] ?? -1) === 0
+            && (int) ($journal['target_missing_count'] ?? -1) === 0,
+        'completed_import_journal_invalid',
+    );
+    privateFullMediaAssert(
+        (int) ($journal['unique_applied_photo_count'] ?? -1) === $expectedCanonical
+            && (int) ($journal['unique_applied_image_count'] ?? -1) === $expectedCanonical,
+        'completed_import_applied_target_ambiguous',
+    );
 
     $rows = privateFullMediaRows(
         $database,
@@ -172,7 +209,6 @@ try {
             . 'INNER JOIN ' . $tables['archive'] . ' a ON a.`piwigo_image_id`=i.`id` '
             . "WHERE p.`state`='ACTIVE' AND a.`era`='HERITAGE' ORDER BY i.`id` ASC",
     );
-    $expectedCanonical = (int) ($import['applied_count'] ?? -1);
     privateFullMediaAssert($expectedCanonical > 0 && count($rows) === $expectedCanonical, 'canonical_photo_count_invalid');
 
     $imageCount = privateFullMediaRow($database, 'SELECT COUNT(*) AS `total` FROM ' . $tables['images']);

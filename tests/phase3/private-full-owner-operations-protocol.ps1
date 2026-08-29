@@ -17,6 +17,7 @@ $paths = @{
     ownerHttp = Join-Path $projectRoot 'tests\phase3\private-full-owner-media-http.ps1'
     ownerHttpRuntime = Join-Path $projectRoot 'tests\phase3\private-full-owner-media-http.php'
     ownerMediaRuntime = Join-Path $projectRoot 'tests\phase3\private-full-media-runtime.ps1'
+    ownerMediaRuntimePhp = Join-Path $projectRoot 'tests\phase3\private-full-media-runtime.php'
     dev = Join-Path $projectRoot 'infra\scripts\dev.ps1'
 }
 
@@ -46,6 +47,7 @@ $domain = Read-Source 'attestationDomain'
 $ownerHttp = Read-Source 'ownerHttp'
 $ownerHttpRuntime = Read-Source 'ownerHttpRuntime'
 $ownerMediaRuntime = Read-Source 'ownerMediaRuntime'
+$ownerMediaRuntimePhp = Read-Source 'ownerMediaRuntimePhp'
 $dev = Read-Source 'dev'
 
 # Both the env reader and Compose configuration use UTF-8 paths. The
@@ -147,6 +149,15 @@ Assert-True ($ownerHttpRuntime.Contains('direct_guest_requests=') -and $ownerHtt
 Assert-True (-not ($ownerHttpRuntime -match '(?i)(?:source_root|staging_path|relative_source_path|original_filename|absolute_path)')) 'owner_media_http_private_field_reference_detected'
 Assert-True ($ownerMediaRuntime.Contains("[ValidateSet('staging', 'owner')]")) 'owner_media_runtime_mode_missing'
 Assert-True ($ownerMediaRuntime.Contains(".env.piwigo.owner")) 'owner_media_runtime_owner_env_missing'
+Assert-True ($ownerMediaRuntimePhp.Contains('START TRANSACTION READ ONLY')) 'owner_media_runtime_php_read_only_missing'
+Assert-True ($ownerMediaRuntimePhp.Contains('WHERE `state`=''COMPLETED'' ORDER BY `completed_at` ASC,`import_id` ASC')) 'owner_media_runtime_all_completed_imports_missing'
+Assert-True (-not ($ownerMediaRuntimePhp.Contains('ORDER BY `completed_at` DESC LIMIT 1'))) 'owner_media_runtime_latest_import_regression'
+Assert-True ($ownerMediaRuntimePhp.Contains('unique_applied_photo_count')) 'owner_media_runtime_unique_photo_aggregate_missing'
+Assert-True ($ownerMediaRuntimePhp.Contains('unique_applied_image_count')) 'owner_media_runtime_unique_image_aggregate_missing'
+Assert-True ($ownerMediaRuntimePhp.Contains('completed_import_applied_target_ambiguous')) 'owner_media_runtime_applied_ambiguity_fail_closed_missing'
+Assert-True ($ownerMediaRuntimePhp.Contains('completed_import_journal_invalid')) 'owner_media_runtime_journal_drift_fail_closed_missing'
+Assert-True (-not ($ownerMediaRuntimePhp -match '(?im)\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|CREATE|DROP|TRUNCATE|OUTFILE)\b')) 'owner_media_runtime_php_mutation_statement_detected'
+Assert-True (-not ($ownerMediaRuntimePhp -match '(?i)(?:source_root|staging_path|relative_source_path|original_filename)')) 'owner_media_runtime_php_private_field_read_detected'
 
 # Public synthetic Phase 3 contract must keep this pure static guard in its
 # suite, without running the owner commands or accessing their ignored env.

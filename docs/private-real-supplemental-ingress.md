@@ -91,6 +91,18 @@ provenance before reopening Piwigo. An exact rerun is a durable 28-item no-op;
 an interrupted run resumes through the same item and native-media checkpoints.
 Output is aggregate-only and never includes a path or filename.
 
+The private managed-original verifier treats the library as an append-only
+sequence of successful terminal imports. It validates every `COMPLETED`
+import journal, requires the recorded item totals to match the underlying
+`APPLIED` and `DEDUPLICATED` items, and derives the canonical count from the
+globally unique `APPLIED` photo/image targets. This means a supplemental
+import increases the expected original count only for newly applied
+canonicals; deduplicated provenance does not create another original. A
+missing target, repeated `APPLIED` target, unresolved item, count drift, or
+non-successful terminal journal fails closed before file mode or checksum
+evidence can pass. The verifier remains read-only and does not read source
+roots, source filenames, ignored manifests, or staging paths.
+
 `validate` is public-safe configuration evidence, not evidence that an apply
 was executed. Restore must be exercised successfully before the independent
 Owner confirmation is used.
