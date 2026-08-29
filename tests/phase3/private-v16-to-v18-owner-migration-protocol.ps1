@@ -75,6 +75,10 @@ foreach ($invoker in @($ownerInvokeWslFunction, $baselineInvokeWslFunction)) {
     Assert-True ($invoker.Contains('TimeoutSeconds') -and $invoker.Contains('Add-ClassArchiveWslTimeout') -and $invoker.Contains('Invoke-ClassArchiveBoundedNative')) 'private_v16_to_v18_bounded_wsl_wrapper_missing'
     Assert-True ($invoker.Contains("`$Code + '_timeout'") -and -not $invoker.Contains('@(&')) 'private_v16_to_v18_bounded_wsl_timeout_mapping_missing'
 }
+# PowerShell reserves `$Args` for unbound invocation arguments.  The Owner
+# adapter must use an explicit payload parameter so a Compose request cannot
+# silently collapse into an empty command before its fail-closed boundary.
+Assert-True ($ownerInvokeWslFunction.Contains('[string[]]$CommandArguments') -and $ownerInvokeWslFunction.Contains('Add-ClassArchiveWslTimeout -Arguments $CommandArguments') -and -not $ownerInvokeWslFunction.Contains('[string[]]$Args')) 'private_v16_to_v18_owner_command_arguments_binding_missing'
 
 # The helper must be exact to this migration boundary and fail closed for
 # other states. It cannot be redirected toward a staging endpoint.
@@ -138,7 +142,7 @@ Assert-True ($adapter.Contains("'attest-v16-to-v18-synthetic-direct-runtime.ps1'
 Assert-True ($boundedNative.Contains('StandardOutputEncoding = [Text.UTF8Encoding]::new($false)') -and $boundedNative.Contains('StandardErrorEncoding = [Text.UTF8Encoding]::new($false)') -and $adapter.Contains('Invoke-ClassArchiveBoundedNative') -and $helper.Contains('Invoke-ClassArchiveBoundedNative')) 'private_v16_to_v18_utf8_wsl_path_contract_missing'
 Assert-True ($adapter.Contains('$directProof=Invoke-DirectV16ToV18ProofGate; Assert-OwnerRuntime; Assert-SourceV16') -and $adapter.Contains('$plan=Write-Plan $baseline $snapshot $gate $directProof')) 'private_v16_to_v18_snapshot_direct_runtime_gate_order_missing'
 Assert-True ($adapter.Contains('direct_v16_to_v18_proof=[ordered]@{commit=$DirectProof.Commit;source_digest=$DirectProof.SourceDigest;proof_sha256=$DirectProof.ProofSha256}') -and $adapter.Contains('migration_plan_direct_runtime_proof_stale') -and $adapter.Contains('$currentDirectProof = Invoke-DirectV16ToV18ProofGate')) 'private_v16_to_v18_plan_direct_runtime_binding_missing'
-Assert-True ($adapter.Contains('function Invoke-ChildPowerShell') -and $adapter.Contains("Invoke-ChildPowerShell `$lifecycle @('runtime-owner') 'owner_lifecycle_invalid' 240") -and $adapter.Contains("Invoke-ChildPowerShell `$baselineHelper `$Args `$Code 600")) 'private_v16_to_v18_bounded_child_powershell_missing'
+Assert-True ($adapter.Contains('function Invoke-ChildPowerShell') -and $adapter.Contains("Invoke-ChildPowerShell `$lifecycle @('runtime-owner') 'owner_lifecycle_invalid' 240") -and $adapter.Contains('Invoke-ChildPowerShell $baselineHelper $CommandArguments $Code 600')) 'private_v16_to_v18_bounded_child_powershell_missing'
 Assert-True (-not $adapter.Contains('@(& powershell.exe')) 'private_v16_to_v18_unbounded_child_powershell_forbidden'
 $privateDriveMarker = ([string][char]77) + ':' + [char]92
 foreach ($forbiddenAdapterMarker in @('Rollback', '0.0.0.0', $privateDriveMarker, 'relative_source_path', 'source_filename', 'Remove-Item', 'Copy-Item', 'Move-Item')) {

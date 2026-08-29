@@ -55,9 +55,13 @@ function Get-FileSha256([string]$Path) {
     if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') { Stop-V16ToV18 'file_hash_result_invalid' }
     return ([string]$hash).ToLowerInvariant()
 }
-function Invoke-Wsl([string[]]$Args, [string]$Code, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
+function Invoke-Wsl([string[]]$CommandArguments, [string]$Code, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     try {
-        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments $Args -TimeoutSeconds $TimeoutSeconds
+        # `$Args` is PowerShell's automatic collection of unbound arguments.
+        # Using it as a formal parameter silently loses the Compose payload in
+        # Windows PowerShell 5.1, which must fail closed rather than running an
+        # empty or malformed Docker command against the Owner runtime.
+        $boundedArgs = Add-ClassArchiveWslTimeout -Arguments $CommandArguments -TimeoutSeconds $TimeoutSeconds
         $result = Invoke-ClassArchiveBoundedNative -Executable "$env:SystemRoot\System32\wsl.exe" -Arguments $boundedArgs -TimeoutSeconds ($TimeoutSeconds + 15) -WorkingDirectory $projectRoot
     }
     catch { Stop-V16ToV18 ($Code + '_start_failed') }
@@ -89,8 +93,13 @@ function Initialize-ImmichCompose {
     $immichEnv = Get-WslPath $script:immichEnvWindows
     $script:immichCompose = @('-d','Ubuntu','--cd',$projectRoot,'--','env',('IMMICH_SPIKE_ENV_FILE=' + $immichEnv),'docker','compose','--env-file','infra/private-full/.env.immich.owner','-f','infra/immich-spike/docker-compose.yml','-f','infra/private-full/docker-compose.immich.override.yml','-p','class_archive_private_full_v3_immich','--profile','immich-spike','--profile','immich-ml','--profile','immich-web-compat','--profile','immich-gateway-integration')
 }
-function Invoke-Piwigo([string[]]$Args, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) { return Invoke-Wsl @($script:piwigoCompose + $Args) 'piwigo_compose_failed' -Capture:$Capture -TimeoutSeconds $TimeoutSeconds }
-function Invoke-Immich([string[]]$Args, [ValidateRange(1,900)][int]$TimeoutSeconds = 180) { Initialize-ImmichCompose; Invoke-Wsl @($script:immichCompose + $Args) 'compat_compose_failed' -TimeoutSeconds $TimeoutSeconds }
+function Invoke-Piwigo([string[]]$CommandArguments, [switch]$Capture, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
+    return Invoke-Wsl -CommandArguments @($script:piwigoCompose + $CommandArguments) -Code 'piwigo_compose_failed' -Capture:$Capture -TimeoutSeconds $TimeoutSeconds
+}
+function Invoke-Immich([string[]]$CommandArguments, [ValidateRange(1,900)][int]$TimeoutSeconds = 180) {
+    Initialize-ImmichCompose
+    Invoke-Wsl -CommandArguments @($script:immichCompose + $CommandArguments) -Code 'compat_compose_failed' -TimeoutSeconds $TimeoutSeconds
+}
 function Invoke-ChildPowerShell([string]$ScriptPath, [string[]]$Arguments, [string]$Code, [ValidateRange(1,900)][int]$TimeoutSeconds = 120) {
     if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { Stop-V16ToV18 ($Code + '_script_missing') }
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -311,9 +320,9 @@ function Assert-Snapshot([hashtable]$Snapshot) {
     }
 }
 
-function Invoke-Baseline([string[]]$Args,[string]$Code) {
+function Invoke-Baseline([string[]]$CommandArguments,[string]$Code) {
     if (-not (Test-Path -LiteralPath $baselineHelper -PathType Leaf)) { Stop-V16ToV18 'baseline_helper_missing' }
-    return Invoke-ChildPowerShell $baselineHelper $Args $Code 600
+    return Invoke-ChildPowerShell $baselineHelper $CommandArguments $Code 600
 }
 function Assert-Baseline([hashtable]$Baseline) {
     if ($null -eq $Baseline -or [string]$Baseline.Name -notmatch '^owner-v16-to-v18-baseline-[0-9]{8}T[0-9]{6}Z\.json$' -or [string]$Baseline.Sha256 -notmatch '^[a-f0-9]{64}$') { Stop-V16ToV18 'baseline_reference_invalid' }
