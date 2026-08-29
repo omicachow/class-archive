@@ -127,6 +127,7 @@ async function open(role, credentials) {
   const profile = child(settings.userDataRoot, `${role}-1440x900`, 'profile_child');
   check(!fs.existsSync(profile), `profile_fresh_${role}`);
   let context = null;
+  let sessionStep = 'stable_launch';
   try {
     context = await chromium.launchPersistentContext(profile, {
       channel: 'chrome',
@@ -142,28 +143,63 @@ async function open(role, credentials) {
         ...CHROME_SYNTHETIC_LOCALHOST_ONLY_LAUNCH_ARGS,
       ],
     });
+    sessionStep = 'route_guard';
     await context.route('**/*', (route) => {
       try { return allowed(new URL(route.request().url())) ? route.continue() : route.abort(); }
       catch { return route.abort(); }
     });
     const page = context.pages()[0] ?? await context.newPage();
+    sessionStep = 'stable_version';
     await recordChromeStableVersion(context, page);
-    await page.goto(new URL('identification.php', settings.piwigo).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // Exercise the same bounded post-login bridge that the product uses. A
+    // direct cross-port navigation can race Piwigo's successful-login redirect
+    // and turn an authentication proof into a timing-dependent test.
+    const homeTarget = new URL('/home', settings.photos);
+    const loginTarget = new URL('identification.php?redirect=%252Findex.php%253F%252Fclass-archive-photo-app', settings.piwigo);
+    sessionStep = 'login_navigation';
+    await page.goto(loginTarget.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
     const form = page.locator('form[name="login_form"]');
+    sessionStep = 'login_form';
     check(await form.count() === 1, `login_form_${role}`);
+    sessionStep = 'login_submit';
     await form.locator('input[name="username"]').fill(credentials.roles[role].username);
     await form.locator('input[name="password"]').fill(credentials.roles[role].password);
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => null),
-      form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last().click(),
-    ]);
-    await page.goto(new URL('/home', settings.photos).toString(), { waitUntil: 'networkidle', timeout: 30_000 });
-    await page.locator('[data-photo-app="true"]').waitFor({ timeout: 15_000 });
+    const bridgeReachedHome = page.waitForURL((value) => value.origin === homeTarget.origin
+      && value.pathname === homeTarget.pathname && value.search === '', { timeout: 30_000 })
+      .then(() => true).catch(() => false);
+    await form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last().click();
+    sessionStep = 'login_bridge';
+    if (!await bridgeReachedHome) {
+      const loginFormVisible = await page.locator('form[name="login_form"]').count().then((count) => count === 1).catch(() => false);
+      fail(loginFormVisible ? `login_bridge_auth_${role}` : `login_bridge_${role}`);
+    }
+    // The Photo UI hydrates several owned API requests after the document has
+    // loaded. Browser-wide `networkidle` is therefore not a stable proxy for
+    // an interactive, scoped application: a long-lived owned request can keep
+    // it pending even though the authenticated shell is ready.
+    sessionStep = 'home_shell';
+    const shellReady = await page.locator('[data-photo-app="true"]').waitFor({ state: 'attached', timeout: 15_000 })
+      .then(() => true).catch(() => false);
+    if (!shellReady) {
+      // Keep failure evidence bounded: it distinguishes a rejected login bridge
+      // from a document that loaded but never mounted the owned Photo UI,
+      // without recording URLs, HTML, cookies, account names, or API bodies.
+      const loginFormVisible = await page.locator('form[name="login_form"]').count().then((count) => count === 1).catch(() => false);
+      fail(loginFormVisible ? `home_auth_bridge_${role}` : `home_shell_${role}`);
+    }
+    // The shell is intentionally available before its compact home projection
+    // finishes rendering. Scope assertions read that projection immediately,
+    // so wait for its stable, user-visible library entry rather than racing an
+    // asynchronous home render.
+    sessionStep = 'home_projection';
+    const homeProjectionReady = await page.locator('[data-home-all-photos="true"]').waitFor({ state: 'visible', timeout: 20_000 })
+      .then(() => true).catch(() => false);
+    if (!homeProjectionReady) fail(`home_projection_${role}`);
     return { context, page };
   } catch (error) {
     await context?.close().catch(() => null);
     if (error instanceof GateError) throw error;
-    fail(context === null ? `chrome_stable_launch_${role}` : `chrome_session_${role}`);
+    fail(context === null ? `chrome_stable_launch_${role}` : `chrome_${sessionStep}_${role}`);
   }
 }
 
