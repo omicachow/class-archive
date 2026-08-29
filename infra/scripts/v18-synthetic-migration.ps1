@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27', 'attempt28', 'attempt29', 'attempt30', 'attempt31')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -280,6 +280,17 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11490'; CompatPort = '11491'
             AppSubnet = '10.255.25.0/24'; GatewaySubnet = '10.202.0.0/16'
             BffGatewayIp = '10.202.0.10'
+        }
+    }
+    'attempt31' {
+        # attempt30 remains preserved after restore-and-prove was invoked
+        # without its deliberately explicit initialise prerequisite. It has
+        # no Docker state. attempt31 is a fresh lab whose initialisation is
+        # recorded before the bounded restore-and-prove operation begins.
+        @{
+            HttpPort = '11590'; CompatPort = '11591'
+            AppSubnet = '10.255.26.0/24'; GatewaySubnet = '10.200.0.0/16'
+            BffGatewayIp = '10.200.0.10'
         }
     }
 }
