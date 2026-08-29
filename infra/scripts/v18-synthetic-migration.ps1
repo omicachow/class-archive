@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -220,6 +220,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '10990'; CompatPort = '10991'
             AppSubnet = '10.255.20.0/24'; GatewaySubnet = '10.212.0.0/16'
             BffGatewayIp = '10.212.0.10'
+        }
+    }
+    'attempt26' {
+        # attempt25 remains preserved after its child returned a nonzero exit
+        # despite emitting only the fixed READY evidence. attempt26 retains
+        # the owner-only file capture and reports a bounded numeric child exit
+        # code if that host behavior recurs. It shares no project, volumes,
+        # bridges, or ports with any prior laboratory.
+        @{
+            HttpPort = '11090'; CompatPort = '11091'
+            AppSubnet = '10.255.21.0/24'; GatewaySubnet = '10.210.0.0/16'
+            BffGatewayIp = '10.210.0.10'
         }
     }
 }
