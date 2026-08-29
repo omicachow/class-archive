@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-# Static-only contract for the attempt15 orchestration layer. It opens
+# Static-only contract for the attempt16 orchestration layer. It opens
 # tracked source text only; no WSL, Docker, database, browser, media volume or
 # private Owner state is contacted.
 
@@ -45,8 +45,8 @@ $directComposeFunction = Slice-Function $runner 'function Invoke-DirectCompose' 
 
 # There is exactly one allowable laboratory identity.  The orchestration
 # surface has no user-selectable attempt, port, project, owner, or source path.
-Assert-True ($runner.Contains("`$attempt = 'attempt15'") -and $runner.Contains("`$httpPort = '9990'") -and $runner.Contains("`$compatPort = '9991'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt15'")) 'direct_runtime_attempt15_identity_not_fixed'
-Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
+Assert-True ($runner.Contains("`$attempt = 'attempt16'") -and $runner.Contains("`$httpPort = '10090'") -and $runner.Contains("`$compatPort = '10091'") -and $runner.Contains("`$composeProject = 'class_archive_v18_synthetic_migration_attempt16'")) 'direct_runtime_attempt16_identity_not_fixed'
+Assert-True ($runner.Contains("[ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]") -and -not $runner.Contains('[string]$Attempt')) 'direct_runtime_action_surface_not_bounded'
 $privateSourceMarker = (([string][char]77) + ':' + [char]92) + '图片资源'
 $recoveryTargetMarker = (([string][char]67) + ':' + [char]92) + 'ClassArchive'
 foreach ($forbiddenTarget in @('8091','8191','8291','private-real','runtime-owner',$privateSourceMarker,$recoveryTargetMarker,'sailor-ingest')) {
@@ -69,6 +69,7 @@ Assert-True ($composePipeIndex -ge 0 -and $composeWslPathIndex -gt $composePipeI
 # lab runner.  The direct orchestrator cannot invoke historical bootstrap or
 # its V17->V18 migration action.
 Assert-True ($runner.Contains('function Invoke-BaseRunner') -and $runner.Contains("@('initialize','restore')") -and $runner.Contains("Invoke-BaseRunner 'initialize'") -and $runner.Contains("Invoke-BaseRunner 'restore' -RestoreConfirmation")) 'direct_runtime_base_restore_reuse_missing'
+Assert-True ($runner.Contains('function Invoke-RestoreAndProve') -and $runner.Contains('synthetic_restore_and_migration_confirmation_required') -and $runner.Contains('Invoke-Restore') -and $runner.Contains('Invoke-Prove') -and $runner.Contains("'restore-and-prove' { Invoke-RestoreAndProve }")) 'direct_runtime_bounded_restore_and_prove_missing'
 Assert-True ($runner.Contains('create-pre-migration-db-snapshot.sh') -and $runner.Contains('restore-v4-synthetic-pre-migration-db.sh')) 'direct_runtime_snapshot_producer_in_source_closure_missing'
 Assert-True ($restore.Contains("expected_current_snapshot_script_sha='1897ea83db59c9126125ce63afe538e7a73e58ee1386db5acf518b6ddafaf7c5'") -and $restore.Contains('9c5035e26aec9b3f616272f48d4a0c5a3ce81b0a505ac7bc71ad5a47176db7c0') -and $restore.Contains('snapshot_restore_mechanism_unreviewed') -and $restore.Contains('snapshot_not_created_by_reviewed_mechanism')) 'direct_runtime_restore_producer_allowlist_missing'
 Assert-True ($restore.Contains('case "$manifest_script_sha" in') -and -not $restore.Contains('snapshot_not_created_by_current_mechanism')) 'direct_runtime_restore_dynamic_producer_equality_forbidden'

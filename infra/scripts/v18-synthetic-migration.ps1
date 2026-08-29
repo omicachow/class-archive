@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -111,6 +111,17 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '9990'; CompatPort = '9991'
             AppSubnet = '10.255.10.0/24'; GatewaySubnet = '10.232.0.0/16'
             BffGatewayIp = '10.232.0.10'
+        }
+    }
+    'attempt16' {
+        # attempt15 remains preserved after an interrupted V16 restore that
+        # did not emit its terminal evidence before the local Docker lifecycle
+        # stopped the lab. attempt16 is a fresh direct lab and is used only by
+        # the bounded restore-and-prove chain below; it shares no prior state.
+        @{
+            HttpPort = '10090'; CompatPort = '10091'
+            AppSubnet = '10.255.11.0/24'; GatewaySubnet = '10.230.0.0/16'
+            BffGatewayIp = '10.230.0.10'
         }
     }
 }

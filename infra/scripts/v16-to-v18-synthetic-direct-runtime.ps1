@@ -4,7 +4,7 @@ Runs one isolated, direct-current-source synthetic V16 -> V18 migration proof.
 
 .DESCRIPTION
 This is deliberately narrower than v18-synthetic-migration.ps1.  It has one
-hard-coded laboratory identity: attempt15 on loopback ports 9990/9991.  The
+hard-coded laboratory identity: attempt16 on loopback ports 10090/10091.  The
 runner may ask the existing runner to initialise and DB-only restore that
 fresh laboratory, but it never calls its historical V17 bootstrap or migrate
 actions.  The proof itself is always the current checked-out
@@ -13,13 +13,14 @@ account with its explicit synthetic scope gates.
 
 No cleanup action exists. Any failed laboratory state is retained for
 forensics. attempt13 is preserved after an interrupted Docker recovery and
-attempt14 is preserved after its valid proof plus rejected pre-fix attestation;
-attempt15 is the one new fixed, empty replacement laboratory.
+attempt14 is preserved after its valid proof plus rejected pre-fix attestation,
+and attempt15 is preserved after its interrupted V16 restore; attempt16 is the
+one new fixed, empty replacement laboratory.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'initialize', 'restore', 'prove', 'verify')]
+    [ValidateSet('status', 'initialize', 'restore', 'restore-and-prove', 'prove', 'verify')]
     [string]$Action = 'status',
     [switch]$ConfirmSyntheticRestore,
     [switch]$ConfirmSyntheticMigration
@@ -32,10 +33,10 @@ $ProgressPreference = 'SilentlyContinue'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $wsl = "$env:SystemRoot\System32\wsl.exe"
 $windowsPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$attempt = 'attempt15'
-$httpPort = '9990'
-$compatPort = '9991'
-$composeProject = 'class_archive_v18_synthetic_migration_attempt15'
+$attempt = 'attempt16'
+$httpPort = '10090'
+$compatPort = '10091'
+$composeProject = 'class_archive_v18_synthetic_migration_attempt16'
 $baseRunner = Join-Path $PSScriptRoot 'v18-synthetic-migration.ps1'
 $proofPath = Join-Path $PSScriptRoot 'v16-to-v18-synthetic-direct-proof.php'
 $sandboxRoot = Join-Path $projectRoot ('.codex-work\v18-synthetic-migration-' + $attempt)
@@ -134,7 +135,7 @@ function ConvertTo-NormalizedSourceEntries([object[]]$Entries, [string]$InvalidC
 
 function Get-ProofSourceClosure {
     # A runtime proof is evidence for exact executable sources, not merely the
-    # attempt15 database state. Require a clean, tracked source closure before
+    # attempt16 database state. Require a clean, tracked source closure before
     # it mutates the synthetic lab and record its deterministic digest.
     $head = Get-Head
     $records = [System.Collections.Generic.List[object]]::new()
@@ -389,10 +390,10 @@ function Invoke-Initialize {
     Assert-DirectRuntimeSources
     $script:stage = 'initialize'
     $lines = @(Invoke-BaseRunner 'initialize')
-    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt15 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
+    $record = @($lines | Where-Object { $_ -eq 'V18_SYNTHETIC_MIGRATION=READY stage=initialize attempt=attempt16 source=V16_DB_ONLY historical_schema=V17_PINNED media=NOT_MOUNTED' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_initialize_evidence_invalid' }
     Get-SandboxValues | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt15 ports=127.0.0.1:9990_9991 source=V16_DB_ONLY media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'initialize' 'attempt=attempt16 ports=127.0.0.1:10090_10091 source=V16_DB_ONLY media=NOT_MOUNTED'
 }
 
 function Invoke-Restore {
@@ -401,10 +402,23 @@ function Invoke-Restore {
     Get-SandboxValues | Out-Null
     $script:stage = 'restore'
     $lines = @(Invoke-BaseRunner 'restore' -RestoreConfirmation)
-    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt15 media=NOT_MOUNTED$' })
+    $record = @($lines | Where-Object { $_ -match '^V18_SYNTHETIC_MIGRATION=PASS stage=restore schema=16 source=pre-migration-db-v16-to-v17-[0-9]{8}T[0-9]{6}Z target=attempt16 media=NOT_MOUNTED$' })
     if ($record.Count -ne 1) { Stop-V16ToV18DirectRuntime 'base_restore_evidence_invalid' }
     if ((Get-DirectSchemaVersion) -ne 16) { Stop-V16ToV18DirectRuntime 'direct_restore_not_v16' }
-    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt15 schema=16 target=ISOLATED media=NOT_MOUNTED'
+    Write-V16ToV18DirectRuntime 'PASS' 'restore' 'attempt=attempt16 schema=16 target=ISOLATED media=NOT_MOUNTED'
+}
+
+function Invoke-RestoreAndProve {
+    # Keep the V16 restore and the first current-source proof in one bounded
+    # synthetic invocation. This eliminates an avoidable handoff window while
+    # retaining both explicit confirmations and all existing fail-closed
+    # assertions. It never reuses a lab: Invoke-Restore still requires fresh
+    # isolated state, and Invoke-Prove still requires that exact V16 result.
+    if (-not $ConfirmSyntheticRestore -or -not $ConfirmSyntheticMigration) {
+        Stop-V16ToV18DirectRuntime 'synthetic_restore_and_migration_confirmation_required'
+    }
+    Invoke-Restore
+    Invoke-Prove
 }
 
 function Invoke-Prove {
@@ -425,7 +439,7 @@ function Invoke-Prove {
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_proof_source_changed_during_run' | Out-Null
     Write-ProofReport $sourceClosure $fingerprint $first $replay $verify $failClosed
-    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt15 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'prove' ('attempt=attempt16 schema_from=16 schema_to=18 direct_current_source=PASS replay=PASS verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 function Invoke-Verify {
@@ -442,20 +456,21 @@ function Invoke-Verify {
     $failClosed = Invoke-DirectProof '--fail-closed'
     Assert-FailClosedRecord $failClosed
     Assert-ProofSourceClosure $sourceClosure 'direct_verify_source_changed_during_run' | Out-Null
-    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt15 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
+    Write-V16ToV18DirectRuntime 'PASS' 'verify' ('attempt=attempt16 schema=18 direct_current_source=REPLAY_VERIFIED verify=PASS fail_closed=PASS legacy_fingerprint=' + $fingerprint + ' media=NOT_MOUNTED')
 }
 
 try {
     switch ($Action) {
         'initialize' { Invoke-Initialize }
         'restore' { Invoke-Restore }
+        'restore-and-prove' { Invoke-RestoreAndProve }
         'prove' { Invoke-Prove }
         'verify' { Invoke-Verify }
         'status' {
             $initialized = (Test-Path -LiteralPath $envPath)
             $proof = (Test-Path -LiteralPath $reportPath)
             if ($initialized) { Get-SandboxValues | Out-Null }
-            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt15 ports=127.0.0.1:9990_9991 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
+            Write-V16ToV18DirectRuntime 'STATUS' 'status' ('attempt=attempt16 ports=127.0.0.1:10090_10091 initialized=' + $initialized.ToString().ToUpperInvariant() + ' proof=' + $proof.ToString().ToUpperInvariant() + ' media=NOT_MOUNTED')
         }
     }
 } catch {
