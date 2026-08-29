@@ -1,25 +1,74 @@
-# Photos App V4 Owner-private Chrome role harness
+# Photos App V4 owner-private existing-fixture Chrome gate
 
-`tests/phase3/photos-app-v4-owner-browser-qa.ps1` is a local-only acceptance harness for the private full-library instance at ports 8190 and 8191. It uses Playwright `launchPersistentContext` with `channel: 'chrome'`, headed Google Chrome Stable, a fresh profile under `.codex-work/private-real-qa/browser/photos-app-v4-owner/`, and an ignored screenshot directory under `.codex-work/private-real-qa/screenshots/photos-app-v4/`.
+`tests/phase3/photos-app-v4-owner-browser-qa.ps1` is a local-only, read-only
+product acceptance harness for the full-v3 owner instance on ports 8190/8191.
+It uses only the existing bound fixture principals:
 
-It never reuses the normal Chrome profile. Chrome startup and every Playwright request are restricted to loopback, and downloads, service workers, extensions, background networking, component updates, sync, QUIC, and non-proxied WebRTC are disabled for the test process.
+- `fixture-classmate`
+- `fixture-family`
+- `fixture-teacher`
+- `fixture-anonymous`
 
-The harness has no mutate-on-import behavior. It must be explicitly invoked with `-ProvisionTemporaryRoles` before it can create any transient accounts:
+The harness does not create identities, seats, claims, invitations, accounts,
+or tokens. It does not upload media, write comments, alter albums, modify AI
+state, start/stop containers, or touch the private source folders.
+
+## Credential lifecycle
+
+Execution requires an explicit acknowledgement because even a password
+rotation changes owner runtime state:
 
 ```powershell
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\photos-app-v4-owner-browser-qa.ps1 -ProvisionTemporaryRoles
+pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\tests\phase3\photos-app-v4-owner-browser-qa.ps1 `
+  -ConfirmExistingFixtureCredentialRotation
 ```
 
-The wrapper mints a short-lived SYSTEM_ADMIN session through the existing owner-only test helper. It writes the cookie only to an ignored file with an owner-only ACL, then revokes the lease in `finally`. The Node runner uses the real browser routes to create one temporary Classmate and Teacher, has the Classmate claim its seat, issue a Family invitation, activate an Anonymous seat, and has the Family/Teacher accounts complete their normal claim journeys. Credentials, claim codes, invite codes, pages, media URLs, identifiers, and screenshots never reach stdout.
+The wrapper generates a per-run secret and passes it through an ignored,
+owner-only file to the existing `provision-access-users.php` helper. That
+helper refuses missing or incorrectly bound principals, stores only Core
+password hashes, and revokes existing credentials. In `finally`, the wrapper
+rotates all four fixture accounts again to a second unknown random secret,
+revokes the Chrome sessions, removes the temporary credential/profile files,
+and never prints either secret.
 
-The four role journeys cover the V4 Home, Library, Viewer/comment surface, Albums, People, search overlay, and policy-visible capability state. It also checks that visible derivatives use the Class Archive media path and that the Family comment surface remains read-only. The runner does not import, copy, or modify photo source data, albums, managed originals, AI indexes, or real-library curation.
+## Browser and privacy boundary
 
-Cleanup is deliberately conservative: it freezes only the two identities created by its own run, which in turn revokes access for their attached Family and Anonymous accounts. It does not delete prior temporary identities, does not touch any existing owner account, and does not start or stop Docker. A cleanup failure is a gate failure.
+The runner launches installed Google Chrome Stable with Playwright
+`channel: 'chrome'`, a fresh ignored profile, disabled extensions/service
+workers/background networking, and both process-level and request-level
+localhost guards. Real-library screenshots remain only under the ignored
+private screenshot root. Stdout is restricted to aggregate stages and a final
+record containing assertion/screenshot/photo counts and `writes=0`; it never
+contains account credentials, photo identifiers, URLs, page text, filenames,
+or screenshot paths.
 
-This harness is not evidence of a known-LIVING private URL denial: a private library may have no suitable test LIVING asset and the harness never creates one. That exact URL/GET/HEAD/Range policy oracle remains owned by the synthetic MediaGuard regression, where the controlled LIVING fixture is known. Likewise, actual upload mutation and comment-write/delete lifecycle tests remain in their dedicated cleanup-aware runners; this role harness only verifies their V4 presentation and server-advertised capability boundaries.
+## Read-only coverage
 
-Before execution, run the static contract only:
+The browser gate compares the role-scoped timeline, Home, pins, albums,
+People, Spotlight, search suggestions/results, album/person details, and
+Viewer media paths:
+
+- Classmate, Teacher, and Anonymous must receive the same `FULL` catalog.
+- Family must receive the exact `HERITAGE_ONLY` timeline.
+- Family responses, counts, covers, People details, search results, viewer,
+  known-LIVING GET/HEAD/Range probes, and Spotlight are checked for LIVING
+  leakage.
+- Anonymous API/HTML is checked for account, identity, seat, principal, and
+  fixture-username disclosure.
+- Family has no comment composer. One deliberately denied comment request is
+  allowed through the network guard, must return 403, and the comments payload
+  must remain byte-for-byte equivalent before/after. No successful business
+  mutation is permitted.
+
+The gate intentionally performs no upload lifecycle. The synthetic instance
+owns upload/browser mutation evidence; in-place private uploads remain blocked
+until exact cleanup can restore every immutable projection and audit reference
+without risking owner data.
+
+Run the non-mutating contract first:
 
 ```powershell
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\phase3\photos-app-v4-owner-browser-qa-protocol.ps1
+pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\tests\phase3\photos-app-v4-owner-browser-qa-protocol.ps1
 ```

@@ -1,20 +1,12 @@
 /*
- * Photos App V4 owner-private Chrome Stable role journey.
- *
- * This is intentionally a bounded, local acceptance harness rather than a
- * fixture importer. It creates one run-scoped Classmate and Teacher through
- * the real admin/claim forms, then creates the Family and Anonymous accounts
- * through that Classmate's real seat flows. All bearer values remain in this
- * process; finally freezes only the two identities created by this run.
- *
- * It never reads source folders, mounts host media, starts Docker, alters
- * albums/photos/AI data, or prints page text, credentials, URLs, identifiers,
- * or screenshot paths. Mutating photo upload and comment-write exercises stay
- * in their dedicated, cleanup-aware acceptance modules.
+ * Owner-private V4 role acceptance over the four pre-existing full-v3
+ * fixture principals. The companion PowerShell wrapper is the only component
+ * allowed to rotate their passwords; this browser process performs no
+ * successful business write and never creates an identity, seat, claim,
+ * invitation, account, media, comment, or AI job.
  */
 
-import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
+import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -25,30 +17,33 @@ class GateError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 
+const roles = Object.freeze(['classmate', 'family', 'teacher', 'anonymous']);
+const fullRoles = Object.freeze(['classmate', 'teacher', 'anonymous']);
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const fixtureUsernames = Object.freeze(['fixture-classmate', 'fixture-family', 'fixture-teacher', 'fixture-anonymous']);
+const forbiddenIdentityKeys = new Set([
+  'classmateid', 'classmate_id', 'identityid', 'identity_id', 'seatid', 'seat_id',
+  'accountid', 'account_id', 'userid', 'user_id', 'underlyinguserid', 'underlying_user_id',
+  'principalid', 'principal_id', 'pseudonymsubject', 'pseudonym_subject',
+]);
+
 let assertions = 0;
 let screenshots = 0;
 let stage = 'initialization';
 let chromeVersion = 'unknown';
-const contexts = [];
+let successfulBusinessWrites = 0;
 const unexpectedNetwork = new Set();
-const created = { classmateIdentityId: 0, teacherIdentityId: 0 };
-let cleanup = 'failed';
+const forbiddenBusinessMutations = new Set();
 
 function fail(code) { throw new GateError(code); }
-function check(value, code) {
-  assertions += 1;
-  if (!value) fail(code);
-}
-function stageAt(value) {
-  stage = value;
-  process.stdout.write(`V4_OWNER_CHROME_STAGE=${value}\n`);
-}
+function check(value, code) { assertions += 1; if (!value) fail(code); }
+function stageAt(value) { stage = value; process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_STAGE=${value}\n`); }
 function setting(name, pattern) {
   const value = process.env[name] ?? '';
   check(pattern.test(value), `setting_${name.toLowerCase()}_invalid`);
   return value;
 }
-function strictOrigin(name, port) {
+function localOrigin(name, port) {
   let value;
   try { value = new URL(setting(name, /^http:\/\/127\.0\.0\.1:[0-9]{2,5}\/$/)); }
   catch { fail(`setting_${name.toLowerCase()}_invalid`); }
@@ -57,36 +52,39 @@ function strictOrigin(name, port) {
   `setting_${name.toLowerCase()}_invalid`);
   return value;
 }
-function absolutePath(name, boundary) {
+function privatePath(name, requiredBoundary) {
   const value = path.resolve(setting(name, /^[^\u0000]{8,2048}$/));
-  const portable = value.replaceAll('\\', '/').toLowerCase();
-  check(portable.includes(boundary), `setting_${name.toLowerCase()}_boundary`);
+  check(value.replaceAll('\\', '/').toLowerCase().includes(requiredBoundary), `setting_${name.toLowerCase()}_boundary`);
   return value;
 }
 function child(root, name, code) {
-  check(/^[a-z][a-z0-9-]{2,48}$/i.test(name), code);
-  const resolved = path.resolve(root, name);
-  const relative = path.relative(root, resolved);
+  check(/^[a-z0-9][a-z0-9_.-]{1,80}$/i.test(name), code);
+  const target = path.resolve(root, name);
+  const relative = path.relative(root, target);
   check(relative.length > 0 && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), code);
-  return resolved;
+  return target;
 }
 
-const runId = setting('CLASS_ARCHIVE_V4_OWNER_RUN_ID', /^[a-f0-9]{24}$/);
-const coreOrigin = strictOrigin('CLASS_ARCHIVE_V4_OWNER_CORE_ORIGIN', 8190);
-const photoOrigin = strictOrigin('CLASS_ARCHIVE_V4_OWNER_PHOTO_ORIGIN', 8191);
-const credentialPath = absolutePath('CLASS_ARCHIVE_V4_OWNER_CREDENTIAL_FILE', '/.codex-work/private-real-qa/runtime/photos-app-v4-owner/');
-const profileRoot = absolutePath('CLASS_ARCHIVE_V4_OWNER_PROFILE_ROOT', '/.codex-work/private-real-qa/browser/photos-app-v4-owner/');
-const screenshotDir = absolutePath('CLASS_ARCHIVE_V4_OWNER_SCREENSHOT_DIR', '/.codex-work/private-real-qa/screenshots/photos-app-v4/');
-check(process.env.CLASS_ARCHIVE_V4_OWNER_PROVISION === '1', 'explicit_temporary_role_provisioning_required');
+const runId = setting('CLASS_ARCHIVE_V4_OWNER_FIXTURE_RUN_ID', /^[a-f0-9]{24}$/);
+const coreOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CORE_ORIGIN', 8190);
+const photoOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PHOTO_ORIGIN', 8191);
+const credentialPath = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE', '/.codex-work/private-real-qa/runtime/photos-app-v4-owner-existing-fixtures/');
+const profileRoot = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT', '/.codex-work/private-real-qa/browser/photos-app-v4-owner-existing-fixtures/');
+const screenshotDir = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR', '/.codex-work/private-real-qa/screenshots/photos-app-v4/');
 
-let credential;
-try { credential = JSON.parse(await fs.readFile(credentialPath, 'utf8')); }
+let credentials;
+try { credentials = JSON.parse(fs.readFileSync(credentialPath, 'utf8')); }
 catch { fail('credential_document_invalid'); }
-check(Object.keys(credential ?? {}).sort().join(',') === 'admin,cookie,environment,leaseHandle,run,version', 'credential_document_shape');
-check(credential.version === 1 && credential.environment === 'PRIVATE_REAL_FULL_OWNER_V4' && credential.run === runId, 'credential_document_scope');
-check(typeof credential.admin === 'string' && /^[A-Za-z0-9_.@+-]{1,100}$/.test(credential.admin), 'credential_admin_invalid');
-check(typeof credential.cookie === 'string' && /^[A-Za-z0-9,-]{16,128}$/.test(credential.cookie), 'credential_cookie_invalid');
-check(typeof credential.leaseHandle === 'string' && /^[a-f0-9]{24}$/.test(credential.leaseHandle), 'credential_lease_invalid');
+check(credentials?.version === 1 && credentials.environment === 'PRIVATE_REAL_FULL_OWNER_V4_EXISTING_FIXTURES'
+  && credentials.run === runId, 'credential_document_scope');
+check(Object.keys(credentials ?? {}).sort().join(',') === 'environment,roles,run,version', 'credential_document_shape');
+check(Object.keys(credentials.roles ?? {}).sort().join(',') === 'anonymous,classmate,family,teacher', 'credential_role_shape');
+for (const role of roles) {
+  const expectedUsername = `fixture-${role}`;
+  const value = credentials.roles[role];
+  check(value?.username === expectedUsername && typeof value?.password === 'string'
+    && /^[A-Za-z0-9_-]{32,190}$/.test(value.password), `credential_${role}_invalid`);
+}
 
 const CHROME_OWNER_LOCALHOST_ONLY_LAUNCH_ARGS = Object.freeze([
   '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1',
@@ -102,66 +100,37 @@ const CHROME_OWNER_LOCALHOST_ONLY_LAUNCH_ARGS = Object.freeze([
   '--webrtc-ip-handling-policy=disable_non_proxied_udp',
 ]);
 
-const runToken = crypto.randomBytes(8).toString('hex');
-const fixture = Object.freeze({
-  classmate: Object.freeze({
-    roster: `V4O-C-${runId.slice(0, 12).toUpperCase()}`,
-    name: '本地验收同学',
-    username: `v4o_${runId.slice(0, 12)}_classmate`,
-    email: `v4o-${runId.slice(0, 12)}-classmate@class-archive.invalid`,
-    password: `Vc-${runToken}-${crypto.randomBytes(24).toString('hex')}`,
-  }),
-  teacher: Object.freeze({
-    roster: `V4O-T-${runId.slice(0, 12).toUpperCase()}`,
-    name: '本地验收教师',
-    username: `v4o_${runId.slice(0, 12)}_teacher`,
-    email: `v4o-${runId.slice(0, 12)}-teacher@class-archive.invalid`,
-    password: `Vt-${runToken}-${crypto.randomBytes(24).toString('hex')}`,
-  }),
-  family: Object.freeze({
-    name: '本地验收家属',
-    username: `v4o_${runId.slice(0, 12)}_family`,
-    email: `v4o-${runId.slice(0, 12)}-family@class-archive.invalid`,
-    password: `Vf-${runToken}-${crypto.randomBytes(24).toString('hex')}`,
-  }),
-});
-
 function allowedUrl(value) {
   if (['about:', 'blob:', 'data:'].includes(value.protocol)) return true;
   return value.protocol === 'http:' && value.hostname === '127.0.0.1'
     && [coreOrigin.port, photoOrigin.port].includes(value.port);
 }
-function observeLocalOnly(page) {
-  page.on('request', (request) => {
-    try {
-      const target = new URL(request.url());
-      if (!allowedUrl(target)) unexpectedNetwork.add(`${target.protocol}//${target.hostname}:${target.port}`);
-    } catch { unexpectedNetwork.add('invalid'); }
-  });
-}
-function acceptLocalBusinessConfirmations(page) {
-  page.on('dialog', async (dialog) => { try { await dialog.accept(); } catch { /* close race */ } });
+function isBusinessMutation(request) {
+  let target;
+  try { target = new URL(request.url()); } catch { return true; }
+  return !['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && target.pathname.startsWith('/api/');
 }
 async function recordChromeStable(context, page) {
   let session = null;
   try {
     session = await context.newCDPSession(page);
     const result = await session.send('Browser.getVersion');
-    const match = /^(Chrome|HeadlessChrome)\/(\d+(?:\.\d+){1,4})$/.exec(result?.product ?? '');
-    check(match !== null && match[1] === 'Chrome', 'chrome_stable_product');
-    chromeVersion = match[2];
+    const match = /^Chrome\/(\d+(?:\.\d+){1,4})$/.exec(result?.product ?? '');
+    check(match !== null, 'chrome_stable_product');
+    chromeVersion = match[1];
   } catch (error) {
     if (error instanceof GateError) throw error;
     fail('chrome_stable_version');
   } finally { await session?.detach().catch(() => null); }
 }
-async function openChromeRole(role, viewport = { width: 1440, height: 900 }) {
-  const profile = child(profileRoot, role, 'profile_child_invalid');
-  check(!(await fs.stat(profile).then(() => true).catch(() => false)), `profile_${role}_not_fresh`);
+
+async function openRole(role, viewport) {
+  const profile = child(profileRoot, `${role}-${viewport.width}x${viewport.height}`, 'profile_child_invalid');
+  check(!fs.existsSync(profile), `profile_${role}_not_fresh`);
   let context = null;
+  let familyDeniedCommentProbe = false;
   try {
     context = await chromium.launchPersistentContext(profile, {
-      // Exact requested browser boundary: installed Google Chrome Stable.
       channel: 'chrome',
       headless: false,
       viewport,
@@ -172,322 +141,451 @@ async function openChromeRole(role, viewport = { width: 1440, height: 900 }) {
       acceptDownloads: false,
       args: ['--no-first-run', '--no-default-browser-check', ...CHROME_OWNER_LOCALHOST_ONLY_LAUNCH_ARGS],
     });
-    contexts.push(context);
     await context.route('**/*', (route) => {
-      try { return allowedUrl(new URL(route.request().url())) ? route.continue() : route.abort(); }
-      catch { return route.abort(); }
+      let target;
+      try { target = new URL(route.request().url()); }
+      catch { unexpectedNetwork.add('invalid'); return route.abort(); }
+      if (!allowedUrl(target)) { unexpectedNetwork.add('external'); return route.abort(); }
+      if (isBusinessMutation(route.request())) {
+        const allowedDeniedProbe = role === 'family' && familyDeniedCommentProbe
+          && route.request().method() === 'POST' && target.pathname === '/api/class-archive/comments/create';
+        if (!allowedDeniedProbe) {
+          forbiddenBusinessMutations.add(`${role}:${route.request().method()}:${target.pathname}`);
+          return route.abort();
+        }
+      }
+      return route.continue();
+    });
+    context.on('response', (response) => {
+      if (isBusinessMutation(response.request()) && response.status() >= 200 && response.status() < 300) {
+        successfulBusinessWrites += 1;
+      }
     });
     const page = context.pages()[0] ?? await context.newPage();
-    observeLocalOnly(page);
-    acceptLocalBusinessConfirmations(page);
     await recordChromeStable(context, page);
-    return { context, page };
+    const home = new URL('/home', photoOrigin);
+    const login = new URL('/class-archive-core/login', photoOrigin);
+    await page.goto(login.href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    const form = page.locator('form[name="login_form"]');
+    check(await form.count() === 1, `login_form_${role}`);
+    await form.locator('input[name="username"]').fill(credentials.roles[role].username);
+    await form.locator('input[name="password"]').fill(credentials.roles[role].password);
+    const reached = page.waitForURL((value) => value.origin === home.origin && value.pathname === '/home', { timeout: 45_000 })
+      .then(() => true).catch(() => false);
+    await form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last().click();
+    check(await reached, `login_bridge_${role}`);
+    check(await page.locator('[data-photo-app="true"]').waitFor({ state: 'attached', timeout: 30_000 }).then(() => true).catch(() => false), `home_shell_${role}`);
+    check(await page.locator('[data-home-all-photos="true"]').waitFor({ state: 'visible', timeout: 30_000 }).then(() => true).catch(() => false), `home_projection_${role}`);
+    return {
+      context,
+      page,
+      beginFamilyDeniedCommentProbe() { familyDeniedCommentProbe = true; },
+      endFamilyDeniedCommentProbe() { familyDeniedCommentProbe = false; },
+    };
   } catch (error) {
     await context?.close().catch(() => null);
     if (error instanceof GateError) throw error;
-    fail('chrome_stable_launch');
+    fail(`chrome_${role}_unexpected`);
   }
 }
-async function go(page, base, relative, code, statuses = [200]) {
-  let response;
-  try { response = await page.goto(new URL(relative, base).href, { waitUntil: 'domcontentloaded', timeout: 45_000 }); }
-  catch { fail(`${code}_transport`); }
-  check(response !== null && statuses.includes(response.status()), `${code}_status`);
-  return response;
-}
-async function submit(page, form, code) {
-  const button = form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last();
-  check(await button.count() === 1, `${code}_button_missing`);
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
-    button.click(),
-  ]);
-  await page.waitForTimeout(120);
-}
-async function codeValue(page, expectedCount, code) {
-  const values = (await page.locator('code.ca-admin__code, code.ca-public__secret').allTextContents()).map((value) => value.trim());
-  check(values.length === expectedCount, `${code}_count`);
-  check(/^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{32,}$/.test(values[0] ?? ''), `${code}_shape`);
-  return values[0];
-}
-async function login(page, account, role, presentedName = account.username) {
-  await go(page, coreOrigin, 'identification.php', `${role}_login_page`);
-  const form = page.locator('form[name="login_form"]');
-  check(await form.count() === 1, `${role}_login_form_missing`);
-  await form.locator('input[name="username"]').fill(account.username);
-  await form.locator('input[name="password"]').fill(account.password);
-  await submit(page, form, `${role}_login`);
-  const status = await page.evaluate(async () => {
-    const body = new URLSearchParams({ method: 'pwg.session.getStatus' });
-    const response = await fetch('ws.php?format=json', { method: 'POST', body, credentials: 'same-origin', cache: 'no-store' });
-    return { status: response.status, payload: await response.json().catch(() => null) };
-  });
-  check(status.status === 200 && status.payload?.stat === 'ok' && status.payload?.result?.username === presentedName, `${role}_session_invalid`);
-}
-async function createAdminPage() {
-  const opened = await openChromeRole('admin');
-  await opened.context.addCookies([{ name: 'pwg_id', value: credential.cookie, domain: '127.0.0.1', path: '/', httpOnly: true, secure: false, sameSite: 'Lax' }]);
-  await go(opened.page, coreOrigin, 'admin.php?page=plugin-ClassIdentity-dashboard', 'admin_dashboard');
-  const state = await opened.page.evaluate(async () => {
-    const response = await fetch('/api/class-archive/product-state', { credentials: 'same-origin', cache: 'no-store' });
-    return { status: response.status, payload: await response.json().catch(() => null) };
-  });
-  check(state.status === 200 && state.payload?.role === 'SYSTEM_ADMIN' && state.payload?.canManage === true, 'admin_scope_invalid');
-  return opened.page;
-}
-async function issueClaim(adminPage, identityId, code) {
-  const form = adminPage.locator('form:has(input[name="action"][value="reissue_claim"])');
-  check(await form.count() === 1, `${code}_form_missing`);
-  check((await form.locator('input[name="identity_id"]').getAttribute('value')) === String(identityId), `${code}_identity_binding`);
-  await form.locator('input[name="reason"]').fill('本地 V4 Chrome 验收的一次性认领');
-  await submit(adminPage, form, code);
-  return codeValue(adminPage, 1, code);
-}
-async function createClassmateAndClaim(adminPage) {
-  stageAt('provision_classmate');
-  await go(adminPage, coreOrigin, 'admin.php?page=plugin-ClassIdentity-identities', 'classmate_admin_list');
-  const form = adminPage.locator('form:has(input[name="action"][value="create_classmate"])');
-  check(await form.count() === 1, 'classmate_create_form_missing');
-  await form.locator('input[name="roster_code"]').fill(fixture.classmate.roster);
-  await form.locator('input[name="real_name"]').fill(fixture.classmate.name);
-  await form.locator('input[name="reason"]').fill('本地 V4 Chrome 临时验收身份');
-  await submit(adminPage, form, 'classmate_create');
-  const identityId = Number.parseInt(await adminPage.locator('input[name="identity_id"]').first().getAttribute('value') ?? '', 10);
-  check(Number.isSafeInteger(identityId) && identityId > 0, 'classmate_identity_id_invalid');
-  created.classmateIdentityId = identityId;
-  const claim = await issueClaim(adminPage, identityId, 'classmate_claim_issue');
 
-  const opened = await openChromeRole('classmate');
-  const page = opened.page;
-  await go(page, coreOrigin, 'index.php?/class-identity/claim', 'classmate_claim_page');
-  const claimForm = page.locator('form:has(input[name="action"][value="claim"])');
-  check(await claimForm.count() === 1, 'classmate_claim_form_missing');
-  await claimForm.locator('input[name="roster_code"]').fill(fixture.classmate.roster);
-  await claimForm.locator('input[name="claim_code"]').fill(claim);
-  await claimForm.locator('input[name="username"]').fill(fixture.classmate.username);
-  await claimForm.locator('input[name="email"]').fill(fixture.classmate.email);
-  await claimForm.locator('input[name="password"]').fill(fixture.classmate.password);
-  await claimForm.locator('input[name="password_confirmation"]').fill(fixture.classmate.password);
-  await submit(page, claimForm, 'classmate_claim');
-  check((await page.locator('body').innerText()).includes('账号已创建'), 'classmate_claim_not_completed');
-  await login(page, fixture.classmate, 'classmate');
-  return page;
-}
-async function createTeacherAndClaim(adminPage) {
-  stageAt('provision_teacher');
-  await go(adminPage, coreOrigin, 'admin.php?page=plugin-ClassIdentity-teachers', 'teacher_admin_list');
-  const form = adminPage.locator('form:has(input[name="action"][value="create_teacher"])');
-  check(await form.count() === 1, 'teacher_create_form_missing');
-  await form.locator('input[name="roster_code"]').fill(fixture.teacher.roster);
-  await form.locator('input[name="real_name"]').fill(fixture.teacher.name);
-  await form.locator('input[name="reason"]').fill('本地 V4 Chrome 临时验收身份');
-  await submit(adminPage, form, 'teacher_create');
-  const identityId = Number.parseInt(await adminPage.locator('input[name="identity_id"]').first().getAttribute('value') ?? '', 10);
-  check(Number.isSafeInteger(identityId) && identityId > 0, 'teacher_identity_id_invalid');
-  created.teacherIdentityId = identityId;
-  const claim = await issueClaim(adminPage, identityId, 'teacher_claim_issue');
-  const opened = await openChromeRole('teacher', { width: 1920, height: 1080 });
-  const page = opened.page;
-  await go(page, coreOrigin, 'index.php?/class-identity/claim', 'teacher_claim_page');
-  const claimForm = page.locator('form:has(input[name="action"][value="claim"])');
-  check(await claimForm.count() === 1, 'teacher_claim_form_missing');
-  await claimForm.locator('input[name="roster_code"]').fill(fixture.teacher.roster);
-  await claimForm.locator('input[name="claim_code"]').fill(claim);
-  await claimForm.locator('input[name="username"]').fill(fixture.teacher.username);
-  await claimForm.locator('input[name="email"]').fill(fixture.teacher.email);
-  await claimForm.locator('input[name="password"]').fill(fixture.teacher.password);
-  await claimForm.locator('input[name="password_confirmation"]').fill(fixture.teacher.password);
-  await submit(page, claimForm, 'teacher_claim');
-  check((await page.locator('body').innerText()).includes('账号已创建'), 'teacher_claim_not_completed');
-  await login(page, fixture.teacher, 'teacher');
-  return page;
-}
-async function createFamilyAndAnonymous(classmatePage) {
-  stageAt('provision_family_anonymous');
-  await go(classmatePage, coreOrigin, 'index.php?/class-identity/my', 'classmate_my');
-  const invite = classmatePage.locator('form:has(input[name="action"][value="issue_family_invitation"])');
-  check(await invite.count() === 1, 'family_invitation_form_missing');
-  await submit(classmatePage, invite, 'family_invitation_issue');
-  const invitation = await codeValue(classmatePage, 3, 'family_invitation_issue');
-  await go(classmatePage, coreOrigin, 'index.php?/class-identity/my', 'classmate_my_anonymous');
-  const activate = classmatePage.locator('form:has(input[name="action"][value="activate_anonymous"])');
-  check(await activate.count() === 1, 'anonymous_activation_form_missing');
-  await submit(classmatePage, activate, 'anonymous_activation');
-  const anonymousValues = (await classmatePage.locator('code.ca-public__secret').allTextContents()).map((value) => value.trim());
-  check(anonymousValues.length === 2 && /^anon_[a-f0-9]{20}$/.test(anonymousValues[0] ?? '') && /^[A-Za-z0-9_-]{24,128}$/.test(anonymousValues[1] ?? ''), 'anonymous_credential_shape');
-
-  const family = await openChromeRole('family', { width: 390, height: 844 });
-  await go(family.page, coreOrigin, 'index.php?/class-identity/family-invite', 'family_invite_page');
-  const familyForm = family.page.locator('form:has(input[name="action"][value="accept_family"])');
-  check(await familyForm.count() === 1, 'family_accept_form_missing');
-  await familyForm.locator('input[name="invitation_code"]').fill(invitation);
-  await familyForm.locator('input[name="real_name"]').fill(fixture.family.name);
-  await familyForm.locator('select[name="relationship"]').selectOption('MOTHER');
-  await familyForm.locator('input[name="username"]').fill(fixture.family.username);
-  await familyForm.locator('input[name="email"]').fill(fixture.family.email);
-  await familyForm.locator('input[name="password"]').fill(fixture.family.password);
-  await familyForm.locator('input[name="password_confirmation"]').fill(fixture.family.password);
-  await submit(family.page, familyForm, 'family_accept');
-  check((await family.page.locator('body').innerText()).includes('家庭账号已创建'), 'family_accept_not_completed');
-  await login(family.page, fixture.family, 'family');
-
-  const anonymous = await openChromeRole('anonymous', { width: 390, height: 844 });
-  await login(anonymous.page, { username: anonymousValues[0], password: anonymousValues[1] }, 'anonymous', '匿名账号');
-  return { familyPage: family.page, anonymousPage: anonymous.page };
-}
-async function productState(page, code) {
-  const result = await page.evaluate(async () => {
-    const response = await fetch('/api/class-archive/product-state', { credentials: 'same-origin', cache: 'no-store' });
-    return { status: response.status, payload: await response.json().catch(() => null) };
-  });
-  check(result.status === 200 && result.payload && typeof result.payload === 'object' && !Array.isArray(result.payload), `${code}_unavailable`);
-  return result.payload;
-}
-async function assertQuietSurface(page, code) {
-  const text = await page.locator('body').innerText();
-  check(!/(?:HERITAGE|LIVING|ownerId|assetId|personId|CLIP|embedding|Gateway|MediaGuard|Piwigo|Immich)/i.test(text), `${code}_technical_copy_visible`);
-  const markup = await page.locator('html').innerHTML();
-  check(!/(?:classmate_identity|identity_id|seat_id|account_id|piwigo_image|immich_asset|media_reference)/i.test(markup), `${code}_backend_identifier_visible`);
-}
 async function save(page, name) {
-  await page.screenshot({ path: path.join(screenshotDir, name), fullPage: false });
+  await page.screenshot({ path: child(screenshotDir, `${name}.png`, 'screenshot_child_invalid'), fullPage: false });
   screenshots += 1;
 }
-async function decodedPhoto(page, code) {
-  await page.waitForFunction(() => {
-    const image = document.querySelector('.photo-card img[src^="/api/assets/"]');
-    return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
-  }, null, { timeout: 120_000 }).catch(() => null);
-  const image = page.locator('.photo-card img[src^="/api/assets/"]').first();
-  check(await image.count() === 1, `${code}_thumbnail_missing`);
-  const source = await image.getAttribute('src');
-  check(typeof source === 'string' && /^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=/.test(source), `${code}_not_mediaguard_path`);
-  return source;
+
+async function browserFetch(page, target, init = {}) {
+  const result = await page.evaluate(async ({ relative, options }) => {
+    try {
+      const response = await fetch(relative, { credentials: 'same-origin', cache: 'no-store', ...options });
+      const raw = options?.method === 'HEAD' ? '' : await response.text();
+      let json = null;
+      if (raw !== '') { try { json = JSON.parse(raw); } catch { /* bounded non-JSON response */ } }
+      return { status: response.status, json, text: raw };
+    } catch { return { status: 0, json: null, text: '' }; }
+  }, { relative: target, options: init });
+  check(Number.isInteger(result?.status), 'browser_fetch_shape');
+  return result;
 }
-async function openSearch(page, code) {
+
+async function requiredJson(page, target, code) {
+  const result = await browserFetch(page, target);
+  if (!(result.status === 200 && result.json && typeof result.json === 'object' && !Array.isArray(result.json))) {
+    fail(`${code}_http_${Number.isInteger(result.status) ? result.status : 0}`);
+  }
+  return result.json;
+}
+function canonicalId(value, code) {
+  check(typeof value === 'string' && uuid.test(value), code);
+  return value.toLowerCase();
+}
+function setEquals(left, right) { return left.size === right.size && [...left].every((value) => right.has(value)); }
+function recursiveWalk(value, visitor, depth = 0) {
+  check(depth <= 64, 'projection_json_depth');
+  if (value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) { for (const item of value) recursiveWalk(item, visitor, depth + 1); return; }
+  for (const [key, nested] of Object.entries(value)) {
+    visitor(key, nested);
+    recursiveWalk(nested, visitor, depth + 1);
+  }
+}
+function assertNoPhotoIds(payload, forbiddenIds, code) {
+  let leaked = false;
+  const serialized = JSON.stringify(payload ?? null).toLowerCase();
+  for (const id of forbiddenIds) { if (serialized.includes(id)) { leaked = true; break; } }
+  check(!leaked, code);
+}
+function assertAnonymousRedaction(payload, code) {
+  let leakedKey = false;
+  recursiveWalk(payload, (key) => { if (forbiddenIdentityKeys.has(key.toLowerCase())) leakedKey = true; });
+  const encoded = JSON.stringify(payload ?? null).toLowerCase();
+  check(!leakedKey && !fixtureUsernames.some((username) => encoded.includes(username)), code);
+}
+function assertAllowedPhotoId(value, allowedIds, code) {
+  check(allowedIds.has(canonicalId(value, code)), code);
+}
+
+async function timelineCatalog(page, role) {
+  const photos = new Map();
+  const cursors = new Set();
+  let cursor = null;
+  let expectedTotal = null;
+  let pages = 0;
+  do {
+    pages += 1;
+    check(pages <= 32, `${role}_timeline_page_budget`);
+    const suffix = cursor === null ? '?limit=240' : `?limit=240&cursor=${encodeURIComponent(cursor)}`;
+    const payload = await requiredJson(page, `/api/class-archive/timeline${suffix}`, `${role}_timeline`);
+    const total = payload.total;
+    const count = payload.count;
+    const groups = payload.groups;
+    const hasMore = payload.hasMore ?? payload.has_more;
+    const nextCursor = payload.nextCursor ?? payload.next_cursor;
+    check(Number.isInteger(total) && total > 0 && Number.isInteger(count) && count >= 0 && count <= 240
+      && Array.isArray(groups) && typeof hasMore === 'boolean', `${role}_timeline_shape`);
+    if (expectedTotal === null) expectedTotal = total;
+    check(total === expectedTotal, `${role}_timeline_total_stable`);
+    let pageCount = 0;
+    for (const group of groups) {
+      check(Array.isArray(group?.items) && Number.isInteger(group?.count) && group.items.length === group.count, `${role}_timeline_group_shape`);
+      for (const photo of group.items) {
+        const id = canonicalId(photo?.id, `${role}_timeline_photo_id`);
+        check(!photos.has(id), `${role}_timeline_duplicate`);
+        check(['HERITAGE', 'LIVING'].includes(photo?.era), `${role}_timeline_era_invalid`);
+        photos.set(id, photo.era);
+        pageCount += 1;
+      }
+    }
+    check(pageCount === count, `${role}_timeline_page_count`);
+    if (!hasMore) { check(nextCursor === null, `${role}_timeline_terminal_cursor`); break; }
+    check(typeof nextCursor === 'string' && /^[A-Za-z0-9_-]{48}$/.test(nextCursor) && !cursors.has(nextCursor), `${role}_timeline_cursor`);
+    cursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (true);
+  check(photos.size === expectedTotal, `${role}_timeline_catalog_complete`);
+  return photos;
+}
+
+function assertCollection(payload, role, allowedIds, code) {
+  check(payload?.scope === (role === 'family' ? 'HERITAGE_ONLY' : 'FULL'), `${code}_scope`);
+  check(Array.isArray(payload?.items), `${code}_items`);
+  for (const item of payload.items) {
+    check(Array.isArray(item?.photoIds) && Number.isInteger(item?.photoCount)
+      && item.photoCount === item.photoIds.length, `${code}_card_shape`);
+    for (const id of item.photoIds) assertAllowedPhotoId(id, allowedIds, `${code}_photo_scope`);
+    if (item.coverPhotoId !== null) assertAllowedPhotoId(item.coverPhotoId, allowedIds, `${code}_cover_scope`);
+  }
+}
+function assertPins(payload, allowedIds, code) {
+  check(Array.isArray(payload?.items), `${code}_items`);
+  for (const [index, pin] of payload.items.entries()) {
+    check(pin?.ordinal === index && pin?.item && Array.isArray(pin.item.photoIds), `${code}_shape`);
+    for (const id of pin.item.photoIds) assertAllowedPhotoId(id, allowedIds, `${code}_photo_scope`);
+    if (pin.item.coverPhotoId !== null) assertAllowedPhotoId(pin.item.coverPhotoId, allowedIds, `${code}_cover_scope`);
+  }
+}
+function albumMap(payload, allowedIds, code) {
+  check(Number.isInteger(payload?.total) && Array.isArray(payload?.items) && payload.total === payload.items.length, `${code}_shape`);
+  const result = new Map();
+  for (const item of payload.items) {
+    const id = canonicalId(item?.id, `${code}_id`);
+    check(!result.has(id) && Number.isInteger(item?.total) && item.total > 0, `${code}_item`);
+    assertAllowedPhotoId(item?.coverPhotoId, allowedIds, `${code}_cover_scope`);
+    result.set(id, { total: item.total, cover: item.coverPhotoId.toLowerCase() });
+  }
+  return result;
+}
+function peopleMap(payload, allowedIds, code) {
+  check(payload?.hasNextPage === false && Number.isInteger(payload?.total) && Array.isArray(payload?.people)
+    && payload.total === payload.people.length, `${code}_shape`);
+  const result = new Map();
+  for (const item of payload.people) {
+    const id = canonicalId(item?.id, `${code}_id`);
+    const count = item?.photoCount ?? item?.photo_count ?? item?.total;
+    const cover = item?.coverPhotoId ?? item?.cover_photo_id ?? null;
+    check(!result.has(id) && Number.isInteger(count) && count > 0, `${code}_item`);
+    if (cover !== null) assertAllowedPhotoId(cover, allowedIds, `${code}_cover_scope`);
+    result.set(id, { count, cover: cover === null ? null : cover.toLowerCase() });
+  }
+  return result;
+}
+function assertSpotlight(payload, allowedIds, code) {
+  check(typeof payload?.active === 'boolean' && Number.isInteger(payload?.total) && Array.isArray(payload?.items), `${code}_shape`);
+  for (const item of payload.items) assertAllowedPhotoId(item?.coverPhotoId, allowedIds, `${code}_cover_scope`);
+}
+function assertSearch(payload, allowedIds, code) {
+  check(typeof payload?.query === 'string' && payload?.photos && Array.isArray(payload.photos.items)
+    && Number.isInteger(payload.photos.total) && Number.isInteger(payload.photos.count)
+    && payload.photos.total >= payload.photos.count && payload.photos.count === payload.photos.items.length, `${code}_shape`);
+  for (const photo of payload.photos.items) assertAllowedPhotoId(photo?.id, allowedIds, `${code}_photo_scope`);
+  for (const sectionName of ['people', 'albums', 'events', 'archiveTime', 'semantic']) {
+    const section = payload[sectionName];
+    check(section && Number.isInteger(section.total) && Array.isArray(section.items) && section.total >= section.items.length,
+      `${code}_${sectionName}_shape`);
+    for (const item of section.items) {
+      const cover = item?.coverPhotoId ?? item?.cover_photo_id ?? null;
+      if (cover !== null) assertAllowedPhotoId(cover, allowedIds, `${code}_${sectionName}_cover_scope`);
+      if (sectionName === 'semantic') assertAllowedPhotoId(item?.id, allowedIds, `${code}_semantic_scope`);
+    }
+  }
+}
+function compareMapsExact(actual, expected, valueKey, code) {
+  check(actual.size === expected.size, `${code}_size`);
+  for (const [id, value] of expected) {
+    check(actual.has(id) && actual.get(id)[valueKey] === value[valueKey], `${code}_value`);
+  }
+}
+function compareMapsSubset(actual, full, valueKey, code) {
+  for (const [id, value] of actual) {
+    check(full.has(id) && value[valueKey] <= full.get(id)[valueKey], `${code}_value`);
+  }
+}
+
+async function albumDetailSamples(page, albums, allowedIds, forbiddenIds, role) {
+  let sampled = 0;
+  for (const [albumId, summary] of albums) {
+    if (sampled >= 12) break;
+    const payload = await requiredJson(page, `/api/class-archive/albums/${albumId}?limit=240`, `${role}_album_detail`);
+    const items = payload.items;
+    check(Array.isArray(items) && Number.isInteger(payload.total) && payload.total === summary.total, `${role}_album_detail_shape`);
+    for (const photo of items) assertAllowedPhotoId(photo?.id, allowedIds, `${role}_album_detail_scope`);
+    if (role === 'family') assertNoPhotoIds(payload, forbiddenIds, 'family_album_detail_living_leak');
+    sampled += 1;
+  }
+  check(sampled > 0, `${role}_album_detail_sample_missing`);
+}
+async function peopleDetailSamples(page, people, allowedIds, forbiddenIds, role) {
+  let sampled = 0;
+  for (const [personId, summary] of people) {
+    if (sampled >= 12) break;
+    const payload = await requiredJson(page, `/api/class-archive/people/${personId}`, `${role}_person_detail`);
+    const items = payload.items ?? payload.photos;
+    const count = payload.photoCount ?? payload.photo_count ?? payload.total;
+    check(Array.isArray(items) && Number.isInteger(count) && count === items.length && count === summary.count, `${role}_person_detail_shape`);
+    for (const photo of items) assertAllowedPhotoId(photo?.id, allowedIds, `${role}_person_detail_scope`);
+    if (role === 'family') assertNoPhotoIds(payload, forbiddenIds, 'family_person_detail_living_leak');
+    sampled += 1;
+  }
+  check(sampled > 0, `${role}_person_detail_sample_missing`);
+}
+
+async function assertBrowserSurface(page, role) {
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  check(!overflow, `${role}_horizontal_overflow`);
+  const body = await page.locator('body').innerText();
+  check(!/(?:HERITAGE|LIVING|ownerId|assetId|personId|CLIP|embedding|Gateway|MediaGuard|Piwigo|Immich)/i.test(body), `${role}_technical_copy_visible`);
+  if (role === 'anonymous') {
+    const markup = await page.locator('[data-photo-app="true"]').innerHTML();
+    check(!/(?:classmate_id|identity_id|seat_id|account_id|user_id|principal_id|pseudonym_subject)/i.test(markup)
+      && !fixtureUsernames.some((username) => markup.includes(username)), 'anonymous_html_identity_leak');
+  }
+}
+
+async function viewer(page, role, photoId) {
+  const response = await page.goto(new URL(`/photos/${photoId}`, photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  check(response?.status() === 200, `${role}_viewer_status`);
+  const image = page.locator('.viewer-image');
+  check(await image.waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false), `${role}_viewer_missing`);
+  const decoded = await image.evaluate((node) => node instanceof HTMLImageElement && node.complete && node.naturalWidth > 0 && node.naturalHeight > 0);
+  check(decoded, `${role}_viewer_decode`);
+  const source = await image.getAttribute('src');
+  check(new RegExp(`^/api/assets/${photoId}/thumbnail\\?size=preview(?:&v=[a-f0-9]{32})?$`, 'i').test(source ?? ''), `${role}_viewer_mediaguard_path`);
+  check(!/(?:immich|original|_data|galleries|upload)/i.test(source ?? ''), `${role}_viewer_direct_media_path`);
+  const comments = page.locator('.viewer-comments');
+  check(await comments.count() === 1, `${role}_comments_surface`);
+  if (role === 'family') {
+    check(await comments.locator('.comment-composer').count() === 0 && await comments.locator('.comment-readonly').count() === 1,
+      'family_comment_readonly_surface');
+  }
+  await assertBrowserSurface(page, role);
+  await save(page, `${role}-viewer`);
+}
+
+async function assertFamilyKnownLivingDenied(page, livingId) {
+  const probes = [
+    [`/api/assets/${livingId}`, { method: 'GET' }],
+    [`/api/assets/${livingId}`, { method: 'HEAD' }],
+    [`/api/assets/${livingId}/thumbnail?size=grid`, { method: 'GET' }],
+    [`/api/assets/${livingId}/thumbnail?size=grid`, { method: 'HEAD' }],
+    [`/api/assets/${livingId}/thumbnail?size=preview`, { method: 'GET' }],
+    [`/api/assets/${livingId}/thumbnail?size=preview`, { method: 'HEAD' }],
+    [`/api/assets/${livingId}/thumbnail?size=preview`, { method: 'GET', headers: { Range: 'bytes=0-31' } }],
+  ];
+  for (const [target, init] of probes) {
+    const result = await browserFetch(page, target, init);
+    check(result.status === 404, 'family_known_living_media_denied');
+  }
+  const response = await page.goto(new URL(`/photos/${livingId}`, photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  const markup = await page.locator('html').innerHTML();
+  check(response?.status() === 404 && await page.locator('[data-photo-app="true"]').count() === 0
+    && !markup.toLowerCase().includes(livingId), 'family_known_living_viewer_denied');
+}
+
+async function assertFamilyCommentServerDenied(session, photoId) {
+  const before = await requiredJson(session.page, `/api/class-archive/comments/${photoId}?limit=100`, 'family_comments_before');
+  const beforeDigest = JSON.stringify(before);
+  session.beginFamilyDeniedCommentProbe();
+  let denied;
+  try {
+    denied = await session.page.evaluate(async ({ id }) => {
+      try {
+        const stateResponse = await fetch('/api/class-archive/product-state', { credentials: 'same-origin', cache: 'no-store' });
+        const state = await stateResponse.json().catch(() => null);
+        const response = await fetch('/api/class-archive/comments/create', {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csrfToken: state?.csrfToken, photoUuid: id, parentId: null, body: 'family-readonly-owner-acceptance' }),
+        });
+        return { state: stateResponse.status, status: response.status };
+      } catch { return { state: 0, status: 0 }; }
+    }, { id: photoId });
+  } finally { session.endFamilyDeniedCommentProbe(); }
+  check(denied?.state === 200 && denied?.status === 403, 'family_comment_server_denied');
+  const after = await requiredJson(session.page, `/api/class-archive/comments/${photoId}?limit=100`, 'family_comments_after');
+  check(JSON.stringify(after) === beforeDigest, 'family_comment_denial_no_write');
+}
+
+async function openSearch(page, role) {
+  await page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   const trigger = page.locator('.search-trigger').first();
-  check(await trigger.count() === 1, `${code}_trigger_missing`);
+  check(await trigger.count() === 1, `${role}_search_trigger`);
   await trigger.focus();
   await page.keyboard.press('Control+K');
   const dialog = page.locator('dialog[data-search-overlay="true"][open]');
-  await dialog.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => null);
-  check(await dialog.count() === 1, `${code}_dialog_missing`);
+  check(await dialog.waitFor({ state: 'visible', timeout: 30_000 }).then(() => true).catch(() => false), `${role}_search_dialog`);
   const input = dialog.getByRole('combobox', { name: '搜索照片', exact: true });
-  check(await input.count() === 1 && await input.evaluate((node) => document.activeElement === node), `${code}_focus_missing`);
-  return { dialog, input };
-}
-async function browseRole(page, role, expectedRole) {
-  stageAt(`browse_${role}`);
-  await go(page, photoOrigin, '/home', `${role}_home`);
-  const state = await productState(page, `${role}_state`);
-  check(state.role === expectedRole, `${role}_role_wrong`);
-  if (role === 'classmate' || role === 'teacher') {
-    check(state.canEraUpload === true && state.canFamilySubmission === false, `${role}_era_capability`);
-  } else if (role === 'family') {
-    check(state.canEraUpload === false && state.canFamilySubmission === true, 'family_capability');
-  } else {
-    check(state.canEraUpload === false && state.canFamilySubmission === false, 'anonymous_capability');
-  }
-  check(await page.getByRole('heading', { name: '精选集', exact: true }).count() >= 1, `${role}_home_missing`);
-  await assertQuietSurface(page, `${role}_home`);
-  await save(page, `${role}-home.png`);
-
-  await go(page, photoOrigin, '/photos', `${role}_photos`);
-  check(await page.getByRole('heading', { name: '资料库', exact: true }).count() >= 1, `${role}_photos_heading`);
-  await page.waitForFunction(() => document.querySelectorAll('.photo-card').length >= 1, null, { timeout: 120_000 }).catch(() => null);
-  const source = await decodedPhoto(page, `${role}_photos`);
-  await assertQuietSurface(page, `${role}_photos`);
-  await save(page, `${role}-photos.png`);
-
-  const first = page.locator('.photo-card').first();
-  const href = await first.getAttribute('href');
-  check(typeof href === 'string' && /^\/photos\/[0-9a-f-]{36}$/i.test(href), `${role}_viewer_href`);
-  await go(page, photoOrigin, href, `${role}_viewer`);
-  const viewer = page.locator('.viewer-image[src^="/api/assets/"]');
-  await viewer.waitFor({ state: 'visible', timeout: 90_000 }).catch(() => null);
-  check(await viewer.count() === 1, `${role}_viewer_missing`);
-  const viewerSrc = await viewer.getAttribute('src');
-  check(typeof viewerSrc === 'string' && /^\/api\/assets\/[0-9a-f-]{36}\/thumbnail\?size=preview/.test(viewerSrc), `${role}_viewer_not_mediaguard`);
-  const comments = page.getByRole('button', { name: '打开评论', exact: true });
-  check(await comments.count() === 1, `${role}_comments_control_missing`);
-  await comments.click();
-  check(await comments.getAttribute('aria-expanded') === 'true', `${role}_comments_not_open`);
-  if (role === 'family') {
-    check(await page.locator('.viewer-comments > .comment-composer').count() === 0, 'family_comment_composer_visible');
-    check(await page.locator('.comment-readonly').count() === 1, 'family_comment_readonly_missing');
-  }
-  await assertQuietSurface(page, `${role}_viewer`);
-  await save(page, `${role}-viewer.png`);
-
-  await go(page, photoOrigin, '/albums', `${role}_albums`);
-  check(await page.getByRole('heading', { name: '相册', exact: true }).count() >= 1, `${role}_albums_heading`);
-  await page.waitForFunction(() => document.querySelectorAll('.album-card').length >= 1, null, { timeout: 90_000 }).catch(() => null);
-  await assertQuietSurface(page, `${role}_albums`);
-
-  await go(page, photoOrigin, '/people', `${role}_people`);
-  check(await page.getByRole('heading', { name: '人物', exact: true }).count() >= 1, `${role}_people_heading`);
-  await assertQuietSurface(page, `${role}_people`);
-
-  await go(page, photoOrigin, '/home', `${role}_search_home`);
-  const search = await openSearch(page, `${role}_search`);
-  await search.input.fill('毕业');
-  await search.input.press('Enter');
-  await page.waitForFunction(() => document.querySelector('.global-search-results .hybrid-results, .global-search-results .error-state') !== null, null, { timeout: 60_000 }).catch(() => null);
-  check(await search.dialog.locator('.hybrid-results, .error-state').count() >= 1, `${role}_search_results_missing`);
-  await assertQuietSurface(page, `${role}_search`);
+  check(await input.count() === 1 && await input.evaluate((node) => document.activeElement === node), `${role}_search_focus`);
+  await input.fill('毕业');
+  await input.press('Enter');
+  check(await dialog.locator('.hybrid-results, .error-state').waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false), `${role}_search_results`);
+  await save(page, `${role}-search`);
   await page.keyboard.press('Escape');
   check(await page.locator('dialog[data-search-overlay="true"][open]').count() === 0, `${role}_search_escape`);
-
-  // Browser requests must use the checked gateway media path. The check is
-  // intentionally scoped to an authorized visible derivative; the synthetic
-  // V4 scope suite owns a known-LIVING URL denial oracle.
-  const response = await page.evaluate(async (target) => {
-    const value = await fetch(target, { method: 'HEAD', credentials: 'same-origin', cache: 'no-store' });
-    return { status: value.status, type: value.headers.get('content-type') ?? '' };
-  }, source);
-  check(response.status === 200 && /^image\//i.test(response.type), `${role}_authorized_thumbnail_denied`);
-}
-async function isFrozen(adminPage) {
-  return (await adminPage.locator('form:has(input[name="action"][value="unfreeze_identity"])').count()) === 1;
-}
-async function freezeIdentity(adminPage, identityId, code) {
-  if (!(Number.isSafeInteger(identityId) && identityId > 0)) return;
-  await go(adminPage, coreOrigin, `admin.php?page=plugin-ClassIdentity-identities&identity_id=${identityId}`, `${code}_detail`);
-  if (await isFrozen(adminPage)) return;
-  const form = adminPage.locator('form:has(input[name="action"][value="freeze_identity"])');
-  check(await form.count() === 1, `${code}_form_missing`);
-  await form.locator('input[name="reason"]').fill('本地 V4 Chrome 验收结束，冻结临时身份');
-  await submit(adminPage, form, code);
-  check(await isFrozen(adminPage), `${code}_not_frozen`);
-}
-async function cleanupIdentities(adminPage) {
-  await freezeIdentity(adminPage, created.teacherIdentityId, 'cleanup_teacher');
-  await freezeIdentity(adminPage, created.classmateIdentityId, 'cleanup_classmate');
-  cleanup = 'frozen';
 }
 
-let adminPage = null;
-try {
-  stageAt('admin_session');
-  adminPage = await createAdminPage();
-  const classmatePage = await createClassmateAndClaim(adminPage);
-  const teacherPage = await createTeacherAndClaim(adminPage);
-  const { familyPage, anonymousPage } = await createFamilyAndAnonymous(classmatePage);
+async function inspectRole(session, role, expectedIds, forbiddenLivingIds) {
+  const { page } = session;
+  stageAt(`${role}_read_projections`);
+  const state = await requiredJson(page, '/api/class-archive/product-state', `${role}_state`);
+  check(state.role === role.toUpperCase(), `${role}_state_role`);
+  check(state.canEraUpload === (role === 'classmate' || role === 'teacher'), `${role}_state_member_upload`);
+  check(state.canFamilySubmission === (role === 'family'), `${role}_state_family_upload`);
+  const timeline = await timelineCatalog(page, role);
+  check(setEquals(new Set(timeline.keys()), expectedIds), `${role}_timeline_exact_scope`);
+  const home = await requiredJson(page, '/api/class-archive/collections/home', `${role}_home`);
+  const pins = await requiredJson(page, '/api/class-archive/collections/pins', `${role}_pins`);
+  const albumsPayload = await requiredJson(page, '/api/class-archive/albums', `${role}_albums`);
+  const peoplePayload = await requiredJson(page, '/api/people', `${role}_people`);
+  const spotlight = await requiredJson(page, '/api/class-archive/spotlight', `${role}_spotlight`);
+  const suggestions = await requiredJson(page, '/api/class-archive/search/suggestions?q=%E6%AF%95%E4%B8%9A', `${role}_suggestions`);
+  const grouped = await requiredJson(page, '/api/class-archive/search/grouped?q=%E6%AF%95%E4%B8%9A&contextType=ALL&limit=120', `${role}_search`);
+  assertCollection(home, role, expectedIds, `${role}_home`);
+  assertPins(pins, expectedIds, `${role}_pins`);
+  const albums = albumMap(albumsPayload, expectedIds, `${role}_albums`);
+  const people = peopleMap(peoplePayload, expectedIds, `${role}_people`);
+  assertSpotlight(spotlight, expectedIds, `${role}_spotlight`);
+  assertSearch(grouped, expectedIds, `${role}_search`);
+  if (role === 'family') {
+    for (const [name, payload] of Object.entries({ home, pins, albumsPayload, peoplePayload, spotlight, suggestions, grouped })) {
+      assertNoPhotoIds(payload, forbiddenLivingIds, `family_${name}_living_leak`);
+    }
+  }
+  if (role === 'anonymous') {
+    for (const payload of [state, home, pins, albumsPayload, peoplePayload, spotlight, suggestions, grouped]) {
+      assertAnonymousRedaction(payload, 'anonymous_api_identity_leak');
+    }
+  }
+  await albumDetailSamples(page, albums, expectedIds, forbiddenLivingIds, role);
+  await peopleDetailSamples(page, people, expectedIds, forbiddenLivingIds, role);
+  await page.goto(new URL('/people', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  check(await page.getByRole('heading', { name: '人物', exact: true }).count() >= 1, `${role}_people_surface`);
+  await assertBrowserSurface(page, role);
+  await save(page, `${role}-people`);
+  await openSearch(page, role);
+  return { state, timeline, home, albums, people, grouped };
+}
 
-  await browseRole(classmatePage, 'classmate', 'CLASSMATE');
-  await browseRole(teacherPage, 'teacher', 'TEACHER');
-  await browseRole(familyPage, 'family', 'FAMILY');
-  await browseRole(anonymousPage, 'anonymous', 'ANONYMOUS');
-  check(unexpectedNetwork.size === 0, 'unexpected_network_request');
-  await cleanupIdentities(adminPage);
-  process.stdout.write(`V4_OWNER_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} cleanup=${cleanup}\n`);
-} catch (error) {
-  const code = error instanceof GateError && /^[a-z0-9_]{1,120}$/i.test(error.code) ? error.code : 'unexpected';
-  process.stdout.write(`V4_OWNER_CHROME_QA=FAIL stage=${stage} code=${code}\n`);
-  process.exitCode = 1;
-} finally {
+async function main() {
+  const results = new Map();
+  stageAt('classmate_login');
+  const classmateSession = await openRole('classmate', { width: 1440, height: 900 });
+  let classmateTimeline;
   try {
-    if (adminPage !== null && cleanup !== 'frozen') await cleanupIdentities(adminPage);
-  } catch { process.exitCode = 1; cleanup = 'failed'; }
-  for (const context of contexts.reverse()) await context.close().catch(() => { process.exitCode = 1; });
+    classmateTimeline = await timelineCatalog(classmateSession.page, 'classmate_truth');
+    const fullIds = new Set(classmateTimeline.keys());
+    const heritageIds = new Set([...classmateTimeline].filter(([, era]) => era === 'HERITAGE').map(([id]) => id));
+    const livingIds = new Set([...classmateTimeline].filter(([, era]) => era === 'LIVING').map(([id]) => id));
+    check(heritageIds.size > 0 && livingIds.size > 0 && heritageIds.size + livingIds.size === fullIds.size, 'owner_both_eras_required');
+    const classmate = await inspectRole(classmateSession, 'classmate', fullIds, livingIds);
+    results.set('classmate', classmate);
+    const knownLiving = livingIds.values().next().value;
+    await viewer(classmateSession.page, 'classmate', knownLiving);
+    await classmateSession.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await assertBrowserSurface(classmateSession.page, 'classmate');
+    await save(classmateSession.page, 'classmate-home');
+
+    for (const role of ['family', 'teacher', 'anonymous']) {
+      stageAt(`${role}_login`);
+      const session = await openRole(role, role === 'family' || role === 'anonymous' ? { width: 390, height: 844 } : { width: 1920, height: 1080 });
+      try {
+        const expectedIds = role === 'family' ? heritageIds : fullIds;
+        const inspection = await inspectRole(session, role, expectedIds, livingIds);
+        results.set(role, inspection);
+        if (role === 'family') {
+          await assertFamilyKnownLivingDenied(session.page, knownLiving);
+          const visibleHeritage = heritageIds.values().next().value;
+          await viewer(session.page, role, visibleHeritage);
+          await assertFamilyCommentServerDenied(session, visibleHeritage);
+        } else {
+          await viewer(session.page, role, knownLiving);
+        }
+        await session.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        await assertBrowserSurface(session.page, role);
+        await save(session.page, `${role}-home`);
+      } finally { await session.context.close().catch(() => null); }
+    }
+
+    stageAt('cross_role_scope_comparison');
+    for (const role of fullRoles) {
+      const result = results.get(role);
+      check(result?.home?.scope === 'FULL', `${role}_full_scope`);
+      check(setEquals(new Set(result.timeline.keys()), fullIds), `${role}_full_timeline`);
+      compareMapsExact(result.albums, results.get('classmate').albums, 'total', `${role}_album_counts`);
+      compareMapsExact(result.people, results.get('classmate').people, 'count', `${role}_people_counts`);
+    }
+    const family = results.get('family');
+    check(family?.home?.scope === 'HERITAGE_ONLY' && setEquals(new Set(family.timeline.keys()), heritageIds), 'family_heritage_only_scope');
+    compareMapsSubset(family.albums, results.get('classmate').albums, 'total', 'family_album_counts');
+    compareMapsSubset(family.people, results.get('classmate').people, 'count', 'family_people_counts');
+    check(unexpectedNetwork.size === 0, 'unexpected_network_request');
+    check(forbiddenBusinessMutations.size === 0, 'forbidden_business_mutation_attempt');
+    check(successfulBusinessWrites === 0, 'business_write_observed');
+    process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=4 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0\n`);
+  } finally { await classmateSession.context.close().catch(() => null); }
+}
+
+try { await main(); }
+catch (error) {
+  const code = error instanceof GateError && /^[a-z0-9_]{1,120}$/i.test(error.code) ? error.code : 'unexpected';
+  process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=${stage} code=${code}\n`);
+  process.exitCode = 1;
 }
