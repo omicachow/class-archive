@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('initialize', 'restore', 'bootstrap-v17', 'migrate', 'verify', 'recover', 'status')]
     [string]$Action = 'status',
-    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26')]
+    [ValidateSet('attempt8', 'attempt9', 'attempt10', 'attempt11', 'attempt12', 'attempt13', 'attempt14', 'attempt15', 'attempt16', 'attempt17', 'attempt18', 'attempt19', 'attempt20', 'attempt21', 'attempt22', 'attempt23', 'attempt24', 'attempt25', 'attempt26', 'attempt27')]
     [string]$Attempt = 'attempt8',
     [switch]$ResumeEmptyBootstrap,
     [switch]$ResumeEmptyRecovery,
@@ -232,6 +232,18 @@ $attemptSpec = switch ($Attempt) {
             HttpPort = '11090'; CompatPort = '11091'
             AppSubnet = '10.255.21.0/24'; GatewaySubnet = '10.210.0.0/16'
             BffGatewayIp = '10.210.0.10'
+        }
+    }
+    'attempt27' {
+        # attempt26 remains preserved after its completed child exposed an
+        # ambiguous host-side ExitCode object. attempt27 validates the native
+        # process exit state before normalizing its exit code, while retaining
+        # owner-only file capture. It shares no project, volumes, bridges, or
+        # ports with any prior laboratory.
+        @{
+            HttpPort = '11190'; CompatPort = '11191'
+            AppSubnet = '10.255.22.0/24'; GatewaySubnet = '10.208.0.0/16'
+            BffGatewayIp = '10.208.0.10'
         }
     }
 }
