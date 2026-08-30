@@ -17,8 +17,8 @@ $fixture = [IO.File]::ReadAllText($files.fixture)
 $tokens = $null; $parseErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($files.wrapper, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'v4_upload_protocol_wrapper_parse_invalid' }
-$node = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'v4_upload_protocol_node_parse_unavailable' }
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if ([string]::IsNullOrWhiteSpace($node)) { throw 'v4_upload_protocol_node_parse_unavailable' }
 & $node --check $files.runner
 if ($LASTEXITCODE -ne 0) { throw 'v4_upload_protocol_runner_parse_invalid' }
 function Assert-Contains([string]$Source,[string]$Needle,[string]$Code) { if (-not $Source.Contains($Needle)) { throw $Code } }

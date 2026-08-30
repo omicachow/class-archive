@@ -36,8 +36,8 @@ $tokens = $null
 $parseErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($wrapperPath, [ref]$tokens, [ref]$parseErrors)
 Assert-True ($parseErrors.Count -eq 0) 'v4_scope_wrapper_parse_invalid'
-$node = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-Assert-True (Test-Path -LiteralPath $node -PathType Leaf) 'v4_scope_node_parse_unavailable'
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+Assert-True (-not [string]::IsNullOrWhiteSpace($node)) 'v4_scope_node_parse_unavailable'
 & $node --check $runnerPath
 Assert-True ($LASTEXITCODE -eq 0) 'v4_scope_runner_parse_invalid'
 

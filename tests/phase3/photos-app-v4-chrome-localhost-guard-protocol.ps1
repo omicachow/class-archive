@@ -25,8 +25,8 @@ Assert-True (Test-Path -LiteralPath $guardPath -PathType Leaf) 'v4_chrome_localh
 foreach ($path in $runnerPaths) { Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'v4_chrome_localhost_guard_runner_missing' }
 $guard = [IO.File]::ReadAllText($guardPath)
 
-$node = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-Assert-True (Test-Path -LiteralPath $node -PathType Leaf) 'v4_chrome_localhost_guard_node_unavailable'
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+Assert-True (-not [string]::IsNullOrWhiteSpace($node)) 'v4_chrome_localhost_guard_node_unavailable'
 & $node --check $guardPath
 Assert-True ($LASTEXITCODE -eq 0) 'v4_chrome_localhost_guard_parse_invalid'
 
