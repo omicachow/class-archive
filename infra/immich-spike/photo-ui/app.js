@@ -1867,7 +1867,10 @@ function viewerFilmstrip(photos, currentIndex) {
       link.dataset.current = 'true';
       link.setAttribute('aria-current', 'true');
     }
-    link.append(responsivePhotoImage(photo, 'grid', '', index === currentIndex));
+    // The strip is bounded to eleven xsmall thumbnails. Load that compact
+    // navigation eagerly so a freshly opened mobile viewer never presents
+    // blank waypoints while IntersectionObserver settles.
+    link.append(responsivePhotoImage(photo, 'grid', '', true));
     strip.append(link);
   }
   return strip;

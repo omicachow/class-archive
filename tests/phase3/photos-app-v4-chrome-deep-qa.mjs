@@ -153,10 +153,24 @@ function safePhotoUrl(relative) {
   return new URL(relative, settings.photos).toString();
 }
 
-async function save(page, name) {
+async function save(page, name, options = {}) {
   const stem = child(settings.screenshots, name, 'screenshot_child');
-  await page.screenshot({ path: inside(settings.screenshots, `${stem}.png`, 'screenshot_file'), fullPage: true });
+  await page.screenshot({
+    path: inside(settings.screenshots, `${stem}.png`, 'screenshot_file'),
+    fullPage: options.fullPage !== false,
+  });
   screenshots += 1;
+}
+
+async function waitForViewerFilmstrip(page, role) {
+  const ready = await page.waitForFunction(() => {
+    const images = Array.from(document.querySelectorAll('.viewer-filmstrip img'));
+    return images.length > 0 && images.every((item) => item instanceof HTMLImageElement
+      && item.complete && item.naturalWidth > 0 && item.dataset.loadState !== 'error');
+  }, undefined, { timeout: 15_000 }).then(() => true).catch(() => false);
+  check(ready, `${role}_viewer_filmstrip_images_ready`);
+  const strip = page.locator('.viewer-filmstrip');
+  check(await strip.evaluate((node) => node.offsetHeight - node.clientHeight <= 2), `${role}_viewer_filmstrip_scrollbar_hidden`);
 }
 
 async function open(role, viewport, credentials) {
@@ -507,6 +521,7 @@ async function viewerJourney(role, viewport, credentials, viewerFixture) {
 
     stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation`);
     stageAt(`${role}_${mobile ? 'mobile' : 'desktop'}_viewer_navigation_save`);
+    await waitForViewerFilmstrip(page, role);
     await save(page, `${role}-${mobile ? 'mobile' : 'desktop'}-viewer`);
     const next = page.locator('.viewer-next');
     check(!(await next.isDisabled()), `${role}_viewer_keyboard_next_available`);
@@ -639,11 +654,11 @@ async function eraUploadJourney(role, viewport, credentials) {
     check(!(await album.isDisabled()) && await album.locator('option').count() >= 2, `${role}_era_upload_heritage_album_choices`);
     await dialog.locator('input[name="era"][value="LIVING"]').check();
     check(!(await album.isDisabled()) && await album.locator('option').count() >= 2, `${role}_era_upload_living_album_choices`);
+    await save(page, `${role}-era-upload`, { fullPage: false });
     await dialog.getByRole('button', { name: '取消', exact: true }).click();
     await dialog.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => null);
     check(await dialog.count() === 0, `${role}_era_upload_close`);
     await directMemberMissingEraDenied(page, role);
-    await save(page, `${role}-era-upload`);
   } finally {
     await context.close().catch(() => null);
   }

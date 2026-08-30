@@ -140,7 +140,24 @@ async function open(role, viewport, credentials) {
     fail(context === null ? 'chrome_stable_launch' : 'chrome_session');
   }
 }
-async function save(page, name) { await page.screenshot({ path: child(settings.screenshots, `${name}.png`, 'screenshot_child'), fullPage: true }); screenshots += 1; }
+async function save(page, name, options = {}) {
+  await page.screenshot({
+    path: child(settings.screenshots, `${name}.png`, 'screenshot_child'),
+    fullPage: options.fullPage !== false,
+  });
+  screenshots += 1;
+}
+async function waitForSearchImages(page, limit = 6) {
+  const selector = 'dialog[data-search-overlay="true"][open] .global-search-results .search-photo-grid img';
+  const count = await page.locator(selector).count();
+  check(count > 0, 'search_visual_photo_results_missing');
+  const ready = await page.waitForFunction(({ selector: imageSelector, limit: maxItems }) => {
+    const items = Array.from(document.querySelectorAll(imageSelector)).slice(0, maxItems);
+    return items.length > 0 && items.every((item) => item instanceof HTMLImageElement
+      && item.complete && item.naturalWidth > 0 && item.dataset.loadState !== 'error');
+  }, { selector, limit: Math.min(limit, count) }, { timeout: 15_000 }).then(() => true).catch(() => false);
+  check(ready, 'search_visual_photo_results_not_ready');
+}
 async function textList(locator) { return locator.allTextContents().then((v) => v.map((x) => x.trim()).filter(Boolean)); }
 async function focusables(page) { return page.locator(searchFocusableSelector); }
 function boundedDelay(milliseconds) {
@@ -451,7 +468,8 @@ async function currentAlbumScopeCheck(page, query) {
   const all = await allResponse;
   check(all !== null && all.status() === 200 && await scope.getAttribute('data-scope-kind') === 'ALL', 'search_all_library_scope_request');
   check(await context.isHidden(), 'search_all_library_scope_context_hidden');
-  await save(page, 'classmate-desktop-album-search-scope');
+  await waitForSearchImages(page);
+  await save(page, 'classmate-desktop-album-search-scope', { fullPage: false });
   await closeSearchDialog(page, dialog, 'search_album_scope_close');
   await gotoOwned(page, new URL('/home', settings.photos), 'home_route_after_album_search_scope');
 }
@@ -537,9 +555,9 @@ async function main() {
   stageAt('teacher_wide'); const wide = await loginAndHome('teacher', { width: 1920, height: 1080 }, credentials);
   try { const teacher = await scopeProjection(wide.page, 'teacher'); check(teacher.total === classmate.total, 'teacher_full_scope'); await navCheck(wide.page, false); await save(wide.page, 'teacher-wide-home'); } finally { await wide.context.close(); }
   stageAt('family_mobile'); const mobile = await loginAndHome('family', { width: 390, height: 844 }, credentials);
-  try { const family = await scopeProjection(mobile.page, 'family'); check(family.total < classmate.total, 'family_heritage_only_scope'); await navCheck(mobile.page, true); await mobileSearchOverlayCheck(mobile.page); await save(mobile.page, 'family-mobile-home'); } finally { await mobile.context.close(); }
+  try { const family = await scopeProjection(mobile.page, 'family'); check(family.total < classmate.total, 'family_heritage_only_scope'); await navCheck(mobile.page, true); await mobileSearchOverlayCheck(mobile.page); await save(mobile.page, 'family-mobile-home', { fullPage: false }); } finally { await mobile.context.close(); }
   stageAt('anonymous_mobile'); const anonymous = await loginAndHome('anonymous', { width: 390, height: 844 }, credentials);
-  try { const state = await scopeProjection(anonymous.page, 'anonymous'); check(state.total === classmate.total, 'anonymous_full_scope'); await save(anonymous.page, 'anonymous-mobile-home'); } finally { await anonymous.context.close(); }
+  try { const state = await scopeProjection(anonymous.page, 'anonymous'); check(state.total === classmate.total, 'anonymous_full_scope'); await save(anonymous.page, 'anonymous-mobile-home', { fullPage: false }); } finally { await anonymous.context.close(); }
   check(/^\d+(?:\.\d+){1,4}$/.test(chromeVersion), 'chrome_stable_version');
   process.stdout.write(`V4_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} channel=chrome chrome_product=${chromeProduct} chrome_version=${chromeVersion}\n`);
 }
