@@ -45,6 +45,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Broker recovery plans contain one-time fixture credentials and must
+      # survive a Piwigo container restart between the first password CAS and
+      # the watchdog recovery. This dedicated private named volume is neither
+      # web-served nor mounted by the synthetic/public runtime.
+      - type: volume
+        source: private_e2e_recovery
+        target: /var/lib/class-archive-private-e2e
     logging:
       driver: local
       options:
@@ -146,3 +153,8 @@ volumes:
     driver: local
     labels:
       com.classarchive.scope: private-real-full
+  private_e2e_recovery:
+    driver: local
+    labels:
+      com.classarchive.scope: private-real-full
+      com.classarchive.data: local-private-e2e-recovery

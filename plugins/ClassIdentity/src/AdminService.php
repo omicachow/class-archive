@@ -7,6 +7,8 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 use ClassIdentity\Schema;
 use ClassIdentity\Audit;
 use ClassIdentity\CoreAdapter;
+use ClassIdentity\PrivateE2EFixtureLeaseContext;
+use ClassIdentity\PrivateE2EFixtureLeaseService;
 
 /**
  * Business-facing read/write service for the Class Archive Admin Console.
@@ -598,17 +600,35 @@ SQL, 'i', [$tokenId]);
         }
     }
 
-    public function setIdentityFrozen(int $identityId, bool $frozen, string $reason, int $actorUserId): void
-    {
+    public function setIdentityFrozen(
+        int $identityId,
+        bool $frozen,
+        string $reason,
+        int $actorUserId,
+        ?PrivateE2EFixtureLeaseContext $fixtureLease = null,
+        ?int $expectedLockVersion = null,
+    ): void {
         // Validate before reading account state or revoking a Core credential;
         // an invalid operator reason must never cause an unaudited side effect.
         $reason = $this->validatedReason($reason);
-        $identity = $this->table('identity');
-        $principal = $this->table('principal');
-        $account = $this->table('account');
-        $seat = $this->table('seat');
+        if ($expectedLockVersion !== null && $expectedLockVersion < 0) {
+            throw new InvalidArgumentException('class_identity_expected_lock_version_invalid');
+        }
 
-        $boundPrincipals = $this->all(<<<SQL
+        // The guard's named lock is shared with private lease acquisition and
+        // is held through commit plus Core credential revocation. An ordinary
+        // browser administrator therefore cannot pass a no-row race while a
+        // local-private broker is acquiring its lease. Test mode is not needed
+        // in this web process: any durable ACTIVE lease is enforced.
+        $fixtureLeaseService = PrivateE2EFixtureLeaseService::fromPiwigo();
+        $fixtureMutationGuard = $fixtureLeaseService->beginIdentityMutation($identityId, $fixtureLease);
+        try {
+            $identity = $this->table('identity');
+            $principal = $this->table('principal');
+            $account = $this->table('account');
+            $seat = $this->table('seat');
+
+            $boundPrincipals = $this->all(<<<SQL
 SELECT p.id, p.piwigo_user_id
 FROM {$principal} p
 JOIN {$account} a ON a.id = p.account_id AND a.current_marker = 1
@@ -616,62 +636,109 @@ JOIN {$seat} s ON s.id = a.seat_id
 WHERE s.identity_id = ? AND p.principal_type = 'SEAT_ACCOUNT'
 SQL, 'i', [$identityId]);
 
-        // Unfreeze never resurrects a session/API key that existed before the
-        // freeze. Revoke while the Identity is still denied, then make it active.
-        if (!$frozen) {
-            foreach ($boundPrincipals as $boundPrincipal) {
-                CoreAdapter::revokeAllCredentials((int) $boundPrincipal['piwigo_user_id']);
+            // Unfreeze never resurrects a session/API key that existed before
+            // the freeze. Revoke while the Identity is still denied, then make
+            // it active. The fixture mutation guard remains held throughout.
+            if (!$frozen) {
+                foreach ($boundPrincipals as $boundPrincipal) {
+                    CoreAdapter::revokeAllCredentials((int) $boundPrincipal['piwigo_user_id']);
+                }
             }
-        }
 
-        $this->begin();
-        try {
-            $row = $this->one("SELECT id, state FROM {$identity} WHERE id = ? FOR UPDATE", 'i', [$identityId]);
-            if ($row === null || $row['state'] === 'RETIRED') {
-                throw new InvalidArgumentException('身份不存在或已注销。');
-            }
-            $newState = $frozen ? 'FROZEN' : 'ACTIVE';
-            $oldState = (string) $row['state'];
-            if ($oldState !== $newState) {
-                $stmt = $this->prepare("UPDATE {$identity} SET state = ?, frozen_at = CASE WHEN ? = 'FROZEN' THEN UTC_TIMESTAMP(6) ELSE NULL END, updated_at = UTC_TIMESTAMP(6), lock_version = lock_version + 1 WHERE id = ?");
-                $stmt->bind_param('ssi', $newState, $newState, $identityId);
-                $this->execute($stmt);
-                $stmt->close();
-            }
-            if ($frozen) {
-                $stmt = $this->prepare(<<<SQL
+            $this->begin();
+            $leaseCommittedVersion = null;
+            try {
+                $row = $this->one(
+                    "SELECT id, state, lock_version FROM {$identity} WHERE id = ? FOR UPDATE",
+                    'i',
+                    [$identityId],
+                );
+                if ($row === null || $row['state'] === 'RETIRED') {
+                    throw new InvalidArgumentException('身份不存在或已注销。');
+                }
+                $oldVersion = (int) $row['lock_version'];
+                $guardVersion = $fixtureMutationGuard->expectedLockVersion();
+                if (($expectedLockVersion !== null && $oldVersion !== $expectedLockVersion)
+                    || ($guardVersion !== null && $oldVersion !== $guardVersion)
+                    || ($fixtureLease !== null && $oldVersion !== $fixtureLease->expectedLockVersion())
+                ) {
+                    throw new RuntimeException('class_identity_fixture_lease_cas_conflict');
+                }
+
+                $newState = $frozen ? 'FROZEN' : 'ACTIVE';
+                $oldState = (string) $row['state'];
+                $newVersion = $oldVersion;
+                if ($oldState !== $newState) {
+                    $stmt = $this->prepare(
+                        "UPDATE {$identity} SET state = ?, frozen_at = CASE WHEN ? = 'FROZEN' THEN UTC_TIMESTAMP(6) ELSE NULL END, "
+                        . 'updated_at = UTC_TIMESTAMP(6), lock_version = lock_version + 1 '
+                        . 'WHERE id = ? AND state = ? AND lock_version = ?',
+                    );
+                    $stmt->bind_param('ssisi', $newState, $newState, $identityId, $oldState, $oldVersion);
+                    $this->execute($stmt);
+                    self::requireAffected($stmt, 'class_identity_fixture_lease_cas_conflict');
+                    $stmt->close();
+                    $newVersion = $oldVersion + 1;
+                    if ($fixtureMutationGuard->isLeased()) {
+                        if ($fixtureLease === null) {
+                            throw new RuntimeException('class_identity_fixture_lease_context_required');
+                        }
+                        $fixtureLeaseService->advanceIdentityMutation($fixtureLease, $oldVersion, $newVersion);
+                    }
+                }
+                if ($frozen) {
+                    $stmt = $this->prepare(<<<SQL
 UPDATE {$principal} p
 JOIN {$account} a ON a.id = p.account_id AND a.current_marker = 1
 JOIN {$seat} s ON s.id = a.seat_id
 SET p.auth_epoch = p.auth_epoch + 1, p.updated_at = UTC_TIMESTAMP(6)
 WHERE s.identity_id = ? AND p.principal_type = 'SEAT_ACCOUNT'
 SQL);
-                $stmt->bind_param('i', $identityId);
-                $this->execute($stmt);
-                $stmt->close();
+                    $stmt->bind_param('i', $identityId);
+                    $this->execute($stmt);
+                    $stmt->close();
+                }
+                $this->audit(
+                    $actorUserId,
+                    $frozen ? 'IDENTITY_FREEZE' : 'IDENTITY_UNFREEZE',
+                    'IDENTITY',
+                    (string) $identityId,
+                    $identityId,
+                    null,
+                    [
+                        'from' => $oldState,
+                        'to' => $newState,
+                        'lock_version_before' => $oldVersion,
+                        'lock_version_after' => $newVersion,
+                    ],
+                    $reason,
+                );
+                $this->commit();
+                if ($fixtureMutationGuard->isLeased() && $newVersion !== $oldVersion) {
+                    $leaseCommittedVersion = $newVersion;
+                }
+            } catch (Throwable $error) {
+                $this->rollback();
+                throw $error;
             }
-            $this->audit(
-                $actorUserId,
-                $frozen ? 'IDENTITY_FREEZE' : 'IDENTITY_UNFREEZE',
-                'IDENTITY',
-                (string) $identityId,
-                $identityId,
-                null,
-                ['from' => $oldState, 'to' => $newState],
-                $reason
-            );
-            $this->commit();
-        } catch (Throwable $error) {
-            $this->rollback();
-            throw $error;
-        }
 
-        // The state and epoch change are already committed, so any failure in
-        // a Core MyISAM revoke remains fail-closed: the Identity stays frozen.
-        if ($frozen) {
-            foreach ($boundPrincipals as $boundPrincipal) {
-                CoreAdapter::revokeAllCredentials((int) $boundPrincipal['piwigo_user_id']);
+            if ($leaseCommittedVersion !== null && $fixtureLease !== null) {
+                $fixtureLeaseService->confirmIdentityMutationCommitted(
+                    $fixtureLease,
+                    $leaseCommittedVersion,
+                );
             }
+
+            // The state and epoch change are already committed, so any failure
+            // in a Core MyISAM revoke remains fail-closed: the Identity stays
+            // frozen. The lease mutation guard remains held until this finishes.
+            if ($frozen) {
+                foreach ($boundPrincipals as $boundPrincipal) {
+                    CoreAdapter::revokeAllCredentials((int) $boundPrincipal['piwigo_user_id']);
+                }
+            }
+        } finally {
+            $fixtureMutationGuard->release();
         }
     }
 

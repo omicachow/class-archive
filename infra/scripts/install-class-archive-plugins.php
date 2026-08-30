@@ -26,7 +26,7 @@ const CLASS_ARCHIVE_PLUGIN_MANIFEST = [
             'src/ClassArchivePhoto.php', 'src/ClassArchivePhotoMappingService.php',
             'src/Access.php', 'src/CoreAdapter.php', 'src/CapabilityGuard.php',
             'src/RateLimiter.php', 'src/ProvisioningService.php',
-            'src/AdminService.php', 'src/AnonymousPresenter.php',
+            'src/AdminService.php', 'src/PrivateE2EFixtureLeaseService.php', 'src/AnonymousPresenter.php',
             'src/AnonymousResolutionService.php', 'src/Http.php', 'public.php',
             'src/SubmissionService.php', 'src/MemberEraUploadService.php', 'src/ArchiveService.php',
             'src/AnonymousGovernanceService.php', 'src/BuildCommit.php', 'src/MediaAttestation.php',

@@ -30,14 +30,21 @@ usernames, and paths never appear in stdout.
 
 Opening order is fail-closed:
 
-1. rotate and revoke credentials while the Identity is still frozen;
-2. append `PRINCIPAL_SECURITY_CHANGE` audit events;
-3. unfreeze the Identity as the final opening action.
+1. create the exclusive 0600 credential/recovery plan;
+2. install each temporary verifier with an exact user/topology CAS while the
+   Identity is still frozen;
+3. revoke credentials and append `PRINCIPAL_SECURITY_CHANGE` audit events;
+4. unfreeze the Identity as the final opening action.
 
 EOF, `STOP`, timeout, a handled signal, or any exception enters the same
 cleanup. Cleanup freezes first, increments principal authorization epochs and
-revokes sessions, then rotates every account to a second unknown secret while
-still frozen. Audit rows are retained. No identity, seat, account, token,
+revokes sessions, then replaces only verifiers whose digest proves they were
+installed by this run. An administrator's concurrent verifier is preserved and
+the lease becomes `CONFLICT`; expired/conflicted access stays denied by Access
+and MediaGuard. The recovery plan is retained until exact `CLOSED` or
+`RECOVERED` attestation in a dedicated non-web-served volume that survives a
+Piwigo container restart. Open and close/recovery security changes each append
+`PRINCIPAL_SECURITY_CHANGE` evidence. Audit rows are retained. No identity, seat, account, token,
 content, comment, media, album, or AI record is created or deleted.
 
 The post-run state is security-equivalent rather than byte-identical:
@@ -57,19 +64,11 @@ albums, Spotlight, Viewer, and known-LIVING GET/HEAD/Range denial. Anonymous
 responses and markup are checked against all three leased usernames as well as
 identity/account/seat/principal fields.
 
-## Current runtime gate
+## Runtime gate
 
-The executable lease is deliberately **blocked** in this revision. The broker
-advisory lock serializes brokers, but the ordinary administrator mutation path
-does not yet participate in that lock. A concurrent administrator could race
-the final freeze verifier. The wrapper therefore returns
-`lease_runtime_disabled_pending_mutation_exclusion` even when its confirmation
-switch is supplied. This is a fail-closed protocol implementation, not 8191
-browser evidence. The PHP broker carries the same hard-coded false gate, so a
-direct container invocation cannot bypass the wrapper block.
-
-After a lease-aware administrator mutation exclusion/CAS is implemented and
-reviewed, the intended local command is:
+The durable lease, administrator mutation guard, HTTP authorization denial,
+password CAS and independent TTL watchdog are exercised first against random
+synthetic tables. Owner execution remains separately opt-in and requires:
 
 ```powershell
 pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
@@ -77,5 +76,6 @@ pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -ConfirmFqaCredentialLease
 ```
 
-This gate does not test Teacher or owner-private uploads. Those remain separate
-gates and must not be reported as passing from this run.
+This gate remains deliberately narrow: it does not create fixtures and does not
+test Teacher or owner-private uploads. Those remain separate gates and must not
+be reported as passing from this run.

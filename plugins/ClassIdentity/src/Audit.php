@@ -57,6 +57,8 @@ final class Audit
         'name',
         'enabled',
         'auth_epoch',
+        'lock_version_before',
+        'lock_version_after',
         'era',
         'mime_type',
         'extension',

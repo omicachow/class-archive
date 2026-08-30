@@ -26,6 +26,7 @@ require_once CLASS_IDENTITY_PATH . 'src/ClassArchivePersonMappingService.php';
 require_once CLASS_IDENTITY_PATH . 'src/Audit.php';
 require_once CLASS_IDENTITY_PATH . 'src/CoreAdapter.php';
 require_once CLASS_IDENTITY_PATH . 'src/Access.php';
+require_once CLASS_IDENTITY_PATH . 'src/PrivateE2EFixtureLeaseService.php';
 require_once CLASS_IDENTITY_PATH . 'src/DomainSupport.php';
 require_once CLASS_IDENTITY_PATH . 'src/ProjectionMutationBoundary.php';
 require_once CLASS_IDENTITY_PATH . 'src/PersonCurationService.php';

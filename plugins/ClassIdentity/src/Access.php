@@ -471,6 +471,16 @@ final class Access
                 return null;
             }
 
+            // A live local-private fixture lease is an intentional, bounded
+            // access window. Expired or conflicted leases are authorization
+            // UNKNOWN and must deny the same page/API/media request. This one
+            // bridge also covers MediaGuard through resolveMediaRole().
+            if (!class_exists(PrivateE2EFixtureLeaseService::class, false)) {
+                return null;
+            }
+            PrivateE2EFixtureLeaseService::fromPiwigo()
+                ->assertIdentityHttpAuthorizationAllowed((int) $context['identity_id']);
+
             $role = (string) $context['seat_type'];
             if (!CoreAdapter::managedGroupProjectionMatches($userId, $role, $context)) {
                 return null;
