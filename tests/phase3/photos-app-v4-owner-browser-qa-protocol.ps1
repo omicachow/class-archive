@@ -174,6 +174,8 @@ Assert-Contains $wrapper 'Invoke-ClassArchiveBoundedNative' 'owner_fqa_browser_w
 Assert-Contains $wrapper '$browserTimeoutSeconds = 720' 'owner_fqa_browser_timeout_missing'
 Assert-NotContains $wrapper 'function Invoke-Piwigo' 'owner_fqa_unbounded_wsl_helper_forbidden'
 Assert-Contains $wrapper "if (`$cleanupFailed) {" 'owner_fqa_cleanup_failure_precedes_pass_missing'
+Assert-Contains $wrapper 'V4_OWNER_FQA_CLEANUP=FAIL code=' 'owner_fqa_cleanup_failure_detail_missing'
+Assert-Contains $wrapper 'if ($null -ne $failureRecord) { Write-Output $failureRecord }' 'owner_fqa_primary_failure_hidden_by_cleanup_missing'
 $wrapperCleanup = $wrapper.LastIndexOf('if ($cleanupFailed) {')
 $wrapperPass = $wrapper.LastIndexOf('Write-Output $browserPassRecord')
 Assert-True ($wrapperCleanup -ge 0 -and $wrapperPass -gt $wrapperCleanup) 'owner_fqa_wrapper_pass_emitted_before_cleanup_gate'

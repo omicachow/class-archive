@@ -1,0 +1,112 @@
+name: class_archive_private_role_shadow_v1_piwigo
+
+# Phase 3.4.1 destructive-role-test shadow.  This overlay is deliberately
+# fixed: callers cannot select projects, ports, networks, volumes or source
+# paths.  The runtime is disabled by the PowerShell operator unless the local
+# opt-in gate and explicit confirmation are both present.
+services:
+  db:
+    restart: "no"
+    labels: &shadow-service-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+    logging: &shadow-logging
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  piwigo:
+    restart: "no"
+    labels: *shadow-service-labels
+    ports:
+      - "127.0.0.1:11990:80"
+      - "127.0.0.1:11991:8081"
+    environment:
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_REAL_FULL
+      CLASS_ARCHIVE_PRIVATE_REAL_FULL: "1"
+      CLASS_ARCHIVE_PRIVATE_ROLE_SHADOW: "1"
+      CLASS_ARCHIVE_PRIVATE_E2E_ENABLED: "1"
+    volumes:
+      - type: bind
+        source: ${CLASS_ARCHIVE_SHADOW_NGINX_CONFIG:?Set the generated shadow nginx config}
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: private_e2e_recovery
+        target: /var/lib/class-archive-private-e2e
+    logging: *shadow-logging
+
+  backup:
+    restart: "no"
+    labels: *shadow-service-labels
+
+  pre-migration-db-backup:
+    restart: "no"
+    labels: *shadow-service-labels
+
+  backup-audit:
+    restart: "no"
+    network_mode: "none"
+    labels: *shadow-service-labels
+
+  restore:
+    restart: "no"
+    labels: *shadow-service-labels
+
+networks:
+  app:
+    name: class_archive_private_role_shadow_v1_app
+    internal: false
+    labels: &shadow-network-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+    ipam:
+      config:
+        - subnet: 10.180.1.0/24
+  immich_gateway:
+    name: class_archive_private_role_shadow_v1_gateway
+    internal: true
+    labels: *shadow-network-labels
+    ipam:
+      config:
+        - subnet: 10.180.0.0/24
+
+volumes:
+  piwigo_data:
+    name: class_archive_private_role_shadow_v1_piwigo_data
+    driver: local
+    labels: &shadow-piwigo-volume-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+      com.docker.compose.project: class_archive_private_role_shadow_v1_piwigo
+  piwigo_uploads:
+    name: class_archive_private_role_shadow_v1_piwigo_uploads
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  piwigo_galleries:
+    name: class_archive_private_role_shadow_v1_piwigo_galleries
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  piwigo_derivatives:
+    name: class_archive_private_role_shadow_v1_piwigo_derivatives
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  piwigo_db:
+    name: class_archive_private_role_shadow_v1_piwigo_db
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  piwigo_scripts:
+    name: class_archive_private_role_shadow_v1_piwigo_scripts
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  backups:
+    name: class_archive_private_role_shadow_v1_piwigo_backups
+    driver: local
+    labels: *shadow-piwigo-volume-labels
+  private_e2e_recovery:
+    name: class_archive_private_role_shadow_v1_private_e2e_recovery
+    driver: local
+    labels: *shadow-piwigo-volume-labels

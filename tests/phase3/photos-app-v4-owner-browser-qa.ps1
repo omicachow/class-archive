@@ -531,6 +531,7 @@ $wrapperStage = 'initialization'
 $browserPassRecord = $null
 $failureRecord = $null
 $cleanupFailed = $false
+$cleanupFailureCode = $null
 $containerCredentialNeedsCleanup = $false
 $leaseMayBeActive = $false
 $leaseCloseAttested = $false
@@ -638,7 +639,11 @@ finally {
         elseif (-not $leaseMayBeActive) {
             $leaseCloseAttested = $true
         }
-    } catch { $cleanupFailed = $true; $exitCode = 2 }
+    } catch {
+        $cleanupFailed = $true
+        if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'broker_close' }
+        $exitCode = 2
+    }
 
     # The independent watchdog is cancelled only after an exact CLOSED or
     # RECOVERED terminal attestation. Otherwise it and its ignored script are
@@ -649,17 +654,23 @@ finally {
         }
         elseif ($leaseWatchdog.HasExited) {
             $cleanupFailed = $true
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'watchdog_exited' }
             $exitCode = 2
         }
         else {
             $watchdogReaped = Stop-FqaNativeProcessTree -Process $leaseWatchdog
-            if (-not $watchdogReaped) { $cleanupFailed = $true; $exitCode = 2 }
+            if (-not $watchdogReaped) {
+                $cleanupFailed = $true
+                if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'watchdog_reap' }
+                $exitCode = 2
+            }
         }
     }
     else {
         $preserveRecoveryRuntime = $true
         if ($null -eq $leaseWatchdog -or $leaseWatchdog.HasExited) {
             $cleanupFailed = $true
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'recovery_watchdog_unavailable' }
             $exitCode = 2
         }
     }
@@ -667,14 +678,33 @@ finally {
         try {
             [void](Invoke-BoundedPiwigo -Arguments @('exec', '-T', '--user', 'nginx', 'piwigo', 'rm', '-f', '--', $containerCredentialPath) -TimeoutSeconds 30 -Code 'container_credential_cleanup_failed')
             $containerCredentialNeedsCleanup = $false
-        } catch { $cleanupFailed = $true; $exitCode = 2 }
+        } catch {
+            $cleanupFailed = $true
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'container_credential' }
+            $exitCode = 2
+        }
     }
     if ($leaseCloseAttested) {
-        try { Remove-VerifiedPrivateFile -Path $credentialPath -Root $runtimeRoot -Code 'credential_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+        try { Remove-VerifiedPrivateFile -Path $credentialPath -Root $runtimeRoot -Code 'credential_cleanup' }
+        catch {
+            $cleanupFailed = $true
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'host_credential' }
+            $exitCode = 2
+        }
     }
-    try { Remove-VerifiedPrivateDirectory -Path $runProfile -Root $profileRoot -Code 'profile_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+    try { Remove-VerifiedPrivateDirectory -Path $runProfile -Root $profileRoot -Code 'profile_cleanup' }
+    catch {
+        $cleanupFailed = $true
+        if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'chrome_profile' }
+        $exitCode = 2
+    }
     if (-not $preserveRecoveryRuntime -and $leaseCloseAttested -and $watchdogReaped) {
-        try { Remove-VerifiedPrivateDirectory -Path $runRuntime -Root $runtimeRoot -Code 'runtime_cleanup' } catch { $cleanupFailed = $true; $exitCode = 2 }
+        try { Remove-VerifiedPrivateDirectory -Path $runRuntime -Root $runtimeRoot -Code 'runtime_cleanup' }
+        catch {
+            $cleanupFailed = $true
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'run_runtime' }
+            $exitCode = 2
+        }
     }
     if ($null -ne $hostLeaseLock) { $hostLeaseLock.Dispose() }
     if ($null -ne $leaseBroker) { $leaseBroker.Dispose() }
@@ -682,6 +712,9 @@ finally {
 }
 
 if ($cleanupFailed) {
+    if ($null -ne $failureRecord) { Write-Output $failureRecord }
+    if ($null -eq $cleanupFailureCode -or $cleanupFailureCode -notmatch '^[a-z_]{3,64}$') { $cleanupFailureCode = 'unknown' }
+    Write-Output ('V4_OWNER_FQA_CLEANUP=FAIL code=' + $cleanupFailureCode)
     Write-Output 'V4_OWNER_FQA_CHROME_QA=FAIL stage=wrapper code=lease_cleanup_failed'
 } elseif ($exitCode -eq 0 -and $null -ne $browserPassRecord) {
     Write-Output $browserPassRecord

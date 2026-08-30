@@ -1,0 +1,104 @@
+name: class_archive_private_role_shadow_v1_immich
+
+services:
+  immich-server:
+    labels: &shadow-service-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the ignored shadow env}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME:-immich}
+      TZ: ${TZ:-Asia/Shanghai}
+    logging: &shadow-logging
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  immich-machine-learning:
+    labels: *shadow-service-labels
+    logging: *shadow-logging
+
+  immich-gateway:
+    labels: *shadow-service-labels
+    logging: *shadow-logging
+
+  immich-gateway-secret-stager:
+    labels: *shadow-service-labels
+
+  immich-web-compat:
+    labels: *shadow-service-labels
+    environment:
+      CLASS_ARCHIVE_PHOTO_UI_ROOT: /photo-ui
+      CLASS_ARCHIVE_CORE_PUBLIC_PORT: "11990"
+      CLASS_ARCHIVE_WEB_COMPAT_PUBLIC_PORT: "11991"
+    volumes:
+      - ./photo-ui:/photo-ui:ro
+    networks:
+      class_archive_gateway:
+        ipv4_address: 10.180.0.10
+    logging: *shadow-logging
+
+  redis:
+    labels: *shadow-service-labels
+    logging: *shadow-logging
+
+  database:
+    labels: *shadow-service-labels
+    logging: *shadow-logging
+
+networks:
+  immich_internal:
+    name: class_archive_private_role_shadow_v1_immich_internal
+    internal: true
+    labels: &shadow-network-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+    ipam:
+      config:
+        - subnet: 10.180.2.0/24
+  immich_ml_internal:
+    name: class_archive_private_role_shadow_v1_immich_ml_internal
+    internal: true
+    labels: *shadow-network-labels
+    ipam:
+      config:
+        - subnet: 10.180.3.0/24
+  immich_bridge_internal:
+    name: class_archive_private_role_shadow_v1_immich_bridge_internal
+    internal: true
+    labels: *shadow-network-labels
+    ipam:
+      config:
+        - subnet: 10.180.4.0/24
+  class_archive_gateway:
+    external: true
+    name: class_archive_private_role_shadow_v1_gateway
+
+volumes:
+  immich_upload:
+    name: class_archive_private_role_shadow_v1_immich_upload
+    driver: local
+    labels: &shadow-immich-volume-labels
+      com.classarchive.scope: private-role-shadow
+      com.classarchive.shadow-version: "1"
+      com.docker.compose.project: class_archive_private_role_shadow_v1_immich
+  immich_model_cache:
+    name: class_archive_private_role_shadow_v1_immich_model_cache
+    driver: local
+    labels: *shadow-immich-volume-labels
+  immich_db:
+    name: class_archive_private_role_shadow_v1_immich_db
+    driver: local
+    labels: *shadow-immich-volume-labels
+  immich_gateway_secret:
+    name: class_archive_private_role_shadow_v1_immich_gateway_secret
+    driver: local
+    labels: *shadow-immich-volume-labels
+  piwigo_uploads:
+    external: true
+    name: class_archive_private_role_shadow_v1_piwigo_uploads
+  piwigo_galleries:
+    external: true
+    name: class_archive_private_role_shadow_v1_piwigo_galleries

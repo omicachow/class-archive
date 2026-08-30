@@ -1,0 +1,171 @@
+name: class_archive_private_e2e_recreate_lab
+
+# Disposable, non-routable proof environment for the private fixture lease.
+# This is a standalone Compose model: it is never merged into the Owner stack
+# and it deliberately has no published port or private-media mount.
+services:
+  db:
+    image: ${MARIADB_IMAGE:?Owner-locked MariaDB image is required}
+    restart: "no"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-piwigo}
+      MARIADB_USER: ${DB_USER:-piwigo}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Owner DB application secret is required}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Owner DB root secret is required}
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+      start_period: 10s
+    volumes:
+      - lab_db:/var/lib/mysql
+    networks:
+      - lab
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+
+  piwigo:
+    image: ${PIWIGO_IMAGE:?Owner-locked Piwigo image is required}
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      recovery-init:
+        condition: service_completed_successfully
+    environment:
+      TZ: ${CLASS_ARCHIVE_TIMEZONE:-Asia/Shanghai}
+      PIWIGO_UID: ${PIWIGO_UID:-1000}
+      PIWIGO_GID: ${PIWIGO_GID:-1000}
+      CLASS_ARCHIVE_CLAIM_CODE_PEPPER: ${CLASS_ARCHIVE_CLAIM_CODE_PEPPER:?Owner clone pepper is required}
+      CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET: ${CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET:?Owner clone pseudonym secret is required}
+      CLASS_ARCHIVE_RUNTIME_SCOPE: PRIVATE_E2E_RECREATE_LAB
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
+    volumes:
+      - lab_piwigo_data:/var/www/html/piwigo
+      - lab_uploads:/var/www/html/piwigo/upload
+      - lab_galleries:/var/www/html/piwigo/galleries
+      - lab_derivatives:/var/www/html/piwigo/_data/i
+      - lab_scripts:/usr/local/bin/scripts
+      - lab_recovery:/var/lib/class-archive-private-e2e
+      - ../piwigo-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../php-fpm/class-archive-env.conf:/etc/php84/php-fpm.d/zz-class-archive-env.conf:ro
+      - ../s6/php-fpm-run:/etc/s6-overlay/s6-rc.d/php-fpm/run:ro
+      - ../../infra:/workspace/infra:ro
+      - ../../plugins:/workspace/plugins:ro
+      - ../../themes:/workspace/themes:ro
+      - ../../tests:/workspace/tests:ro
+    networks:
+      - lab
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+
+  recovery-init:
+    image: ${PIWIGO_IMAGE:?Owner-locked Piwigo image is required}
+    restart: "no"
+    network_mode: none
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        install -d -o nginx -g nginx -m 0700 /target
+        test "$$(stat -c '%U:%G:%a' /target)" = "nginx:nginx:700"
+    volumes:
+      - lab_recovery:/target
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+
+  # One-shot, networkless copy of the small Owner control volumes. The Owner
+  # volumes are external and read-only; no uploads, galleries, derivatives,
+  # originals, Immich state or source directory is visible in this service.
+  seed-piwigo:
+    profiles: ["seed"]
+    image: ${PIWIGO_IMAGE:?Owner-locked Piwigo image is required}
+    restart: "no"
+    network_mode: none
+    user: "0:0"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:mode=1777,size=8m
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        test -z "$$(find /target/piwigo -mindepth 1 -print -quit)"
+        test -z "$$(find /target/scripts -mindepth 1 -print -quit)"
+        tar -C /source/piwigo -cf - . | tar -C /target/piwigo -xf -
+        tar -C /source/scripts -cf - . | tar -C /target/scripts -xf -
+        sync
+        test -n "$$(find /target/piwigo -mindepth 1 -print -quit)"
+    volumes:
+      - owner_piwigo_data:/source/piwigo:ro
+      - owner_piwigo_scripts:/source/scripts:ro
+      - lab_piwigo_data:/target/piwigo
+      - lab_scripts:/target/scripts
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+
+networks:
+  lab:
+    name: class_archive_private_e2e_recreate_lab_network
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.180.10.0/24
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+
+volumes:
+  owner_piwigo_data:
+    external: true
+    name: class_archive_private_full_v3_control_piwigo_data
+  owner_piwigo_scripts:
+    external: true
+    name: class_archive_private_full_v3_control_piwigo_scripts
+  lab_db:
+    name: class_archive_private_e2e_recreate_lab_db
+    labels: &lab-volume-labels
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+  lab_piwigo_data:
+    name: class_archive_private_e2e_recreate_lab_piwigo_data
+    labels: *lab-volume-labels
+  lab_uploads:
+    name: class_archive_private_e2e_recreate_lab_uploads
+    labels: *lab-volume-labels
+  lab_galleries:
+    name: class_archive_private_e2e_recreate_lab_galleries
+    labels: *lab-volume-labels
+  lab_derivatives:
+    name: class_archive_private_e2e_recreate_lab_derivatives
+    labels: *lab-volume-labels
+  lab_scripts:
+    name: class_archive_private_e2e_recreate_lab_scripts
+    labels: *lab-volume-labels
+  lab_recovery:
+    name: class_archive_private_e2e_recreate_lab_recovery
+    labels:
+      com.classarchive.scope: private-e2e-recreate-lab
+      com.classarchive.disposable: "true"
+      com.classarchive.data: durable-private-e2e-recovery-plan
