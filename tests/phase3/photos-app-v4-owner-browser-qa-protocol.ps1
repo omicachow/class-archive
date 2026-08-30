@@ -11,6 +11,7 @@ $projectRoot = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Pa
 $wrapperPath = Join-Path $projectRoot 'tests/phase3/photos-app-v4-owner-browser-qa.ps1'
 $runnerPath = Join-Path $projectRoot 'tests/phase3/photos-app-v4-owner-browser-qa.mjs'
 $leaseProtocolPath = Join-Path $projectRoot 'tests/phase3/photos-app-v4-owner-fqa-lease-protocol.ps1'
+$boundedNativePath = Join-Path $projectRoot 'infra/scripts/class-archive-bounded-native-process.ps1'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -24,8 +25,41 @@ function Assert-NotContains([string]$Text, [string]$Needle, [string]$Code) {
     Assert-True (-not $Text.Contains($Needle)) $Code
 }
 
-foreach ($path in @($wrapperPath, $runnerPath, $leaseProtocolPath)) {
+foreach ($path in @($wrapperPath, $runnerPath, $leaseProtocolPath, $boundedNativePath)) {
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) ('owner_fqa_browser_file_missing_' + [IO.Path]::GetFileNameWithoutExtension($path))
+}
+
+# The wrapper transports its owner-only credential and later removes the
+# container recovery plan with Linux commands that use their own `--` operand
+# separator.  Only the first WSL delimiter is structural; payload separators
+# must survive unchanged after timeout injection.
+. $boundedNativePath
+$credentialCopyArguments = @(Add-ClassArchiveWslTimeout -Arguments @(
+    '-d', 'Ubuntu', '--exec', 'docker', 'compose', 'exec', '-T', 'piwigo',
+    'base64', '-w0', '--', '/var/lib/class-archive-private-e2e/credential.json'
+) -TimeoutSeconds 30)
+Assert-True (($credentialCopyArguments -join "`n") -eq (@(
+    '-d', 'Ubuntu', '--exec', 'timeout', '--foreground', '--kill-after=10s', '30s',
+    'docker', 'compose', 'exec', '-T', 'piwigo', 'base64', '-w0', '--',
+    '/var/lib/class-archive-private-e2e/credential.json'
+) -join "`n")) 'owner_fqa_payload_operand_separator_not_preserved'
+$credentialCleanupArguments = @(Add-ClassArchiveWslTimeout -Arguments @(
+    '-d', 'Ubuntu', '--', 'docker', 'compose', 'exec', '-T', 'piwigo',
+    'rm', '-f', '--', '/var/lib/class-archive-private-e2e/credential.json'
+) -TimeoutSeconds 45)
+Assert-True (($credentialCleanupArguments -join "`n") -eq (@(
+    '-d', 'Ubuntu', '--exec', 'timeout', '--foreground', '--kill-after=10s', '45s',
+    'docker', 'compose', 'exec', '-T', 'piwigo', 'rm', '-f', '--',
+    '/var/lib/class-archive-private-e2e/credential.json'
+) -join "`n")) 'owner_fqa_cleanup_operand_separator_not_preserved'
+foreach ($invalidArguments in @(
+    @( '-d', 'Ubuntu', 'docker', 'compose', 'ps' ),
+    @( '-d', 'Ubuntu', '--exec' )
+)) {
+    $rejected = $false
+    try { Add-ClassArchiveWslTimeout -Arguments $invalidArguments -TimeoutSeconds 30 | Out-Null }
+    catch [ArgumentException] { $rejected = $true }
+    Assert-True $rejected 'owner_fqa_wsl_boundary_fail_closed_missing'
 }
 
 $currentPowerShell = (Get-Process -Id $PID -ErrorAction Stop).Path
@@ -63,6 +97,13 @@ Assert-NotContains $wrapper 'ConfirmExistingFixtureCredentialRotation' 'owner_fq
 
 Assert-Contains $runner "const roles = Object.freeze(['classmate', 'family', 'anonymous'])" 'owner_fqa_runner_roles_invalid'
 Assert-Contains $runner "const fullRoles = Object.freeze(['classmate', 'anonymous'])" 'owner_fqa_runner_full_roles_invalid'
+Assert-NotContains $runner "['HERITAGE', 'LIVING'].includes(photo?.era)" 'owner_fqa_presentation_era_leak_dependency_forbidden'
+Assert-Contains $runner "const familyTruthTimeline = await timelineCatalog(familySession.page, 'family_truth')" 'owner_fqa_family_scope_truth_missing'
+Assert-Contains $runner 'const livingIds = new Set([...fullIds].filter((id) => !heritageIds.has(id)))' 'owner_fqa_living_scope_difference_missing'
+Assert-Contains $runner "check([...heritageIds].every((id) => fullIds.has(id)), 'family_truth_not_subset_of_full')" 'owner_fqa_family_scope_subset_guard_missing'
+Assert-Contains $runner "livingIds.size > 0 ? 'present_and_tested' : 'not_present_private_library'" 'owner_fqa_absent_living_scope_honesty_missing'
+Assert-NotContains $runner 'owner_both_eras_required' 'owner_fqa_false_both_eras_requirement_present'
+Assert-Contains $runner "Object.hasOwn(payload, 'nextCursor') ? payload.nextCursor : payload.next_cursor" 'owner_fqa_terminal_cursor_null_preservation_missing'
 Assert-Contains $runner "credentialDocument.lease?.roster === 'FQA-C-99CA3B3B6AF1'" 'owner_fqa_runner_candidate_binding_missing'
 Assert-Contains $runner 'credentialDocument?.version === 3' 'owner_fqa_runner_v3_credential_document_missing'
 Assert-Contains $runner "'environment,lease,recovery_plan,roles,run,version'" 'owner_fqa_runner_v3_credential_shape_missing'
@@ -81,6 +122,9 @@ Assert-Contains $runner 'document.documentElement.outerHTML' 'owner_fqa_runner_f
 Assert-NotContains $runner "'teacher'" 'owner_fqa_runner_teacher_role_forbidden'
 Assert-NotContains $runner 'fixture-teacher' 'owner_fqa_runner_teacher_fixture_forbidden'
 Assert-Contains $runner 'chromium.launchPersistentContext' 'owner_fqa_persistent_context_missing'
+Assert-Contains $runner 'async function assertHomeReady(page, role)' 'owner_fqa_home_ready_guard_missing'
+Assert-Contains $runner 'image.complete && image.naturalWidth > 0 && image.naturalHeight > 0' 'owner_fqa_home_real_image_evidence_missing'
+Assert-Contains $runner "page.locator('.photo-loading').count() === 0" 'owner_fqa_home_skeleton_guard_missing'
 Assert-Contains $runner "channel: 'chrome'" 'owner_fqa_chrome_channel_missing'
 Assert-Contains $runner 'headless: false' 'owner_fqa_headed_chrome_missing'
 Assert-Contains $runner "context.route('**/*'" 'owner_fqa_network_route_guard_missing'
@@ -112,6 +156,9 @@ Assert-Contains $runner 'denied?.state === 200 && denied?.status === 403' 'owner
 Assert-Contains $runner 'afterDigest === beforeDigest' 'owner_fqa_family_comment_no_write_missing'
 Assert-Contains $runner 'completeCommentDigest' 'owner_fqa_family_comment_complete_digest_missing'
 Assert-Contains $runner 'successfulBusinessWrites === 0' 'owner_fqa_zero_content_write_assertion_missing'
+Assert-Contains $runner "child(screenshotDir, 'failure.local.json', 'failure_diagnostic_path')" 'owner_fqa_private_failure_diagnostic_missing'
+Assert-Contains $runner "flag: 'wx', mode: 0o600" 'owner_fqa_failure_diagnostic_exclusive_create_missing'
+Assert-Contains $runner 'The diagnostic must never replace the original fail-closed result.' 'owner_fqa_failure_diagnostic_fail_closed_missing'
 Assert-Contains $runner "home?.scope === 'FULL'" 'owner_fqa_full_scope_missing'
 Assert-Contains $runner "home?.scope === 'HERITAGE_ONLY'" 'owner_fqa_heritage_scope_missing'
 Assert-Contains $runner 'family_known_living_media_denied' 'owner_fqa_living_media_denial_missing'
@@ -172,6 +219,7 @@ Assert-Contains $wrapper '$preserveRecoveryRuntime = $true' 'owner_fqa_watchdog_
 Assert-Contains $wrapper 'if (-not $preserveRecoveryRuntime -and $leaseCloseAttested -and $watchdogReaped)' 'owner_fqa_watchdog_cleanup_gate_missing'
 Assert-Contains $wrapper 'Invoke-ClassArchiveBoundedNative' 'owner_fqa_browser_watchdog_missing'
 Assert-Contains $wrapper '$browserTimeoutSeconds = 720' 'owner_fqa_browser_timeout_missing'
+Assert-Contains $wrapper 'living_scope=(?:present_and_tested|not_present_private_library)' 'owner_fqa_honest_living_scope_pass_parser_missing'
 Assert-NotContains $wrapper 'function Invoke-Piwigo' 'owner_fqa_unbounded_wsl_helper_forbidden'
 Assert-Contains $wrapper "if (`$cleanupFailed) {" 'owner_fqa_cleanup_failure_precedes_pass_missing'
 Assert-Contains $wrapper 'V4_OWNER_FQA_CLEANUP=FAIL code=' 'owner_fqa_cleanup_failure_detail_missing'

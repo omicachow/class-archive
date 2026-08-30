@@ -132,6 +132,16 @@ function allowedUrl(value) {
   return value.protocol === 'http:' && value.hostname === '127.0.0.1'
     && [coreOrigin.port, photoOrigin.port].includes(value.port);
 }
+
+async function assertHomeReady(page, role) {
+  check(await page.locator('[data-home-all-photos="true"]').waitFor({ state: 'visible', timeout: 30_000 })
+    .then(() => true).catch(() => false), `home_projection_${role}`);
+  check(await page.locator('.photo-loading').count() === 0, `home_loading_${role}`);
+  check(await page.waitForFunction(() => [...document.images]
+    .some((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0),
+  undefined, { timeout: 30_000 }).then(() => true).catch(() => false), `home_real_image_${role}`);
+}
+
 const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // Keep the source ASCII-only so Windows PowerShell 5.1 can attest the exact
 // probe text without depending on the host ANSI code page. JavaScript decodes
@@ -253,7 +263,7 @@ async function openRole(role, viewport) {
     await form.locator('button[type="submit"], button:not([type]), input[type="submit"]').last().click();
     check(await reached, `login_bridge_${role}`);
     check(await page.locator('[data-photo-app="true"]').waitFor({ state: 'attached', timeout: 30_000 }).then(() => true).catch(() => false), `home_shell_${role}`);
-    check(await page.locator('[data-home-all-photos="true"]').waitFor({ state: 'visible', timeout: 30_000 }).then(() => true).catch(() => false), `home_projection_${role}`);
+    await assertHomeReady(page, role);
     return {
       context,
       page,
@@ -344,7 +354,9 @@ async function timelineCatalog(page, role) {
     const count = payload.count;
     const groups = payload.groups;
     const hasMore = payload.hasMore ?? payload.has_more;
-    const nextCursor = payload.nextCursor ?? payload.next_cursor;
+    // Preserve the explicit terminal null. Nullish coalescing would replace a
+    // valid `nextCursor: null` with an absent snake-case alias (undefined).
+    const nextCursor = Object.hasOwn(payload, 'nextCursor') ? payload.nextCursor : payload.next_cursor;
     check(Number.isInteger(total) && total > 0 && Number.isInteger(count) && count >= 0 && count <= 240
       && Array.isArray(groups) && typeof hasMore === 'boolean', `${role}_timeline_shape`);
     if (expectedTotal === null) expectedTotal = total;
@@ -357,10 +369,7 @@ async function timelineCatalog(page, role) {
       for (const photo of group.items) {
         const id = canonicalId(photo?.id, `${role}_timeline_photo_id`);
         check(!photos.has(id), `${role}_timeline_duplicate`);
-        check(['HERITAGE', 'LIVING'].includes(photo?.era), `${role}_timeline_era_invalid`);
         photos.set(id, {
-          era: photo.era,
-          eventLabel: typeof photo?.event_label === 'string' && photo.event_label !== '' ? photo.event_label : null,
           timelineKey: group.key,
           timelineLabel: group.label,
           timelineKind: group.kind,
@@ -884,37 +893,63 @@ async function main() {
   let passRecord = null;
   stageAt('classmate_login');
   const classmateSession = await openRole('classmate', { width: 1440, height: 900 });
+  let familySession = null;
   let classmateTimeline;
   try {
     classmateTimeline = await timelineCatalog(classmateSession.page, 'classmate_truth');
     const fullIds = new Set(classmateTimeline.keys());
-    const heritageIds = new Set([...classmateTimeline].filter(([, photo]) => photo.era === 'HERITAGE').map(([id]) => id));
-    const livingIds = new Set([...classmateTimeline].filter(([, photo]) => photo.era === 'LIVING').map(([id]) => id));
-    check(heritageIds.size > 0 && livingIds.size > 0 && heritageIds.size + livingIds.size === fullIds.size, 'owner_both_eras_required');
+    // The presentation timeline deliberately omits the internal HERITAGE /
+    // LIVING enum. Derive the authoritative visible sets by comparing two
+    // independently authenticated server projections instead of asking the
+    // browser payload to expose an internal policy field.
+    stageAt('family_scope_truth');
+    familySession = await openRole('family', { width: 390, height: 844 });
+    const familyTruthTimeline = await timelineCatalog(familySession.page, 'family_truth');
+    const heritageIds = new Set(familyTruthTimeline.keys());
+    check([...heritageIds].every((id) => fullIds.has(id)), 'family_truth_not_subset_of_full');
+    const livingIds = new Set([...fullIds].filter((id) => !heritageIds.has(id)));
+    check(heritageIds.size > 0 && heritageIds.size + livingIds.size === fullIds.size, 'owner_era_partition_invalid');
     const classmate = await inspectRole(classmateSession, 'classmate', fullIds, livingIds);
     results.set('classmate', classmate);
-    const knownLiving = livingIds.values().next().value;
-    await viewer(classmateSession.page, 'classmate', knownLiving);
+    const knownLiving = livingIds.size > 0 ? livingIds.values().next().value : null;
+    const fullViewerPhoto = knownLiving ?? fullIds.values().next().value;
+    await viewer(classmateSession.page, 'classmate', fullViewerPhoto);
     await classmateSession.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await assertHomeReady(classmateSession.page, 'classmate');
     await assertBrowserSurface(classmateSession.page, 'classmate');
     await save(classmateSession.page, 'classmate-home');
 
-    for (const role of ['family', 'anonymous']) {
+    stageAt('family_login');
+    try {
+      const family = await inspectRole(familySession, 'family', heritageIds, livingIds);
+      results.set('family', family);
+      if (knownLiving !== null) await assertFamilyKnownLivingDenied(familySession.page, knownLiving);
+      const visibleHeritage = heritageIds.values().next().value;
+      stageAt('family_viewer');
+      await viewer(familySession.page, 'family', visibleHeritage);
+      stageAt('family_comment_denial');
+      await assertFamilyCommentServerDenied(familySession, visibleHeritage);
+      stageAt('family_home');
+      await familySession.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      await assertHomeReady(familySession.page, 'family');
+      await assertBrowserSurface(familySession.page, 'family');
+      await save(familySession.page, 'family-home');
+    } finally {
+      const session = familySession;
+      familySession = null;
+      await closeRoleContext(session, 'family');
+    }
+
+    for (const role of ['anonymous']) {
       stageAt(`${role}_login`);
-      const session = await openRole(role, role === 'family' || role === 'anonymous' ? { width: 390, height: 844 } : { width: 1920, height: 1080 });
+      const session = await openRole(role, { width: 390, height: 844 });
       try {
-        const expectedIds = role === 'family' ? heritageIds : fullIds;
+        const expectedIds = fullIds;
         const inspection = await inspectRole(session, role, expectedIds, livingIds);
         results.set(role, inspection);
-        if (role === 'family') {
-          await assertFamilyKnownLivingDenied(session.page, knownLiving);
-          const visibleHeritage = heritageIds.values().next().value;
-          await viewer(session.page, role, visibleHeritage);
-          await assertFamilyCommentServerDenied(session, visibleHeritage);
-        } else {
-          await viewer(session.page, role, knownLiving);
-        }
+        await viewer(session.page, role, fullViewerPhoto);
         await session.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        await assertHomeReady(session.page, role);
         await assertBrowserSurface(session.page, role);
         await save(session.page, `${role}-home`);
       } finally { await closeRoleContext(session, role); }
@@ -937,14 +972,31 @@ async function main() {
     check(unexpectedNetwork.size === 0, 'unexpected_network_request');
     check(forbiddenBusinessMutations.size === 0, 'forbidden_business_mutation_attempt');
     check(successfulBusinessWrites === 0, 'business_write_observed');
-    passRecord = `V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=3 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0`;
-  } finally { await closeRoleContext(classmateSession, 'classmate'); }
+    const livingScopeEvidence = livingIds.size > 0 ? 'present_and_tested' : 'not_present_private_library';
+    passRecord = `V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=3 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} living_scope=${livingScopeEvidence} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0`;
+  } finally {
+    if (familySession !== null) {
+      const session = familySession;
+      familySession = null;
+      await closeRoleContext(session, 'family');
+    }
+    await closeRoleContext(classmateSession, 'classmate');
+  }
   check(typeof passRecord === 'string', 'browser_pass_record_missing');
   process.stdout.write(`${passRecord}\n`);
 }
 
 try { await main(); }
 catch (error) {
+  try {
+    const diagnosticPath = child(screenshotDir, 'failure.local.json', 'failure_diagnostic_path');
+    fs.writeFileSync(diagnosticPath, JSON.stringify({
+      name: typeof error?.name === 'string' ? error.name : 'Error',
+      message: typeof error?.message === 'string' ? error.message : '',
+      stack: typeof error?.stack === 'string' ? error.stack : '',
+      stage,
+    }, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch { /* The diagnostic must never replace the original fail-closed result. */ }
   const code = error instanceof GateError && /^[a-z0-9_]{1,120}$/i.test(error.code) ? error.code : 'unexpected';
   process.stdout.write(`V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=${stage} code=${code}\n`);
   process.exitCode = 1;

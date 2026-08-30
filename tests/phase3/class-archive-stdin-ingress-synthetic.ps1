@@ -95,6 +95,19 @@ param([Parameter(Mandatory=$true)][string]$Value)
     $syntheticWslDirectory = ([string][char]67) + ':' + [char]92 + 'synthetic'
     $wslArguments = Add-ClassArchiveWslTimeout -Arguments @('-d','Ubuntu','--cd',$syntheticWslDirectory,'--','docker','compose','ps') -TimeoutSeconds 30
     Assert-Synthetic (([string]::Join('|',$wslArguments)) -eq ('-d|Ubuntu|--cd|' + $syntheticWslDirectory + '|--exec|timeout|--foreground|--kill-after=10s|30s|docker|compose|ps')) 'bounded_wsl_exec_and_timeout_injected'
+    $wslPayloadSeparators = Add-ClassArchiveWslTimeout -Arguments @(
+        '-d','Ubuntu','--exec','printf','%s','--','--exec'
+    ) -TimeoutSeconds 45
+    Assert-Synthetic (([string]::Join('|',$wslPayloadSeparators)) -eq '-d|Ubuntu|--exec|timeout|--foreground|--kill-after=10s|45s|printf|%s|--|--exec') 'bounded_wsl_payload_separators_preserved'
+    foreach ($invalidWslArguments in @(
+        @( '-d', 'Ubuntu', 'printf', 'missing-boundary' ),
+        @( '-d', 'Ubuntu', '--exec' )
+    )) {
+        $invalidWslRejected = $false
+        try { Add-ClassArchiveWslTimeout -Arguments $invalidWslArguments -TimeoutSeconds 30 | Out-Null }
+        catch [ArgumentException] { $invalidWslRejected = $true }
+        Assert-Synthetic $invalidWslRejected 'bounded_wsl_invalid_boundary_not_rejected'
+    }
 
     $stream.Position = 1
     $rejected = $false

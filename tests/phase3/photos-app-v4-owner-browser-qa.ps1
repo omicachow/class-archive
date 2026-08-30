@@ -224,16 +224,20 @@ function Initialize-FqaDurableRecoveryRoot {
 }
 
 function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPath) {
+    $script:wrapperStage = 'credential_copy_preflight'
     if (Test-Path -LiteralPath $HostPath) { Stop-V4OwnerFqa 'credential_path_not_fresh' }
     Assert-PrivateParentAcl -Candidate $HostPath -Code 'credential'
 
     # Create an empty file inside the already owner-only directory, restrict it,
     # verify the descriptor, and only then write any credential bytes.
+    $script:wrapperStage = 'credential_copy_create'
     $created = [IO.File]::Open($HostPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     $created.Dispose()
     try {
+        $script:wrapperStage = 'credential_copy_acl'
         Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
+        $script:wrapperStage = 'credential_copy_transport'
         $result = Invoke-BoundedPiwigo -Arguments @(
             'exec', '-T', '--user', 'nginx', 'piwigo',
             'base64', '-w0', '--', $ContainerPath
@@ -242,9 +246,11 @@ function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPa
         if ($encoded -notmatch '^[A-Za-z0-9+/]{64,131072}={0,2}$') { Stop-V4OwnerFqa 'credential_transport_invalid' }
         $bytes = $null
         try {
+            $script:wrapperStage = 'credential_copy_decode'
             try { $bytes = [Convert]::FromBase64String($encoded) }
             catch { Stop-V4OwnerFqa 'credential_transport_invalid' }
             if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) { Stop-V4OwnerFqa 'credential_size_invalid' }
+            $script:wrapperStage = 'credential_copy_write'
             $stream = [IO.File]::Open($HostPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
             try {
                 $stream.SetLength(0)
@@ -256,6 +262,7 @@ function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPa
         finally {
             if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
         }
+        $script:wrapperStage = 'credential_copy_final_acl'
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
     }
     catch {
@@ -574,12 +581,15 @@ try {
     Assert-IgnoredPrivateChild -Candidate $credentialPath -Root $runtimeRoot -Code 'credential' | Out-Null
     Assert-IgnoredPrivateChild -Candidate $watchdogPath -Root $runtimeRoot -Code 'lease_watchdog' | Out-Null
 
-    $wrapperStage = 'lease_open'
+    $wrapperStage = 'durable_recovery_root'
     Initialize-FqaDurableRecoveryRoot
+    $wrapperStage = 'watchdog_start'
     $leaseWatchdog = Start-FqaLeaseWatchdog -Path $watchdogPath -Run $run
     $leaseMayBeActive = $true
+    $wrapperStage = 'broker_start'
     $leaseBroker = Start-FqaLeaseBroker -Run $run -ContainerCredentialPath $containerCredentialPath
     $containerCredentialNeedsCleanup = $true
+    $wrapperStage = 'credential_copy'
     Copy-FqaCredentialFromContainer -ContainerPath $containerCredentialPath -HostPath $credentialPath
     # Preserve the owner-only recovery plan in the container until exact lease
     # closure. The watchdog uses it after a wrapper/broker crash to remove only
@@ -604,7 +614,7 @@ try {
     if ($nodeResult.TimedOut) { Stop-V4OwnerFqa 'node_runner_timeout' }
     $safe = @($output | ForEach-Object { [string]$_ } | Where-Object {
         $_ -match '^V4_OWNER_EXISTING_FIXTURE_STAGE=[a-z0-9_-]+$' -or
-        $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=[0-9]+ screenshots=[0-9]+ roles=3 full_photos=[0-9]+ heritage_photos=[0-9]+ living_photos=[0-9]+ channel=chrome chrome_product=chrome chrome_version=[0-9.]+ writes=0$' -or
+        $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=[0-9]+ screenshots=[0-9]+ roles=3 full_photos=[0-9]+ heritage_photos=[0-9]+ living_photos=[0-9]+ living_scope=(?:present_and_tested|not_present_private_library) channel=chrome chrome_product=chrome chrome_version=[0-9.]+ writes=0$' -or
         $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=FAIL stage=[a-z0-9_-]+ code=[a-z0-9_]+$'
     })
     $pass = @($safe | Where-Object { $_ -match '^V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS\b' })
@@ -616,10 +626,22 @@ try {
     $browserPassRecord = $pass[0]
 }
 catch {
+    try {
+        $diagnosticPath = Join-Path $runtimeRoot 'last-failure.local.json'
+        $diagnostic = [ordered]@{
+            exception_type = $_.Exception.GetType().FullName
+            script_line = [int]$_.InvocationInfo.ScriptLineNumber
+            offset = [int]$_.InvocationInfo.OffsetInLine
+            stack = [string]$_.ScriptStackTrace
+            stage = $wrapperStage
+        } | ConvertTo-Json -Depth 3
+        [IO.File]::WriteAllText($diagnosticPath, $diagnostic, [Text.UTF8Encoding]::new($false))
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $diagnosticPath
+    } catch {}
     $code = if ($_.Exception.Message -match '^V4_OWNER_FQA_STOP:([A-Za-z0-9_]{1,120})$') {
         [string]$Matches[1]
     } else {
-        'unexpected_' + $wrapperStage + '_' + $_.Exception.GetType().Name
+        'unexpected_' + $wrapperStage + '_' + $_.Exception.GetType().Name + '_line' + [string][int]$_.InvocationInfo.ScriptLineNumber
     }
     if ($code -notmatch '^[A-Za-z0-9_]{1,120}$') { $code = 'unexpected' }
     $failureRecord = 'V4_OWNER_FQA_CHROME_QA=FAIL stage=wrapper code=' + $code.ToLowerInvariant()
@@ -680,7 +702,7 @@ finally {
             $containerCredentialNeedsCleanup = $false
         } catch {
             $cleanupFailed = $true
-            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'container_credential' }
+            if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'container_credential_' + $_.Exception.GetType().Name.ToLowerInvariant() + '_line' + [string][int]$_.InvocationInfo.ScriptLineNumber }
             $exitCode = 2
         }
     }
@@ -713,7 +735,7 @@ finally {
 
 if ($cleanupFailed) {
     if ($null -ne $failureRecord) { Write-Output $failureRecord }
-    if ($null -eq $cleanupFailureCode -or $cleanupFailureCode -notmatch '^[a-z_]{3,64}$') { $cleanupFailureCode = 'unknown' }
+    if ($null -eq $cleanupFailureCode -or $cleanupFailureCode -notmatch '^[a-z0-9_]{3,96}$') { $cleanupFailureCode = 'unknown' }
     Write-Output ('V4_OWNER_FQA_CLEANUP=FAIL code=' + $cleanupFailureCode)
     Write-Output 'V4_OWNER_FQA_CHROME_QA=FAIL stage=wrapper code=lease_cleanup_failed'
 } elseif ($exitCode -eq 0 -and $null -ne $browserPassRecord) {

@@ -156,16 +156,20 @@ function Add-ClassArchiveWslTimeout {
         }
     }
 
-    $delimiterIndices = [System.Collections.Generic.List[int]]::new()
+    # WSL treats the first standalone `--` or `--exec` as the boundary between
+    # its own options and the Linux command.  Tokens after that boundary belong
+    # to the payload; commands such as `base64 -w0 -- /path` and
+    # `rm -f -- /path` legitimately contain another standalone `--`.
+    $delimiter = -1
     for ($index = 0; $index -lt $Arguments.Count; $index++) {
         if ($Arguments[$index] -eq '--' -or $Arguments[$index] -eq '--exec') {
-            [void]$delimiterIndices.Add($index)
+            $delimiter = $index
+            break
         }
     }
-    if ($delimiterIndices.Count -ne 1) {
+    if ($delimiter -lt 0) {
         throw [ArgumentException]::new('WSL command delimiter is invalid.')
     }
-    $delimiter = [int]$delimiterIndices[0]
     if ($delimiter -ge ($Arguments.Count - 1)) {
         throw [ArgumentException]::new('WSL command payload is missing.')
     }
