@@ -239,6 +239,133 @@ function Initialize-FqaDurableRecoveryRoot {
     ) -TimeoutSeconds 30 -Code 'durable_recovery_root_unavailable')
 }
 
+function ConvertFrom-FqaBase64Url([string]$Value) {
+    if ($Value -notmatch '^[A-Za-z0-9_-]{2,131072}$') {
+        Stop-V4OwnerFqa 'credential_transport_invalid'
+    }
+    $standard = $Value.Replace('-', '+').Replace('_', '/')
+    switch ($standard.Length % 4) {
+        0 { }
+        2 { $standard += '==' }
+        3 { $standard += '=' }
+        default { Stop-V4OwnerFqa 'credential_transport_invalid' }
+    }
+    try {
+        return ,([Convert]::FromBase64String($standard))
+    }
+    catch {
+        Stop-V4OwnerFqa 'credential_transport_invalid'
+    }
+    finally {
+        $standard = ''
+    }
+}
+
+function ConvertFrom-FqaSha256Hex([string]$Value) {
+    if ($Value -notmatch '^[a-f0-9]{64}$') {
+        Stop-V4OwnerFqa 'credential_hash_invalid'
+    }
+    $bytes = New-Object byte[] 32
+    for ($index = 0; $index -lt 32; $index++) {
+        try {
+            $bytes[$index] = [Convert]::ToByte($Value.Substring($index * 2, 2), 16)
+        }
+        catch {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            Stop-V4OwnerFqa 'credential_hash_invalid'
+        }
+    }
+    return ,$bytes
+}
+
+function Test-FqaFixedTimeBytes([byte[]]$Left, [byte[]]$Right) {
+    if ($null -eq $Left -or $null -eq $Right -or $Left.Length -ne $Right.Length) {
+        return $false
+    }
+    # Windows PowerShell 5.1 can run against a framework without
+    # CryptographicOperations.FixedTimeEquals. Keep the comparison length
+    # independent and do not short-circuit on the first mismatched byte.
+    [int]$different = 0
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        $different = $different -bor ($Left[$index] -bxor $Right[$index])
+    }
+    return $different -eq 0
+}
+
+function Assert-FqaBrowserCredentialDocument([byte[]]$Bytes, [string]$Run) {
+    if ($null -eq $Bytes -or $Bytes.Length -lt 128 -or $Bytes.Length -gt 65536) {
+        Stop-V4OwnerFqa 'credential_size_invalid'
+    }
+    $documentText = ''
+    try {
+        try {
+            $utf8 = [Text.UTF8Encoding]::new($false, $true)
+            $documentText = $utf8.GetString($Bytes)
+        }
+        catch {
+            Stop-V4OwnerFqa 'credential_document_invalid'
+        }
+        if ($documentText.IndexOf([char]0) -ge 0) {
+            Stop-V4OwnerFqa 'credential_document_invalid'
+        }
+        try {
+            $document = $documentText | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            Stop-V4OwnerFqa 'credential_document_invalid'
+        }
+        if ($null -eq $document) { Stop-V4OwnerFqa 'credential_document_invalid' }
+        $rootKeys = @($document.PSObject.Properties.Name | Sort-Object)
+        $documentVersion = [int]$document.version
+        $documentEnvironment = [string]$document.environment
+        $documentRun = [string]$document.run
+        $documentScopeValid = (($rootKeys -join ',') -eq 'environment,lease,roles,run,version') -and
+            ($documentVersion -eq 1) -and
+            ($documentEnvironment -eq 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT') -and
+            ($documentRun -eq $Run)
+        if (-not $documentScopeValid) {
+            Stop-V4OwnerFqa 'credential_document_scope'
+        }
+        if ($null -eq $document.lease) { Stop-V4OwnerFqa 'credential_document_scope' }
+        $leaseKeys = @($document.lease.PSObject.Properties.Name | Sort-Object)
+        $leaseRoster = [string]$document.lease.roster
+        $leaseRoles = [int]$document.lease.roles
+        $leaseScopeValid = (($leaseKeys -join ',') -eq 'roles,roster') -and
+            ($leaseRoster -eq 'FQA-C-99CA3B3B6AF1') -and
+            ($leaseRoles -eq 3)
+        if (-not $leaseScopeValid) {
+            Stop-V4OwnerFqa 'credential_document_scope'
+        }
+        if ($null -eq $document.roles) { Stop-V4OwnerFqa 'credential_role_shape_invalid' }
+        $roles = @($document.roles.PSObject.Properties.Name | Sort-Object)
+        if (($roles -join ',') -ne 'anonymous,classmate,family') {
+            Stop-V4OwnerFqa 'credential_role_shape_invalid'
+        }
+        foreach ($role in @('classmate', 'family', 'anonymous')) {
+            $credential = $document.roles.$role
+            if ($null -eq $credential) { Stop-V4OwnerFqa 'credential_role_shape_invalid' }
+            $credentialKeys = @($credential.PSObject.Properties.Name | Sort-Object)
+            if (($credentialKeys -join ',') -ne 'password,username') {
+                Stop-V4OwnerFqa 'credential_role_shape_invalid'
+            }
+            $username = [string]$credential.username
+            $validUsername = switch ($role) {
+                'classmate' { $username -eq 'fqa_99ca3b3b6af1_classmate' }
+                'family' { $username -eq 'fqa_99ca3b3b6af1_family' }
+                default { $username -match '^anon_[a-f0-9]{20}$' }
+            }
+            $passwordValid = ([string]$credential.password) -match '^[A-Za-z0-9_-]{64}$'
+            if (-not $validUsername -or -not $passwordValid) {
+                Stop-V4OwnerFqa 'credential_role_invalid'
+            }
+        }
+    }
+    finally {
+        $document = $null
+        $documentText = ''
+    }
+}
+
 function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run, [string]$HostPath) {
     $script:wrapperStage = 'credential_copy_preflight'
     if ($null -eq $Broker -or $Broker.HasExited) {
@@ -257,9 +384,10 @@ function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run
         Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
         # Use the already authenticated broker control pipe rather than a
-        # second docker exec. The broker validates its 0600 recovery document,
-        # exports it exactly once for this run, and remains alive for the
-        # eventual close/refreeze attestation.
+        # second docker exec. The broker validates its 0600 durable
+        # recovery-only document, exports a browser-only v1 document exactly
+        # once for this run, and remains alive for the eventual close/refreeze
+        # attestation.
         $script:wrapperStage = 'credential_broker_export'
         try {
             $Broker.StandardInput.WriteLine('EXPORT ' + $Run)
@@ -272,21 +400,39 @@ function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run
             Stop-V4OwnerFqa 'credential_export_timeout'
         }
         $record = [string]$exportTask.Result
-        if ($record -notmatch '^V4_OWNER_FQA_CREDENTIAL=([A-Za-z0-9+/]{64,131072}={0,2})$') {
+        $frame = [regex]::Match($record, '^V4_OWNER_FQA_CREDENTIAL=v1:([a-f0-9]{24}):([1-9][0-9]{0,4}):([a-f0-9]{64}):([A-Za-z0-9_-]{2,131072})$')
+        if (-not $frame.Success) {
             if ($record -match '^V4_OWNER_FQA_LEASE=FAIL stage=(?:bootstrap|runtime) code=[a-z0-9_]+$') {
                 Stop-V4OwnerFqa 'credential_export_rejected'
             }
             Stop-V4OwnerFqa 'credential_export_invalid'
         }
-        $encoded = $Matches[1]
+        $frameRun = [string]$frame.Groups[1].Value
+        $frameLength = 0
+        $frameLengthParsed = [int]::TryParse([string]$frame.Groups[2].Value, [ref]$frameLength)
+        if (($frameRun -ne $Run) -or (-not $frameLengthParsed) -or ($frameLength -lt 128) -or ($frameLength -gt 65536)) {
+            Stop-V4OwnerFqa 'credential_export_scope_invalid'
+        }
+        $frameHash = [string]$frame.Groups[3].Value
+        $encoded = [string]$frame.Groups[4].Value
+        $frame = $null
         $record = ''
-        if ($encoded -notmatch '^[A-Za-z0-9+/]{64,131072}={0,2}$') { Stop-V4OwnerFqa 'credential_transport_invalid' }
         $bytes = $null
+        $actualHash = $null
+        $expectedHash = $null
         try {
             $script:wrapperStage = 'credential_copy_decode'
-            try { $bytes = [Convert]::FromBase64String($encoded) }
-            catch { Stop-V4OwnerFqa 'credential_transport_invalid' }
-            if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) { Stop-V4OwnerFqa 'credential_size_invalid' }
+            $bytes = ConvertFrom-FqaBase64Url -Value $encoded
+            if ($bytes.Length -ne $frameLength) { Stop-V4OwnerFqa 'credential_size_invalid' }
+            $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+            try { $actualHash = $hashAlgorithm.ComputeHash($bytes) }
+            finally { $hashAlgorithm.Dispose() }
+            $expectedHash = ConvertFrom-FqaSha256Hex -Value $frameHash
+            if (-not (Test-FqaFixedTimeBytes -Left $actualHash -Right $expectedHash)) {
+                Stop-V4OwnerFqa 'credential_hash_mismatch'
+            }
+            $script:wrapperStage = 'credential_copy_validate'
+            Assert-FqaBrowserCredentialDocument -Bytes $bytes -Run $Run
             $script:wrapperStage = 'credential_copy_write'
             $stream = [IO.File]::Open($HostPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
             try {
@@ -298,8 +444,12 @@ function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run
         }
         finally {
             if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+            if ($null -ne $actualHash) { [Array]::Clear($actualHash, 0, $actualHash.Length) }
+            if ($null -ne $expectedHash) { [Array]::Clear($expectedHash, 0, $expectedHash.Length) }
         }
         $encoded = ''
+        $frameHash = ''
+        $frameRun = ''
         $script:wrapperStage = 'credential_copy_final_acl'
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
     }

@@ -31,18 +31,9 @@ foreach ($path in @($wrapperPath, $runnerPath, $leaseProtocolPath, $boundedNativ
 
 # The durable-plan cleanup command uses its own `--` operand separator. Only
 # the first WSL delimiter is structural; payload separators must survive
-# unchanged after timeout injection. Credential export itself now stays on the
-# already-authenticated broker control pipe and must not open a second exec.
+# unchanged after timeout injection. Credential export stays on the already-
+# authenticated broker control pipe and must not open a second exec.
 . $boundedNativePath
-$credentialCopyArguments = @(Add-ClassArchiveWslTimeout -Arguments @(
-    '-d', 'Ubuntu', '--exec', 'docker', 'compose', 'exec', '-T', 'piwigo',
-    'base64', '-w0', '--', '/var/lib/class-archive-private-e2e/credential.json'
-) -TimeoutSeconds 30)
-Assert-True (($credentialCopyArguments -join "`n") -eq (@(
-    '-d', 'Ubuntu', '--exec', 'timeout', '--foreground', '--kill-after=10s', '30s',
-    'docker', 'compose', 'exec', '-T', 'piwigo', 'base64', '-w0', '--',
-    '/var/lib/class-archive-private-e2e/credential.json'
-) -join "`n")) 'owner_fqa_payload_operand_separator_not_preserved'
 $credentialCleanupArguments = @(Add-ClassArchiveWslTimeout -Arguments @(
     '-d', 'Ubuntu', '--', 'docker', 'compose', 'exec', '-T', 'piwigo',
     'rm', '-f', '--', '/var/lib/class-archive-private-e2e/credential.json'
@@ -92,6 +83,10 @@ Assert-Contains $wrapper '.codex-work\private-real-qa\screenshots\photos-app-v4'
 Assert-Contains $wrapper "'http://127.0.0.1:8190/'" 'owner_fqa_core_origin_missing'
 Assert-Contains $wrapper "'http://127.0.0.1:8191/'" 'owner_fqa_photo_origin_missing'
 Assert-Contains $wrapper 'roles=3' 'owner_fqa_wrapper_role_count_missing'
+Assert-Contains $wrapper 'Copy-FqaCredentialFromBroker' 'owner_fqa_broker_credential_transport_missing'
+Assert-Contains $wrapper "WriteLine('EXPORT ' + `$Run)" 'owner_fqa_broker_export_command_missing'
+Assert-Contains $wrapper 'V4_OWNER_FQA_CREDENTIAL=v1:' 'owner_fqa_broker_export_frame_missing'
+Assert-NotContains $wrapper "'base64', '-w0'" 'owner_fqa_second_exec_credential_export_forbidden'
 Assert-NotContains $wrapper 'fixture-teacher' 'owner_fqa_wrapper_teacher_forbidden'
 Assert-NotContains $wrapper 'ConfirmExistingFixtureCredentialRotation' 'owner_fqa_legacy_switch_forbidden'
 
@@ -105,11 +100,22 @@ Assert-Contains $runner "livingIds.size > 0 ? 'present_and_tested' : 'not_presen
 Assert-NotContains $runner 'owner_both_eras_required' 'owner_fqa_false_both_eras_requirement_present'
 Assert-Contains $runner "Object.hasOwn(payload, 'nextCursor') ? payload.nextCursor : payload.next_cursor" 'owner_fqa_terminal_cursor_null_preservation_missing'
 Assert-Contains $runner "credentialDocument.lease?.roster === 'FQA-C-99CA3B3B6AF1'" 'owner_fqa_runner_candidate_binding_missing'
-Assert-Contains $runner 'credentialDocument?.version === 3' 'owner_fqa_runner_v3_credential_document_missing'
-Assert-Contains $runner "'environment,lease,recovery_plan,roles,run,version'" 'owner_fqa_runner_v3_credential_shape_missing'
-Assert-Contains $runner 'credential_recovery_plan_shape' 'owner_fqa_runner_recovery_plan_validation_missing'
-Assert-Contains $runner "credentialDocument = null;" 'owner_fqa_runner_recovery_plan_retention_missing'
-Assert-Contains $runner 'never passed to page.evaluate' 'owner_fqa_runner_recovery_plan_browser_boundary_missing'
+Assert-Contains $runner "const BROWSER_CREDENTIAL_ENV = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT'" 'owner_fqa_runner_browser_credential_environment_missing'
+Assert-Contains $runner 'credentialDocument?.version === 1' 'owner_fqa_runner_browser_credential_version_missing'
+Assert-Contains $runner "const BROWSER_CREDENTIAL_ROOT_KEYS = 'environment,lease,roles,run,version'" 'owner_fqa_runner_browser_credential_shape_missing'
+Assert-Contains $runner "const BROWSER_CREDENTIAL_LEASE_KEYS = 'roles,roster'" 'owner_fqa_runner_browser_lease_shape_missing'
+Assert-Contains $runner "const BROWSER_CREDENTIAL_ROLE_KEYS = 'password,username'" 'owner_fqa_runner_browser_role_field_shape_missing'
+Assert-Contains $runner "exactObjectKeys(credentialDocument, BROWSER_CREDENTIAL_ROOT_KEYS, 'credential_document_shape')" 'owner_fqa_runner_browser_exact_root_guard_missing'
+Assert-Contains $runner "exactObjectKeys(credentialDocument.lease, BROWSER_CREDENTIAL_LEASE_KEYS, 'credential_lease_shape')" 'owner_fqa_runner_browser_exact_lease_guard_missing'
+Assert-Contains $runner 'exactObjectKeys(value, BROWSER_CREDENTIAL_ROLE_KEYS, `credential_${role}_shape`)' 'owner_fqa_runner_browser_exact_role_guard_missing'
+Assert-Contains $runner '/^[A-Za-z0-9_-]{64}$/' 'owner_fqa_runner_browser_password_length_guard_missing'
+Assert-NotContains $runner 'recovery_plan' 'owner_fqa_runner_recovery_data_forbidden'
+Assert-NotContains $runner 'closed_password_hash' 'owner_fqa_runner_recovery_hash_forbidden'
+Assert-NotContains $runner 'before_password_sha256' 'owner_fqa_runner_recovery_digest_forbidden'
+Assert-NotContains $runner 'lease_password_sha256' 'owner_fqa_runner_lease_digest_forbidden'
+Assert-Contains $runner "credentialDocument = null;" 'owner_fqa_runner_browser_document_discard_missing'
+Assert-Contains $runner 'intentionally not accepted by this parser' 'owner_fqa_runner_browser_boundary_missing'
+Assert-Contains $runner 'page.evaluate, page content, screenshots, console output, or browser storage' 'owner_fqa_runner_browser_sink_boundary_missing'
 Assert-Contains $runner "value?.username === 'fqa_99ca3b3b6af1_classmate'" 'owner_fqa_runner_classmate_binding_missing'
 Assert-Contains $runner "value?.username === 'fqa_99ca3b3b6af1_family'" 'owner_fqa_runner_family_binding_missing'
 Assert-Contains $runner '/^anon_[a-f0-9]{20}$/' 'owner_fqa_runner_anonymous_binding_missing'

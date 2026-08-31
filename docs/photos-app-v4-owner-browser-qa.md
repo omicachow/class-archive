@@ -24,13 +24,24 @@ The broker refuses to open unless every expected invariant still holds:
 
 The PowerShell wrapper holds an exclusive ignored host lock. The PHP broker
 holds a MariaDB advisory lock for the whole run and has a 15-minute maximum
-TTL. Passwords are generated inside the broker and cross the process boundary
-only once through the already-authenticated broker control pipe. The broker
-validates its private 0600 recovery document, emits one bounded base64 record
-to its redirected parent pipe, and the wrapper immediately writes it to an
-ignored, owner-only 0600 host file. It does not use a second `docker exec` or
-`docker cp` transport. Passwords, usernames, paths, and the export record
-never appear in terminal output.
+TTL. The broker retains a private 0600 recovery-only document for recovery
+verification; it contains no browser credential payload. Passwords are
+generated inside the broker and cross the process boundary only once through
+the already-authenticated broker control pipe. The broker validates its
+recovery document, emits one bounded, integrity-framed browser export record
+to its redirected parent pipe, and the wrapper verifies the frame before it
+writes an ignored, owner-only 0600 host file. It does not use a second
+`docker exec` or `docker cp` transport. Passwords, usernames, paths, and the
+export record never appear in terminal output.
+
+The Chrome runner accepts only browser-export document version 1 with the
+exact root shape `environment`, `lease`, `roles`, `run`, and `version`. Its
+environment is `PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT`; `lease` is
+limited to the fixed roster marker and role count; and each of the exact three
+lowercase roles has only `username` and a 64-character base64url password.
+Any extra field is rejected before Chrome starts, which rejects recovery
+plans, verifier or digest fields, hashes, and future broker-only metadata.
+The runner never reads or retains recovery material.
 
 Opening order is fail-closed:
 
@@ -60,7 +71,10 @@ advance intentionally.
 Chrome Stable launches with fresh ignored profiles and localhost-only network
 guards. The browser performs only read journeys plus one Family comment request
 that must be denied with 403 and leave the payload unchanged. Its successful
-content-write count must remain zero.
+content-write count must remain zero. Browser credentials are the minimal
+three-role export only; recovery data is neither provided to the browser
+process nor passed to page content, screenshots, console output, or browser
+storage.
 
 Classmate and Anonymous must see the same FULL projection. Family must see the
 exact HERITAGE_ONLY projection, including safe counts, covers, People, search,

@@ -188,17 +188,6 @@ $addFixture = static function (int $identityId) use (
     return ['identity_id' => $identityId, 'lock_version' => 0, 'accounts' => $accounts];
 };
 
-$credentialProjection = static function (array $plan): array {
-    $credentials = [];
-    foreach ($plan as $role => $item) {
-        $credentials[strtolower((string) $role)] = [
-            'username' => (string) $item['username'],
-            'password' => (string) $item['browser_password'],
-        ];
-    }
-    return $credentials;
-};
-
 $expireLease = static function (int $identityId) use ($db, $leaseTable): void {
     v4BrokerRuntimeExecute(
         $db,
@@ -236,7 +225,96 @@ SQL);
     $normalPlan = v4fqaBuildCredentialPlan($normal['accounts']);
     $normalFile = '/tmp/class-archive-v4-broker-runtime-' . $run . '-normal.json';
     $files[] = $normalFile;
-    v4fqaWriteCredentialFile($normalFile, $normalRun, $credentialProjection($normalPlan), $normalPlan);
+    v4fqaWriteCredentialFile($normalFile, $normalRun, $normalPlan);
+    $normalRaw = file_get_contents($normalFile);
+    $normalDocument = is_string($normalRaw)
+        ? json_decode($normalRaw, true, 32, JSON_THROW_ON_ERROR)
+        : null;
+    $assert(is_array($normalDocument), 'v4_recovery_document_decode_failed');
+    $assert(($normalDocument['version'] ?? null) === V4_FQA_RECOVERY_DOCUMENT_VERSION, 'v4_recovery_document_version_invalid');
+    $assert(
+        array_keys($normalDocument) === ['version', 'environment', 'run', 'lease', 'recovery_plan'],
+        'v4_recovery_document_root_shape_invalid',
+    );
+    $assert(!array_key_exists('roles', $normalDocument), 'v4_recovery_document_roles_persisted');
+    $assert(
+        strpos($normalRaw, 'browser_password') === false && strpos($normalRaw, '"password"') === false,
+        'v4_recovery_document_browser_secret_persisted',
+    );
+
+    // Browser export is an independent v1 projection. It must not serialize
+    // the recovery-only verifier plan even though both documents are produced
+    // during the same lease.
+    $browserCredentials = [
+        'anonymous' => [
+            'username' => 'anon_' . str_repeat('a', 20),
+            'password' => v4fqaSecret(),
+        ],
+        'classmate' => [
+            'username' => 'fqa_99ca3b3b6af1_classmate',
+            'password' => v4fqaSecret(),
+        ],
+        'family' => [
+            'username' => 'fqa_99ca3b3b6af1_family',
+            'password' => v4fqaSecret(),
+        ],
+    ];
+    $browserDocument = v4fqaBuildBrowserCredentialDocument($browserCredentials, $normalRun);
+    $assert(
+        array_keys($browserDocument) === ['version', 'environment', 'run', 'lease', 'roles'],
+        'browser_export_document_root_shape_invalid',
+    );
+    $assert(($browserDocument['version'] ?? null) === V4_FQA_BROWSER_DOCUMENT_VERSION, 'browser_export_document_version_invalid');
+    $assert(!array_key_exists('recovery_plan', $browserDocument), 'browser_export_recovery_plan_present');
+    $browserFrame = v4fqaExportCredentialDocument($normalFile, $normalRun, $browserCredentials);
+    $browserParts = explode(':', $browserFrame, 5);
+    $assert(
+        count($browserParts) === 5
+            && $browserParts[0] === 'v1'
+            && $browserParts[1] === $normalRun
+            && preg_match('/\A[0-9]+\z/D', $browserParts[2]) === 1
+            && preg_match('/\A[a-f0-9]{64}\z/D', $browserParts[3]) === 1
+            && preg_match('/\A[A-Za-z0-9_-]+\z/D', $browserParts[4]) === 1,
+        'browser_export_frame_shape_invalid',
+    );
+    $browserPayloadBase64 = strtr($browserParts[4], '-_', '+/');
+    $browserPayloadBase64 .= str_repeat('=', (4 - (strlen($browserPayloadBase64) % 4)) % 4);
+    $browserPayload = base64_decode($browserPayloadBase64, true);
+    $assert(is_string($browserPayload), 'browser_export_frame_decode_failed');
+    $assert((int) $browserParts[2] === strlen($browserPayload), 'browser_export_frame_length_invalid');
+    $assert(hash_equals($browserParts[3], hash('sha256', $browserPayload)), 'browser_export_frame_hash_invalid');
+    $browserDecoded = json_decode($browserPayload, true, 32, JSON_THROW_ON_ERROR);
+    $assert(is_array($browserDecoded) && !array_key_exists('recovery_plan', $browserDecoded), 'browser_export_payload_recovery_present');
+    $assert(
+        strpos($browserPayload, 'closed_password_hash') === false
+            && strpos($browserPayload, 'lease_password_sha256') === false,
+        'browser_export_payload_recovery_verifier_present',
+    );
+    v4fqaClearBrowserCredentials($browserCredentials);
+    $assert($browserCredentials === [], 'browser_export_credentials_not_cleared');
+
+    // Existing abandoned v3 files remain readable for recovery only. This
+    // test constructs the old shape directly; no new writer can produce it.
+    $legacyFile = '/tmp/class-archive-v4-broker-runtime-' . $run . '-legacy-v3.json';
+    $files[] = $legacyFile;
+    $legacyDocument = [
+        'version' => 3,
+        'environment' => V4_FQA_RECOVERY_ENVIRONMENT,
+        'run' => $normalRun,
+        'lease' => ['roster' => V4_FQA_ROSTER, 'roles' => 3],
+        'roles' => $browserDocument['roles'],
+        'recovery_plan' => $normalDocument['recovery_plan'],
+    ];
+    $legacyJson = json_encode($legacyDocument, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+    $legacyUmask = umask(0077);
+    try {
+        $legacyWrite = file_put_contents($legacyFile, $legacyJson, LOCK_EX);
+    } finally {
+        umask($legacyUmask);
+    }
+    $assert($legacyWrite === strlen($legacyJson) && chmod($legacyFile, 0600), 'legacy_recovery_document_write_failed');
+    $persistedLegacy = v4fqaReadCredentialPlan($legacyFile, $normalRun);
+    $assert(v4fqaCredentialPlanMatchesState($persistedLegacy, $normal), 'legacy_recovery_document_compatibility_invalid');
     $persistedNormal = v4fqaReadCredentialPlan($normalFile, $normalRun);
     $assert(v4fqaCredentialPlanMatchesState($persistedNormal, $normal), 'normal_plan_topology_invalid');
     v4fqaInstallCredentialPlan($service, $normalContext, $normalPlan, 10, 900001, 900002, $revoke, $audit);
@@ -260,7 +338,7 @@ SQL);
     $finallyPlan = v4fqaBuildCredentialPlan($finallyState['accounts']);
     $finallyFile = '/tmp/class-archive-v4-broker-runtime-' . $run . '-finally.json';
     $files[] = $finallyFile;
-    v4fqaWriteCredentialFile($finallyFile, $finallyRun, $credentialProjection($finallyPlan), $finallyPlan);
+    v4fqaWriteCredentialFile($finallyFile, $finallyRun, $finallyPlan);
     $finallyClosed = false;
     try {
         v4fqaInstallCredentialPlan(
@@ -319,7 +397,7 @@ SQL);
         $plan = v4fqaBuildCredentialPlan($state['accounts']);
         $file = '/tmp/class-archive-v4-broker-runtime-' . $run . '-crash-' . $crashAfter . '.json';
         $files[] = $file;
-        v4fqaWriteCredentialFile($file, $scenarioRun, $credentialProjection($plan), $plan);
+        v4fqaWriteCredentialFile($file, $scenarioRun, $plan);
         $installed = 0;
         v4BrokerRuntimeRejected(
             static function () use (
@@ -408,7 +486,7 @@ SQL);
     $conflictPlan = v4fqaBuildCredentialPlan($conflictState['accounts']);
     $conflictFile = '/tmp/class-archive-v4-broker-runtime-' . $run . '-conflict.json';
     $files[] = $conflictFile;
-    v4fqaWriteCredentialFile($conflictFile, $conflictRun, $credentialProjection($conflictPlan), $conflictPlan);
+    v4fqaWriteCredentialFile($conflictFile, $conflictRun, $conflictPlan);
     $persistedConflict = v4fqaReadCredentialPlan($conflictFile, $conflictRun);
     v4fqaInstallCredentialPlan($service, $conflictContext, $conflictPlan, 40, 900001, 900002, $revoke, $audit);
     $administratorHash = 'administrator-wins-' . $run;
@@ -486,7 +564,7 @@ SQL);
     $driftPlan = v4fqaBuildCredentialPlan($driftState['accounts']);
     $driftFile = '/tmp/class-archive-v4-broker-runtime-' . $run . '-drift.json';
     $files[] = $driftFile;
-    v4fqaWriteCredentialFile($driftFile, $driftRun, $credentialProjection($driftPlan), $driftPlan);
+    v4fqaWriteCredentialFile($driftFile, $driftRun, $driftPlan);
     $persistedDrift = v4fqaReadCredentialPlan($driftFile, $driftRun);
     v4fqaInstallCredentialPlan($service, $driftContext, $driftPlan, 60, 900001, 900002, $revoke, $audit);
     $driftedState = $driftState;

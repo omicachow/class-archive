@@ -6,11 +6,12 @@ declare(strict_types=1);
  * Local-only, bounded credential lease for one historical FQA aggregate.
  *
  * This broker deliberately keeps the database advisory lock and its stdin
- * control channel open for the complete browser run. Credentials are exported
- * exactly once over that authenticated pipe and are written immediately to an
- * owner-only 0600 host file; no second docker exec reads the recovery plan.
- * EOF, STOP, timeout, signals, or any Throwable enter the same freeze-first
- * cleanup path.
+ * control channel open for the complete browser run. The durable 0600 file
+ * contains recovery-only verifier material; browser credentials remain in
+ * broker memory and are exported exactly once over that authenticated pipe.
+ * The host receives only the browser credential document, never the recovery
+ * plan. EOF, STOP, timeout, signals, or any Throwable enter the same
+ * freeze-first cleanup path.
  */
 
 const V4_FQA_ROOT = '/var/www/html/piwigo';
@@ -18,6 +19,10 @@ const V4_FQA_RECOVERY_ROOT = '/var/lib/class-archive-private-e2e';
 const V4_FQA_ROSTER = 'FQA-C-99CA3B3B6AF1';
 const V4_FQA_LOCK = 'class_archive_v4_owner_fqa_lease_v1';
 const V4_FQA_ROLES = ['ANONYMOUS', 'CLASSMATE', 'FAMILY'];
+const V4_FQA_RECOVERY_DOCUMENT_VERSION = 4;
+const V4_FQA_BROWSER_DOCUMENT_VERSION = 1;
+const V4_FQA_RECOVERY_ENVIRONMENT = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE';
+const V4_FQA_BROWSER_ENVIRONMENT = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT';
 // AdminService::setIdentityFrozen now participates in the durable fixture
 // lease and the same identity-version CAS. This constant records capability,
 // not enablement: acquisition still requires the local process-only
@@ -345,7 +350,15 @@ function v4fqaInstallCredentialPlan(
     return $credentials;
 }
 
-function v4fqaWriteCredentialFile(string $path, string $run, array $credentials, array $plan): void
+/**
+ * Persist only the material required for emergency broker recovery.
+ *
+ * Browser passwords deliberately remain outside this file.  A recovery worker
+ * needs the exact verifier hashes and topology, but never the one-time browser
+ * secrets.  This v4 shape supersedes v3 while v4fqaReadCredentialPlan keeps
+ * v3 read compatibility for a crash plan left by an earlier broker.
+ */
+function v4fqaWriteCredentialFile(string $path, string $run, array $plan): void
 {
     if (file_exists($path) || is_link($path)) {
         v4fqaFail('credential_path_not_fresh');
@@ -367,14 +380,14 @@ function v4fqaWriteCredentialFile(string $path, string $run, array $credentials,
         ];
     }
     $document = [
-        'version' => 3,
-        'environment' => 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE',
+        'version' => V4_FQA_RECOVERY_DOCUMENT_VERSION,
+        'environment' => V4_FQA_RECOVERY_ENVIRONMENT,
         'run' => $run,
         'lease' => ['roster' => V4_FQA_ROSTER, 'roles' => 3],
-        'roles' => $credentials,
         // This plan contains no plaintext closed credential and no prior
-        // password verifier. It lets an abandoned broker remove only a hash
-        // that is proven to have been installed by this exact lease.
+        // password verifier or browser credential. It lets an abandoned
+        // broker remove only a hash that is proven to have been installed by
+        // this exact lease.
         'recovery_plan' => $recoveryPlan,
     ];
     $json = json_encode($document, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
@@ -446,17 +459,58 @@ function v4fqaReadCredentialPlan(string $path, string $run): array
     if (!is_string($raw)) {
         v4fqaFail('credential_recovery_plan_read_failed');
     }
-    $document = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+    try {
+        $document = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+    } catch (Throwable) {
+        v4fqaFail('credential_recovery_plan_contract_invalid');
+    }
+    $version = is_array($document) ? ($document['version'] ?? null) : null;
+    $expectedRootKeys = match ($version) {
+        // v3 can remain only as an abandoned-plan recovery compatibility
+        // reader. New writers never persist its browser-password `roles`.
+        3 => ['environment', 'lease', 'recovery_plan', 'roles', 'run', 'version'],
+        V4_FQA_RECOVERY_DOCUMENT_VERSION => ['environment', 'lease', 'recovery_plan', 'run', 'version'],
+        default => [],
+    };
+    $actualRootKeys = is_array($document) ? array_keys($document) : [];
+    sort($actualRootKeys, SORT_STRING);
     if (!is_array($document)
-        || ($document['version'] ?? null) !== 3
+        || $expectedRootKeys === []
+        || $actualRootKeys !== $expectedRootKeys
+        || ($document['environment'] ?? null) !== V4_FQA_RECOVERY_ENVIRONMENT
         || ($document['run'] ?? null) !== $run
+        || !is_array($document['lease'] ?? null)
+        || array_keys($document['lease']) !== ['roster', 'roles']
+        || ($document['lease']['roster'] ?? null) !== V4_FQA_ROSTER
+        || ($document['lease']['roles'] ?? null) !== 3
         || !is_array($document['recovery_plan'] ?? null)
         || array_keys($document['recovery_plan']) !== V4_FQA_ROLES
+        || ($version === 3
+            && (!is_array($document['roles'] ?? null)
+                || array_keys($document['roles']) !== array_map('strtolower', V4_FQA_ROLES)))
+        || ($version === V4_FQA_RECOVERY_DOCUMENT_VERSION
+            && array_key_exists('roles', $document))
     ) {
         v4fqaFail('credential_recovery_plan_contract_invalid');
     }
+    $expectedRecoveryItemKeys = [
+        'account_id',
+        'before_password_sha256',
+        'closed_password_hash',
+        'closed_password_sha256',
+        'lease_password_sha256',
+        'principal_id',
+        'role',
+        'seat_id',
+        'seat_lock_version',
+        'user_id',
+        'username',
+    ];
     foreach ($document['recovery_plan'] as $role => $item) {
+        $actualRecoveryItemKeys = is_array($item) ? array_keys($item) : [];
+        sort($actualRecoveryItemKeys, SORT_STRING);
         if (!is_array($item)
+            || $actualRecoveryItemKeys !== $expectedRecoveryItemKeys
             || ($item['role'] ?? null) !== $role
             || preg_match('/\A[a-f0-9]{64}\z/D', (string) ($item['before_password_sha256'] ?? '')) !== 1
             || preg_match('/\A[a-f0-9]{64}\z/D', (string) ($item['lease_password_sha256'] ?? '')) !== 1
@@ -475,69 +529,118 @@ function v4fqaReadCredentialPlan(string $path, string $run): array
 }
 
 /**
- * Return the short-lived browser credential document only over the already
+ * Build the exact browser-only credential document that may leave the broker.
+ * Recovery verifiers are intentionally neither accepted nor emitted here.
+ *
+ * @param array<string,array{username:mixed,password:mixed}> $credentials
+ * @return array{version:int,environment:string,run:string,lease:array{roster:string,roles:int},roles:array<string,array{username:string,password:string}>}
+ */
+function v4fqaBuildBrowserCredentialDocument(array $credentials, string $run): array
+{
+    if (preg_match('/\A[a-f0-9]{24}\z/D', $run) !== 1
+        || array_keys($credentials) !== array_map('strtolower', V4_FQA_ROLES)
+    ) {
+        v4fqaFail('credential_browser_document_invalid');
+    }
+    foreach ($credentials as $role => $credential) {
+        $username = is_array($credential) ? ($credential['username'] ?? null) : null;
+        $password = is_array($credential) ? ($credential['password'] ?? null) : null;
+        $validUsername = match ($role) {
+            'anonymous' => is_string($username)
+                && preg_match('/\Aanon_[a-f0-9]{20}\z/D', $username) === 1,
+            'classmate' => $username === 'fqa_99ca3b3b6af1_classmate',
+            'family' => $username === 'fqa_99ca3b3b6af1_family',
+            default => false,
+        };
+        if (!$validUsername
+            || !is_string($password)
+            || preg_match('/\A[A-Za-z0-9_-]{64}\z/D', $password) !== 1
+            || array_keys($credential) !== ['username', 'password']
+        ) {
+            v4fqaFail('credential_browser_role_invalid');
+        }
+    }
+
+    /** @var array<string,array{username:string,password:string}> $credentials */
+    return [
+        'version' => V4_FQA_BROWSER_DOCUMENT_VERSION,
+        'environment' => V4_FQA_BROWSER_ENVIRONMENT,
+        'run' => $run,
+        'lease' => ['roster' => V4_FQA_ROSTER, 'roles' => 3],
+        'roles' => $credentials,
+    ];
+}
+
+function v4fqaBase64UrlEncode(string $value): string
+{
+    $encoded = rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+    if ($encoded === '') {
+        v4fqaFail('credential_export_size_invalid');
+    }
+    return $encoded;
+}
+
+/** @param array<string,array{username:mixed,password:mixed}> $credentials */
+function v4fqaBuildBrowserCredentialFrame(array $credentials, string $run): string
+{
+    $document = v4fqaBuildBrowserCredentialDocument($credentials, $run);
+    try {
+        $payload = json_encode($document, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+    } catch (Throwable) {
+        v4fqaFail('credential_export_document_invalid');
+    }
+    $bytes = strlen($payload);
+    if ($bytes < 128 || $bytes > 8192) {
+        v4fqaFail('credential_export_size_invalid');
+    }
+    $encoded = v4fqaBase64UrlEncode($payload);
+    return 'v1:' . $run . ':' . $bytes . ':' . hash('sha256', $payload) . ':' . $encoded;
+}
+
+/** @param array<string,array{username:mixed,password:mixed}> $credentials */
+function v4fqaClearBrowserCredentials(array &$credentials): void
+{
+    foreach ($credentials as &$credential) {
+        if (is_array($credential) && is_string($credential['password'] ?? null)) {
+            $credential['password'] = str_repeat("\0", strlen($credential['password']));
+        }
+    }
+    unset($credential);
+    $credentials = [];
+}
+
+/** @param array<string,array<string,mixed>> $plan */
+function v4fqaClearBrowserPasswordsFromPlan(array &$plan): void
+{
+    foreach ($plan as &$item) {
+        if (is_array($item) && is_string($item['browser_password'] ?? null)) {
+            $item['browser_password'] = str_repeat("\0", strlen($item['browser_password']));
+        }
+        if (is_array($item)) {
+            unset($item['browser_password']);
+        }
+    }
+    unset($item);
+}
+
+/**
+ * Return the short-lived browser credential frame only over the already
  * authenticated broker control pipe.
  *
  * This deliberately does not create a second docker exec transport window:
  * the same process that owns the lease proves the recovery file is present,
  * regular, private, bound to this run, and structurally complete before it
- * emits one base64 line to its parent.  Callers must never log the result.
+ * emits one framed browser-only line to its parent. Callers must never log
+ * the result.
+ *
+ * @param array<string,array{username:mixed,password:mixed}> $credentials
  */
-function v4fqaExportCredentialDocument(string $path, string $run): string
+function v4fqaExportCredentialDocument(string $path, string $run, array $credentials): string
 {
     // Reuse the strict recovery-plan validator first. It rejects symlinks,
     // unsafe modes, hard links, stale runs, and malformed recovery data.
     v4fqaReadCredentialPlan($path, $run);
-
-    clearstatcache(true, $path);
-    $stat = @lstat($path);
-    if (!is_array($stat)
-        || (($stat['mode'] ?? 0) & 0170000) !== 0100000
-        || (($stat['mode'] ?? 0) & 0777) !== 0600
-        || (int) ($stat['nlink'] ?? 0) !== 1
-        || is_link($path)
-        || (int) ($stat['size'] ?? 0) < 128
-        || (int) ($stat['size'] ?? 0) > 65536
-    ) {
-        v4fqaFail('credential_export_file_invalid');
-    }
-    $raw = file_get_contents($path);
-    if (!is_string($raw)) {
-        v4fqaFail('credential_export_read_failed');
-    }
-    try {
-        $document = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
-    } catch (Throwable) {
-        v4fqaFail('credential_export_document_invalid');
-    }
-    if (!is_array($document)
-        || ($document['version'] ?? null) !== 3
-        || ($document['environment'] ?? null) !== 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE'
-        || ($document['run'] ?? null) !== $run
-        || !is_array($document['lease'] ?? null)
-        || ($document['lease']['roster'] ?? null) !== V4_FQA_ROSTER
-        || ($document['lease']['roles'] ?? null) !== 3
-        || !is_array($document['roles'] ?? null)
-        || array_keys($document['roles']) !== array_map('strtolower', V4_FQA_ROLES)
-    ) {
-        v4fqaFail('credential_export_document_invalid');
-    }
-    foreach ($document['roles'] as $role => $credential) {
-        if (!is_array($credential)
-            || !is_string($credential['username'] ?? null)
-            || !is_string($credential['password'] ?? null)
-            || $credential['username'] === ''
-            || strlen($credential['password']) < 16
-            || strlen($credential['password']) > 512
-        ) {
-            v4fqaFail('credential_export_role_invalid');
-        }
-    }
-    $encoded = base64_encode($raw);
-    if ($encoded === '' || strlen($encoded) > 131072) {
-        v4fqaFail('credential_export_size_invalid');
-    }
-    return $encoded;
+    return v4fqaBuildBrowserCredentialFrame($credentials, $run);
 }
 
 function v4fqaRemoveCredentialFile(string $path): void
@@ -937,6 +1040,7 @@ $cleanupTerminal = false;
 $cleanupSafe = false;
 $credentialExported = false;
 $credentialPlan = [];
+$browserCredentials = [];
 $lockHeld = false;
 $state = null;
 $db = null;
@@ -1071,17 +1175,10 @@ try {
     } elseif (!$recoveryMode) {
 
     $credentialPlan = v4fqaBuildCredentialPlan($state['accounts']);
-    $plannedCredentials = [];
-    foreach ($credentialPlan as $role => $item) {
-        $plannedCredentials[strtolower($role)] = [
-            'username' => (string) $item['username'],
-            'password' => (string) $item['browser_password'],
-        ];
-    }
     // The 0600 recovery plan exists before the first password CAS. A crash at
     // any later point can therefore remove only this run's installed hashes.
-    v4fqaWriteCredentialFile($credentialFile, $run, $plannedCredentials, $credentialPlan);
-    $credentials = v4fqaInstallCredentialPlan(
+    v4fqaWriteCredentialFile($credentialFile, $run, $credentialPlan);
+    $browserCredentials = v4fqaInstallCredentialPlan(
         $fixtureLeaseService,
         $fixtureLeaseContext,
         $credentialPlan,
@@ -1089,8 +1186,6 @@ try {
         $state['admin_user_id'],
         $state['admin_principal_id'],
     );
-    $credentials = [];
-    $plannedCredentials = [];
 
     // Re-read every invariant after credential preparation. The named lock
     // serializes brokers; this immediate topology/version check also rejects
@@ -1151,20 +1246,27 @@ try {
         if ($line === false) {
             break; // parent EOF: cleanup immediately
         }
-        $control = trim($line);
+        // Treat only a line terminator as transport syntax. Whitespace inside
+        // a control record changes its authenticated value and must fail.
+        $control = rtrim($line, "\r\n");
         if (hash_equals('EXPORT ' . $run, $control)) {
             if ($credentialExported) {
                 v4fqaFail('credential_export_replayed');
             }
-            $encodedCredential = v4fqaExportCredentialDocument($credentialFile, $run);
-            $record = "V4_OWNER_FQA_CREDENTIAL={$encodedCredential}\n";
+            $credentialFrame = v4fqaExportCredentialDocument(
+                $credentialFile,
+                $run,
+                $browserCredentials,
+            );
+            $record = "V4_OWNER_FQA_CREDENTIAL={$credentialFrame}\n";
             if (fwrite(STDOUT, $record) !== strlen($record) || !fflush(STDOUT)) {
                 v4fqaFail('credential_export_write_failed');
             }
-            // Do not retain a second plaintext-bearing buffer after the single
-            // parent-bound export. The durable recovery document remains until
-            // ordinary broker closure can attest cleanup.
-            $encodedCredential = '';
+            // Do not retain browser passwords after the single parent-bound
+            // export. The durable recovery document remains until ordinary
+            // broker closure can attest cleanup.
+            v4fqaClearBrowserCredentials($browserCredentials);
+            $credentialFrame = '';
             $record = '';
             $credentialExported = true;
             continue;
@@ -1185,6 +1287,12 @@ catch (Throwable $error) {
     $exitCode = 2;
 }
 finally {
+    // A failed/aborted browser run must not leave one-time credentials in the
+    // broker's long-lived variable graph. This is best-effort memory hygiene;
+    // the security boundary remains the single-use process pipe and lease
+    // cleanup below.
+    v4fqaClearBrowserCredentials($browserCredentials);
+    v4fqaClearBrowserPasswordsFromPlan($credentialPlan);
     if (is_array($state)
         && $admin instanceof ClassIdentityAdminService
         && $fixtureLeaseService instanceof \ClassIdentity\PrivateE2EFixtureLeaseService

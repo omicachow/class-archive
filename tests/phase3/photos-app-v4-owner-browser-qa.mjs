@@ -19,6 +19,10 @@ class GateError extends Error {
 
 const roles = Object.freeze(['classmate', 'family', 'anonymous']);
 const fullRoles = Object.freeze(['classmate', 'anonymous']);
+const BROWSER_CREDENTIAL_ENV = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT';
+const BROWSER_CREDENTIAL_ROOT_KEYS = 'environment,lease,roles,run,version';
+const BROWSER_CREDENTIAL_LEASE_KEYS = 'roles,roster';
+const BROWSER_CREDENTIAL_ROLE_KEYS = 'password,username';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const forbiddenIdentityKeys = new Set([
   'classmateid', 'classmateidentity', 'classmateidentityid', 'identityid', 'seatid', 'accountid',
@@ -63,6 +67,10 @@ function child(root, name, code) {
   check(relative.length > 0 && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), code);
   return target;
 }
+function exactObjectKeys(value, expected, code) {
+  check(value !== null && typeof value === 'object' && !Array.isArray(value), code);
+  check(Object.keys(value).sort().join(',') === expected, code);
+}
 
 const runId = setting('CLASS_ARCHIVE_V4_OWNER_FIXTURE_RUN_ID', /^[a-f0-9]{24}$/);
 const coreOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CORE_ORIGIN', 8190);
@@ -74,26 +82,18 @@ const screenshotDir = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR
 let credentialDocument;
 try { credentialDocument = JSON.parse(fs.readFileSync(credentialPath, 'utf8')); }
 catch { fail('credential_document_invalid'); }
-check(credentialDocument?.version === 3 && credentialDocument.environment === 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE'
+check(credentialDocument?.version === 1 && credentialDocument.environment === BROWSER_CREDENTIAL_ENV
   && credentialDocument.run === runId, 'credential_document_scope');
-check(Object.keys(credentialDocument ?? {}).sort().join(',') === 'environment,lease,recovery_plan,roles,run,version', 'credential_document_shape');
+// This is deliberately the browser-only export contract. Exact object shapes
+// reject recovery plans, verifiers/digests, hashes, and any future broker-only
+// metadata before a credential can reach the Chrome process.
+exactObjectKeys(credentialDocument, BROWSER_CREDENTIAL_ROOT_KEYS, 'credential_document_shape');
+exactObjectKeys(credentialDocument.lease, BROWSER_CREDENTIAL_LEASE_KEYS, 'credential_lease_shape');
 check(credentialDocument.lease?.roster === 'FQA-C-99CA3B3B6AF1' && credentialDocument.lease?.roles === 3, 'credential_lease_scope');
-check(Object.keys(credentialDocument.roles ?? {}).sort().join(',') === 'anonymous,classmate,family', 'credential_role_shape');
-check(Object.keys(credentialDocument.recovery_plan ?? {}).join(',') === 'ANONYMOUS,CLASSMATE,FAMILY', 'credential_recovery_plan_shape');
-for (const role of ['ANONYMOUS', 'CLASSMATE', 'FAMILY']) {
-  const value = credentialDocument.recovery_plan[role];
-  check(value?.role === role
-    && /^[a-f0-9]{64}$/.test(value?.before_password_sha256 ?? '')
-    && /^[a-f0-9]{64}$/.test(value?.lease_password_sha256 ?? '')
-    && /^[a-f0-9]{64}$/.test(value?.closed_password_sha256 ?? '')
-    && typeof value?.closed_password_hash === 'string' && value.closed_password_hash.length > 0
-    && !Object.hasOwn(value, 'password') && !Object.hasOwn(value, 'browser_password')
-    && !Object.hasOwn(value, 'before_password_hash') && !Object.hasOwn(value, 'lease_password_hash'),
-  `credential_recovery_${role.toLowerCase()}_invalid`);
-}
-// Copy only the three one-time browser credentials. Recovery verifiers stay
-// in broker-owned memory/file handling and are never passed to page.evaluate,
-// page content, screenshots, console output, or browser storage.
+exactObjectKeys(credentialDocument.roles, 'anonymous,classmate,family', 'credential_role_shape');
+// Copy only the three one-time browser credentials. Broker recovery material is
+// intentionally not accepted by this parser and is never passed to
+// page.evaluate, page content, screenshots, console output, or browser storage.
 const credentials = Object.freeze({
   roles: Object.freeze(Object.fromEntries(roles.map((role) => [role, Object.freeze({
     username: credentialDocument.roles?.[role]?.username,
@@ -103,13 +103,14 @@ const credentials = Object.freeze({
 credentialDocument = null;
 for (const role of roles) {
   const value = credentials.roles[role];
+  exactObjectKeys(value, BROWSER_CREDENTIAL_ROLE_KEYS, `credential_${role}_shape`);
   const usernameValid = role === 'classmate'
     ? value?.username === 'fqa_99ca3b3b6af1_classmate'
     : role === 'family'
       ? value?.username === 'fqa_99ca3b3b6af1_family'
       : /^anon_[a-f0-9]{20}$/.test(value?.username ?? '');
   check(usernameValid && typeof value?.password === 'string'
-    && /^[A-Za-z0-9_-]{32,190}$/.test(value.password), `credential_${role}_invalid`);
+    && /^[A-Za-z0-9_-]{64}$/.test(value.password), `credential_${role}_invalid`);
 }
 const leasedUsernames = Object.freeze(roles.map((role) => credentials.roles[role].username));
 

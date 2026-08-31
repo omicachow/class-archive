@@ -39,8 +39,23 @@ $adminService = [IO.File]::ReadAllText($adminServicePath)
 $main = [IO.File]::ReadAllText($mainPath)
 $docs = [IO.File]::ReadAllText($docsPath)
 
+$durableWriterStart = $broker.IndexOf('function v4fqaWriteCredentialFile')
+$durableReaderStart = $broker.IndexOf('function v4fqaReadCredentialPlan')
+$browserDocumentStart = $broker.IndexOf('function v4fqaBuildBrowserCredentialDocument')
+$browserFrameStart = $broker.IndexOf('function v4fqaBuildBrowserCredentialFrame')
+$browserExportStart = $broker.IndexOf('function v4fqaExportCredentialDocument')
+Assert-True ($durableWriterStart -ge 0 -and $durableReaderStart -gt $durableWriterStart) 'owner_fqa_durable_writer_section_missing'
+Assert-True ($browserDocumentStart -ge 0 -and $browserFrameStart -gt $browserDocumentStart) 'owner_fqa_browser_document_section_missing'
+Assert-True ($browserFrameStart -ge 0 -and $browserExportStart -gt $browserFrameStart) 'owner_fqa_browser_frame_section_missing'
+$durableWriter = $broker.Substring($durableWriterStart, $durableReaderStart - $durableWriterStart)
+$browserDocumentBuilder = $broker.Substring($browserDocumentStart, $browserFrameStart - $browserDocumentStart)
+$browserFrameBuilder = $broker.Substring($browserFrameStart, $browserExportStart - $browserFrameStart)
+
 Assert-Contains $broker "const V4_FQA_ROSTER = 'FQA-C-99CA3B3B6AF1'" 'owner_fqa_candidate_not_pinned'
 Assert-Contains $broker "const V4_FQA_ROLES = ['ANONYMOUS', 'CLASSMATE', 'FAMILY']" 'owner_fqa_role_set_invalid'
+Assert-Contains $broker 'const V4_FQA_RECOVERY_DOCUMENT_VERSION = 4;' 'owner_fqa_recovery_document_v4_missing'
+Assert-Contains $broker 'const V4_FQA_BROWSER_DOCUMENT_VERSION = 1;' 'owner_fqa_browser_document_v1_missing'
+Assert-Contains $broker "const V4_FQA_BROWSER_ENVIRONMENT = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT';" 'owner_fqa_browser_environment_missing'
 Assert-Contains $broker 'const V4_FQA_RUNTIME_MUTATION_EXCLUSION_PROVEN = true;' 'owner_fqa_broker_runtime_cas_capability_missing'
 Assert-Contains $broker "'mutation_exclusion_unavailable'" 'owner_fqa_broker_mutation_exclusion_code_missing'
 Assert-Contains $broker "getenv('CLASS_ARCHIVE_PRIVATE_E2E_ENABLED') !== '1'" 'owner_fqa_private_mode_gate_missing'
@@ -84,12 +99,33 @@ Assert-Contains $broker "'before_password_sha256' => hash('sha256', (string) `$a
 Assert-Contains $broker 'closed_password_hash' 'owner_fqa_closed_password_hash_missing'
 Assert-Contains $broker 'v4fqaReadCredentialPlan' 'owner_fqa_recovery_plan_reader_missing'
 Assert-Contains $broker 'v4fqaExportCredentialDocument' 'owner_fqa_broker_export_reader_missing'
+Assert-Contains $broker 'v4fqaBuildBrowserCredentialDocument' 'owner_fqa_browser_document_builder_missing'
+Assert-Contains $broker 'v4fqaBuildBrowserCredentialFrame' 'owner_fqa_browser_frame_builder_missing'
+Assert-Contains $broker 'v4fqaClearBrowserCredentials' 'owner_fqa_browser_credential_clear_missing'
+Assert-Contains $broker 'v4fqaClearBrowserPasswordsFromPlan' 'owner_fqa_plan_browser_secret_clear_missing'
+Assert-Contains $broker 'rtrim($line, "\r\n")' 'owner_fqa_exact_control_line_parsing_missing'
 Assert-Contains $broker "hash_equals('EXPORT ' . `$run" 'owner_fqa_authenticated_export_missing'
 Assert-Contains $broker 'credential_export_replayed' 'owner_fqa_single_export_guard_missing'
 Assert-Contains $broker 'V4_OWNER_FQA_CREDENTIAL=' 'owner_fqa_private_export_record_missing'
-Assert-Contains $broker "array_keys(`$document['roles']) !== array_map('strtolower', V4_FQA_ROLES)" 'owner_fqa_export_role_shape_guard_missing'
+Assert-Contains $broker "return 'v1:' . `$run . ':' . `$bytes . ':' . hash('sha256', `$payload) . ':' . `$encoded;" 'owner_fqa_export_integrity_frame_missing'
+Assert-Contains $broker "array_keys(`$credentials) !== array_map('strtolower', V4_FQA_ROLES)" 'owner_fqa_export_role_shape_guard_missing'
 Assert-Contains $broker 'credential_export_document_invalid' 'owner_fqa_export_document_validation_missing'
-Assert-Contains $broker "`$encodedCredential = '';" 'owner_fqa_export_buffer_release_missing'
+Assert-Contains $broker "`$credentialFrame = '';" 'owner_fqa_export_buffer_release_missing'
+Assert-Contains $broker 'v4fqaClearBrowserCredentials($browserCredentials);' 'owner_fqa_export_browser_secret_clear_missing'
+Assert-Contains $durableWriter 'function v4fqaWriteCredentialFile(string $path, string $run, array $plan): void' 'owner_fqa_durable_writer_signature_invalid'
+Assert-Contains $durableWriter "'version' => V4_FQA_RECOVERY_DOCUMENT_VERSION" 'owner_fqa_durable_writer_v4_missing'
+Assert-Contains $durableWriter "'recovery_plan' => `$recoveryPlan" 'owner_fqa_durable_writer_recovery_plan_missing'
+Assert-NotContains $durableWriter "'roles' => `$credentials" 'owner_fqa_durable_writer_roles_forbidden'
+Assert-NotContains $durableWriter 'browser_password' 'owner_fqa_durable_writer_browser_password_forbidden'
+Assert-NotContains $durableWriter "'password' =>" 'owner_fqa_durable_writer_password_forbidden'
+Assert-Contains $browserDocumentBuilder "'version' => V4_FQA_BROWSER_DOCUMENT_VERSION" 'owner_fqa_browser_document_version_missing'
+Assert-Contains $browserDocumentBuilder "'environment' => V4_FQA_BROWSER_ENVIRONMENT" 'owner_fqa_browser_document_environment_missing'
+Assert-Contains $browserDocumentBuilder "'roles' => `$credentials" 'owner_fqa_browser_document_roles_missing'
+Assert-NotContains $browserDocumentBuilder 'recovery_plan' 'owner_fqa_browser_document_recovery_forbidden'
+Assert-NotContains $browserDocumentBuilder 'closed_password_hash' 'owner_fqa_browser_document_closed_hash_forbidden'
+Assert-NotContains $browserDocumentBuilder 'lease_password_sha256' 'owner_fqa_browser_document_lease_digest_forbidden'
+Assert-Contains $browserFrameBuilder 'v4fqaBase64UrlEncode($payload)' 'owner_fqa_browser_frame_base64url_missing'
+Assert-Contains $browserFrameBuilder "hash('sha256', `$payload)" 'owner_fqa_browser_frame_hash_missing'
 Assert-Contains $broker 'v4fqaCredentialPlanMatchesState' 'owner_fqa_recovery_topology_binding_missing'
 Assert-Contains $broker 'v4fqaRecoveryIdentityEnvelope' 'owner_fqa_recovery_identity_envelope_missing'
 Assert-Contains $broker 'v4fqaQuarantineTopologyConflict' 'owner_fqa_recovery_topology_quarantine_missing'
@@ -146,6 +182,11 @@ foreach ($needle in @(
     'v4fqaInstallCredentialPlan',
     'v4fqaReadCredentialPlan',
     'v4fqaCloseCredentialPlan',
+    'v4_recovery_document_roles_persisted',
+    'browser_export_document_root_shape_invalid',
+    'browser_export_payload_recovery_present',
+    'browser_export_frame_hash_invalid',
+    'legacy_recovery_document_compatibility_invalid',
     'helper_throw_finally=CLOSED',
     'crash_first=RECOVERED',
     'crash_middle=RECOVERED',
@@ -184,6 +225,13 @@ Assert-Contains $wrapper 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $item.FullNa
 Assert-Contains $wrapper 'Copy-FqaCredentialFromBroker' 'owner_fqa_private_credential_transport_missing'
 Assert-Contains $wrapper "WriteLine('EXPORT ' + `$Run)" 'owner_fqa_broker_export_command_missing'
 Assert-NotContains $wrapper "'base64', '-w0'" 'owner_fqa_second_exec_credential_transport_forbidden'
+Assert-Contains $wrapper 'ConvertFrom-FqaBase64Url' 'owner_fqa_wrapper_base64url_decode_missing'
+Assert-Contains $wrapper 'ConvertFrom-FqaSha256Hex' 'owner_fqa_wrapper_hash_decode_missing'
+Assert-Contains $wrapper 'Test-FqaFixedTimeBytes' 'owner_fqa_wrapper_fixed_time_hash_missing'
+Assert-Contains $wrapper 'Assert-FqaBrowserCredentialDocument' 'owner_fqa_wrapper_browser_document_shape_missing'
+Assert-Contains $wrapper 'credential_hash_mismatch' 'owner_fqa_wrapper_hash_failure_missing'
+Assert-Contains $wrapper 'V4_OWNER_FQA_CREDENTIAL=v1:' 'owner_fqa_wrapper_export_frame_contract_missing'
+Assert-Contains $wrapper "'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT'" 'owner_fqa_wrapper_browser_environment_missing'
 Assert-Contains $wrapper 'Initialize-FqaDurableRecoveryRoot' 'owner_fqa_durable_recovery_mount_preflight_missing'
 Assert-Contains $wrapper "mountpoint -q -- " 'owner_fqa_durable_recovery_mount_attestation_missing'
 Assert-Contains $wrapper "'/var/lib/class-archive-private-e2e/credentials-'" 'owner_fqa_durable_recovery_plan_path_missing'
@@ -266,5 +314,7 @@ Assert-Contains $docs 'No identity, seat, account, token,' 'owner_fqa_no_creatio
 Assert-Contains $docs 'freezes first' 'owner_fqa_freeze_first_docs_missing'
 Assert-Contains $docs 'security-equivalent rather than byte-identical' 'owner_fqa_non_bit_identical_docs_missing'
 Assert-Contains $docs '-ConfirmFqaCredentialLease' 'owner_fqa_command_docs_missing'
+Assert-Contains $docs 'recovery-only document' 'owner_fqa_browser_recovery_split_docs_missing'
+Assert-Contains $docs 'browser-export document version 1' 'owner_fqa_browser_export_v1_docs_missing'
 
 Write-Output "PHOTOS_APP_V4_OWNER_FQA_LEASE_PROTOCOL=PASS assertions=$assertions"
