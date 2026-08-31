@@ -58,6 +58,8 @@ foreach ($forbidden in @('$_GET', '$_POST', '$_REQUEST', 'add_event_handler', 'r
 }
 Assert-Contains $adapter "|| str_starts_with((string) `$roster, 'FQA-C-')" 'teacher_fixture_fqa_aggregate_reuse_not_rejected'
 Assert-Contains $adapter "`$identity['identity_type'] !== PRIVATE_E2E_TEACHER_FIXTURE_ROLE" 'teacher_fixture_identity_role_guard_missing'
+Assert-Contains $adapter "'reason_code' => 'TEACHER_FIXTURE'" 'teacher_fixture_audit_reason_code_missing'
+Assert-NotContains $adapter 'LOCAL_PRIVATE_E2E_TEACHER_FIXTURE_LEASE' 'teacher_fixture_audit_reason_code_looks_credential_like'
 Assert-Contains $adapter "`$seat['seat_type'] !== PRIVATE_E2E_TEACHER_FIXTURE_ROLE" 'teacher_fixture_seat_role_guard_missing'
 Assert-Contains $adapter "`$identity['state'] !== 'FROZEN'" 'teacher_fixture_frozen_preflight_missing'
 Assert-Contains $adapter "`$account['current_marker'] !== 1" 'teacher_fixture_current_account_guard_missing'

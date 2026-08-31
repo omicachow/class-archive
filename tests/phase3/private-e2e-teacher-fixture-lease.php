@@ -217,7 +217,11 @@ function privateE2ETeacherFixtureCredentialAuditData(array $fixture, string $sta
     return [
         'state' => $state,
         'role_code' => PRIVATE_E2E_TEACHER_FIXTURE_ROLE,
-        'reason_code' => 'LOCAL_PRIVATE_E2E_TEACHER_FIXTURE_LEASE',
+        // Audit value strings are intentionally screened with the same
+        // credential-shaped-text defense as free-form reasons. Keep this
+        // enum-like marker short and digit-free; the lease state already
+        // carries the detailed lifecycle meaning.
+        'reason_code' => 'TEACHER_FIXTURE',
     ];
 }
 
