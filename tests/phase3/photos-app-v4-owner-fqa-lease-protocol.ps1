@@ -236,6 +236,8 @@ Assert-Contains $wrapper 'V4_OWNER_FQA_CREDENTIAL=v1:' 'owner_fqa_wrapper_export
 Assert-Contains $wrapper "'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT'" 'owner_fqa_wrapper_browser_environment_missing'
 Assert-Contains $wrapper 'credential_export_rejected_' 'owner_fqa_wrapper_safe_export_failure_classification_missing'
 Assert-Contains $wrapper "# record as closure evidence only; otherwise recovery would run after" 'owner_fqa_wrapper_safe_close_evidence_missing'
+Assert-Contains $wrapper '$info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)' 'owner_fqa_wrapper_bom_free_control_pipe_missing'
+Assert-Contains $wrapper 'UTF-8 preamble on the first StreamWriter write' 'owner_fqa_wrapper_bom_control_comment_missing'
 Assert-Contains $wrapper 'Initialize-FqaDurableRecoveryRoot' 'owner_fqa_durable_recovery_mount_preflight_missing'
 Assert-Contains $wrapper "mountpoint -q -- " 'owner_fqa_durable_recovery_mount_attestation_missing'
 Assert-Contains $wrapper "'/var/lib/class-archive-private-e2e/credentials-'" 'owner_fqa_durable_recovery_plan_path_missing'

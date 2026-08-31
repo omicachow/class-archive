@@ -662,6 +662,10 @@ function Start-FqaLeaseBroker([string]$Run, [string]$ContainerCredentialPath) {
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    # The broker intentionally accepts only exact ASCII control records. A
+    # UTF-8 preamble on the first StreamWriter write would turn `EXPORT` into
+    # a different command, so stdin must be UTF-8 without a BOM as well.
+    $info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
     $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $process = [Diagnostics.Process]::new()
