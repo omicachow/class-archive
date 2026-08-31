@@ -774,9 +774,12 @@ try {
     $script:snapshotStage = 'lock'
     $lockPath = Enter-SnapshotLock
     try {
-        $script:snapshotStage = 'partial_directory'
-        [IO.Directory]::CreateDirectory($partial) | Out-Null
-        Set-OwnerOnlyDirectoryAcl $partial
+        $script:snapshotStage = 'partial_directory_create'
+        try { [IO.Directory]::CreateDirectory($partial) | Out-Null }
+        catch { Stop-PrivateRoleSnapshot 'partial_directory_create_failed' }
+        $script:snapshotStage = 'partial_directory_acl'
+        try { Set-OwnerOnlyDirectoryAcl $partial }
+        catch { Stop-PrivateRoleSnapshot 'partial_directory_acl_failed' }
         $script:snapshotStage = 'state_before'
         $stateBefore = Get-OwnerBusinessState $auditPrefixRows
         $script:snapshotStage = 'database_dump'
