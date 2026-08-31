@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -23,6 +24,16 @@ const BROWSER_CREDENTIAL_ENV = 'PRIVATE_REAL_FULL_OWNER_V4_FQA_BROWSER_EXPORT';
 const BROWSER_CREDENTIAL_ROOT_KEYS = 'environment,lease,roles,run,version';
 const BROWSER_CREDENTIAL_LEASE_KEYS = 'roles,roster';
 const BROWSER_CREDENTIAL_ROLE_KEYS = 'password,username';
+const GUEST_MEDIA_PROBE_SCOPE = 'OWNER_PRIVATE_8191';
+const GUEST_MEDIA_PROBE_BOUNDARY = '/.codex-work/private-real-qa/runtime/photos-app-v4-owner-guest/opaque-media-probes/';
+// These are normalized SHA-256 fingerprints for the frozen target's two
+// private identifiers. Keeping only the fingerprints lets the ordinary-member
+// audit detect disclosure without placing a roster, account name, or identity
+// value in the browser runner, its output, or its failure diagnostics.
+const FQT_DISCLOSURE_FINGERPRINTS = Object.freeze(new Set([
+  '607cffd7aa8e1f620131fc2e6fd9bbefeb8585645923f097dc932d3d22ffa6f0',
+  '2dc38737163a12e63067a3852bc5377db3dcbc529d0497a1cc412cb2d04777d3',
+]));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const forbiddenIdentityKeys = new Set([
   'classmateid', 'classmateidentity', 'classmateidentityid', 'identityid', 'seatid', 'accountid',
@@ -35,6 +46,7 @@ let screenshots = 0;
 let stage = 'initialization';
 let chromeVersion = 'unknown';
 let successfulBusinessWrites = 0;
+let fqtDisclosureAudit = false;
 const unexpectedNetwork = new Set();
 const forbiddenBusinessMutations = new Set();
 
@@ -60,6 +72,17 @@ function privatePath(name, requiredBoundary) {
   check(value.replaceAll('\\', '/').toLowerCase().includes(requiredBoundary), `setting_${name.toLowerCase()}_boundary`);
   return value;
 }
+function optionalPrivateNewFilePath(name, requiredBoundary) {
+  const raw = process.env[name] ?? '';
+  if (raw.length === 0) return null;
+  const value = privatePath(name, requiredBoundary);
+  check(path.extname(value) === '.json', `setting_${name.toLowerCase()}_leaf`);
+  let parent;
+  try { parent = fs.lstatSync(path.dirname(value)); }
+  catch { fail(`setting_${name.toLowerCase()}_parent`); }
+  check(parent.isDirectory() && !parent.isSymbolicLink() && !fs.existsSync(value), `setting_${name.toLowerCase()}_fresh`);
+  return value;
+}
 function child(root, name, code) {
   check(/^[a-z0-9][a-z0-9_.-]{1,80}$/i.test(name), code);
   const target = path.resolve(root, name);
@@ -78,6 +101,13 @@ const photoOrigin = localOrigin('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PHOTO_ORIGIN', 8
 const credentialPath = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE', '/.codex-work/private-real-qa/runtime/photos-app-v4-owner-fqa-lease/');
 const profileRoot = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT', '/.codex-work/private-real-qa/browser/photos-app-v4-owner-fqa-lease/');
 const screenshotDir = privatePath('CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR', '/.codex-work/private-real-qa/screenshots/photos-app-v4/');
+const guestMediaProbeOutput = optionalPrivateNewFilePath(
+  'CLASS_ARCHIVE_V4_OWNER_GUEST_MEDIA_PROBE_OUTPUT',
+  GUEST_MEDIA_PROBE_BOUNDARY,
+);
+if (guestMediaProbeOutput !== null) {
+  check(/^owner-fqa-[a-f0-9]{24}\.json$/i.test(path.basename(guestMediaProbeOutput)), 'guest_media_probe_output_leaf');
+}
 
 let credentialDocument;
 try { credentialDocument = JSON.parse(fs.readFileSync(credentialPath, 'utf8')); }
@@ -299,6 +329,7 @@ async function browserFetch(page, target, init = {}) {
 
 async function requiredJson(page, target, code) {
   const result = await browserFetch(page, target);
+  if (fqtDisclosureAudit) assertNoFqtDisclosure(result.text, `${code}_fqt_api`);
   if (!(result.status === 200 && result.json && typeof result.json === 'object' && !Array.isArray(result.json))) {
     fail(`${code}_http_${Number.isInteger(result.status) ? result.status : 0}`);
   }
@@ -320,6 +351,43 @@ function recursiveWalk(value, visitor, depth = 0) {
 }
 function normalizedIdentityKey(value) {
   return String(value).toLowerCase().replaceAll('_', '').replaceAll('-', '');
+}
+function fqtDecodedForms(value) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+  check(raw.length <= 8_000_000, 'classmate_fqt_surface_size');
+  const forms = new Set([raw]);
+  const add = (candidate) => {
+    if (typeof candidate === 'string' && candidate.length <= 8_000_000) forms.add(candidate);
+  };
+  const decodedEscapes = raw
+    .replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => fqtCodePoint(hex, 16))
+    .replace(/&#([0-9]+);/g, (_, decimal) => fqtCodePoint(decimal, 10));
+  add(decodedEscapes);
+  try { add(decodeURIComponent(raw)); } catch { /* malformed percent sequences remain raw */ }
+  try { add(decodeURIComponent(decodedEscapes)); } catch { /* malformed percent sequences remain decoded */ }
+  return forms;
+}
+function fqtCodePoint(value, radix) {
+  const parsed = Number.parseInt(value, radix);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 0x10ffff ? String.fromCodePoint(parsed) : '';
+}
+function fqtFingerprint(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+function containsFqtDisclosure(value) {
+  for (const form of fqtDecodedForms(value)) {
+    const tokens = form.match(/[A-Za-z0-9_%\\-]{6,192}/g) ?? [];
+    for (const token of tokens) {
+      const normalized = token.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (normalized.length >= 6 && FQT_DISCLOSURE_FINGERPRINTS.has(fqtFingerprint(normalized))) return true;
+    }
+  }
+  return false;
+}
+function assertNoFqtDisclosure(value, code) {
+  check(!containsFqtDisclosure(value), code);
 }
 function normalizedTextIncludes(value, query) {
   return typeof value === 'string' && value.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN'));
@@ -564,10 +632,12 @@ async function exactSemanticSearch(page, allowedIds, forbiddenIds, role) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
     });
+    const text = await response.text();
     let body = null;
-    try { body = await response.json(); } catch { }
-    return { status: response.status, body };
+    try { body = text === '' ? null : JSON.parse(text); } catch { }
+    return { status: response.status, body, text };
   }, { origin: photoOrigin.origin, query: SEMANTIC_PROBE_QUERY });
+  if (fqtDisclosureAudit) assertNoFqtDisclosure(result?.text ?? '', `${role}_semantic_fqt_api`);
   const assets = result?.body?.assets;
   check(result?.status === 200 && assets && Number.isInteger(assets.total)
     && Number.isInteger(assets.count) && Array.isArray(assets.items)
@@ -718,16 +788,88 @@ async function assertAnonymousBrowserRedaction(page) {
     && !leasedUsernames.some((username) => compactMarkup.includes(normalizedIdentityKey(username))), 'anonymous_html_identity_leak');
 }
 
+async function assertClassmateFqtDom(page, code) {
+  const surfaces = await page.evaluate(() => {
+    const hydrationNames = [
+      '__INITIAL_STATE__', '__PRELOADED_STATE__', '__NEXT_DATA__', '__NUXT__',
+      '__APOLLO_STATE__', '__HYDRATION_DATA__', '__CLASS_ARCHIVE_STATE__',
+    ];
+    const hydration = {};
+    for (const name of hydrationNames) {
+      if (!Object.hasOwn(globalThis, name)) continue;
+      try { hydration[name] = JSON.stringify(globalThis[name]); }
+      catch { hydration[name] = '[unserializable]'; }
+    }
+    const dynamicHydrationNames = Object.getOwnPropertyNames(globalThis)
+      .filter((name) => /^__.*(?:state|data|hydrat)/i.test(name));
+    for (const name of dynamicHydrationNames) {
+      if (Object.hasOwn(hydration, name)) continue;
+      try { hydration[name] = JSON.stringify(globalThis[name]); }
+      catch { hydration[name] = '[unserializable]'; }
+    }
+    return {
+      document: document.documentElement.outerHTML,
+      text: document.body?.innerText ?? '',
+      hydration,
+      resourceUrls: performance.getEntriesByType('resource').map((entry) => entry.name),
+    };
+  });
+  assertNoFqtDisclosure(surfaces.document, `${code}_html`);
+  assertNoFqtDisclosure(surfaces.text, `${code}_dom_text`);
+  assertNoFqtDisclosure(surfaces.hydration, `${code}_hydration`);
+  assertNoFqtDisclosure(surfaces.resourceUrls, `${code}_resource_urls`);
+}
+
+async function assertClassmateFqtReadBoundary(page) {
+  // These are ordinary read projections plus the explicitly server-denied
+  // management boundary. They are deliberately fixed paths, not a generic
+  // forwarding probe, so an acceptance run cannot broaden browser access.
+  for (const [pathname, label] of [
+    ['/api/class-archive/collections/state', 'collections_state'],
+    ['/api/class-archive/home', 'legacy_home'],
+    ['/api/class-archive/memories', 'memories'],
+    ['/api/users/me', 'current_user'],
+  ]) {
+    await requiredJson(page, pathname, `classmate_fqt_${label}`);
+  }
+  for (const [pathname, label] of [
+    ['/api/class-archive/manage/people', 'manage_people'],
+    ['/api/class-archive/manage/options', 'manage_options'],
+    ['/api/class-archive/manage/duplicates', 'manage_duplicates'],
+  ]) {
+    const result = await browserFetch(page, pathname);
+    check(result.status === 403, `classmate_fqt_${label}_denied`);
+    assertNoFqtDisclosure(result.text, `classmate_fqt_${label}_denial`);
+  }
+  const manageResponse = await page.goto(new URL('/people/manage', photoOrigin).href, {
+    waitUntil: 'domcontentloaded', timeout: 45_000,
+  });
+  check(manageResponse?.status() === 403, 'classmate_fqt_manage_document_denied');
+  await assertClassmateFqtDom(page, 'classmate_fqt_manage_document');
+
+  const identityResponse = await page.goto(new URL('/class-archive-core/identity', photoOrigin).href, {
+    waitUntil: 'domcontentloaded', timeout: 45_000,
+  });
+  const identityUrl = new URL(page.url());
+  check(identityResponse?.status() === 200 && identityUrl.origin === coreOrigin.origin
+    && identityUrl.pathname === '/index.php', 'classmate_fqt_identity_surface');
+  await assertClassmateFqtDom(page, 'classmate_fqt_identity_document');
+}
+
 async function assertBrowserSurface(page, role) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   check(!overflow, `${role}_horizontal_overflow`);
   const body = await page.locator('body').innerText();
   check(!/(?:HERITAGE|LIVING|ownerId|assetId|personId|CLIP|embedding|Gateway|MediaGuard|Piwigo|Immich)/i.test(body), `${role}_technical_copy_visible`);
+  if (role === 'classmate' && fqtDisclosureAudit) await assertClassmateFqtDom(page, 'classmate_fqt_visible_surface');
   if (role === 'anonymous') await assertAnonymousBrowserRedaction(page);
 }
 
 async function viewer(page, role, photoId) {
   const target = new URL(`/photos/${photoId}`, photoOrigin);
+  const reachedViewer = page.waitForURL((value) => value.origin === target.origin
+    && value.pathname === target.pathname && value.search === '', { timeout: 45_000 })
+    .then(() => true).catch(() => false);
   let response = null;
   try {
     response = await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
@@ -744,7 +886,9 @@ async function viewer(page, role, photoId) {
         && document.readyState !== 'loading';
     }, { origin: target.origin, pathname: target.pathname }, { timeout: 15_000 }).catch(() => null);
   }
-  check(new URL(page.url()).origin === target.origin && new URL(page.url()).pathname === target.pathname, `${role}_viewer_route`);
+  check(await reachedViewer, `${role}_viewer_route`);
+  check(new URL(page.url()).origin === target.origin && new URL(page.url()).pathname === target.pathname
+    && new URL(page.url()).search === '', `${role}_viewer_route_exact`);
   if (response !== null) check(response.status() === 200, `${role}_viewer_status`);
   const image = page.locator('.viewer-image');
   check(await image.waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false), `${role}_viewer_missing`);
@@ -761,6 +905,38 @@ async function viewer(page, role, photoId) {
   }
   await assertBrowserSurface(page, role);
   await save(page, `${role}-viewer`);
+}
+
+async function writeGuestOpaqueMediaProbe(page, photoId) {
+  if (guestMediaProbeOutput === null) return;
+  const id = canonicalId(photoId, 'guest_media_probe_photo_id');
+  const probes = [
+    { surface: 'DERIVATIVE', url: new URL(`/api/assets/${id}/thumbnail?size=thumbnail`, photoOrigin).href },
+    { surface: 'ORIGINAL', url: new URL(`/api/assets/${id}/original`, photoOrigin).href },
+  ];
+  // Assert both BFF endpoints in the already-authorized Classmate context
+  // before handing their opaque values to the no-session Guest process. A HEAD
+  // avoids moving an original into the browser process and retains the normal
+  // MediaGuard authorization path.
+  for (const probe of probes) {
+    const status = await page.evaluate(async (url) => {
+      const response = await fetch(url, { method: 'HEAD', credentials: 'include', cache: 'no-store' });
+      return response.status;
+    }, probe.url);
+    check(status === 200, `guest_media_probe_authorized_${probe.surface.toLowerCase()}`);
+  }
+  const document = JSON.stringify({ version: 1, scope: GUEST_MEDIA_PROBE_SCOPE, probes });
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(guestMediaProbeOutput, 'wx', 0o600);
+    fs.writeFileSync(descriptor, document, { encoding: 'utf8' });
+    fs.fsyncSync(descriptor);
+  } catch {
+    try { if (fs.existsSync(guestMediaProbeOutput)) fs.unlinkSync(guestMediaProbeOutput); } catch { }
+    fail('guest_media_probe_write');
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
 }
 
 async function assertFamilyKnownLivingDenied(page, livingId) {
@@ -846,9 +1022,14 @@ async function openSearch(page, role) {
     && await dialog.locator('.photo-loading').count() === 0
     && await dialog.locator('.hybrid-results .search-section').count() > 0
     && await dialog.locator('.hybrid-results .empty-state').count() === 0, `${role}_search_results`);
+  if (role === 'classmate' && fqtDisclosureAudit) await assertClassmateFqtDom(page, 'classmate_fqt_search_dialog');
   await save(page, `${role}-search`);
+  const historyRestored = page.waitForURL((value) => value.origin === photoOrigin.origin
+    && value.pathname === '/home' && value.search === '', { timeout: 15_000 })
+    .then(() => true).catch(() => false);
   await page.keyboard.press('Escape');
   check(await page.locator('dialog[data-search-overlay="true"][open]').count() === 0, `${role}_search_escape`);
+  check(await historyRestored, `${role}_search_history_restored`);
 }
 
 async function inspectRole(session, role, expectedIds, forbiddenLivingIds) {
@@ -910,10 +1091,12 @@ async function main() {
   const results = new Map();
   let passRecord = null;
   stageAt('classmate_login');
+  fqtDisclosureAudit = true;
   const classmateSession = await openRole('classmate', { width: 1440, height: 900 });
   let familySession = null;
   let classmateTimeline;
   try {
+    await assertClassmateFqtDom(classmateSession.page, 'classmate_fqt_login_home');
     classmateTimeline = await timelineCatalog(classmateSession.page, 'classmate_truth');
     const fullIds = new Set(classmateTimeline.keys());
     // The presentation timeline deliberately omits the internal HERITAGE /
@@ -921,21 +1104,27 @@ async function main() {
     // independently authenticated server projections instead of asking the
     // browser payload to expose an internal policy field.
     stageAt('family_scope_truth');
+    fqtDisclosureAudit = false;
     familySession = await openRole('family', { width: 390, height: 844 });
     const familyTruthTimeline = await timelineCatalog(familySession.page, 'family_truth');
     const heritageIds = new Set(familyTruthTimeline.keys());
     check([...heritageIds].every((id) => fullIds.has(id)), 'family_truth_not_subset_of_full');
     const livingIds = new Set([...fullIds].filter((id) => !heritageIds.has(id)));
     check(heritageIds.size > 0 && heritageIds.size + livingIds.size === fullIds.size, 'owner_era_partition_invalid');
+    fqtDisclosureAudit = true;
     const classmate = await inspectRole(classmateSession, 'classmate', fullIds, livingIds);
     results.set('classmate', classmate);
     const knownLiving = livingIds.size > 0 ? livingIds.values().next().value : null;
     const fullViewerPhoto = knownLiving ?? fullIds.values().next().value;
     await viewer(classmateSession.page, 'classmate', fullViewerPhoto);
+    await writeGuestOpaqueMediaProbe(classmateSession.page, fullViewerPhoto);
     await classmateSession.page.goto(new URL('/home', photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     await assertHomeReady(classmateSession.page, 'classmate');
     await assertBrowserSurface(classmateSession.page, 'classmate');
     await save(classmateSession.page, 'classmate-home');
+    stageAt('classmate_no_discovery');
+    await assertClassmateFqtReadBoundary(classmateSession.page);
+    fqtDisclosureAudit = false;
 
     stageAt('family_login');
     try {
@@ -993,6 +1182,7 @@ async function main() {
     const livingScopeEvidence = livingIds.size > 0 ? 'present_and_tested' : 'not_present_private_library';
     passRecord = `V4_OWNER_EXISTING_FIXTURE_CHROME_QA=PASS assertions=${assertions} screenshots=${screenshots} roles=3 full_photos=${fullIds.size} heritage_photos=${heritageIds.size} living_photos=${livingIds.size} living_scope=${livingScopeEvidence} channel=chrome chrome_product=chrome chrome_version=${chromeVersion} writes=0`;
   } finally {
+    fqtDisclosureAudit = false;
     if (familySession !== null) {
       const session = familySession;
       familySession = null;

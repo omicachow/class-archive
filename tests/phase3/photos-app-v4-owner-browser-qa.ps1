@@ -2,7 +2,13 @@
 param(
     # This is an audited, time-bounded lease of one already-frozen FQA
     # aggregate. It never creates or deletes a business record.
-    [switch]$ConfirmFqaCredentialLease
+    [switch]$ConfirmFqaCredentialLease,
+
+    # Optional hand-off for the separate unauthenticated Guest browser proof.
+    # It is an ignored, owner-only, one-shot document written only by the
+    # already-authorized Classmate page after its normal MediaGuard viewer
+    # proof. No credential, UUID, or media URL is ever printed by this wrapper.
+    [string]$GuestMediaProbeDocument
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +38,7 @@ $composeFiles = @('infra/docker-compose.yml', 'infra/private-full/docker-compose
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\runtime\photos-app-v4-owner-fqa-lease'))
 $profileRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\browser\photos-app-v4-owner-fqa-lease'))
 $screenshotRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\screenshots\photos-app-v4'))
+$guestMediaProbeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.codex-work\private-real-qa\runtime\photos-app-v4-owner-guest\opaque-media-probes'))
 $leaseTtlSeconds = 900
 $browserTimeoutSeconds = 720
 $brokerCloseTimeoutSeconds = 120
@@ -66,13 +73,13 @@ function Assert-NoReparseAncestor([string]$Candidate, [string]$Code) {
     Stop-V4OwnerFqa ($Code + '_ancestor_outside_project')
 }
 
-function Assert-PrivateParentAcl([string]$Candidate, [string]$Code) {
+function Assert-PrivateParentAcl([string]$Candidate, [string]$Code, [string]$TrustedRoot = $runtimeRoot) {
     Assert-NoReparseAncestor -Candidate $Candidate -Code $Code
     $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Candidate))
     if ([string]::IsNullOrWhiteSpace($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
         Stop-V4OwnerFqa ($Code + '_parent_unavailable')
     }
-    $trustedRoot = $runtimeRoot.TrimEnd('\', '/')
+    $trustedRoot = [IO.Path]::GetFullPath($TrustedRoot).TrimEnd('\', '/')
     $trustedBoundary = $trustedRoot + $separator
     $cursor = [IO.Path]::GetFullPath($parent).TrimEnd('\', '/')
     if (-not ([string]::Equals($cursor, $trustedRoot, [StringComparison]::OrdinalIgnoreCase)) -and -not ($cursor.StartsWith($trustedBoundary, [StringComparison]::OrdinalIgnoreCase))) {
@@ -92,6 +99,34 @@ function Assert-PrivateParentAcl([string]$Candidate, [string]$Code) {
         if ($null -eq $next) { Stop-V4OwnerFqa ($Code + '_parent_chain_invalid') }
         $cursor = $next.FullName.TrimEnd('\', '/')
     }
+}
+
+function Resolve-FqaGuestMediaProbeDocument([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $full = [IO.Path]::GetFullPath($Value)
+    $leaf = [IO.Path]::GetFileName($full)
+    if ($leaf -notmatch '^owner-fqa-[a-f0-9]{24}\.json$') {
+        Stop-V4OwnerFqa 'guest_media_probe_name_invalid'
+    }
+    if (Test-Path -LiteralPath $full) { Stop-V4OwnerFqa 'guest_media_probe_not_fresh' }
+    Assert-IgnoredPrivateChild -Candidate $full -Root $guestMediaProbeRoot -Code 'guest_media_probe_document' | Out-Null
+    Assert-PrivateParentAcl -Candidate $full -Code 'guest_media_probe_document' -TrustedRoot $guestMediaProbeRoot
+    return $full
+}
+
+function Assert-FqaGuestMediaProbeDocument([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Stop-V4OwnerFqa 'guest_media_probe_missing'
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-V4OwnerFqa 'guest_media_probe_untrusted'
+    }
+    Assert-IgnoredPrivateChild -Candidate $item.FullName -Root $guestMediaProbeRoot -Code 'guest_media_probe_document' | Out-Null
+    Assert-PrivateParentAcl -Candidate $item.FullName -Code 'guest_media_probe_document' -TrustedRoot $guestMediaProbeRoot
+    try { Assert-ClassArchiveOwnerOnlyFileAcl -Path $item.FullName }
+    catch { Stop-V4OwnerFqa 'guest_media_probe_acl_invalid' }
+    if ($item.Length -lt 96 -or $item.Length -gt 4096) { Stop-V4OwnerFqa 'guest_media_probe_size_invalid' }
 }
 
 function Set-OwnerOnlyDirectoryAcl([string]$Path) {
@@ -794,6 +829,8 @@ $run = New-RunId
 $runRuntime = Join-Path $runtimeRoot $run
 $runProfile = Join-Path $profileRoot $run
 $runScreenshots = Join-Path $screenshotRoot ('owner-fqa-lease-' + $run)
+$guestMediaProbePath = $null
+$preserveGuestMediaProbe = $false
 $credentialPath = Join-Path $runRuntime 'credentials.json'
 $watchdogPath = Join-Path $runRuntime 'lease-watchdog.ps1'
 $lockPath = Join-Path $runtimeRoot 'owner-fqa-lease.lock'
@@ -820,7 +857,8 @@ $environmentNames = @(
     'CLASS_ARCHIVE_V4_OWNER_FIXTURE_PHOTO_ORIGIN',
     'CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE',
     'CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT',
-    'CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR'
+    'CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR',
+    'CLASS_ARCHIVE_V4_OWNER_GUEST_MEDIA_PROBE_OUTPUT'
 )
 foreach ($name in $environmentNames) {
     $item = Get-Item -LiteralPath ("Env:$name") -ErrorAction SilentlyContinue
@@ -829,7 +867,7 @@ foreach ($name in $environmentNames) {
 
 try {
     $wrapperStage = 'private_paths'
-    foreach ($root in @($runtimeRoot, $profileRoot, $screenshotRoot)) {
+    foreach ($root in @($runtimeRoot, $profileRoot, $screenshotRoot, $guestMediaProbeRoot)) {
         # Validate ignore/boundary and every existing ancestor before creating
         # anything below the private root. A junction cannot redirect the
         # eventual credential or Chrome profile outside the ignored tree.
@@ -838,6 +876,7 @@ try {
         Set-OwnerOnlyDirectoryAcl -Path $root
         Assert-IgnoredPrivateChild -Candidate (Join-Path $root '.path-probe') -Root $root -Code 'private_root' | Out-Null
     }
+    $guestMediaProbePath = Resolve-FqaGuestMediaProbeDocument -Value $GuestMediaProbeDocument
     Assert-IgnoredPrivateChild -Candidate $lockPath -Root $runtimeRoot -Code 'lease_lock' | Out-Null
     $hostLeaseLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     foreach ($path in @($runRuntime, $runProfile, $runScreenshots)) {
@@ -871,6 +910,9 @@ try {
     $env:CLASS_ARCHIVE_V4_OWNER_FIXTURE_CREDENTIAL_FILE = $credentialPath
     $env:CLASS_ARCHIVE_V4_OWNER_FIXTURE_PROFILE_ROOT = $runProfile
     $env:CLASS_ARCHIVE_V4_OWNER_FIXTURE_SCREENSHOT_DIR = $runScreenshots
+    if ($null -ne $guestMediaProbePath) {
+        $env:CLASS_ARCHIVE_V4_OWNER_GUEST_MEDIA_PROBE_OUTPUT = $guestMediaProbePath
+    }
 
     $nodeResult = Invoke-ClassArchiveBoundedNative `
         -Executable (Get-NodePath) `
@@ -892,6 +934,13 @@ try {
         Stop-V4OwnerFqa 'node_runner_failed'
     }
     $browserPassRecord = $pass[0]
+    if ($null -ne $guestMediaProbePath) {
+        # Node created the one-shot file beneath an already owner-only
+        # directory. Replace inherited ACLs with the exact file descriptor
+        # before the Guest wrapper is ever allowed to consume it.
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $guestMediaProbePath
+        Assert-FqaGuestMediaProbeDocument -Path $guestMediaProbePath
+    }
 }
 catch {
     try {
@@ -994,6 +1043,32 @@ finally {
             $cleanupFailed = $true
             if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'run_runtime' }
             $exitCode = 2
+        }
+    }
+    # The opaque Guest media document may survive only a completely successful
+    # FQA lease close. Any browser, lease, or cleanup failure removes the exact
+    # owner-only file rather than leaving a usable authorized URL behind.
+    if ($null -ne $guestMediaProbePath) {
+        $handoffReady = (-not $cleanupFailed) -and $exitCode -eq 0 -and $null -ne $browserPassRecord `
+            -and $leaseCloseAttested -and $watchdogReaped
+        if ($handoffReady) {
+            try {
+                Assert-FqaGuestMediaProbeDocument -Path $guestMediaProbePath
+                $preserveGuestMediaProbe = $true
+            }
+            catch {
+                $cleanupFailed = $true
+                if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'guest_media_probe_handoff' }
+                $exitCode = 2
+            }
+        }
+        if (-not $preserveGuestMediaProbe) {
+            try { Remove-VerifiedPrivateFile -Path $guestMediaProbePath -Root $guestMediaProbeRoot -Code 'guest_media_probe_cleanup' }
+            catch {
+                $cleanupFailed = $true
+                if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'guest_media_probe_cleanup' }
+                $exitCode = 2
+            }
         }
     }
     if ($null -ne $hostLeaseLock) { $hostLeaseLock.Dispose() }

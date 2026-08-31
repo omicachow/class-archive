@@ -123,7 +123,10 @@ function allowedUrl(value) {
 }
 
 function assertOpaqueMediaTarget(surface, raw) {
-  check(typeof raw === 'string' && raw.length >= 80 && raw.length <= 256 && RAW_MEDIA_URL.test(raw),
+  // The exact BFF URL grammar below is the authorization boundary. Do not add
+  // an arbitrary minimum length: a legitimate `/original` endpoint is shorter
+  // than the thumbnail form and must receive the same Guest denial proof.
+  check(typeof raw === 'string' && raw.length <= 256 && RAW_MEDIA_URL.test(raw),
     `guest_media_${surface.toLowerCase()}_opaque_url`);
   let target;
   try { target = new URL(raw); } catch { fail(`guest_media_${surface.toLowerCase()}_opaque_url`); }

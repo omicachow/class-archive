@@ -34,6 +34,7 @@ $assertions = 0
 $resultCode = 'unexpected_wrapper_failure'
 $success = $false
 $executionRoot = $null
+$probePath = $null
 
 . (Join-Path $projectRoot 'infra\scripts\secret-file-acl.ps1')
 . (Join-Path $projectRoot 'infra\scripts\class-archive-bounded-native-process.ps1')
@@ -176,6 +177,61 @@ function Assert-V4OwnerGuestOwnerOnlyTree([string]$Path, [string]$Code) {
     }
 }
 
+function Protect-V4OwnerGuestPrivateTree([string]$Path, [string]$Code) {
+    # Chrome creates its cache/profile children after the execution root has
+    # been locked down.  Those children can carry a different *private* DACL,
+    # which must never make a recursive cleanup less strict.  First walk the
+    # exact, already-bound subtree without following reparse points.  Only
+    # then replace each child descriptor with the owner-only descriptor that
+    # the final tree assertion requires.
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-V4OwnerGuest ($Code + '_tree_root_untrusted')
+    }
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $root.FullName
+
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $directories = [Collections.Generic.List[string]]::new()
+    $files = [Collections.Generic.List[string]]::new()
+    $pending.Push($root.FullName)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Stop-V4OwnerGuest ($Code + '_tree_reparse')
+        }
+        if ($item.PSIsContainer) {
+            if (-not [string]::Equals($item.FullName, $root.FullName, [StringComparison]::OrdinalIgnoreCase)) {
+                $directories.Add($item.FullName)
+            }
+            foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+                $pending.Push($child.FullName)
+            }
+        } else {
+            $files.Add($item.FullName)
+        }
+    }
+
+    # Setting each child explicitly avoids trusting whatever descriptor Chrome
+    # happened to create, while staying entirely inside the ignored execution
+    # root verified by the caller.
+    foreach ($directory in $directories) {
+        Set-V4OwnerGuestOwnerOnlyDirectoryAcl -Path $directory -Code $Code
+    }
+    foreach ($file in $files) {
+        # Do not assume an enumerated filesystem node is still a regular file
+        # when its descriptor is changed.  The execution root is owner-only,
+        # but this closes the remaining type/reparse race before the file ACL
+        # API is invoked.
+        $fileItem = Get-Item -LiteralPath $file -Force -ErrorAction Stop
+        if ($fileItem.PSIsContainer -or ($fileItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Stop-V4OwnerGuest ($Code + '_tree_file_changed')
+        }
+        Set-ClassArchiveOwnerOnlyFileAcl -Path $fileItem.FullName
+    }
+    Assert-V4OwnerGuestOwnerOnlyTree -Path $root.FullName -Code $Code
+}
+
 function Assert-V4OwnerGuestIgnored([string]$Candidate, [string]$Root, [string]$Code, [bool]$MustExist = $true) {
     $full = [IO.Path]::GetFullPath($Candidate)
     $projectBoundary = $projectRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -209,12 +265,18 @@ function Remove-V4OwnerGuestPrivateDirectory([string]$Path, [string]$Root, [stri
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     Assert-V4OwnerGuest ($item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) ($Code + '_untrusted')
     $full = Assert-V4OwnerGuestIgnored -Candidate $item.FullName -Root $Root -Code $Code
-    Assert-V4OwnerGuestOwnerOnlyTree -Path $full -Code $Code
-    $reparse = @(Get-ChildItem -LiteralPath $full -Force -Recurse -ErrorAction Stop | Where-Object {
-        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
-    })
-    Assert-V4OwnerGuest ($reparse.Count -eq 0) ($Code + '_contains_reparse')
+    Protect-V4OwnerGuestPrivateTree -Path $full -Code $Code
     Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+}
+
+function Remove-V4OwnerGuestPrivateFile([string]$Path, [string]$Root, [string]$Code) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-V4OwnerGuest (-not $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) ($Code + '_untrusted')
+    $full = Assert-V4OwnerGuestIgnored -Candidate $item.FullName -Root $Root -Code $Code
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $full
+    Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+    Assert-V4OwnerGuest (-not (Test-Path -LiteralPath $full)) ($Code + '_remains')
 }
 
 function Resolve-V4OwnerGuestProbeDocument([string]$Value) {
@@ -238,7 +300,12 @@ try {
     }
     Assert-V4OwnerGuestIgnored -Candidate $browserRoot -Root $browserParent -Code 'browser_root' | Out-Null
     Set-V4OwnerGuestOwnerOnlyDirectoryAcl -Path $browserRoot -Code 'browser_root'
-    Assert-V4OwnerGuestOwnerOnlyTree -Path $browserRoot -Code 'browser_root'
+    # Historical aborted Chrome profiles may remain as ignored siblings beneath
+    # this stable root. They are never reused or traversed: each run creates a
+    # fresh owner-only execution subtree. Requiring every stale sibling to have
+    # an exact ACL would make a safe fresh profile unavailable without gaining
+    # access to it.
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $browserRoot
     $executionRoot = New-V4OwnerGuestPrivateDirectory -Path (Join-Path $browserRoot (New-V4OwnerGuestRunId)) -Root $browserRoot -Code 'browser_execution_root'
     $profileRoot = New-V4OwnerGuestPrivateDirectory -Path (Join-Path $executionRoot 'profile-root') -Root $browserRoot -Code 'browser_profile_root'
 
@@ -287,13 +354,20 @@ catch {
 }
 finally {
     $cleanupFailed = $false
+    $probeCleanupFailed = $false
+    if ($null -ne $probePath) {
+        try { Remove-V4OwnerGuestPrivateFile -Path $probePath -Root $probeRoot -Code 'media_probe_document_cleanup' }
+        catch { $cleanupFailed = $true; $probeCleanupFailed = $true }
+    }
     if ($null -ne $executionRoot) {
         try { Remove-V4OwnerGuestPrivateDirectory -Path $executionRoot -Root $browserRoot -Code 'browser_execution_cleanup' }
         catch { $cleanupFailed = $true }
     }
     if ($cleanupFailed) {
         $success = $false
-        if ($resultCode -eq 'unexpected_wrapper_failure') { $resultCode = 'browser_profile_cleanup_failed' }
+        if ($resultCode -eq 'unexpected_wrapper_failure') {
+            $resultCode = if ($probeCleanupFailed) { 'media_probe_document_cleanup_failed' } else { 'browser_profile_cleanup_failed' }
+        }
     }
 }
 

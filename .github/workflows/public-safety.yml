@@ -119,6 +119,7 @@ jobs:
           ./tests/phase3/photos-app-v4-owner-teacher-fixture-ensure-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-teacher-browser-qa-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-guest-browser-qa-protocol.ps1
+          ./tests/phase3/photos-app-v4-owner-guest-media-browser-qa-protocol.ps1
           ./tests/phase3/private-e2e-recreate-lab-protocol.ps1
           ./tests/phase3/private-role-shadow-protocol.ps1
           ./tests/phase3/private-role-e2e-business-snapshot-protocol.ps1
