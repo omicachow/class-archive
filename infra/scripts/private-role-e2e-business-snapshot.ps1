@@ -331,11 +331,31 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
 }
 
-function Get-WslPath([string]$WindowsPath) {
-    $full = [IO.Path]::GetFullPath($WindowsPath)
-    $lines = @(Invoke-WslCapture @('-d', 'Ubuntu', '--exec', 'wslpath', '-a', $full) 'wsl_path_invalid')
-    if ($lines.Count -ne 1 -or $lines[0] -notmatch '^/mnt/[a-z]/') { Stop-PrivateRoleSnapshot 'wsl_path_invalid' }
-    return [string]$lines[0]
+function Copy-ContainerFileToPrivateSnapshot([string]$ContainerSource, [string]$Destination) {
+    # Do not pass a Windows path containing non-ASCII characters through
+    # `wslpath`: legacy Windows PowerShell can code-page-mangle it before WSL
+    # receives the argument. Run docker cp from the already trusted WSL
+    # project cwd and pass only a strictly validated ASCII relative target.
+    if ($ContainerSource -notmatch '^[a-f0-9]{12,64}:/tmp/classarchive-private-role-e2e-[a-f0-9]{32}\.sql\.gz$') {
+        Stop-PrivateRoleSnapshot 'mariadb_dump_container_source_invalid'
+    }
+    $fullDestination = [IO.Path]::GetFullPath($Destination)
+    $root = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\', '/')
+    $boundary = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullDestination.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-PrivateRoleSnapshot 'mariadb_dump_destination_outside_checkout'
+    }
+    $relative = $fullDestination.Substring($boundary.Length).Replace('\', '/')
+    if ($relative -notmatch '^\.codex-work/private-role-e2e/business-snapshots/(?:pre|post)-[a-f0-9]{24}\.partial/database\.sql\.gz$') {
+        Stop-PrivateRoleSnapshot 'mariadb_dump_destination_relative_invalid'
+    }
+    # Fixed source-controlled one-line shell program. Source and destination
+    # are positional arguments, never interpolated into shell syntax.
+    $copyRunner = 'source="$1"; destination="$2"; test -d "$(dirname "$destination")"; docker cp "$source" "$destination"'
+    [void](Invoke-WslCapture @(
+        '-d', 'Ubuntu', '--cd', $projectRoot, '--exec',
+        'sh', '-eu', '-c', $copyRunner, 'sh', $ContainerSource, ('./' + $relative)
+    ) 'mariadb_dump_copy_failed')
 }
 
 function Get-PiwigoComposePrefix {
@@ -644,9 +664,8 @@ gzip -6 "$raw"
         if (-not (Test-Path -LiteralPath (Split-Path -Parent $Destination) -PathType Container)) {
             Stop-PrivateRoleSnapshot 'mariadb_dump_destination_parent_missing'
         }
-        $destinationWsl = Get-WslPath $Destination
         $script:snapshotStage = 'database_dump_copy'
-        [void](Invoke-WslCapture @('-d', 'Ubuntu', '--exec', 'docker', 'cp', ($containerIds[0] + ':' + $containerFile), $destinationWsl) 'mariadb_dump_copy_failed')
+        Copy-ContainerFileToPrivateSnapshot ($containerIds[0] + ':' + $containerFile) $Destination
         $script:snapshotStage = 'database_dump_validate'
         if (-not (Test-Path -LiteralPath $Destination -PathType Leaf) -or (Get-Item -LiteralPath $Destination).Length -le 0) {
             Stop-PrivateRoleSnapshot 'mariadb_dump_copy_empty'
