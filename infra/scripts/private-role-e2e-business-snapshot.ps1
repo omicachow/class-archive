@@ -619,7 +619,15 @@ gzip -6 "$raw"
         if ($containerIds.Count -ne 1 -or $containerIds[0] -notmatch '^[a-f0-9]{12,64}$') {
             Stop-PrivateRoleSnapshot 'mariadb_container_identity_invalid'
         }
+        $script:snapshotStage = 'database_dump_container_validate'
+        [void](Invoke-PiwigoComposeCapture @(
+            'exec', '-T', '-e', ('CLASS_ARCHIVE_DB_DUMP_FILE=' + $containerFile),
+            'db', 'sh', '-eu', '-c', 'test -s "$CLASS_ARCHIVE_DB_DUMP_FILE"'
+        ) 'mariadb_dump_container_artifact_missing')
         $script:snapshotStage = 'database_dump_destination'
+        if (-not (Test-Path -LiteralPath (Split-Path -Parent $Destination) -PathType Container)) {
+            Stop-PrivateRoleSnapshot 'mariadb_dump_destination_parent_missing'
+        }
         $destinationWsl = Get-WslPath $Destination
         $script:snapshotStage = 'database_dump_copy'
         [void](Invoke-WslCapture @('-d', 'Ubuntu', '--exec', 'docker', 'cp', ($containerIds[0] + ':' + $containerFile), $destinationWsl) 'mariadb_dump_copy_failed')
