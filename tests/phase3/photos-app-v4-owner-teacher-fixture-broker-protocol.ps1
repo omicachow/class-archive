@@ -125,6 +125,8 @@ foreach ($needle in @(
     'function v4teacherWithRecoveryLeasePermit(callable $callback): mixed',
     "putenv('CLASS_ARCHIVE_PRIVATE_E2E_ENABLED=1')",
     'recoverAbandonedIdentityLease(',
+    'resolveConflictIdentityLease(',
+    'LEASE_CONFLICT_RESOLVED',
     'teacher_broker_recovery_reconciliation_required'
 )) {
     Assert-Contains $broker $needle ('teacher_broker_recovery_gate_missing_' + ($needle -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
@@ -146,6 +148,8 @@ foreach ($needle in @(
 )) {
     Assert-Contains $broker $needle ('teacher_broker_recovery_ledger_missing_' + ($needle -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }
+Assert-Contains $broker 'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1' 'teacher_broker_recovery_table_metadata_query_missing'
+Assert-NotContains $broker "'SHOW TABLES LIKE ?'" 'teacher_broker_recovery_show_tables_placeholder_unsupported'
 $leaseAcquiringWrite = "`$ledger = v4teacherLedger(`$run, `$fixture['identity_id'], `$fixture['seat_id'], 'LEASE_ACQUIRING');"
 $leaseAcquireCall = 'privateE2ETeacherFixtureAcquireLease('
 Assert-True ($broker.IndexOf($leaseAcquiringWrite) -ge 0) 'teacher_broker_acquiring_ledger_write_missing'

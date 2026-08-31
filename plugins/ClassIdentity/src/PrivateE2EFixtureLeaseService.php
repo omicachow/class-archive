@@ -839,6 +839,99 @@ final class PrivateE2EFixtureLeaseService
         }
     }
 
+    /**
+     * Resolve one explicitly quarantined local fixture lease only after the
+     * caller has independently re-proven the business aggregate is terminal.
+     *
+     * The callback runs inside the same database transaction immediately
+     * before the durable CONFLICT row becomes RELEASED. The owner-only
+     * recovery broker uses it to append its audit event, so an audit failure
+     * rolls the state transition back instead of leaving an unaudited
+     * reconciliation behind. This is not a general administrator escape
+     * hatch: it remains behind the disabled-by-default localhost CLI gate,
+     * exact fixture owner/run matching, and aggregate lock-version CAS.
+     */
+    public function resolveConflictIdentityLease(
+        int $identityId,
+        string $testRunId,
+        string $fixtureOwner,
+        int $expectedLockVersion,
+        callable $beforeRelease,
+    ): void {
+        $this->assertAcquisitionAllowed();
+        $this->validateRequest(
+            $identityId,
+            $testRunId,
+            $fixtureOwner,
+            self::MIN_TTL_SECONDS,
+            $expectedLockVersion,
+        );
+        $lockName = $this->acquireNamedLock($identityId);
+        try {
+            if (!$this->storageExists()) {
+                throw new \RuntimeException('class_identity_fixture_lease_storage_missing');
+            }
+            $this->begin();
+            try {
+                $stage = 'identity';
+                $identity = $this->identityForUpdate($identityId);
+                if ((int) $identity['lock_version'] !== $expectedLockVersion) {
+                    throw new \RuntimeException('class_identity_fixture_lease_conflict_resolution_version_conflict');
+                }
+                $stage = 'conflict';
+                $conflict = $this->unresolvedLeaseForUpdate($identityId);
+                if ($conflict === null
+                    || ($conflict['state'] ?? null) !== 'CONFLICT'
+                    || !hash_equals((string) $conflict['test_run_id'], $testRunId)
+                    || !hash_equals((string) $conflict['fixture_owner'], $fixtureOwner)
+                    || (int) ($conflict['expected_lock_version'] ?? -1) !== $expectedLockVersion
+                ) {
+                    throw new \RuntimeException('class_identity_fixture_lease_conflict_resolution_required');
+                }
+
+                $stage = 'audit';
+                $beforeRelease();
+
+                $stage = 'release';
+                $stmt = $this->prepare(
+                    "UPDATE `{$this->table}` SET `state`='RELEASED',`released_at`=UTC_TIMESTAMP(6),"
+                    . '`lease_revision`=`lease_revision`+1,`updated_at`=UTC_TIMESTAMP(6) '
+                    . "WHERE `lease_id`=? AND `state`='CONFLICT' AND `test_run_id`=? AND `fixture_owner`=? "
+                    . '`expected_lock_version`=? AND `lease_revision`=?',
+                );
+                $leaseId = (string) $conflict['lease_id'];
+                $revision = (int) $conflict['lease_revision'];
+                $stmt->bind_param(
+                    'sssii',
+                    $leaseId,
+                    $testRunId,
+                    $fixtureOwner,
+                    $expectedLockVersion,
+                    $revision,
+                );
+                $this->execute($stmt);
+                self::requireAffected($stmt, 'class_identity_fixture_lease_conflict_resolution_conflict');
+                $stmt->close();
+                $stage = 'commit';
+                $this->commit();
+            } catch (\Throwable $error) {
+                $this->rollback();
+                if ($error instanceof \RuntimeException
+                    && preg_match('/\Aclass_identity_fixture_lease_[a-z_]{1,100}\z/D', $error->getMessage()) === 1
+                ) {
+                    throw $error;
+                }
+                throw new \RuntimeException(
+                    'class_identity_fixture_lease_conflict_resolution_' . $stage,
+                    0,
+                    $error,
+                );
+            }
+        } finally {
+            $this->releaseNamedLock($lockName);
+        }
+    }
+
     private function assertAcquisitionAllowed(): void
     {
         if (!self::isAcquisitionEnabled()) {

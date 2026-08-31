@@ -590,7 +590,7 @@ function v4teacherAppendCredentialAudit(array $admin, array $fixture, array $new
  */
 function v4teacherAppendRecoveryAudit(array $admin, ?array $fixture, ?int $identityId, string $state): void
 {
-    if (!in_array($state, ['LEASE_CLOSED', 'LEASE_CONFLICT', 'TERMINAL_FROZEN'], true)) {
+    if (!in_array($state, ['LEASE_CLOSED', 'LEASE_CONFLICT', 'LEASE_CONFLICT_RESOLVED', 'TERMINAL_FROZEN'], true)) {
         v4teacherFail('teacher_broker_recovery_audit_input_invalid');
     }
     $identityId = is_int($identityId) && $identityId > 0 ? $identityId : null;
@@ -615,9 +615,88 @@ function v4teacherAppendRecoveryAudit(array $admin, ?array $fixture, ?int $ident
         ],
         'reason' => $state === 'LEASE_CONFLICT'
             ? '本地 V4 教师测试租约恢复检测到冲突，已隔离待核对'
-            : '本地 V4 教师测试租约恢复已完成安全关闭',
+            : ($state === 'LEASE_CONFLICT_RESOLVED'
+                ? '本地 V4 教师测试租约冲突已在终态核验后安全解除'
+                : '本地 V4 教师测试租约恢复已完成安全关闭'),
         'result' => $state === 'LEASE_CONFLICT' ? 'FAILED' : 'SUCCESS',
     ]);
+}
+
+/**
+ * Resolve only the broker's own previously quarantined lease. A conflict is
+ * never treated as harmless: first prove the exact frozen descriptor and the
+ * password verifier are already terminal, then atomically audit and release
+ * the CONFLICT row through the lease service's explicit reconciliation API.
+ *
+ * @param array<string,mixed> $ledger
+ * @param array{user_id:int,principal_id:int} $admin
+ */
+function v4teacherResolveConflictLedger(
+    mysqli $db,
+    string $prefix,
+    \ClassIdentity\PrivateE2EFixtureLeaseService $leaseService,
+    array $ledger,
+    array $admin,
+    string $run,
+    string $ledgerPath,
+    int $identityId,
+): bool {
+    $stage = 'plan';
+    try {
+        $plan = v4teacherRecoveryPlan($ledger, $run);
+        $stage = 'descriptor';
+        $descriptor = v4teacherFrozenDescriptorOrNull($db, $prefix, $run);
+        if ($descriptor === null
+            || !v4teacherRecoveryPlanMatchesFixture($plan, $descriptor['fixture'])
+            || $descriptor['fixture']['identity_id'] !== $identityId
+        ) {
+            v4teacherFail('teacher_broker_conflict_descriptor_invalid');
+        }
+        $stage = 'password';
+        $current = v4teacherRows(
+            $db,
+            "SELECT password FROM `{$prefix}users` WHERE id=? AND BINARY username=BINARY ? LIMIT 2",
+            'is',
+            [(int) $plan['user_id'], (string) $plan['username']],
+        );
+        $hash = count($current) === 1 && is_string($current[0]['password'] ?? null)
+            ? (string) $current[0]['password']
+            : '';
+        $digest = $hash === '' ? '' : hash('sha256', $hash);
+        if (!hash_equals((string) $plan['before_password_sha256'], $digest)
+            && !hash_equals((string) $plan['closed_password_sha256'], $digest)
+        ) {
+            v4teacherFail('teacher_broker_conflict_password_not_terminal');
+        }
+        $stage = 'terminal';
+        v4teacherAssertTerminalCredentialState($db, $descriptor['fixture']);
+        $stage = 'release';
+        v4teacherWithRecoveryLeasePermit(static function () use (
+            $leaseService, $descriptor, $run, $admin, $identityId,
+        ): void {
+            $leaseService->resolveConflictIdentityLease(
+                $identityId,
+                $run,
+                V4_TEACHER_BROKER_OWNER,
+                $descriptor['fixture']['lock_version'],
+                static function () use ($admin, $descriptor, $identityId): void {
+                    v4teacherAppendRecoveryAudit(
+                        $admin,
+                        $descriptor['fixture'],
+                        $identityId,
+                        'LEASE_CONFLICT_RESOLVED',
+                    );
+                },
+            );
+        });
+        $stage = 'ledger_remove';
+        v4teacherRemoveLedger($ledgerPath);
+        return true;
+    } catch (V4TeacherBrokerFailure $error) {
+        throw $error;
+    } catch (\Throwable) {
+        v4teacherFail('teacher_broker_conflict_reconciliation_' . $stage . '_failed');
+    }
 }
 
 /** @return array{state:string,live:bool,run:string,owner:string}|null */
@@ -630,7 +709,16 @@ function v4teacherUnresolvedLease(mysqli $db, string $prefix, int $identityId): 
     // The table may legitimately be absent before the first ever lease. This
     // projection is read-only; it never creates storage while recovery is
     // deciding whether a FROZEN ledger can be safely removed.
-    $exists = v4teacherRows($db, 'SHOW TABLES LIKE ?', 's', [$table]);
+    // MariaDB does not accept a parameter marker in SHOW TABLES LIKE through
+    // mysqli prepared statements. Use the same schema-scoped metadata query
+    // as the production services so recovery stays usable after a failed
+    // browser lease rather than stranding its durable ledger.
+    $exists = v4teacherRows(
+        $db,
+        'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1',
+        's',
+        [$table],
+    );
     if ($exists === []) {
         return null;
     }
@@ -1080,9 +1168,14 @@ function v4teacherRecoverLedger(
     // into an unsafe retry. Append an auditable failed recovery observation
     // and leave the ledger exactly where it is.
     if ($stage === 'CONFLICT') {
-        $fixture = $identityId > 0 ? v4teacherFrozenDescriptorOrNull($db, $prefix, $run) : null;
-        v4teacherAppendRecoveryAudit($admin, $fixture['fixture'] ?? null, $identityId > 0 ? $identityId : null, 'LEASE_CONFLICT');
-        v4teacherFail('teacher_broker_recovery_reconciliation_required');
+        if ($identityId <= 0
+            || !v4teacherResolveConflictLedger(
+                $db, $prefix, $leaseService, $ledger, $admin, $run, $ledgerPath, $identityId,
+            )
+        ) {
+            v4teacherFail('teacher_broker_recovery_reconciliation_required');
+        }
+        return true;
     }
 
     $unresolved = $identityId > 0 ? v4teacherUnresolvedLease($db, $prefix, $identityId) : null;
