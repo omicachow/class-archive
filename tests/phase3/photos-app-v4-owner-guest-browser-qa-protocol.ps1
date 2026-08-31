@@ -116,6 +116,10 @@ Assert-Contains $wrapper '$browserTimeoutSeconds = 180' 'guest_browser_timeout_m
 Assert-Contains $wrapper 'New-V4OwnerGuestRunId' 'guest_fresh_execution_id_missing'
 Assert-Contains $wrapper 'New-V4OwnerGuestPrivateDirectory' 'guest_private_profile_creation_missing'
 Assert-Contains $wrapper 'Remove-V4OwnerGuestPrivateDirectory' 'guest_private_profile_cleanup_missing'
+Assert-Contains $wrapper 'Set-V4OwnerGuestOwnerOnlyDirectoryAcl' 'guest_private_profile_acl_set_missing'
+Assert-Contains $wrapper 'Assert-V4OwnerGuestOwnerOnlyTree' 'guest_private_profile_acl_tree_missing'
+Assert-Contains $wrapper 'Assert-V4OwnerGuestInheritedOwnerOnlyAcl' 'guest_private_profile_inherited_acl_guard_missing'
+Assert-Contains $wrapper 'Set-V4OwnerGuestOwnerOnlyDirectoryAcl -Path $browserRoot -Code ''browser_root''' 'guest_private_profile_root_acl_missing'
 Assert-Contains $wrapper "'CLASS_ARCHIVE_V4_OWNER_GUEST_PROFILE_ROOT'" 'guest_profile_environment_missing'
 Assert-Contains $wrapper "'CLASS_ARCHIVE_V4_OWNER_GUEST_MEDIA_PROBE_DOCUMENT'" 'guest_probe_environment_missing'
 Assert-Contains $wrapper "'http://127.0.0.1:8190/'" 'guest_wrapper_core_origin_missing'
@@ -124,7 +128,7 @@ Assert-Contains $wrapper "'V4_OWNER_GUEST_CHROME_QA=PASS'" 'guest_sanitized_pass
 Assert-Contains $wrapper "'V4_OWNER_GUEST_CHROME_QA=FAIL code='" 'guest_sanitized_failure_output_missing'
 Assert-Contains $wrapper "'^V4_OWNER_GUEST_CHROME_QA=(?:PASS assertions=[1-9][0-9]*|FAIL code=[a-z0-9_]{1,100})$'" 'guest_node_output_filter_missing'
 
-$privateDrivePrefix = ([char]77).ToString() + ':' + '\\'
+$privateDrivePrefix = ([char]77).ToString() + ':' + ([char]92).ToString()
 foreach ($forbidden in @(
     'docker', 'wsl.exe', 'compose', 'setInputFiles', 'addCookies',
     '/member-upload', 'classmate', 'teacher', 'family', 'anonymous',

@@ -353,12 +353,25 @@ function Write-PrivateExternalFailureDiagnostic([string]$Code, [int]$ExitCode, [
 
 function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    $previousNativePreference = $null
     try {
         $ErrorActionPreference = 'Continue'
+        # PowerShell 7 can otherwise surface a native non-zero exit as an
+        # ApplicationFailedException before this function can classify it and
+        # write the restricted local diagnostic. Capture the process result
+        # explicitly; callers still fail closed below on every non-zero code.
+        if ($null -ne $nativePreference) {
+            $previousNativePreference = [bool]$PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
         $lines = @(& "$env:SystemRoot\System32\wsl.exe" @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previous }
+    finally {
+        if ($null -ne $nativePreference) { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+        $ErrorActionPreference = $previous
+    }
     if ($exitCode -ne 0) {
         Write-PrivateExternalFailureDiagnostic $Code ([int]$exitCode) $lines
         $failureClass = Get-SafeExternalFailureClass $lines
@@ -452,9 +465,24 @@ function ConvertTo-FixedShellRunner([string]$FixedScript, [string]$Code) {
     # semantics to an LF checkout.
     $normalized = $FixedScript.Replace("`r`n", "`n").Replace("`r", "`n")
     if ([string]::IsNullOrWhiteSpace($normalized)) { Stop-PrivateRoleSnapshot $Code }
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
+    $runnerBytes = [Text.Encoding]::UTF8.GetBytes($normalized)
+    $buffer = [IO.MemoryStream]::new()
+    try {
+        $gzip = [IO.Compression.GzipStream]::new($buffer, [IO.Compression.CompressionLevel]::Optimal, $true)
+        try { $gzip.Write($runnerBytes, 0, $runnerBytes.Length) }
+        finally { $gzip.Dispose() }
+        $encoded = [Convert]::ToBase64String($buffer.ToArray())
+    }
+    finally {
+        [Array]::Clear($runnerBytes, 0, $runnerBytes.Length)
+        $buffer.Dispose()
+    }
     if ($encoded -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot $Code }
-    return "printf '%s' $encoded | base64 -d | sh -eu -s"
+    # The state projection contains many fixed SQL statements.  Compressing
+    # that source-controlled payload prevents Windows/WSL command-line length
+    # truncation while preserving the same ASCII-only, non-input contract.
+    if ($encoded.Length -gt 24000) { Stop-PrivateRoleSnapshot ($Code + '_compressed_runner_too_large') }
+    return "printf '%s' $encoded | base64 -d | gzip -dc | sh -eu -s"
 }
 
 function Assert-OwnerRuntimeProof {

@@ -621,6 +621,7 @@ $browserPassRecord = $null
 $failureRecord = $null
 $cleanupFailed = $false
 $cleanupFailureCode = $null
+$watchdogStarted = $false
 $leaseMayBeActive = $false
 $leaseCloseAttested = $false
 $watchdogReaped = $false
@@ -663,9 +664,13 @@ try {
     Initialize-TeacherDurableRecoveryRoot
     $wrapperStage = 'watchdog_start'
     $leaseWatchdog = Start-TeacherLeaseWatchdog -Path $watchdogPath
-    $leaseMayBeActive = $true
+    $watchdogStarted = $true
     $wrapperStage = 'broker_start'
     $leaseBroker = Start-TeacherLeaseBroker
+    # A watchdog process alone does not imply that the broker ever opened an
+    # identity lease. Only the exact READY-returning broker path reaches this
+    # assignment; earlier failures can be reaped and cleaned immediately.
+    $leaseMayBeActive = $true
     $wrapperStage = 'credential_copy'
     Copy-TeacherCredentialFromBroker -Broker $leaseBroker -HostPath $credentialPath
 
@@ -698,6 +703,13 @@ try {
     $browserPassRecord = $pass[0]
 }
 catch {
+    # Start-TeacherLeaseBroker performs a synchronous broker RECOVERY for the
+    # only paths that can have opened a lease before returning. If that
+    # recovery itself fails, retain the watchdog/runtime rather than treating
+    # the lease as absent and deleting its only recovery material.
+    if ($_.Exception.Message -match '^V4_OWNER_TEACHER_STOP:lease_broker_(?:ready_timeout|rejected)_recovery_failed$') {
+        $leaseMayBeActive = $true
+    }
     try {
         $diagnosticPath = Join-Path $runtimeRoot 'last-failure.local.json'
         $diagnostic = [ordered]@{
@@ -728,7 +740,7 @@ finally {
         $exitCode = 2
     }
     if ($leaseCloseAttested) {
-        if ($null -eq $leaseWatchdog) { $watchdogReaped = $true }
+        if (-not $watchdogStarted -or $null -eq $leaseWatchdog) { $watchdogReaped = $true }
         elseif ($leaseWatchdog.HasExited) {
             $cleanupFailed = $true
             if ($null -eq $cleanupFailureCode) { $cleanupFailureCode = 'watchdog_exited' }
