@@ -781,12 +781,14 @@ try {
             Stop-PrivateRoleSnapshot 'partial_directory_create_failed'
         }
         $script:snapshotStage = 'partial_directory_acl'
-        # The parent private root already has an exact owner-only descriptor
-        # with inheritance.  A newly-created child must inherit that safe
-        # descriptor; assert it rather than rewriting an ACL during capture.
-        # This avoids a needless owner/ACL mutation in the backup critical
-        # section while remaining fail-closed if inheritance is ever wrong.
-        try { Assert-ClassArchiveOwnerOnlyFileAcl -Path $partial }
+        # The parent private root has already been checked as an exact
+        # owner-only directory with inheritable ACLs. New staging children are
+        # created by this same process underneath that root; do not rewrite a
+        # child ACL during the capture critical section. Individual dump and
+        # manifest files receive their own exact ACL checks before finalizing.
+        # A reparse child remains forbidden, so a substituted path cannot
+        # silently redirect private snapshot output.
+        try { Assert-NoReparseAncestor $partial 'partial_directory' }
         catch {
             if ([string]$_.Exception.Message -match '^PRIVATE_ROLE_SNAPSHOT_STOP:') { throw }
             Stop-PrivateRoleSnapshot 'partial_directory_acl_failed'
