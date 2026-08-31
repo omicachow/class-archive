@@ -34,7 +34,29 @@ function Invoke-Git([string[]]$Arguments) {
 }
 
 function Resolve-Commit([string]$Reference, [string]$FailureReason) {
-    $result = Invoke-Git @('rev-parse', '--verify', ($Reference + '^{commit}'))
+    # Event payloads are constrained to full object IDs below, but the
+    # initial-push fallback deliberately uses a fully-qualified remote ref.
+    # Validate that ref with Git first, then ask rev-parse for a commit object
+    # while ending option parsing.  The only value emitted remains the
+    # canonical object ID returned by Git, never the supplied ref.
+    if ([string]::IsNullOrWhiteSpace($Reference) -or $Reference.Length -gt 1024) {
+        throw $FailureReason
+    }
+
+    if ($Reference -notmatch '^[0-9a-fA-F]{40,64}$') {
+        # This resolver never needs a relative revision such as HEAD~1. A
+        # fully-qualified ref keeps native Git option parsing out of scope;
+        # check-ref-format then applies Git's complete ref-name rules.
+        if ($Reference -notmatch '^refs/[A-Za-z0-9][A-Za-z0-9._/-]{0,1018}$') {
+            throw $FailureReason
+        }
+        $refCheck = Invoke-Git @('check-ref-format', $Reference)
+        if ($refCheck.ExitCode -ne 0) {
+            throw $FailureReason
+        }
+    }
+
+    $result = Invoke-Git @('rev-parse', '--verify', '--end-of-options', ($Reference + '^{commit}'))
     if (
         $result.ExitCode -ne 0 -or
         $result.Output.Count -ne 1 -or

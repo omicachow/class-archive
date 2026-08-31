@@ -85,10 +85,18 @@ function Invoke-BaseResolver(
     $arguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $baseResolver,
         '-RepositoryRoot', $Repository,
-        '-PullRequestBase', $PullRequestBase,
-        '-PushBase', $PushBase,
         '-DefaultBranch', $DefaultBranch
     )
+    # Windows PowerShell's legacy native-command argument marshaling can
+    # discard an empty string in a splatted array. The resolver defaults these
+    # two optional values to empty, so omit absent parameters rather than
+    # risking a shifted argument list in this cross-version protocol test.
+    if ($PullRequestBase -ne '') {
+        $arguments += @('-PullRequestBase', $PullRequestBase)
+    }
+    if ($PushBase -ne '') {
+        $arguments += @('-PushBase', $PushBase)
+    }
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
