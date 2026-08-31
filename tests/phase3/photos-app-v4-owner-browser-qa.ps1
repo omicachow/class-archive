@@ -366,6 +366,31 @@ function Assert-FqaBrowserCredentialDocument([byte[]]$Bytes, [string]$Run) {
     }
 }
 
+function Write-FqaBrokerControl([Diagnostics.Process]$Broker, [string]$Command, [switch]$CloseAfter) {
+    if ($null -eq $Broker -or $Broker.HasExited) {
+        throw [InvalidOperationException]::new('broker_control_unavailable')
+    }
+    if ($Command -notmatch '^(?:EXPORT|STOP) [a-f0-9]{24}$') {
+        throw [InvalidOperationException]::new('broker_control_invalid')
+    }
+
+    # Windows PowerShell/.NET Framework cannot reliably set
+    # ProcessStartInfo.StandardInputEncoding. Write UTF-8-no-BOM bytes directly
+    # to the already authenticated broker pipe, so its exact control parser
+    # never receives a StreamWriter preamble before EXPORT or STOP.
+    $bytes = $null
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Command + "`n")
+        $stream = $Broker.StandardInput.BaseStream
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        if ($CloseAfter.IsPresent) { $stream.Close() }
+    }
+    finally {
+        if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+    }
+}
+
 function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run, [string]$HostPath) {
     $script:wrapperStage = 'credential_copy_preflight'
     if ($null -eq $Broker -or $Broker.HasExited) {
@@ -390,8 +415,7 @@ function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run
         # attestation.
         $script:wrapperStage = 'credential_broker_export'
         try {
-            $Broker.StandardInput.WriteLine('EXPORT ' + $Run)
-            $Broker.StandardInput.Flush()
+            Write-FqaBrokerControl -Broker $Broker -Command ('EXPORT ' + $Run)
         } catch {
             Stop-V4OwnerFqa 'credential_broker_unavailable'
         }
@@ -662,10 +686,6 @@ function Start-FqaLeaseBroker([string]$Run, [string]$ContainerCredentialPath) {
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    # The broker intentionally accepts only exact ASCII control records. A
-    # UTF-8 preamble on the first StreamWriter write would turn `EXPORT` into
-    # a different command, so stdin must be UTF-8 without a BOM as well.
-    $info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
     $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $process = [Diagnostics.Process]::new()
@@ -696,9 +716,12 @@ function Start-FqaLeaseBroker([string]$Run, [string]$ContainerCredentialPath) {
 function Close-FqaLeaseBroker([Diagnostics.Process]$Process, [string]$Run) {
     if ($null -eq $Process) { return $false }
     if (-not $Process.HasExited) {
-        $Process.StandardInput.WriteLine('STOP ' + $Run)
-        $Process.StandardInput.Flush()
-        $Process.StandardInput.Close()
+        try {
+            Write-FqaBrokerControl -Broker $Process -Command ('STOP ' + $Run) -CloseAfter
+        }
+        catch {
+            return $false
+        }
     }
     if (-not $Process.WaitForExit($brokerCloseTimeoutSeconds * 1000)) {
         [void](Stop-FqaNativeProcessTree -Process $Process)
