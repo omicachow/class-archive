@@ -172,6 +172,42 @@ function Set-OwnerOnlyDirectoryAcl([string]$Path) {
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
 }
 
+function Assert-OwnerOnlyPrivateSnapshotDirectory([string]$Path, [string]$Code) {
+    # The private root is an exact, protected owner-only directory. Snapshot
+    # directories may correctly retain that descriptor as inherited rules after
+    # a same-volume Move-Item, so validate the effective rule set instead of
+    # requiring a needless second ACL rewrite on every directory.
+    Assert-NoReparseAncestor $Path $Code
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $privateRoot
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        Stop-PrivateRoleSnapshot ($Code + '_untrusted')
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($null -eq $identity) { Stop-PrivateRoleSnapshot ($Code + '_identity_unavailable') }
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $acl = Get-Acl -LiteralPath $resolved -ErrorAction Stop
+    $ownerSid = try {
+        ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier])
+    }
+    catch {
+        [Security.Principal.SecurityIdentifier]$acl.Owner
+    }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $expectedSids = @($identity.Value, $systemSid.Value, $administratorsSid.Value) | Sort-Object
+    $actualSids = @($rules | ForEach-Object { $_.IdentityReference.Value }) | Sort-Object
+    $allRulesSafe = @($rules | Where-Object {
+        $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow `
+            -or ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl
+    }).Count -eq 0
+    $sidDifferenceCount = @(Compare-Object -ReferenceObject $expectedSids -DifferenceObject $actualSids).Count
+    if ($null -eq $ownerSid -or $ownerSid -ne $identity -or $rules.Count -ne 3 -or $sidDifferenceCount -ne 0 -or -not $allRulesSafe) {
+        Stop-PrivateRoleSnapshot ($Code + '_acl_invalid')
+    }
+}
+
 function Assert-IgnoredPrivateRoot {
     Assert-NoReparseAncestor $privateRoot 'private_root'
     [IO.Directory]::CreateDirectory($privateRoot) | Out-Null
@@ -613,7 +649,7 @@ function Read-SnapshotBundle([string]$BundlePhase, [string]$ExpectedManifestSha2
     $bundle = Get-BundlePath $BundlePhase
     Assert-NoReparseAncestor $bundle 'bundle'
     if (-not (Test-Path -LiteralPath $bundle -PathType Container)) { Stop-PrivateRoleSnapshot 'bundle_missing' }
-    Assert-ClassArchiveOwnerOnlyFileAcl -Path $bundle
+    Assert-OwnerOnlyPrivateSnapshotDirectory $bundle 'bundle'
     $expectedFiles = @('database.sql.gz', 'MANIFEST.json', 'MANIFEST.sha256', 'COMPLETE', 'SHA256SUMS')
     $actualFiles = @(Get-ChildItem -LiteralPath $bundle -Force | Select-Object -ExpandProperty Name | Sort-Object)
     if (@(Compare-Object ($expectedFiles | Sort-Object) $actualFiles).Count -ne 0) { Stop-PrivateRoleSnapshot 'bundle_file_set_invalid' }
@@ -798,7 +834,7 @@ try {
         # manifest files receive their own exact ACL checks before finalizing.
         # A reparse child remains forbidden, so a substituted path cannot
         # silently redirect private snapshot output.
-        try { Assert-NoReparseAncestor $partial 'partial_directory' }
+        try { Assert-OwnerOnlyPrivateSnapshotDirectory $partial 'partial_directory' }
         catch {
             if ([string]$_.Exception.Message -match '^PRIVATE_ROLE_SNAPSHOT_STOP:') { throw }
             Stop-PrivateRoleSnapshot 'partial_directory_acl_failed'
@@ -826,7 +862,7 @@ try {
         $manifestSha = New-SnapshotManifest $partial $stateAfter $sourceHead $Phase $manifestAuditPrefixRows
         $script:snapshotStage = 'finalize'
         Move-Item -LiteralPath $partial -Destination $bundle
-        Assert-ClassArchiveOwnerOnlyFileAcl -Path $bundle
+        Assert-OwnerOnlyPrivateSnapshotDirectory $bundle 'bundle'
         $gate = if ($Phase -eq 'pre') { 'PRIVATE_ROLE_E2E_PRE_SNAPSHOT' } else { 'PRIVATE_ROLE_E2E_POST_SNAPSHOT' }
         Write-Output ("$gate=PASS action=capture phase=$Phase manifest_sha256=$manifestSha scope=DB_ONLY media=NOT_INCLUDED privacy=OPAQUE_ONLY")
     }
