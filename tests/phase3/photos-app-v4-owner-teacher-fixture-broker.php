@@ -32,6 +32,10 @@ declare(strict_types=1);
  */
 
 const V4_TEACHER_BROKER_ROOT = '/var/www/html/piwigo';
+// The test harness is deliberately mounted read-only outside the writable
+// Piwigo document root. Keep its trust boundary explicit instead of assuming
+// it is mirrored under the application tree.
+const V4_TEACHER_BROKER_WORKSPACE_ROOT = '/workspace';
 const V4_TEACHER_BROKER_RECOVERY_ROOT = '/var/lib/class-archive-private-e2e';
 const V4_TEACHER_BROKER_LOCK = 'class_archive_v4_owner_teacher_fixture_broker_v1';
 const V4_TEACHER_BROKER_OWNER = 'v4-owner-teacher-fixture-broker';
@@ -1287,11 +1291,11 @@ try {
     require_once PHPWG_ROOT_PATH . 'admin/include/functions.php';
     v4teacherAssertPath(CLASS_IDENTITY_PATH . 'src/AdminService.php', V4_TEACHER_BROKER_ROOT . '/plugins/ClassIdentity/src/AdminService.php', 'teacher_broker_admin_service_untrusted');
     v4teacherAssertPath(CLASS_IDENTITY_PATH . 'src/ProvisioningService.php', V4_TEACHER_BROKER_ROOT . '/plugins/ClassIdentity/src/ProvisioningService.php', 'teacher_broker_provisioning_service_untrusted');
-    v4teacherAssertPath(V4_TEACHER_BROKER_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php', V4_TEACHER_BROKER_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php', 'teacher_broker_adapter_untrusted');
+    v4teacherAssertPath(V4_TEACHER_BROKER_WORKSPACE_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php', V4_TEACHER_BROKER_WORKSPACE_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php', 'teacher_broker_adapter_untrusted');
     require_once CLASS_IDENTITY_PATH . 'src/AdminService.php';
     require_once CLASS_IDENTITY_PATH . 'src/ProvisioningService.php';
     define('PRIVATE_E2E_TEACHER_FIXTURE_LIBRARY_ONLY', true);
-    require_once V4_TEACHER_BROKER_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php';
+    require_once V4_TEACHER_BROKER_WORKSPACE_ROOT . '/tests/phase3/private-e2e-teacher-fixture-lease.php';
 
     global $mysqli, $prefixeTable;
     if (!$mysqli instanceof mysqli
