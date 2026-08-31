@@ -287,6 +287,19 @@ function Assert-SchemaSourceContract {
     }
 }
 
+function Get-SafeExternalFailureClass([string[]]$Lines) {
+    # Never emit an external command's raw diagnostic: Docker/WSL can include
+    # local paths or command arguments. Preserve only a small fixed taxonomy
+    # so a private snapshot failure remains actionable without disclosing data.
+    $text = [string]::Join("`n", @($Lines))
+    if ($text -match '(?i)permission denied|access is denied') { return 'permission' }
+    if ($text -match '(?i)no such file|not found|does not exist') { return 'missing' }
+    if ($text -match '(?i)not a directory|is a directory') { return 'path_type' }
+    if ($text -match '(?i)disk full|no space left') { return 'space' }
+    if ($text -match '(?i)connection refused|cannot connect|daemon') { return 'runtime' }
+    return 'unclassified'
+}
+
 function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
     try {
@@ -295,7 +308,10 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
         $exitCode = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
-    if ($exitCode -ne 0) { Stop-PrivateRoleSnapshot $Code }
+    if ($exitCode -ne 0) {
+        $failureClass = Get-SafeExternalFailureClass $lines
+        Stop-PrivateRoleSnapshot ($Code + '_exit_' + [Math]::Abs([int]$exitCode) + '_' + $failureClass)
+    }
     return @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
 }
 
