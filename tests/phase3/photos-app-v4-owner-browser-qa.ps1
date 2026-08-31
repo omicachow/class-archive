@@ -121,7 +121,23 @@ function Set-OwnerOnlyDirectoryAcl([string]$Path) {
             [Security.AccessControl.AccessControlType]::Allow
         ))
     }
-    Set-Acl -LiteralPath $resolved -AclObject $acl
+    # A redirected Windows PowerShell -NoProfile child may not have the
+    # Security cmdlet module loaded. Prefer the native directory ACL API so
+    # the temporary private browser root is protected before any lease data is
+    # written; use Set-Acl only as a verified fallback.
+    $directorySet = [System.IO.Directory].GetMethod(
+        'SetAccessControl',
+        [type[]]@([string], [Security.AccessControl.DirectorySecurity])
+    )
+    if ($null -ne $directorySet) {
+        [System.IO.Directory]::SetAccessControl($resolved, $acl)
+    }
+    elseif ($null -ne (Get-Command Set-Acl -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+        Set-Acl -LiteralPath $resolved -AclObject $acl
+    }
+    else {
+        Stop-V4OwnerFqa 'private_directory_acl_backend_unavailable'
+    }
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
 }
 

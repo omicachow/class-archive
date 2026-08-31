@@ -204,6 +204,8 @@ Assert-Contains $wrapper 'Assert-PrivateParentAcl -Candidate $HostPath' 'owner_f
 Assert-Contains $wrapper '$trustedBoundary = $trustedRoot + $separator' 'owner_fqa_credential_ancestor_acl_boundary_missing'
 Assert-Contains $wrapper 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $item.FullName' 'owner_fqa_credential_ancestor_acl_walk_missing'
 Assert-Contains $wrapper 'Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPath' 'owner_fqa_credential_acl_before_write_missing'
+Assert-Contains $wrapper '[System.IO.Directory]::SetAccessControl($resolved, $acl)' 'owner_fqa_native_directory_acl_backend_missing'
+Assert-Contains $wrapper 'private_directory_acl_backend_unavailable' 'owner_fqa_directory_acl_fail_closed_missing'
 Assert-Contains $wrapper "'base64', '-w0', '--', `$ContainerPath" 'owner_fqa_credential_private_transport_missing'
 Assert-NotContains $wrapper "'cp', ('piwigo:'" 'owner_fqa_insecure_docker_cp_forbidden'
 Assert-Contains $wrapper 'Stop-FqaNativeProcessTree' 'owner_fqa_broker_reap_missing'
