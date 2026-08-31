@@ -690,7 +690,50 @@ function Start-FqaLeaseBroker([string]$Run, [string]$ContainerCredentialPath) {
     $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $info
-    if (-not $process.Start()) { Stop-V4OwnerFqa 'lease_broker_start_failed' }
+    # Windows PowerShell 5.1 constructs the redirected stdin StreamWriter at
+    # Process.Start() from Console.InputEncoding. Set it only for that call so
+    # the first byte on the exact broker pipe cannot be a UTF-8 preamble. The
+    # process-global setting is restored before this function returns.
+    $originalConsoleInputEncoding = $null
+    $consoleInputEncodingSet = $false
+    $brokerStarted = $false
+    $brokerPossiblyStarted = $false
+    $consoleRestoreFailed = $false
+    try {
+        $originalConsoleInputEncoding = [Console]::InputEncoding
+        [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+        $consoleInputEncodingSet = $true
+        $brokerStarted = $process.Start()
+        $brokerPossiblyStarted = $brokerStarted
+    }
+    catch {
+        try { $brokerPossiblyStarted = ($process.Id -gt 0) }
+        catch { $brokerPossiblyStarted = $false }
+    }
+    finally {
+        if ($consoleInputEncodingSet) {
+            try { [Console]::InputEncoding = $originalConsoleInputEncoding }
+            catch { $consoleRestoreFailed = $true }
+        }
+    }
+    if (-not $brokerStarted) {
+        if ($brokerPossiblyStarted) {
+            [void](Stop-FqaNativeProcessTree -Process $process)
+            $recovered = Invoke-FqaLeaseRecovery -Run $Run
+            $process.Dispose()
+            if (-not $recovered) { Stop-V4OwnerFqa 'lease_broker_start_recovery_failed' }
+            Stop-V4OwnerFqa 'lease_broker_start_failed_recovered'
+        }
+        $process.Dispose()
+        Stop-V4OwnerFqa 'lease_broker_start_failed'
+    }
+    if ($consoleRestoreFailed) {
+        [void](Stop-FqaNativeProcessTree -Process $process)
+        $recovered = Invoke-FqaLeaseRecovery -Run $Run
+        $process.Dispose()
+        if (-not $recovered) { Stop-V4OwnerFqa 'lease_broker_console_encoding_restore_recovery_failed' }
+        Stop-V4OwnerFqa 'lease_broker_console_encoding_restore_failed'
+    }
     [void]$process.StandardError.ReadToEndAsync() # drain without reflecting private runtime diagnostics
     $readyTask = $process.StandardOutput.ReadLineAsync()
     if (-not $readyTask.Wait([TimeSpan]::FromSeconds(60))) {
