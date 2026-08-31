@@ -1351,7 +1351,12 @@ finally {
 
 if ($exitCode === 0 && $recoveryCompleted) {
     fwrite(STDOUT, "V4_OWNER_FQA_LEASE=RECOVERED identity=FROZEN credentials=unknown sessions=revoked\n");
-} elseif ($exitCode === 0 && $leaseOpened) {
+} elseif ($cleanupSafe && $leaseOpened) {
+    // CLOSED attests only that the temporary lease has been safely refrozen
+    // and sessions revoked. A preceding FAIL record and non-zero exit status
+    // still describe the failed browser/export action; the parent must retain
+    // that failure while accepting this exact closure instead of launching a
+    // recovery against a plan that has already been securely removed.
     fwrite(STDOUT, "V4_OWNER_FQA_LEASE=CLOSED identity=FROZEN credentials=unknown sessions=revoked\n");
 }
 exit($exitCode);

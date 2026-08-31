@@ -402,8 +402,13 @@ function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run
         $record = [string]$exportTask.Result
         $frame = [regex]::Match($record, '^V4_OWNER_FQA_CREDENTIAL=v1:([a-f0-9]{24}):([1-9][0-9]{0,4}):([a-f0-9]{64}):([A-Za-z0-9_-]{2,131072})$')
         if (-not $frame.Success) {
-            if ($record -match '^V4_OWNER_FQA_LEASE=FAIL stage=(?:bootstrap|runtime) code=[a-z0-9_]+$') {
-                Stop-V4OwnerFqa 'credential_export_rejected'
+            $failure = [regex]::Match($record, '^V4_OWNER_FQA_LEASE=FAIL stage=(?:bootstrap|runtime) code=([a-z0-9_]{1,80})$')
+            if ($failure.Success) {
+                # The code is a broker-controlled lower-case diagnostic token,
+                # not a credential or container diagnostic. Preserve it only
+                # so a failed export can be repaired without printing broker
+                # stderr or any payload bytes.
+                Stop-V4OwnerFqa ('credential_export_rejected_' + [string]$failure.Groups[1].Value)
             }
             Stop-V4OwnerFqa 'credential_export_invalid'
         }
@@ -699,7 +704,12 @@ function Close-FqaLeaseBroker([Diagnostics.Process]$Process, [string]$Run) {
         $safe = @($remaining | Where-Object {
             $_ -match '^V4_OWNER_FQA_LEASE=(?:CLOSED identity=FROZEN credentials=unknown sessions=revoked|FAIL stage=(?:bootstrap|runtime) code=[a-z0-9_]+)$'
         })
-        if ($Process.ExitCode -eq 0 -and $safe.Count -eq 1 -and $safe[0] -eq 'V4_OWNER_FQA_LEASE=CLOSED identity=FROZEN credentials=unknown sessions=revoked') {
+        # A broker action may fail after the lease opened. It still emits the
+        # exact CLOSED record after freeze-first cleanup, while retaining a
+        # non-zero exit status and the wrapper's original failure. Treat that
+        # record as closure evidence only; otherwise recovery would run after
+        # the durable plan has already been securely removed.
+        if ($safe.Count -eq 1 -and $safe[0] -eq 'V4_OWNER_FQA_LEASE=CLOSED identity=FROZEN credentials=unknown sessions=revoked') {
             return $true
         }
     }
