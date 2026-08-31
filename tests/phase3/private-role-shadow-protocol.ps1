@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$StaticOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -95,6 +97,23 @@ Assert-Protocol (-not $composeText.Contains('/mnt/m/')) 'private_source_mount_fo
 $syntaxErrors = $null
 [Management.Automation.Language.Parser]::ParseFile($operator, [ref]$null, [ref]$syntaxErrors) | Out-Null
 Assert-Protocol ($syntaxErrors.Count -eq 0) 'powershell_syntax_invalid'
+if ($StaticOnly) {
+    # Public Linux CI can prove the tracked source and shell syntax without
+    # claiming to operate the Windows+WSL private shadow runtime.
+    $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    if ($isWindowsHost) {
+        & wsl.exe -d Ubuntu --exec bash -n (('/mnt/' + $clone.Substring(0, 1).ToLowerInvariant() + '/' + $clone.Substring(3).Replace('\', '/')))
+    }
+    else {
+        $bash = (Get-Command bash -ErrorAction Stop).Source
+        & $bash -n $clone
+    }
+    Assert-Protocol ($LASTEXITCODE -eq 0) 'bash_syntax_invalid'
+    Assert-Protocol $operatorText.Contains("if ([string]`$env:CLASS_ARCHIVE_PRIVATE_ROLE_SHADOW_ENABLED -cne '1')") 'disabled_default_gate_source_missing'
+    Assert-Protocol $operatorText.Contains('PRIVATE_ROLE_SHADOW=PASS action=validate evidence=STATIC_COMPOSE_CONFIG protocol=DISABLED_BY_DEFAULT') 'validate_output_contract_missing'
+    Write-Output "PRIVATE_ROLE_SHADOW_PROTOCOL=PASS assertions=$assertions static=PASS compose=NOT_RUN runtime=NOT_RUN evidence=PUBLIC_SOURCE_ONLY"
+    exit 0
+}
 & wsl.exe -d Ubuntu --exec bash -n (('/mnt/' + $clone.Substring(0, 1).ToLowerInvariant() + '/' + $clone.Substring(3).Replace('\', '/')))
 Assert-Protocol ($LASTEXITCODE -eq 0) 'bash_syntax_invalid'
 

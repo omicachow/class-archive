@@ -120,9 +120,8 @@ jobs:
           ./tests/phase3/photos-app-v4-owner-guest-browser-qa-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-guest-media-browser-qa-protocol.ps1
           ./tests/phase3/private-e2e-recreate-lab-protocol.ps1
-          ./tests/phase3/private-role-shadow-protocol.ps1
+          ./tests/phase3/private-role-shadow-protocol.ps1 -StaticOnly
           ./tests/phase3/private-role-e2e-business-snapshot-protocol.ps1
-          ./tests/phase3/private-role-e2e-business-snapshot-compare.ps1
           ./tests/phase3/private-real-media-fixture-preflight-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-cold-restart-protocol.ps1
@@ -182,4 +181,6 @@ jobs:
       # replacing that evidence with a different Linux pwsh behavior.
       - name: Verify Windows native stdin ingress
         shell: powershell
-        run: .\tests\phase3\class-archive-stdin-ingress-synthetic.ps1
+        run: |
+          .\tests\phase3\class-archive-stdin-ingress-synthetic.ps1
+          .\tests\phase3\private-role-e2e-business-snapshot-compare.ps1
