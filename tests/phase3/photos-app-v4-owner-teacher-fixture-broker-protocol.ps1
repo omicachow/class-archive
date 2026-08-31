@@ -127,7 +127,8 @@ foreach ($needle in @(
     'recoverAbandonedIdentityLease(',
     'resolveConflictIdentityLease(',
     'LEASE_CONFLICT_RESOLVED',
-    'teacher_broker_recovery_reconciliation_required'
+    'teacher_broker_recovery_reconciliation_required',
+    'teacher_broker_recovery_terminal_proof_required'
 )) {
     Assert-Contains $broker $needle ('teacher_broker_recovery_gate_missing_' + ($needle -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLowerInvariant())
 }

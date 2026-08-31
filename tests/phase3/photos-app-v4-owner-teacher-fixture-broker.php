@@ -1440,9 +1440,24 @@ try {
     $admin = v4teacherSystemAdmin($db, $prefix);
 
     if ($recoveryMode) {
-        $ledger = v4teacherReadLedger($ledgerPath, $run);
-        if (!v4teacherRecoverLedger($db, $prefix, $adminService, $leaseService, $admin, $run, $ledgerPath, $ledger)) {
-            v4teacherFail('teacher_broker_recovery_conflict');
+        // A previous recovery can commit the terminal lease release just
+        // before process interruption removes the local ledger. Treat an
+        // absent ledger as idempotent only after re-proving the exact frozen
+        // Teacher descriptor, zero unresolved lease, and revoked credential
+        // surfaces. Missing state alone is never a recovery success.
+        if (!file_exists($ledgerPath) && !is_link($ledgerPath)) {
+            $terminal = v4teacherFrozenDescriptorOrNull($db, $prefix, $run);
+            if ($terminal === null
+                || v4teacherUnresolvedLease($db, $prefix, (int) $terminal['fixture']['identity_id']) !== null
+            ) {
+                v4teacherFail('teacher_broker_recovery_terminal_proof_required');
+            }
+            v4teacherAssertTerminalCredentialState($db, $terminal['fixture']);
+        } else {
+            $ledger = v4teacherReadLedger($ledgerPath, $run);
+            if (!v4teacherRecoverLedger($db, $prefix, $adminService, $leaseService, $admin, $run, $ledgerPath, $ledger)) {
+                v4teacherFail('teacher_broker_recovery_conflict');
+            }
         }
         $cleanupSafe = true;
     } elseif ($ensureMode) {
