@@ -105,7 +105,18 @@ function Stop-PrivateRoleSnapshot([string]$Code) {
 }
 
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Do not rely on module autoloading in the redirected Windows PowerShell
+    # child that captures the private snapshot. Stream the archive through the
+    # platform SHA-256 implementation instead of loading Get-FileHash.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+    }
+    finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function Get-RunMarkerDigest {
