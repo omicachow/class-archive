@@ -726,8 +726,25 @@ async function assertBrowserSurface(page, role) {
 }
 
 async function viewer(page, role, photoId) {
-  const response = await page.goto(new URL(`/photos/${photoId}`, photoOrigin).href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-  check(response?.status() === 200, `${role}_viewer_status`);
+  const target = new URL(`/photos/${photoId}`, photoOrigin);
+  let response = null;
+  try {
+    response = await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  } catch (error) {
+    // Chrome can report ERR_ABORTED when the compatibility shell replaces the
+    // document navigation with its route transition. Accept that transport
+    // detail only after the exact route and the authorized viewer surface are
+    // independently proven below; redirects, login pages, and failed media
+    // still fail closed.
+    if (!/net::ERR_ABORTED/i.test(String(error?.message ?? ''))) throw error;
+    await page.waitForFunction((expected) => {
+      const current = new URL(window.location.href);
+      return current.origin === expected.origin && current.pathname === expected.pathname
+        && document.readyState !== 'loading';
+    }, { origin: target.origin, pathname: target.pathname }, { timeout: 15_000 }).catch(() => null);
+  }
+  check(new URL(page.url()).origin === target.origin && new URL(page.url()).pathname === target.pathname, `${role}_viewer_route`);
+  if (response !== null) check(response.status() === 200, `${role}_viewer_status`);
   const image = page.locator('.viewer-image');
   check(await image.waitFor({ state: 'visible', timeout: 45_000 }).then(() => true).catch(() => false), `${role}_viewer_missing`);
   const decoded = await image.evaluate((node) => node instanceof HTMLImageElement && node.complete && node.naturalWidth > 0 && node.naturalHeight > 0);

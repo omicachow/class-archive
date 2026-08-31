@@ -195,6 +195,8 @@ Assert-Contains $runner "dialog.locator('.hybrid-results .empty-state').count() 
 Assert-Contains $runner 'closeRoleContext' 'owner_fqa_browser_context_cleanup_missing'
 Assert-Contains $runner 'browser_pass_record_missing' 'owner_fqa_browser_pass_after_cleanup_missing'
 Assert-Contains $runner 'roles=3' 'owner_fqa_safe_aggregate_record_missing'
+Assert-Contains $runner 'net::ERR_ABORTED' 'owner_fqa_viewer_navigation_abort_guard_missing'
+Assert-Contains $runner "`${role}_viewer_route" 'owner_fqa_viewer_route_after_abort_guard_missing'
 
 $runnerClose = $runner.LastIndexOf("await closeRoleContext(classmateSession, 'classmate')")
 $runnerPass = $runner.LastIndexOf('process.stdout.write(`${passRecord}\n`)')
