@@ -140,6 +140,31 @@ function Assert-NoReparseAncestor([string]$Candidate, [string]$Code) {
     }
 }
 
+function Get-OwnerOnlyDirectorySecurity([IO.DirectoryInfo]$Item) {
+    # Windows PowerShell 5.1 can expose DirectoryInfo ACL instance methods
+    # even when a redirected -NoProfile child cannot resolve Get-Acl. Prefer
+    # that stable native API, with the cmdlet as the PowerShell 7 fallback.
+    $getMethod = $Item.GetType().GetMethod('GetAccessControl', [type[]]@())
+    if ($null -ne $getMethod) { return $Item.GetAccessControl() }
+    $getAcl = Get-Command Get-Acl -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -ne $getAcl) { return Get-Acl -LiteralPath $Item.FullName -ErrorAction Stop }
+    Stop-PrivateRoleSnapshot 'private_directory_acl_backend_unavailable'
+}
+
+function Set-OwnerOnlyDirectorySecurity([IO.DirectoryInfo]$Item, [Security.AccessControl.DirectorySecurity]$Acl) {
+    $setMethod = $Item.GetType().GetMethod('SetAccessControl', [type[]]@([Security.AccessControl.DirectorySecurity]))
+    if ($null -ne $setMethod) {
+        $Item.SetAccessControl($Acl)
+        return
+    }
+    $setAcl = Get-Command Set-Acl -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -ne $setAcl) {
+        Set-Acl -LiteralPath $Item.FullName -AclObject $Acl
+        return
+    }
+    Stop-PrivateRoleSnapshot 'private_directory_acl_backend_unavailable'
+}
+
 function Set-OwnerOnlyDirectoryAcl([string]$Path) {
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
@@ -168,7 +193,7 @@ function Set-OwnerOnlyDirectoryAcl([string]$Path) {
             [Security.AccessControl.AccessControlType]::Allow
         ))
     }
-    Set-Acl -LiteralPath $resolved -AclObject $acl
+    Set-OwnerOnlyDirectorySecurity $item $acl
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $resolved
 }
 
@@ -188,7 +213,7 @@ function Assert-OwnerOnlyPrivateSnapshotDirectory([string]$Path, [string]$Code) 
     if ($null -eq $identity) { Stop-PrivateRoleSnapshot ($Code + '_identity_unavailable') }
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    $acl = Get-Acl -LiteralPath $resolved -ErrorAction Stop
+    $acl = Get-OwnerOnlyDirectorySecurity $item
     $ownerSid = try {
         ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier])
     }
