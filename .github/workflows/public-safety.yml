@@ -114,6 +114,7 @@ jobs:
           ./tests/phase3/private-role-shadow-protocol.ps1
           ./tests/phase3/private-role-e2e-business-snapshot-protocol.ps1
           ./tests/phase3/private-role-e2e-business-snapshot-compare.ps1
+          ./tests/phase3/private-real-media-fixture-preflight-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-cold-restart-protocol.ps1
 
