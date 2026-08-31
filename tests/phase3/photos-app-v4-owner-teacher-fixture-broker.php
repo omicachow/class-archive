@@ -611,7 +611,11 @@ function v4teacherAppendRecoveryAudit(array $admin, ?array $fixture, ?int $ident
         'new_value' => [
             'state' => $state,
             'role_code' => 'TEACHER',
-            'reason_code' => 'LOCAL_PRIVATE_E2E_TEACHER_FIXTURE_RECOVERY',
+            // Keep structured audit text deliberately short. Audit values run
+            // through the same credential-shaped-string defense as operator
+            // supplied prose; a long underscore-delimited implementation
+            // label would correctly be rejected as secret-like noise.
+            'reason_code' => 'TEACHER_FIXTURE',
         ],
         'reason' => $state === 'LEASE_CONFLICT'
             ? '本地 V4 教师测试租约恢复检测到冲突，已隔离待核对'
@@ -694,6 +698,22 @@ function v4teacherResolveConflictLedger(
         return true;
     } catch (V4TeacherBrokerFailure $error) {
         throw $error;
+    } catch (\RuntimeException $error) {
+        // The lease service intentionally reports bounded, non-secret
+        // transition codes. Preserve only a closed diagnostic category here:
+        // it lets the local recovery procedure distinguish a stale CAS from
+        // an audit/descriptor failure without ever reflecting row contents,
+        // identifiers, or credential material into the terminal.
+        $category = match ($error->getMessage()) {
+            'class_identity_fixture_lease_conflict_resolution_version_conflict' => 'version',
+            'class_identity_fixture_lease_conflict_resolution_required' => 'required',
+            'class_identity_fixture_lease_conflict_resolution_conflict' => 'cas',
+            'class_identity_fixture_lease_conflict_resolution_audit' => 'audit',
+            'class_identity_fixture_lease_conflict_resolution_release' => 'release',
+            'class_identity_fixture_lease_conflict_resolution_commit' => 'commit',
+            default => 'service',
+        };
+        v4teacherFail('teacher_broker_conflict_reconciliation_' . $category . '_failed');
     } catch (\Throwable) {
         v4teacherFail('teacher_broker_conflict_reconciliation_' . $stage . '_failed');
     }
