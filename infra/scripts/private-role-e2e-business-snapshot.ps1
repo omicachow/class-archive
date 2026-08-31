@@ -293,6 +293,8 @@ function Get-SafeExternalFailureClass([string[]]$Lines) {
     # so a private snapshot failure remains actionable without disclosing data.
     $text = [string]::Join("`n", @($Lines))
     if ($text -match '(?i)permission denied|access is denied') { return 'permission' }
+    if ($text -match '(?i)in container|container path|could not find the file') { return 'container_source_missing' }
+    if ($text -match '(?i)lstat|destination|mkdir') { return 'destination_missing' }
     if ($text -match '(?i)no such file|not found|does not exist') { return 'missing' }
     if ($text -match '(?i)not a directory|is a directory') { return 'path_type' }
     if ($text -match '(?i)disk full|no space left') { return 'space' }
