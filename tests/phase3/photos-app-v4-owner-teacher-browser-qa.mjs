@@ -235,6 +235,18 @@ async function gotoOwned(page, target, code) {
   check(current.origin === target.origin && current.pathname === target.pathname, code);
 }
 
+async function gotoCoreLoginBridge(page) {
+  const bridge = new URL('/class-archive-core/login', configuration.photoOrigin);
+  await page.goto(bridge.href, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  // The photo BFF intentionally delegates the credential form to the
+  // localhost-only Piwigo core origin. This is a successful bridge, not a
+  // cross-origin escape: both origins are explicitly allowlisted and the
+  // subsequent POST is constrained to this exact form action.
+  const current = new URL(page.url());
+  check(current.origin === configuration.coreOrigin.origin
+    && current.pathname === '/identification.php', 'teacher_login_route');
+}
+
 async function assertHomeReady(page) {
   check(await page.locator('[data-home-all-photos="true"]').waitFor({ state: 'visible', timeout: 30_000 })
     .then(() => true).catch(() => false), 'teacher_home_projection');
@@ -277,7 +289,7 @@ async function openTeacher() {
     });
     const page = context.pages()[0] ?? await context.newPage();
     await recordChromeStable(context, page);
-    await gotoOwned(page, new URL('/class-archive-core/login', configuration.photoOrigin), 'teacher_login_route');
+    await gotoCoreLoginBridge(page);
     const form = page.locator('form[name="login_form"]');
     check(await form.count() === 1, 'teacher_login_form');
     await form.locator('input[name="username"]').fill(browserCredential.username);

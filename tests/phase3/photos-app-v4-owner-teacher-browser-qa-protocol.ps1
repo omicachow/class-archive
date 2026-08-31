@@ -75,6 +75,8 @@ foreach ($needle in @(
     "context.route('**/*'",
     "function isUnsafeRequest(request)",
     "function isAllowedLoginPost(request, target)",
+    'function gotoCoreLoginBridge(page)',
+    "current.origin === configuration.coreOrigin.origin`n    && current.pathname === '/identification.php'",
     "function isAllowedSmartSearchProbe(request, target)",
     "if (isUnsafeRequest(route.request())",
     "teacher_business_write_observed",
