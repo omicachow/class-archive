@@ -316,9 +316,12 @@ printf 'FQA_DURABLE_RECOVERY=EMPTY\n'
     $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
     if ($encodedProbe -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot 'fqa_durable_recovery_probe_encoding_invalid' }
     $script = 'printf %s ' + $encodedProbe + ' | base64 -d | sh -eu -s'
-    $lines = Invoke-PiwigoComposeCapture @(
+    # A single successful probe is emitted as a scalar string by PowerShell.
+    # Under StrictMode that scalar has no `.Count`; normalize it to an array
+    # before enforcing the exact-one-line result contract.
+    $lines = @(Invoke-PiwigoComposeCapture @(
         'exec', '-T', '--user', 'root', 'piwigo', 'sh', '-eu', '-c', $script
-    ) 'fqa_durable_recovery_probe_failed'
+    ) 'fqa_durable_recovery_probe_failed')
     if ($lines.Count -ne 1 -or $lines[0] -ne 'FQA_DURABLE_RECOVERY=EMPTY') {
         Stop-PrivateRoleSnapshot 'fqa_durable_recovery_not_empty'
     }
