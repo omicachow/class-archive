@@ -24,6 +24,11 @@ param(
     [ValidatePattern('^[a-f0-9]{64}$')]
     [string]$ExpectedPostManifestSha256,
 
+    # Only permits a source-head delta composed exclusively of this local
+    # snapshot/browser harness. It cannot approve application, schema, policy,
+    # media, or fixture changes between the immutable pre/post captures.
+    [switch]$AllowHarnessOnlySourceHeadChange,
+
     [switch]$ConfirmOwnerPrivateSnapshot
 )
 
@@ -57,6 +62,13 @@ $fqaAllowedVolatile = @(
     'core_user_info.last_visit', 'core_user_info.last_visit_from_history',
     'core_user_info.lastmodified', 'released_fixture_lease_history',
     'revoked_fqa_auth_key_history'
+)
+$harnessOnlySourcePaths = @(
+    'infra/scripts/private-role-e2e-business-snapshot.ps1',
+    'tests/phase3/private-role-e2e-business-snapshot-protocol.ps1',
+    'tests/phase3/photos-app-v4-owner-browser-qa.ps1',
+    'tests/phase3/photos-app-v4-owner-browser-qa.mjs',
+    'tests/phase3/photos-app-v4-owner-browser-qa-protocol.ps1'
 )
 
 . (Join-Path $PSScriptRoot 'secret-file-acl.ps1')
@@ -866,7 +878,15 @@ function Read-SnapshotBundle([string]$BundlePhase, [string]$ExpectedManifestSha2
 }
 
 function Compare-PrePost([hashtable]$Pre, [hashtable]$Post) {
-    if ([string]$Pre.Document.source_head -ne [string]$Post.Document.source_head) { Stop-PrivateRoleSnapshot 'source_head_changed' }
+    if ([string]$Pre.Document.source_head -ne [string]$Post.Document.source_head) {
+        if (-not $AllowHarnessOnlySourceHeadChange.IsPresent) { Stop-PrivateRoleSnapshot 'source_head_changed' }
+        $range = [string]$Pre.Document.source_head + '..' + [string]$Post.Document.source_head
+        $changed = @(& git -C $projectRoot diff --name-only --diff-filter=ACMR $range 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $changed.Count -eq 0) { Stop-PrivateRoleSnapshot 'harness_only_source_delta_unreadable' }
+        foreach ($path in $changed) {
+            if ([string]$path -notin $harnessOnlySourcePaths) { Stop-PrivateRoleSnapshot 'harness_only_source_delta_forbidden' }
+        }
+    }
     if ([uint64]$Pre.Document.audit_policy.preexisting_rows -ne [uint64]$Pre.Counts.audit_events -or
         [uint64]$Post.Document.audit_policy.preexisting_rows -ne [uint64]$Pre.Counts.audit_events) {
         Stop-PrivateRoleSnapshot 'audit_prefix_row_binding_changed'
