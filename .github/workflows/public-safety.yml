@@ -85,6 +85,7 @@ jobs:
           node tests/phase3/member-era-upload-contract.mjs
           node tests/phase3/private-role-capability-inventory.mjs
           php -l plugins/ClassIdentity/src/PrivateE2EFixtureLeaseService.php
+          php -l tests/phase3/private-e2e-fixture-lease-runtime.php
           php -l tests/phase3/photos-app-v4-owner-fqa-lease.php
           php -l tests/phase3/photos-app-v4-owner-fqa-broker-runtime.php
 
@@ -106,9 +107,13 @@ jobs:
           ./tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-performance-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-browser-qa-protocol.ps1
+          ./tests/phase3/class-archive-stdin-ingress-synthetic.ps1
           ./tests/phase3/private-e2e-fixture-lease-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-fqa-lease-protocol.ps1
+          ./tests/phase3/private-e2e-recreate-lab-protocol.ps1
+          ./tests/phase3/private-role-shadow-protocol.ps1
           ./tests/phase3/private-role-e2e-business-snapshot-protocol.ps1
+          ./tests/phase3/private-role-e2e-business-snapshot-compare.ps1
           ./tests/phase3/photos-app-v4-owner-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-cold-restart-protocol.ps1
 

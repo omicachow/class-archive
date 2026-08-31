@@ -48,6 +48,16 @@ $expectedSchema = 18
 $piwigoEnv = 'infra/private-full/.env.piwigo.owner'
 $piwigoProject = 'class_archive_private_full_v3_piwigo'
 $privacyMarker = 'COUNTS_AND_OPAQUE_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_COMMENT_BODIES_OR_SECRETS'
+$snapshotFormat = 2
+$fqaRoster = 'FQA-C-99CA3B3B6AF1'
+$fqaEquivalencePolicy = 'FQA_SAFE_TERMINAL_EQUIVALENCE_V1'
+$fqaAllowedVolatile = @(
+    'identity.lock_version', 'identity.updated_at', 'identity.frozen_at',
+    'principal.auth_epoch', 'principal.updated_at', 'core_user.password',
+    'core_user_info.last_visit', 'core_user_info.last_visit_from_history',
+    'core_user_info.lastmodified', 'released_fixture_lease_history',
+    'revoked_fqa_auth_key_history'
+)
 
 . (Join-Path $PSScriptRoot 'secret-file-acl.ps1')
 
@@ -61,7 +71,14 @@ $countKeys = @(
     'people_mappings', 'visible_people', 'person_merges', 'person_rules',
     'claims', 'invitations', 'submissions', 'audit_events',
     'ai_asset_index', 'ai_jobs_total', 'ai_jobs_open',
-    'projection_epoch_rows'
+    'projection_epoch_rows',
+    'fqa_identity_rows', 'fqa_frozen_identity_rows',
+    'fqa_account_rows', 'fqa_current_account_rows',
+    'fqa_principal_rows', 'fqa_seat_principal_rows',
+    'fqa_valid_binding_rows', 'fqa_disallowed_business_rows',
+    'fqa_active_leases', 'fqa_conflict_leases',
+    'fqa_live_sessions', 'fqa_live_auth_keys',
+    'fqa_valid_password_rows', 'fqa_system_admin_rows'
 )
 
 $semanticKeys = @(
@@ -69,7 +86,7 @@ $semanticKeys = @(
     'canonical_media',
     'album_membership',
     'comments',
-    'identity_security',
+    'identity_security', 'fqa_security_equivalence',
     'submissions',
     'person_curation',
     'spotlight_memories_pins',
@@ -94,7 +111,7 @@ function Get-Sha256([string]$Path) {
 function Get-RunMarkerDigest {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes("classarchive-private-role-e2e-business-snapshot-v1`0$RunMarker")
+        $bytes = [Text.Encoding]::UTF8.GetBytes("classarchive-private-role-e2e-business-snapshot-v2`0$RunMarker")
         return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '')
     }
     finally { $sha.Dispose() }
@@ -251,6 +268,54 @@ function Assert-OwnerRuntimeProof {
     }
 }
 
+function Assert-FqaTerminalCounts([hashtable]$Counts, [string]$CodePrefix) {
+    # This exception is intentionally pinned to one synthetic roster marker.
+    # No other Identity receives normalized comparison semantics.
+    $expected = [ordered]@{
+        fqa_identity_rows = [uint64]1
+        fqa_frozen_identity_rows = [uint64]1
+        fqa_account_rows = [uint64]3
+        fqa_current_account_rows = [uint64]3
+        fqa_principal_rows = [uint64]3
+        fqa_seat_principal_rows = [uint64]3
+        fqa_valid_binding_rows = [uint64]3
+        fqa_disallowed_business_rows = [uint64]0
+        fqa_active_leases = [uint64]0
+        fqa_conflict_leases = [uint64]0
+        fqa_live_sessions = [uint64]0
+        fqa_live_auth_keys = [uint64]0
+        fqa_valid_password_rows = [uint64]3
+        fqa_system_admin_rows = [uint64]1
+    }
+    foreach ($key in $expected.Keys) {
+        if (-not $Counts.Contains($key) -or [uint64]$Counts[$key] -ne [uint64]$expected[$key]) {
+            Stop-PrivateRoleSnapshot ($CodePrefix + '_' + $key)
+        }
+    }
+}
+
+function Assert-FqaDurableRecoveryEmpty {
+    # The credential recovery plan is outside MariaDB, so both Capture phases
+    # independently prove the dedicated, non-web-served volume is empty. The
+    # exact owner/group/mode contract prevents a substituted host directory
+    # from being accepted as an empty recovery volume.
+    $script = @'
+set -eu
+root=/var/lib/class-archive-private-e2e
+mountpoint -q -- "$root"
+[ ! -L "$root" ]
+[ "$(stat -c '%U:%G:%a' -- "$root")" = 'nginx:nginx:700' ]
+[ -z "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)" ]
+printf 'FQA_DURABLE_RECOVERY=EMPTY\n'
+'@
+    $lines = Invoke-PiwigoComposeCapture @(
+        'exec', '-T', '--user', 'root', 'piwigo', 'sh', '-eu', '-c', $script
+    ) 'fqa_durable_recovery_probe_failed'
+    if ($lines.Count -ne 1 -or $lines[0] -ne 'FQA_DURABLE_RECOVERY=EMPTY') {
+        Stop-PrivateRoleSnapshot 'fqa_durable_recovery_not_empty'
+    }
+}
+
 function ConvertTo-StrictState([string[]]$Lines) {
     $counts = [ordered]@{}
     $semantic = [ordered]@{}
@@ -280,6 +345,7 @@ function ConvertTo-StrictState([string[]]$Lines) {
         [uint64]$counts.migration_ledger_rows -ne $expectedSchema) {
         Stop-PrivateRoleSnapshot 'database_schema_not_current_v18'
     }
+    Assert-FqaTerminalCounts $counts 'state_fqa_terminal_invalid'
     return @{ Counts = $counts; Semantic = $semantic }
 }
 
@@ -306,10 +372,10 @@ base=${ci%migration}; pwg=${base%class_identity_}; [ "$pwg" != "$base" ] || exit
 schema_version=$(q "SELECT COALESCE(MAX(version),0) FROM ${base}migration;")
 [ "$schema_version" = "$CLASS_ARCHIVE_EXPECTED_SCHEMA" ] || exit 85
 table_exists() { q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$1';"; }
-for suffix in migration identity seat account principal operation token submission archive_image photo photo_source photo_source_presentation photo_duplicate person person_merge person_photo_rule album spotlight auto_collection auto_collection_photo photo_comment audit_event ai_asset_index ai_index_job native_source_epoch collection_snapshot collection_snapshot_item collection_snapshot_pointer collection_pin collection_feedback collection_maintenance_state batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item spotlight_rotation_state role_group; do
+for suffix in migration identity seat account principal operation token submission archive_image photo photo_source photo_source_presentation photo_duplicate person person_merge person_photo_rule album spotlight auto_collection auto_collection_photo photo_comment audit_event ai_asset_index ai_index_job native_source_epoch collection_snapshot collection_snapshot_item collection_snapshot_pointer collection_pin collection_feedback collection_maintenance_state batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item spotlight_rotation_state role_group private_e2e_fixture_lease; do
   [ "$(table_exists "${base}${suffix}")" = 1 ] || exit 86
 done
-for suffix in images categories image_category users user_infos groups user_group group_access user_access; do
+for suffix in images categories image_category users user_infos groups user_group group_access user_access sessions user_auth_keys; do
   [ "$(table_exists "${pwg}${suffix}")" = 1 ] || exit 87
 done
 audit_rows=$(q "SELECT COUNT(*) FROM ${base}audit_event;")
@@ -358,11 +424,26 @@ printf 'count.ai_asset_index=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_asset_in
 printf 'count.ai_jobs_total=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_index_job;")"
 printf 'count.ai_jobs_open=%s\n' "$(q "SELECT COUNT(*) FROM ${base}ai_index_job WHERE state IN ('PENDING','RUNNING','UNAVAILABLE');")"
 printf 'count.projection_epoch_rows=%s\n' "$(q "SELECT (SELECT COUNT(*) FROM ${base}native_source_epoch)+(SELECT COUNT(*) FROM ${base}collection_snapshot_pointer)+(SELECT COUNT(*) FROM ${base}collection_maintenance_state)+(SELECT COUNT(*) FROM ${base}spotlight_rotation_state);")"
+printf 'count.fqa_identity_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}identity WHERE roster_code='FQA-C-99CA3B3B6AF1';")"
+printf 'count.fqa_frozen_identity_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}identity WHERE roster_code='FQA-C-99CA3B3B6AF1' AND identity_type='CLASSMATE' AND state='FROZEN';")"
+printf 'count.fqa_account_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}account a JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1';")"
+printf 'count.fqa_current_account_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}account a JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' AND a.current_marker=1;")"
+printf 'count.fqa_principal_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1';")"
+printf 'count.fqa_seat_principal_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' AND p.principal_type='SEAT_ACCOUNT';")"
+printf 'count.fqa_valid_binding_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}seat s JOIN ${base}identity i ON i.id=s.identity_id JOIN ${base}account a ON a.seat_id=s.id AND a.current_marker=1 JOIN ${base}principal p ON p.account_id=a.id AND p.principal_type='SEAT_ACCOUNT' JOIN ${pwg}users u ON u.id=p.piwigo_user_id JOIN ${pwg}user_infos ui ON ui.user_id=u.id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' AND s.state='ACTIVE' AND a.state='ACTIVE' AND p.state='ACTIVE' AND ui.status='normal' AND u.username=a.requested_username AND ((s.seat_type='CLASSMATE' AND a.requested_username='fqa_99ca3b3b6af1_classmate') OR (s.seat_type='FAMILY' AND a.requested_username='fqa_99ca3b3b6af1_family') OR (s.seat_type='ANONYMOUS' AND a.requested_username REGEXP '^anon_[a-f0-9]{20}$')) AND (SELECT COUNT(*) FROM ${pwg}user_group ug WHERE ug.user_id=p.piwigo_user_id)=1 AND (SELECT COUNT(*) FROM ${pwg}user_group ug JOIN ${pwg}groups g ON g.id=ug.group_id WHERE ug.user_id=p.piwigo_user_id AND g.name=s.seat_type)=1;")"
+printf 'count.fqa_disallowed_business_rows=%s\n' "$(q "SELECT (SELECT COUNT(*) FROM ${base}token t WHERE t.state='ISSUED' AND (t.seat_id IN (SELECT s.id FROM ${base}seat s JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1') OR t.principal_id IN (SELECT p.id FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1')))+(SELECT COUNT(*) FROM ${base}submission x JOIN ${base}identity i ON i.id=x.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1')+(SELECT COUNT(*) FROM ${base}collection_pin cp WHERE cp.state='ACTIVE' AND cp.principal_id IN (SELECT p.id FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1'))+(SELECT COUNT(*) FROM ${base}operation o JOIN ${base}identity i ON i.id=o.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' AND o.state<>'COMMITTED')+(SELECT COUNT(*) FROM ${base}photo_comment pc WHERE pc.state<>'DELETED' AND pc.author_principal_id IN (SELECT p.id FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1'));")"
+printf 'count.fqa_active_leases=%s\n' "$(q "SELECT COUNT(*) FROM ${base}private_e2e_fixture_lease l JOIN ${base}identity i ON i.id=l.resource_id WHERE l.resource_type='IDENTITY' AND i.roster_code='FQA-C-99CA3B3B6AF1' AND l.state='ACTIVE';")"
+printf 'count.fqa_conflict_leases=%s\n' "$(q "SELECT COUNT(*) FROM ${base}private_e2e_fixture_lease l JOIN ${base}identity i ON i.id=l.resource_id WHERE l.resource_type='IDENTITY' AND i.roster_code='FQA-C-99CA3B3B6AF1' AND l.state='CONFLICT';")"
+printf 'count.fqa_live_sessions=%s\n' "$(q "SELECT COUNT(*) FROM ${pwg}sessions ss WHERE EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' AND ss.data LIKE CONCAT('%pwg_uid|i:',p.piwigo_user_id,';%'));")"
+printf 'count.fqa_live_auth_keys=%s\n' "$(q "SELECT COUNT(*) FROM ${pwg}user_auth_keys k WHERE k.user_id IN (SELECT p.piwigo_user_id FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1') AND k.revoked_on IS NULL AND k.expired_on>UTC_TIMESTAMP();")"
+printf 'count.fqa_valid_password_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${pwg}users u WHERE u.id IN (SELECT p.piwigo_user_id FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id AND a.current_marker=1 JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1') AND ((CHAR_LENGTH(u.password)=34 AND u.password REGEXP '^[$]P[$][./0-9A-Za-z]{31}$') OR (CHAR_LENGTH(u.password)=60 AND u.password REGEXP '^[$]2[aby][$][0-9]{2}[$][./0-9A-Za-z]{53}$') OR (CHAR_LENGTH(u.password) BETWEEN 90 AND 255 AND u.password REGEXP '^[$]argon2(id|i|d)[$]v=[0-9]+[$]m=[0-9]+,t=[0-9]+,p=[0-9]+[$][A-Za-z0-9+/]+[$][A-Za-z0-9+/]+$'));")"
+printf 'count.fqa_system_admin_rows=%s\n' "$(q "SELECT COUNT(*) FROM ${base}principal p JOIN ${pwg}user_infos ui ON ui.user_id=p.piwigo_user_id WHERE p.principal_type='SYSTEM_ACCOUNT' AND p.system_role='SYSTEM_ADMIN' AND p.account_id IS NULL AND p.state='ACTIVE' AND ui.status IN ('admin','webmaster');")"
 fingerprint schema_ledger "SELECT * FROM ${base}migration ORDER BY version;"
 fingerprint canonical_media "SELECT 'submission'; SELECT * FROM ${base}submission ORDER BY id; SELECT 'photo'; SELECT * FROM ${base}photo ORDER BY class_photo_id; SELECT 'photo_source'; SELECT * FROM ${base}photo_source ORDER BY id; SELECT 'photo_source_presentation'; SELECT * FROM ${base}photo_source_presentation ORDER BY photo_source_id; SELECT 'photo_duplicate'; SELECT * FROM ${base}photo_duplicate ORDER BY duplicate_id; SELECT 'private_library_collection'; SELECT * FROM ${base}private_library_collection ORDER BY source_collection_id; SELECT 'private_library_folder'; SELECT * FROM ${base}private_library_folder ORDER BY folder_id; SELECT 'private_library_import'; SELECT * FROM ${base}private_library_import ORDER BY import_id; SELECT 'private_library_import_item'; SELECT * FROM ${base}private_library_import_item ORDER BY import_id,item_digest; SELECT 'piwigo_images'; SELECT * FROM ${pwg}images ORDER BY id;"
 fingerprint album_membership "SELECT 'archive_image'; SELECT * FROM ${base}archive_image ORDER BY id; SELECT 'album'; SELECT * FROM ${base}album ORDER BY class_album_id; SELECT 'batch_operation'; SELECT * FROM ${base}batch_operation ORDER BY batch_id; SELECT 'batch_operation_item'; SELECT * FROM ${base}batch_operation_item ORDER BY batch_id,id; SELECT 'categories'; SELECT * FROM ${pwg}categories ORDER BY id; SELECT 'image_category'; SELECT * FROM ${pwg}image_category ORDER BY image_id,category_id;"
 fingerprint comments "SELECT * FROM ${base}photo_comment ORDER BY created_at,comment_id;"
-fingerprint identity_security "SELECT 'identity'; SELECT * FROM ${base}identity ORDER BY id; SELECT 'seat'; SELECT * FROM ${base}seat ORDER BY id; SELECT 'account'; SELECT * FROM ${base}account ORDER BY id; SELECT 'principal'; SELECT * FROM ${base}principal ORDER BY id; SELECT 'operation'; SELECT * FROM ${base}operation ORDER BY id; SELECT 'token'; SELECT * FROM ${base}token ORDER BY id; SELECT 'role_group'; SELECT * FROM ${base}role_group ORDER BY id; SELECT 'pwg_users'; SELECT * FROM ${pwg}users ORDER BY id; SELECT 'pwg_user_infos'; SELECT * FROM ${pwg}user_infos ORDER BY user_id; SELECT 'pwg_groups'; SELECT * FROM ${pwg}groups ORDER BY id; SELECT 'pwg_user_group'; SELECT * FROM ${pwg}user_group ORDER BY user_id,group_id; SELECT 'pwg_group_access'; SELECT * FROM ${pwg}group_access ORDER BY group_id,cat_id; SELECT 'pwg_user_access'; SELECT * FROM ${pwg}user_access ORDER BY user_id,cat_id;"
+fingerprint identity_security "SELECT 'identity_non_fqa'; SELECT * FROM ${base}identity WHERE roster_code<>'FQA-C-99CA3B3B6AF1' ORDER BY id; SELECT 'seat_non_fqa'; SELECT s.* FROM ${base}seat s WHERE NOT EXISTS (SELECT 1 FROM ${base}identity i WHERE i.id=s.identity_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY s.id; SELECT 'account_non_fqa'; SELECT a.* FROM ${base}account a WHERE NOT EXISTS (SELECT 1 FROM ${base}seat s JOIN ${base}identity i ON i.id=s.identity_id WHERE s.id=a.seat_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY a.id; SELECT 'principal_non_fqa'; SELECT p.* FROM ${base}principal p WHERE p.account_id IS NULL OR NOT EXISTS (SELECT 1 FROM ${base}account a JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE a.id=p.account_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY p.id; SELECT 'operation'; SELECT * FROM ${base}operation ORDER BY id; SELECT 'token'; SELECT * FROM ${base}token ORDER BY id; SELECT 'role_group'; SELECT * FROM ${base}role_group ORDER BY id; SELECT 'pwg_users_non_fqa'; SELECT u.* FROM ${pwg}users u WHERE NOT EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE p.piwigo_user_id=u.id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY u.id; SELECT 'pwg_user_infos_non_fqa'; SELECT ui.* FROM ${pwg}user_infos ui WHERE NOT EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE p.piwigo_user_id=ui.user_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY ui.user_id; SELECT 'pwg_groups'; SELECT * FROM ${pwg}groups ORDER BY id; SELECT 'pwg_user_group_non_fqa'; SELECT ug.* FROM ${pwg}user_group ug WHERE NOT EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE p.piwigo_user_id=ug.user_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY ug.user_id,ug.group_id; SELECT 'pwg_group_access'; SELECT * FROM ${pwg}group_access ORDER BY group_id,cat_id; SELECT 'pwg_user_access_non_fqa'; SELECT ua.* FROM ${pwg}user_access ua WHERE NOT EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE p.piwigo_user_id=ua.user_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY ua.user_id,ua.cat_id; SELECT 'pwg_user_auth_keys_non_fqa'; SELECT k.* FROM ${pwg}user_auth_keys k WHERE NOT EXISTS (SELECT 1 FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE p.piwigo_user_id=k.user_id AND i.roster_code='FQA-C-99CA3B3B6AF1') ORDER BY k.auth_key_id;"
+fingerprint fqa_security_equivalence "SELECT 'policy','FQA_SAFE_TERMINAL_EQUIVALENCE_V1'; SELECT 'identity'; SELECT id,roster_code,identity_type,real_name,state,seat_template_version,created_at,retired_at FROM ${base}identity WHERE roster_code='FQA-C-99CA3B3B6AF1' ORDER BY id; SELECT 'seat'; SELECT s.* FROM ${base}seat s JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY s.id; SELECT 'account'; SELECT a.* FROM ${base}account a JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY a.id; SELECT 'principal'; SELECT p.id,p.principal_type,p.system_role,p.account_id,p.piwigo_user_id,p.state,p.created_at,p.frozen_at,p.disabled_at FROM ${base}principal p JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY p.id; SELECT 'pwg_users'; SELECT u.id,u.username,u.mail_address FROM ${pwg}users u JOIN ${base}principal p ON p.piwigo_user_id=u.id JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY u.id; SELECT 'pwg_user_infos'; SELECT ui.user_id,ui.nb_image_page,ui.status,ui.language,ui.expand,ui.show_nb_comments,ui.show_nb_hits,ui.recent_period,ui.theme,ui.registration_date,ui.enabled_high,ui.level,ui.activation_key,ui.activation_key_expire,ui.preferences FROM ${pwg}user_infos ui JOIN ${base}principal p ON p.piwigo_user_id=ui.user_id JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY ui.user_id; SELECT 'pwg_user_group'; SELECT ug.* FROM ${pwg}user_group ug JOIN ${base}principal p ON p.piwigo_user_id=ug.user_id JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY ug.user_id,ug.group_id; SELECT 'pwg_user_access'; SELECT ua.* FROM ${pwg}user_access ua JOIN ${base}principal p ON p.piwigo_user_id=ua.user_id JOIN ${base}account a ON a.id=p.account_id JOIN ${base}seat s ON s.id=a.seat_id JOIN ${base}identity i ON i.id=s.identity_id WHERE i.roster_code='FQA-C-99CA3B3B6AF1' ORDER BY ua.user_id,ua.cat_id;"
 fingerprint submissions "SELECT * FROM ${base}submission ORDER BY id;"
 fingerprint person_curation "SELECT 'person'; SELECT * FROM ${base}person ORDER BY class_person_id; SELECT 'person_merge'; SELECT * FROM ${base}person_merge ORDER BY merge_id; SELECT 'person_photo_rule'; SELECT * FROM ${base}person_photo_rule ORDER BY class_person_id,class_photo_id;"
 fingerprint spotlight_memories_pins "SELECT 'spotlight'; SELECT * FROM ${base}spotlight ORDER BY spotlight_id; SELECT 'auto_collection'; SELECT * FROM ${base}auto_collection ORDER BY auto_collection_id; SELECT 'auto_collection_photo'; SELECT * FROM ${base}auto_collection_photo ORDER BY auto_collection_id,ordinal,class_photo_id; SELECT 'collection_pin'; SELECT * FROM ${base}collection_pin ORDER BY pin_id; SELECT 'collection_feedback'; SELECT * FROM ${base}collection_feedback ORDER BY feedback_id;"
@@ -455,7 +536,7 @@ function New-SnapshotManifest([string]$Bundle, [hashtable]$State, [string]$Sourc
     $dumpPath = Join-Path $Bundle 'database.sql.gz'
     $dump = Get-Item -LiteralPath $dumpPath -Force
     $record = [ordered]@{
-        format = 1
+        format = $snapshotFormat
         scope = 'PRIVATE_ROLE_E2E_OWNER_DB_ONLY_ROLLBACK'
         phase = $CapturePhase
         created_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -478,6 +559,15 @@ function New-SnapshotManifest([string]$Bundle, [hashtable]$State, [string]$Sourc
             preexisting_rows = $AuditPrefixRows
             preexisting_prefix_sha256 = [string]$State.Semantic.audit_preexisting_prefix
             high_water_mark = 'OPAQUE_SHA256_ONLY'
+        }
+        fqa_security_policy = [ordered]@{
+            version = 1
+            roster = $fqaRoster
+            comparison = $fqaEquivalencePolicy
+            non_fqa_identity_security = 'BYTE_EXACT_SHA256'
+            terminal_counts = 'EXACT_REQUIRED_VALUES'
+            durable_recovery_empty = $true
+            allowed_volatile = $fqaAllowedVolatile
         }
         excluded = @(
             'CANONICAL_ORIGINALS', 'DERIVATIVES', 'SOURCE_DIRECTORIES',
@@ -536,7 +626,7 @@ function Read-SnapshotBundle([string]$BundlePhase, [string]$ExpectedManifestSha2
     if ($seen.Count -ne 4) { Stop-PrivateRoleSnapshot 'checksum_set_invalid' }
     try { $document = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-PrivateRoleSnapshot 'manifest_json_invalid' }
-    if ([int]$document.format -ne 1 -or [string]$document.scope -ne 'PRIVATE_ROLE_E2E_OWNER_DB_ONLY_ROLLBACK' -or
+    if ([int]$document.format -ne $snapshotFormat -or [string]$document.scope -ne 'PRIVATE_ROLE_E2E_OWNER_DB_ONLY_ROLLBACK' -or
         [string]$document.phase -ne $BundlePhase -or [int]$document.schema_version -ne $expectedSchema -or
         [string]$document.run_marker_sha256 -ne (Get-RunMarkerDigest) -or [string]$document.privacy -ne $privacyMarker -or
         [string]$document.media -ne 'NOT_INCLUDED' -or [bool]$document.disaster_backup -ne $false) {
@@ -555,6 +645,16 @@ function Read-SnapshotBundle([string]$BundlePhase, [string]$ExpectedManifestSha2
         [string]$document.audit_policy.high_water_mark -ne 'OPAQUE_SHA256_ONLY') {
         Stop-PrivateRoleSnapshot 'manifest_audit_or_source_binding_invalid'
     }
+    $manifestAllowedVolatile = @($document.fqa_security_policy.allowed_volatile | ForEach-Object { [string]$_ })
+    if ([int]$document.fqa_security_policy.version -ne 1 -or
+        [string]$document.fqa_security_policy.roster -ne $fqaRoster -or
+        [string]$document.fqa_security_policy.comparison -ne $fqaEquivalencePolicy -or
+        [string]$document.fqa_security_policy.non_fqa_identity_security -ne 'BYTE_EXACT_SHA256' -or
+        [string]$document.fqa_security_policy.terminal_counts -ne 'EXACT_REQUIRED_VALUES' -or
+        [bool]$document.fqa_security_policy.durable_recovery_empty -ne $true -or
+        @(Compare-Object $fqaAllowedVolatile $manifestAllowedVolatile).Count -ne 0) {
+        Stop-PrivateRoleSnapshot 'manifest_fqa_security_policy_invalid'
+    }
     $counts = [ordered]@{}
     foreach ($property in $document.counts.PSObject.Properties) {
         if ($property.Name -notmatch '^[a-z_]+$' -or ([string]$property.Value) -notmatch '^[0-9]+$') { Stop-PrivateRoleSnapshot 'manifest_count_invalid' }
@@ -569,6 +669,7 @@ function Read-SnapshotBundle([string]$BundlePhase, [string]$ExpectedManifestSha2
         $semantic.Count -ne $semanticKeys.Count -or @($semanticKeys | Where-Object { -not $semantic.Contains($_) }).Count -ne 0) {
         Stop-PrivateRoleSnapshot 'manifest_state_key_set_invalid'
     }
+    Assert-FqaTerminalCounts $counts 'manifest_fqa_terminal_invalid'
     return @{ Path = $bundle; ManifestSha256 = $actualManifestSha; Document = $document; Counts = $counts; Semantic = $semantic }
 }
 
@@ -647,6 +748,8 @@ try {
     Assert-CleanCheckout
     $script:snapshotStage = 'owner_runtime'
     Assert-OwnerRuntimeProof
+    $script:snapshotStage = 'fqa_recovery_before'
+    Assert-FqaDurableRecoveryEmpty
     $preBundle = $null
     $auditPrefixRows = 'FULL'
     if ($Phase -eq 'post') {
@@ -669,6 +772,8 @@ try {
         New-OwnerDatabaseDump (Join-Path $partial 'database.sql.gz')
         $script:snapshotStage = 'state_after'
         $stateAfter = Get-OwnerBusinessState $auditPrefixRows
+        $script:snapshotStage = 'fqa_recovery_after'
+        Assert-FqaDurableRecoveryEmpty
         $script:snapshotStage = 'state_consistency'
         Assert-StateEqual $stateBefore $stateAfter 'snapshot_consistency_drift'
         if ($Phase -eq 'pre' -and [string]$stateAfter.Semantic.audit_full -ne [string]$stateAfter.Semantic.audit_preexisting_prefix) {

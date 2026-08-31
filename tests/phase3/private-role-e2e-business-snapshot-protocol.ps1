@@ -65,7 +65,14 @@ foreach ($count in @(
     'spotlights', 'memories', 'active_pins', 'people_mappings',
     'identities', 'seats', 'accounts', 'principals',
     'person_merges', 'person_rules', 'claims', 'invitations', 'submissions',
-    'audit_events', 'ai_jobs_total', 'ai_jobs_open', 'projection_epoch_rows'
+    'audit_events', 'ai_jobs_total', 'ai_jobs_open', 'projection_epoch_rows',
+    'fqa_identity_rows', 'fqa_frozen_identity_rows',
+    'fqa_account_rows', 'fqa_current_account_rows',
+    'fqa_principal_rows', 'fqa_seat_principal_rows',
+    'fqa_valid_binding_rows', 'fqa_disallowed_business_rows',
+    'fqa_active_leases', 'fqa_conflict_leases',
+    'fqa_live_sessions', 'fqa_live_auth_keys',
+    'fqa_valid_password_rows', 'fqa_system_admin_rows'
 )) {
     Assert-Protocol ($source.Contains("'$count'") -and $source.Contains("count.$count=")) ('snapshot_required_count_missing_' + $count)
 }
@@ -75,7 +82,7 @@ foreach ($count in @(
 Assert-Protocol ($source.Contains('q "$sql" > "$tmp"') -and $source.Contains('sha256sum "$tmp"')) 'snapshot_container_local_fingerprint_missing'
 foreach ($domain in @(
     'schema_ledger', 'canonical_media', 'album_membership', 'comments',
-    'identity_security', 'submissions', 'person_curation',
+    'identity_security', 'fqa_security_equivalence', 'submissions', 'person_curation',
     'spotlight_memories_pins', 'ai_projection_control',
     'audit_full', 'audit_preexisting_prefix', 'audit_high_water_opaque'
 )) {
@@ -83,6 +90,24 @@ foreach ($domain in @(
 }
 Assert-Protocol ($source.Contains('APPEND_ONLY_PREFIX_PRESERVED') -and $source.Contains('audit_rows_deleted') -and $source.Contains('audit_preexisting_prefix_changed')) 'snapshot_audit_append_only_guard_missing'
 Assert-Protocol ($source.Contains('SELECT * FROM ${base}audit_event ORDER BY id LIMIT ${CLASS_ARCHIVE_AUDIT_PREFIX_ROWS}') -and $source.Contains('SELECT COALESCE(MAX(id),0) FROM ${base}audit_event')) 'snapshot_audit_prefix_or_opaque_high_water_missing'
+
+# The only normalized security exception is the fixed, already-synthetic FQA
+# aggregate. Non-FQA rows remain byte-exact; the FQA projection omits only
+# lease-owned verifier/revision/activity fields and requires a fully closed,
+# frozen terminal state.
+Assert-Protocol ($source.Contains("`$snapshotFormat = 2") -and $source.Contains("`$fqaRoster = 'FQA-C-99CA3B3B6AF1'") -and $source.Contains("`$fqaEquivalencePolicy = 'FQA_SAFE_TERMINAL_EQUIVALENCE_V1'")) 'snapshot_fqa_policy_not_versioned_or_pinned'
+Assert-Protocol ($source.Contains("SELECT * FROM `${base}identity WHERE roster_code<>'FQA-C-99CA3B3B6AF1'") -and $source.Contains('fingerprint identity_security "SELECT ''identity_non_fqa'';')) 'snapshot_non_fqa_identity_security_not_exact'
+Assert-Protocol ($source.Contains('SELECT id,roster_code,identity_type,real_name,state,seat_template_version,created_at,retired_at') -and $source.Contains('SELECT p.id,p.principal_type,p.system_role,p.account_id,p.piwigo_user_id,p.state,p.created_at,p.frozen_at,p.disabled_at')) 'snapshot_fqa_normalized_topology_invalid'
+$fqaFingerprintLines = @($source -split "`r?`n" | Where-Object { $_.StartsWith('fingerprint fqa_security_equivalence ') })
+Assert-Protocol ($fqaFingerprintLines.Count -eq 1) 'snapshot_fqa_security_equivalence_fingerprint_not_unique'
+$fqaFingerprintLine = [string]$fqaFingerprintLines[0]
+foreach ($forbiddenFqaField in @('SELECT * FROM ${base}identity', 'SELECT p.* FROM ${base}principal', 'i.lock_version', 'p.auth_epoch', 'u.password')) {
+    Assert-Protocol (-not $fqaFingerprintLine.Contains($forbiddenFqaField)) ('snapshot_fqa_volatile_field_not_excluded_' + ($forbiddenFqaField -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+}
+Assert-Protocol ($source.Contains('state_fqa_terminal_invalid') -and $source.Contains('manifest_fqa_terminal_invalid') -and $source.Contains('fqa_active_leases = [uint64]0') -and $source.Contains('fqa_conflict_leases = [uint64]0') -and $source.Contains('fqa_live_sessions = [uint64]0') -and $source.Contains('fqa_live_auth_keys = [uint64]0')) 'snapshot_fqa_terminal_fail_closed_missing'
+Assert-Protocol ($source.Contains("u.password REGEXP '^[$]P[$][./0-9A-Za-z]{31}$'") -and $source.Contains("u.password REGEXP '^[$]2[aby][$][0-9]{2}[$][./0-9A-Za-z]{53}$'") -and $source.Contains("u.password REGEXP '^[$]argon2(id|i|d)")) 'snapshot_fqa_password_hash_format_gate_missing'
+Assert-Protocol ($source.Contains("mountpoint -q -- `"`$root`"") -and $source.Contains("FQA_DURABLE_RECOVERY=EMPTY") -and $source.Contains('Assert-FqaDurableRecoveryEmpty') -and $source.Contains("durable_recovery_empty = `$true")) 'snapshot_fqa_durable_recovery_gate_missing'
+Assert-Protocol ($source.Contains("non_fqa_identity_security = 'BYTE_EXACT_SHA256'") -and $source.Contains('manifest_fqa_security_policy_invalid') -and $source.Contains('Compare-Object $fqaAllowedVolatile $manifestAllowedVolatile')) 'snapshot_fqa_manifest_policy_binding_missing'
 
 # SHA-256 binds dump, manifest, completion marker, and the compare inputs.
 foreach ($needle in @('MANIFEST.json', 'MANIFEST.sha256', 'SHA256SUMS', 'database.sql.gz', 'Get-FileHash', 'bundle_checksum_mismatch', 'ExpectedPreManifestSha256', 'ExpectedPostManifestSha256')) {

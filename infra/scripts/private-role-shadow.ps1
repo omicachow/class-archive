@@ -98,6 +98,44 @@ function Get-PropertyValue([object]$Object, [string]$Name) {
     return $property.Value
 }
 
+function Get-DockerInspectObject(
+    [ValidateSet('container', 'network', 'volume')][string]$Kind,
+    [string]$Id,
+    [string]$Code
+) {
+    if ([string]::IsNullOrWhiteSpace($Id) -or $Code -notmatch '^[a-z0-9_]{1,96}$') { Stop-Shadow 'inspect_arguments_invalid' }
+    $arguments = if ($Kind -eq 'container') { @('inspect', $Id) } else { @($Kind, 'inspect', $Id) }
+    $raw = @(Invoke-Docker $arguments $Code -Capture)
+    try {
+        $document = [string]::Join("`n", $raw)
+        $parsed = $document | ConvertFrom-Json -ErrorAction Stop
+        $objects = @($parsed)
+    }
+    catch { Stop-Shadow ($Code + '_json_invalid') }
+    finally {
+        $parsed = $null
+        $document = $null
+        $raw = $null
+    }
+    if ($objects.Count -ne 1 -or $null -eq $objects[0]) { Stop-Shadow ($Code + '_count_invalid') }
+    return $objects[0]
+}
+
+function Get-ShadowPiwigoRecoveryFingerprint([string]$Code) {
+    $container = Get-DockerInspectObject container ($piwigoProject + '-piwigo-1') $Code
+    $id = [string](Get-PropertyValue $container 'Id')
+    if ($id -notmatch '^[a-f0-9]{64}$') { Stop-Shadow $Code }
+    $mounts = @(Get-PropertyValue $container 'Mounts')
+    $recovery = @($mounts | Where-Object {
+        [string](Get-PropertyValue $_ 'Destination') -ceq '/var/lib/class-archive-private-e2e'
+    })
+    if ($recovery.Count -ne 1 -or
+        [string](Get-PropertyValue $recovery[0] 'Name') -cne 'class_archive_private_role_shadow_v1_private_e2e_recovery') {
+        Stop-Shadow $Code
+    }
+    return ($id + '|class_archive_private_role_shadow_v1_private_e2e_recovery')
+}
+
 function Get-RandomSecret([int]$Bytes = 48) {
     $buffer = New-Object byte[] $Bytes
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -370,10 +408,20 @@ function Assert-PortsFree {
 
 function Convert-CidrToRange([string]$Cidr) {
     $parts = $Cidr -split '/'; if ($parts.Count -ne 2) { Stop-Shadow 'cidr_invalid' }
-    $bytes = [Net.IPAddress]::Parse($parts[0]).GetAddressBytes(); [Array]::Reverse($bytes)
-    $ip = [BitConverter]::ToUInt32($bytes, 0); $prefix = [int]$parts[1]
-    $mask = if ($prefix -eq 0) { [uint32]0 } else { [uint32]([uint64]0xffffffff -shl (32 - $prefix)) }
-    $first = $ip -band $mask; $last = $first + ([uint32]::MaxValue - $mask)
+    if ($parts[0] -notmatch '^(?:\d{1,3}\.){3}\d{1,3}$' -or $parts[1] -notmatch '^(?:[0-9]|[12][0-9]|3[0-2])$') {
+        Stop-Shadow 'cidr_invalid'
+    }
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($parts[0], [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { Stop-Shadow 'cidr_invalid' }
+    $bytes = $address.GetAddressBytes(); [Array]::Reverse($bytes)
+    $ip = [uint64][BitConverter]::ToUInt32($bytes, 0); $prefix = [int]$parts[1]
+    $hostBits = 32 - $prefix
+    $hostMask = if ($hostBits -eq 32) { [uint64][uint32]::MaxValue }
+        elseif ($hostBits -eq 0) { [uint64]0 }
+        else { ([uint64]1 -shl $hostBits) - 1 }
+    $mask = [uint64][uint32]::MaxValue - $hostMask
+    $first = $ip -band $mask; $last = $first + $hostMask
     return @([uint64]$first, [uint64]$last)
 }
 
@@ -381,14 +429,18 @@ function Assert-NetworkRangesFree {
     $reserved = @('10.180.0.0/24', '10.180.1.0/24', '10.180.2.0/24', '10.180.3.0/24', '10.180.4.0/24')
     $ids = @(Invoke-Docker @('network', 'ls', '-q') 'network_list_failed' -Capture | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     foreach ($id in $ids) {
-        $name = @(Invoke-Docker @('network', 'inspect', '--format', '{{.Name}}', $id) 'network_inspect_failed' -Capture)[0].Trim()
+        $network = Get-DockerInspectObject network ([string]$id).Trim() 'network_inspect_failed'
+        $name = [string](Get-PropertyValue $network 'Name')
+        if ([string]::IsNullOrWhiteSpace($name)) { Stop-Shadow 'network_identity_invalid' }
         if ($name -like 'class_archive_private_role_shadow_v1_*') {
-            $identity = @(Invoke-Docker @('network', 'inspect', '--format', '{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.shadow-version"}}', $id) 'shadow_network_identity_failed' -Capture)
-            if ($identity.Count -ne 1 -or ([string]$identity[0]).Trim() -ne 'private-role-shadow|1') { Stop-Shadow 'shadow_network_prefix_unlabelled' }
+            $labels = Get-PropertyValue $network 'Labels'
+            if ([string](Get-PropertyValue $labels 'com.classarchive.scope') -ne 'private-role-shadow' -or
+                [string](Get-PropertyValue $labels 'com.classarchive.shadow-version') -ne '1') { Stop-Shadow 'shadow_network_prefix_unlabelled' }
             continue
         }
-        $cidrs = @(Invoke-Docker @('network', 'inspect', '--format', '{{range .IPAM.Config}}{{println .Subnet}}{{end}}', $id) 'network_inspect_failed' -Capture)
-        foreach ($existing in $cidrs) {
+        $ipam = Get-PropertyValue $network 'IPAM'
+        foreach ($configuration in @((Get-PropertyValue $ipam 'Config'))) {
+            $existing = [string](Get-PropertyValue $configuration 'Subnet')
             if ([string]::IsNullOrWhiteSpace($existing) -or $existing -notmatch '^\d+\.\d+\.\d+\.\d+/\d+$') { continue }
             $left = Convert-CidrToRange $existing.Trim()
             foreach ($candidate in $reserved) {
@@ -400,18 +452,102 @@ function Assert-NetworkRangesFree {
 }
 
 function Get-ProtectedRuntimeFingerprint {
-    $ids = @(Invoke-Docker @('ps', '-aq') 'container_list_failed' -Capture | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $records = @()
+    $ids = @(Invoke-Docker @('ps', '-aq', '--no-trunc') 'container_list_failed' -Capture |
+        ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $requested = @{}
     foreach ($id in $ids) {
-        $identity = @(Invoke-Docker @('inspect', '--format', '{{index .Config.Labels "com.classarchive.scope"}}|{{.Id}}|{{.State.Running}}|{{.State.StartedAt}}', $id) 'container_fingerprint_failed' -Capture)
-        if ($identity.Count -ne 1) { Stop-Shadow 'container_fingerprint_invalid' }
-        if (([string]$identity[0]).StartsWith($scope + '|', [StringComparison]::Ordinal)) { continue }
-        $mounts = @(Invoke-Docker @('inspect', '--format', '{{range .Mounts}}{{println .Type "|" .Name "|" .Source "|" .Destination "|" .RW}}{{end}}', $id) 'container_mount_fingerprint_failed' -Capture |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object)
-        $networks = @(Invoke-Docker @('inspect', '--format', '{{range $name,$network := .NetworkSettings.Networks}}{{println $name "|" $network.NetworkID "|" $network.IPAddress}}{{end}}', $id) 'container_network_fingerprint_failed' -Capture |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object)
-        $records += ([string]$identity[0] + '|mounts=' + ($mounts -join ';') + '|networks=' + ($networks -join ';'))
+        if ($id -notmatch '^[a-f0-9]{64}$' -or $requested.ContainsKey($id)) { Stop-Shadow 'container_list_invalid' }
+        $requested[$id] = $true
     }
+    if ($ids.Count -eq 0) { return '' }
+
+    # Windows PowerShell 5.1 strips the quotes from nested Go-template map
+    # indexes passed to native commands.  Inspect once as JSON instead: this
+    # avoids that parser boundary and sharply reduces the interval in which an
+    # unrelated short-lived container can disappear between list and inspect.
+    $raw = @()
+    foreach ($attempt in 1..2) {
+        try {
+            $raw = @(Invoke-Docker (@('inspect') + $ids) 'container_fingerprint_failed' -Capture)
+            break
+        }
+        catch {
+            if ($attempt -eq 2) { throw }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    try {
+        $document = [string]::Join("`n", $raw)
+        # Windows PowerShell 5.1 preserves a JSON top-level array as one
+        # pipeline object when ConvertFrom-Json is nested directly in @(...).
+        # Assign first so the following array expression enumerates its items.
+        $parsed = $document | ConvertFrom-Json -ErrorAction Stop
+        $containers = @($parsed)
+    }
+    catch { Stop-Shadow 'container_fingerprint_json_invalid' }
+    finally {
+        $parsed = $null
+        $document = $null
+        $raw = $null
+    }
+    if ($containers.Count -ne $ids.Count) { Stop-Shadow 'container_fingerprint_count_invalid' }
+
+    $records = @()
+    $seen = @{}
+    foreach ($container in $containers) {
+        $id = [string](Get-PropertyValue $container 'Id')
+        if ($id -notmatch '^[a-f0-9]{64}$' -or -not $requested.ContainsKey($id) -or $seen.ContainsKey($id)) {
+            Stop-Shadow 'container_fingerprint_id_set_invalid'
+        }
+        $seen[$id] = $true
+
+        $config = Get-PropertyValue $container 'Config'
+        $state = Get-PropertyValue $container 'State'
+        $runningProperty = if ($null -eq $state) { $null } else { $state.PSObject.Properties['Running'] }
+        $startedProperty = if ($null -eq $state) { $null } else { $state.PSObject.Properties['StartedAt'] }
+        if ($null -eq $config -or $null -eq $runningProperty -or $runningProperty.Value -isnot [bool] -or
+            $null -eq $startedProperty -or $null -eq $startedProperty.Value) {
+            Stop-Shadow 'container_fingerprint_state_invalid'
+        }
+        $containerScope = [string](Get-PropertyValue (Get-PropertyValue $config 'Labels') 'com.classarchive.scope')
+        if ([string]::Equals($containerScope, $scope, [StringComparison]::Ordinal)) { continue }
+
+        $mounts = @()
+        foreach ($mount in @((Get-PropertyValue $container 'Mounts'))) {
+            $rwProperty = if ($null -eq $mount) { $null } else { $mount.PSObject.Properties['RW'] }
+            $type = [string](Get-PropertyValue $mount 'Type')
+            $name = [string](Get-PropertyValue $mount 'Name')
+            $source = [string](Get-PropertyValue $mount 'Source')
+            $destination = [string](Get-PropertyValue $mount 'Destination')
+            if ([string]::IsNullOrWhiteSpace($type) -or [string]::IsNullOrWhiteSpace($source) -or
+                [string]::IsNullOrWhiteSpace($destination) -or $null -eq $rwProperty -or $rwProperty.Value -isnot [bool]) {
+                Stop-Shadow 'container_fingerprint_mount_invalid'
+            }
+            $rw = if ([bool]$rwProperty.Value) { 'true' } else { 'false' }
+            $mounts += ($type + '|' + $name + '|' + $source + '|' + $destination + '|' + $rw)
+        }
+
+        $networks = @()
+        $networkSettings = Get-PropertyValue $container 'NetworkSettings'
+        $networkMap = Get-PropertyValue $networkSettings 'Networks'
+        if ($null -ne $networkMap) {
+            foreach ($property in $networkMap.PSObject.Properties) {
+                $network = $property.Value
+                $networkIdProperty = if ($null -eq $network) { $null } else { $network.PSObject.Properties['NetworkID'] }
+                $ipProperty = if ($null -eq $network) { $null } else { $network.PSObject.Properties['IPAddress'] }
+                if ([string]::IsNullOrWhiteSpace([string]$property.Name) -or $null -eq $networkIdProperty -or
+                    $null -eq $networkIdProperty.Value -or $null -eq $ipProperty -or $null -eq $ipProperty.Value) {
+                    Stop-Shadow 'container_fingerprint_network_invalid'
+                }
+                $networks += ([string]$property.Name + '|' + [string]$networkIdProperty.Value + '|' + [string]$ipProperty.Value)
+            }
+        }
+
+        $running = if ([bool]$runningProperty.Value) { 'true' } else { 'false' }
+        $identity = $containerScope + '|' + $id + '|' + $running + '|' + [string]$startedProperty.Value
+        $records += ($identity + '|mounts=' + (($mounts | Sort-Object) -join ';') + '|networks=' + (($networks | Sort-Object) -join ';'))
+    }
+    if ($seen.Count -ne $requested.Count) { Stop-Shadow 'container_fingerprint_id_set_invalid' }
     return (($records | Sort-Object) -join "`n")
 }
 
@@ -427,8 +563,13 @@ function New-ShadowVolume([string]$Name, [string]$Project, [string]$Logical) {
             '--label', ('com.docker.compose.project=' + $Project), '--label', ('com.docker.compose.volume=' + $Logical),
             '--label', ('com.classarchive.scope=' + $scope), '--label', 'com.classarchive.shadow-version=1', $Name) 'volume_create_failed')
     }
-    $actual = @(Invoke-Docker @('volume', 'inspect', '--format', '{{.Name}}|{{.Driver}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.shadow-version"}}', $Name) 'volume_identity_failed' -Capture)
-    if ($actual.Count -ne 1 -or ([string]$actual[0]).Trim() -ne "$Name|local|$Project|$Logical|$scope|1") { Stop-Shadow 'volume_identity_invalid' }
+    $volume = Get-DockerInspectObject volume $Name 'volume_identity_failed'
+    $labels = Get-PropertyValue $volume 'Labels'
+    if ([string](Get-PropertyValue $volume 'Name') -cne $Name -or [string](Get-PropertyValue $volume 'Driver') -cne 'local' -or
+        [string](Get-PropertyValue $labels 'com.docker.compose.project') -cne $Project -or
+        [string](Get-PropertyValue $labels 'com.docker.compose.volume') -cne $Logical -or
+        [string](Get-PropertyValue $labels 'com.classarchive.scope') -cne $scope -or
+        [string](Get-PropertyValue $labels 'com.classarchive.shadow-version') -cne '1') { Stop-Shadow 'volume_identity_invalid' }
 }
 
 function Initialize-ShadowVolumes {
@@ -471,13 +612,14 @@ function Invoke-CloneHelper([string]$HelperAction) {
 }
 
 function Assert-ExactCleanupScope([ValidateSet('container', 'network', 'volume')][string]$Kind, [string]$Id) {
-    if ($Kind -eq 'volume') {
-        $raw = @(Invoke-Docker @('volume', 'inspect', '--format', '{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.shadow-version"}}|{{.Name}}', $Id) 'cleanup_volume_inspect_failed' -Capture)
-    }
-    else {
-        $raw = @(Invoke-Docker @($Kind, 'inspect', '--format', '{{index .Labels "com.classarchive.scope"}}|{{index .Labels "com.classarchive.shadow-version"}}|{{.Name}}', $Id) ('cleanup_' + $Kind + '_inspect_failed') -Capture)
-    }
-    if ($raw.Count -ne 1 -or ([string]$raw[0]).Trim() -notmatch '^private-role-shadow\|1\|/?class_archive_private_role_shadow_v1_[A-Za-z0-9_.-]+$') {
+    $code = 'cleanup_' + $Kind + '_inspect_failed'
+    $resource = Get-DockerInspectObject $Kind $Id $code
+    $labels = if ($Kind -eq 'container') { Get-PropertyValue (Get-PropertyValue $resource 'Config') 'Labels' }
+        else { Get-PropertyValue $resource 'Labels' }
+    $resourceName = [string](Get-PropertyValue $resource 'Name')
+    if ([string](Get-PropertyValue $labels 'com.classarchive.scope') -cne 'private-role-shadow' -or
+        [string](Get-PropertyValue $labels 'com.classarchive.shadow-version') -cne '1' -or
+        $resourceName -notmatch '^/?class_archive_private_role_shadow_v1_[A-Za-z0-9_.-]+$') {
         Stop-Shadow ('cleanup_' + $Kind + '_scope_invalid')
     }
 }
@@ -591,18 +733,12 @@ try {
     }
 
     if ($Action -eq 'recreate-piwigo') {
-        $old = @(Invoke-Docker @('inspect', '--format', '{{.Id}}|{{range .Mounts}}{{if eq .Destination "/var/lib/class-archive-private-e2e"}}{{.Name}}{{end}}{{end}}', ($piwigoProject + '-piwigo-1')) 'shadow_recreate_preflight_failed' -Capture)
-        if ($old.Count -ne 1 -or ([string]$old[0]).Trim() -notmatch '^[a-f0-9]{64}\|class_archive_private_role_shadow_v1_private_e2e_recovery$') {
-            Stop-Shadow 'shadow_recovery_mount_missing_before_recreate'
-        }
-        $oldId = (([string]$old[0]).Trim() -split '\|', 2)[0]
+        $old = Get-ShadowPiwigoRecoveryFingerprint 'shadow_recreate_preflight_failed'
+        $oldId = ($old -split '\|', 2)[0]
         [void](Invoke-Compose piwigo @('up', '-d', '--force-recreate', '--no-deps', 'piwigo'))
         Wait-ContainerHealthy ($piwigoProject + '-piwigo-1') 300
-        $new = @(Invoke-Docker @('inspect', '--format', '{{.Id}}|{{range .Mounts}}{{if eq .Destination "/var/lib/class-archive-private-e2e"}}{{.Name}}{{end}}{{end}}', ($piwigoProject + '-piwigo-1')) 'shadow_recreate_postcheck_failed' -Capture)
-        if ($new.Count -ne 1 -or ([string]$new[0]).Trim() -notmatch '^[a-f0-9]{64}\|class_archive_private_role_shadow_v1_private_e2e_recovery$') {
-            Stop-Shadow 'shadow_recovery_mount_missing_after_recreate'
-        }
-        $newId = (([string]$new[0]).Trim() -split '\|', 2)[0]
+        $new = Get-ShadowPiwigoRecoveryFingerprint 'shadow_recreate_postcheck_failed'
+        $newId = ($new -split '\|', 2)[0]
         if ($newId -eq $oldId) { Stop-Shadow 'piwigo_container_not_recreated' }
         Assert-ProtectedFingerprint $before
         Write-Output 'PRIVATE_ROLE_SHADOW=PASS action=recreate-piwigo container=RECREATED recovery_plan_volume=PRESERVED protected_runtimes=UNCHANGED'
@@ -611,9 +747,15 @@ try {
 
     if ($Action -eq 'verify') {
         [void](Invoke-CloneHelper 'verify')
-        $piwigoInspect = @(Invoke-Docker @('inspect', '--format', '{{index .Config.Labels "com.classarchive.scope"}}|{{json .HostConfig.PortBindings}}', ($piwigoProject + '-piwigo-1')) 'shadow_piwigo_verify_failed' -Capture)
-        if ($piwigoInspect.Count -ne 1 -or ([string]$piwigoInspect[0]).Trim() -notmatch '^private-role-shadow\|.*127\.0\.0\.1.*11990.*11991') {
-            Stop-Shadow 'shadow_piwigo_exposure_invalid'
+        $piwigoInspect = Get-DockerInspectObject container ($piwigoProject + '-piwigo-1') 'shadow_piwigo_verify_failed'
+        $piwigoLabels = Get-PropertyValue (Get-PropertyValue $piwigoInspect 'Config') 'Labels'
+        $portBindings = Get-PropertyValue (Get-PropertyValue $piwigoInspect 'HostConfig') 'PortBindings'
+        if ([string](Get-PropertyValue $piwigoLabels 'com.classarchive.scope') -cne 'private-role-shadow' -or
+            $null -eq $portBindings -or @($portBindings.PSObject.Properties).Count -ne 2) { Stop-Shadow 'shadow_piwigo_exposure_invalid' }
+        foreach ($port in @(@('80/tcp', '11990'), @('8081/tcp', '11991'))) {
+            $binding = @((Get-PropertyValue $portBindings $port[0]))
+            if ($binding.Count -ne 1 -or [string](Get-PropertyValue $binding[0] 'HostIp') -cne '127.0.0.1' -or
+                [string](Get-PropertyValue $binding[0] 'HostPort') -cne $port[1]) { Stop-Shadow 'shadow_piwigo_exposure_invalid' }
         }
         foreach ($name in @(($piwigoProject + '-db-1'), ($immichProject + '-database-1'), ($immichProject + '-immich-web-compat-1'))) {
             $ports = @(Invoke-Docker @('inspect', '--format', '{{json .HostConfig.PortBindings}}', $name) 'shadow_port_verify_failed' -Capture)

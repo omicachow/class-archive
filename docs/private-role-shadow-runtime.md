@@ -40,11 +40,14 @@ pg_dump --format=custom --no-owner --no-acl --serializable-deferrable
 
 The sequence is:
 
-1. calculate deterministic MariaDB, PostgreSQL, filtered Piwigo-data and
-   scripts digests;
+1. calculate deterministic MariaDB, filtered Piwigo-data and scripts digests,
+   plus a PostgreSQL semantic fingerprint covering schema, sequences and an
+   order-independent row-set hash for each persistent table;
 2. create both logical dumps inside an isolated Docker seed volume;
 3. copy the two small control volumes from read-only mounts;
-4. calculate all source digests again;
+4. calculate all source digests again; Immich's single runtime-liveness
+   `system_metadata` row is excluded only from this no-mutation comparison,
+   while its table remains in the logical dump;
 5. reject any source drift;
 6. verify copied control-volume digests;
 7. restore into independent Shadow database volumes;
@@ -52,6 +55,14 @@ The sequence is:
    Shadow database configuration;
 9. publish the ignored `CLONE_COMPLETE` marker;
 10. remove the plaintext seed volume.
+
+PostgreSQL restore starts from a newly created, fixed-name Shadow-only
+database, avoiding bootstrap leftovers that `pg_restore --clean` could leave
+behind. PostgreSQL physical column order and dump ordering are deliberately
+not treated as business differences; table contents are fingerprinted through
+canonical `jsonb` rows, and schema/default/constraint/index/sequence metadata
+is fingerprinted separately. The helper prints only the final SHA-256, never
+any private rows.
 
 The Owner application is never stopped. The only possible Writer impact is
 the brief MariaDB read lock needed for a consistent MyISAM dump. If the Owner
