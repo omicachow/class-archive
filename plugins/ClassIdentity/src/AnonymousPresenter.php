@@ -20,6 +20,13 @@ use Throwable;
  */
 final class AnonymousPresenter
 {
+    // Exact, reserved local-private browser acceptance fixture. It is never a
+    // member-facing identity: while a short-lived Teacher lease is open, keep
+    // its Core user out of ordinary user discovery and uploader filters just
+    // like other hidden technical principals. SYSTEM_ADMIN remains able to
+    // inspect it through the separate business control plane for recovery.
+    private const HIDDEN_LOCAL_TEACHER_FIXTURE_ROSTER = 'FQA-T-3E2F1A94B0C74D81952E6F0A';
+
     public const CONTEXT_PHOTO = 'PHOTO';
     public const CONTEXT_ALBUM = 'ALBUM';
 
@@ -830,7 +837,10 @@ final class AnonymousPresenter
             'SELECT p.`piwigo_user_id` FROM `' . $repository->table('principal') . '` p '
             . 'LEFT JOIN `' . $repository->table('account') . '` a ON a.`id` = p.`account_id` '
             . 'LEFT JOIN `' . $repository->table('seat') . '` s ON s.`id` = a.`seat_id` '
-            . "WHERE p.`principal_type` = 'SYSTEM_ACCOUNT' OR s.`seat_type` = 'ANONYMOUS'",
+            . 'LEFT JOIN `' . $repository->table('identity') . '` i ON i.`id` = s.`identity_id` '
+            . "WHERE p.`principal_type` = 'SYSTEM_ACCOUNT' OR s.`seat_type` = 'ANONYMOUS'"
+            . " OR (i.`identity_type` = 'TEACHER' AND i.`roster_code` = '"
+            . self::HIDDEN_LOCAL_TEACHER_FIXTURE_ROSTER . "')",
         );
         self::$hiddenUserIds = [];
         foreach ($rows as $row) {

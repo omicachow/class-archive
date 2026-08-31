@@ -72,7 +72,14 @@ foreach ($count in @(
     'fqa_valid_binding_rows', 'fqa_disallowed_business_rows',
     'fqa_active_leases', 'fqa_conflict_leases',
     'fqa_live_sessions', 'fqa_live_auth_keys',
-    'fqa_valid_password_rows', 'fqa_system_admin_rows'
+    'fqa_valid_password_rows', 'fqa_system_admin_rows',
+    'fqt_identity_rows', 'fqt_frozen_identity_rows',
+    'fqt_account_rows', 'fqt_current_account_rows',
+    'fqt_principal_rows', 'fqt_seat_principal_rows',
+    'fqt_valid_binding_rows', 'fqt_disallowed_business_rows',
+    'fqt_active_leases', 'fqt_conflict_leases',
+    'fqt_live_sessions', 'fqt_live_auth_keys',
+    'fqt_valid_password_rows'
 )) {
     Assert-Protocol ($source.Contains("'$count'") -and $source.Contains("count.$count=")) ('snapshot_required_count_missing_' + $count)
 }
@@ -82,7 +89,7 @@ foreach ($count in @(
 Assert-Protocol ($source.Contains('q "$sql" > "$tmp"') -and $source.Contains('sha256sum "$tmp"')) 'snapshot_container_local_fingerprint_missing'
 foreach ($domain in @(
     'schema_ledger', 'canonical_media', 'album_membership', 'comments',
-    'identity_security', 'fqa_security_equivalence', 'submissions', 'person_curation',
+    'identity_security', 'fqa_security_equivalence', 'fqt_security_equivalence', 'submissions', 'person_curation',
     'spotlight_memories_pins', 'ai_projection_control',
     'audit_full', 'audit_preexisting_prefix', 'audit_high_water_opaque'
 )) {
@@ -91,12 +98,12 @@ foreach ($domain in @(
 Assert-Protocol ($source.Contains('APPEND_ONLY_PREFIX_PRESERVED') -and $source.Contains('audit_rows_deleted') -and $source.Contains('audit_preexisting_prefix_changed')) 'snapshot_audit_append_only_guard_missing'
 Assert-Protocol ($source.Contains('SELECT * FROM ${base}audit_event ORDER BY id LIMIT ${CLASS_ARCHIVE_AUDIT_PREFIX_ROWS}') -and $source.Contains('SELECT COALESCE(MAX(id),0) FROM ${base}audit_event')) 'snapshot_audit_prefix_or_opaque_high_water_missing'
 
-# The only normalized security exception is the fixed, already-synthetic FQA
-# aggregate. Non-FQA rows remain byte-exact; the FQA projection omits only
-# lease-owned verifier/revision/activity fields and requires a fully closed,
-# frozen terminal state.
-Assert-Protocol ($source.Contains("`$snapshotFormat = 2") -and $source.Contains("`$fqaRoster = 'FQA-C-99CA3B3B6AF1'") -and $source.Contains("`$fqaEquivalencePolicy = 'FQA_SAFE_TERMINAL_EQUIVALENCE_V1'")) 'snapshot_fqa_policy_not_versioned_or_pinned'
-Assert-Protocol ($source.Contains("SELECT * FROM `${base}identity WHERE roster_code<>'FQA-C-99CA3B3B6AF1'") -and $source.Contains('fingerprint identity_security "SELECT ''identity_non_fqa'';')) 'snapshot_non_fqa_identity_security_not_exact'
+# The synthetic Classmate aggregate remains fixed. A second optional exception
+# is permitted only for one exact Teacher fixture roster; all other FQA-T
+# values remain ordinary byte-exact business state.
+Assert-Protocol ($source.Contains("`$snapshotFormat = 3") -and $source.Contains("`$fqaRoster = 'FQA-C-99CA3B3B6AF1'") -and $source.Contains("`$fqaEquivalencePolicy = 'FQA_SAFE_TERMINAL_EQUIVALENCE_V1'")) 'snapshot_fqa_policy_not_versioned_or_pinned'
+Assert-Protocol ($source.Contains("`$fqtRoster = 'FQA-T-3E2F1A94B0C74D81952E6F0A'") -and $source.Contains("`$fqtEquivalencePolicy = 'FQT_SAFE_TERMINAL_EQUIVALENCE_V1'")) 'snapshot_fqt_policy_not_versioned_or_pinned'
+Assert-Protocol ($source.Contains("fixture_rosters=`"'FQA-C-99CA3B3B6AF1','FQA-T-3E2F1A94B0C74D81952E6F0A'`"") -and $source.Contains('fingerprint identity_security "') -and $source.Contains('roster_code NOT IN ($fixture_rosters)')) 'snapshot_non_fixture_identity_security_not_exact'
 Assert-Protocol ($source.Contains('SELECT id,roster_code,identity_type,real_name,state,seat_template_version,created_at,retired_at') -and $source.Contains('SELECT p.id,p.principal_type,p.system_role,p.account_id,p.piwigo_user_id,p.state,p.created_at,p.frozen_at,p.disabled_at')) 'snapshot_fqa_normalized_topology_invalid'
 $fqaFingerprintLines = @($source -split "`r?`n" | Where-Object { $_.StartsWith('fingerprint fqa_security_equivalence ') })
 Assert-Protocol ($fqaFingerprintLines.Count -eq 1) 'snapshot_fqa_security_equivalence_fingerprint_not_unique'
@@ -105,7 +112,15 @@ foreach ($forbiddenFqaField in @('SELECT * FROM ${base}identity', 'SELECT p.* FR
     Assert-Protocol (-not $fqaFingerprintLine.Contains($forbiddenFqaField)) ('snapshot_fqa_volatile_field_not_excluded_' + ($forbiddenFqaField -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
 }
 Assert-Protocol ($source.Contains('state_fqa_terminal_invalid') -and $source.Contains('manifest_fqa_terminal_invalid') -and $source.Contains('fqa_active_leases = [uint64]0') -and $source.Contains('fqa_conflict_leases = [uint64]0') -and $source.Contains('fqa_live_sessions = [uint64]0') -and $source.Contains('fqa_live_auth_keys = [uint64]0')) 'snapshot_fqa_terminal_fail_closed_missing'
+Assert-Protocol ($source.Contains('state_fqt_terminal_invalid') -and $source.Contains('manifest_fqt_terminal_invalid') -and $source.Contains('function Assert-FqtTerminalCounts') -and $source.Contains('OPTIONAL_ABSENT_OR_EXACT_REQUIRED_VALUES') -and $source.Contains('fqt_active_leases = [uint64]0') -and $source.Contains('fqt_conflict_leases = [uint64]0') -and $source.Contains('fqt_live_sessions = [uint64]0') -and $source.Contains('fqt_live_auth_keys = [uint64]0')) 'snapshot_fqt_terminal_fail_closed_missing'
 Assert-Protocol ($source.Contains("u.password REGEXP '^[$]P[$][./0-9A-Za-z]{31}$'") -and $source.Contains("u.password REGEXP '^[$]2[aby][$][0-9]{2}[$][./0-9A-Za-z]{53}$'") -and $source.Contains("u.password REGEXP '^[$]argon2(id|i|d)")) 'snapshot_fqa_password_hash_format_gate_missing'
+Assert-Protocol ($source.Contains('fingerprint fqt_security_equivalence ') -and $source.Contains("SELECT 'policy','FQT_SAFE_TERMINAL_EQUIVALENCE_V1';")) 'snapshot_fqt_normalized_topology_missing'
+$fqtFingerprintLines = @($source -split "`r?`n" | Where-Object { $_.StartsWith('fingerprint fqt_security_equivalence ') })
+Assert-Protocol ($fqtFingerprintLines.Count -eq 1) 'snapshot_fqt_security_equivalence_fingerprint_not_unique'
+$fqtFingerprintLine = [string]$fqtFingerprintLines[0]
+foreach ($forbiddenFqtField in @('SELECT * FROM ${base}identity', 'SELECT p.* FROM ${base}principal', 'i.lock_version', 'p.auth_epoch', 'u.password')) {
+    Assert-Protocol (-not $fqtFingerprintLine.Contains($forbiddenFqtField)) ('snapshot_fqt_volatile_field_not_excluded_' + ($forbiddenFqtField -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant())
+}
 Assert-Protocol ($source.Contains("mountpoint -q -- `"`$root`"") -and $source.Contains("FQA_DURABLE_RECOVERY=EMPTY") -and $source.Contains('Assert-FqaDurableRecoveryEmpty') -and $source.Contains("durable_recovery_empty = `$true")) 'snapshot_fqa_durable_recovery_gate_missing'
 Assert-Protocol ($source.Contains('function ConvertTo-FixedShellRunner') -and $source.Contains('Replace("`r`n", "`n").Replace("`r", "`n")') -and $source.Contains('[Convert]::ToBase64String') -and $source.Contains("'^[A-Za-z0-9+/=]+$'") -and $source.Contains("printf '%s' `$encoded | base64 -d | sh -eu -s") -and $source.Contains('ConvertTo-FixedShellRunner $stateScript') -and $source.Contains('ConvertTo-FixedShellRunner $dumpScript') -and $source.Contains('$lines = @(Invoke-PiwigoComposeCapture')) 'snapshot_fqa_durable_recovery_ingress_hardening_missing'
 Assert-Protocol ($source.Contains('diagnostic_line=$diagnosticLine') -and $source.Contains('never an exception') -and $source.Contains('message/path/row value')) 'snapshot_failure_diagnostic_privacy_contract_missing'
@@ -113,12 +128,13 @@ Assert-Protocol ($source.Contains('function Get-OwnerOnlyDirectorySecurity') -an
 Assert-Protocol ($source.Contains('function Get-Sha256') -and $source.Contains('[Security.Cryptography.SHA256]::Create()') -and $source.Contains('[IO.File]::Open($Path, [IO.FileMode]::Open') -and -not $source.Contains('Get-FileHash -LiteralPath')) 'snapshot_sha256_noprofile_backend_missing'
 Assert-Protocol ($source.Contains('function Get-SafeExternalFailureClass') -and $source.Contains("return 'permission'") -and $source.Contains("return 'container_source_missing'") -and $source.Contains("return 'destination_missing'") -and $source.Contains("return 'missing'") -and $source.Contains("return 'path_type'") -and $source.Contains("return 'space'") -and $source.Contains("return 'runtime'") -and $source.Contains('$Code + ''_exit_'' + [Math]::Abs([int]$exitCode) + ''_'' + $failureClass')) 'snapshot_external_failure_privacy_classifier_missing'
 Assert-Protocol ($source.Contains('function Write-PrivateExternalFailureDiagnostic') -and $source.Contains("CLASS_ARCHIVE_PRIVATE_ROLE_E2E_DIAGNOSTICS") -and $source.Contains("last-external-failure.local.txt") -and $source.Contains('Set-ClassArchiveOwnerOnlyFileAcl -Path $path') -and $source.Contains('Write-PrivateExternalFailureDiagnostic $Code ([int]$exitCode) $lines')) 'snapshot_opt_in_private_diagnostic_boundary_missing'
-Assert-Protocol ($source.Contains('[switch]$AllowHarnessOnlySourceHeadChange') -and $source.Contains('harness_only_source_delta_forbidden') -and $source.Contains("'tests/phase3/photos-app-v4-owner-browser-qa.mjs'") -and $source.Contains("git -C `$projectRoot diff --name-only --diff-filter=ACMR `$range")) 'snapshot_harness_only_source_delta_guard_missing'
+Assert-Protocol ($source.Contains('[switch]$AllowHarnessOnlySourceHeadChange') -and $source.Contains('harness_only_source_delta_forbidden') -and $source.Contains("'tests/phase3/photos-app-v4-owner-browser-qa.mjs'") -and $source.Contains("'tests/phase3/photos-app-v4-owner-teacher-fixture-broker.php'") -and $source.Contains("'tests/phase3/photos-app-v4-owner-teacher-fixture-ensure.ps1'") -and $source.Contains("'tests/phase3/photos-app-v4-owner-teacher-browser-qa.mjs'") -and $source.Contains("git -C `$projectRoot diff --name-only --diff-filter=ACMR `$range")) 'snapshot_harness_only_source_delta_guard_missing'
 Assert-Protocol ($source.Contains("'mariadb_dump_container_artifact_missing'") -and $source.Contains("'mariadb_dump_destination_parent_missing'") -and $source.Contains("'database_dump_container_validate'")) 'snapshot_dump_copy_boundary_validation_missing'
 Assert-Protocol ($source.Contains('function Copy-ContainerFileToPrivateSnapshot') -and $source.Contains('Legacy Windows PowerShell can code-page-mangle') -and $source.Contains("'mariadb_dump_destination_relative_invalid'") -and $source.Contains('docker cp "$source" "$stage"') -and $source.Contains('mariadb_dump_stage_cleanup_failed')) 'snapshot_ascii_relative_wsl_copy_missing'
 Assert-Protocol (($source.Split("`n") | Where-Object { $_ -match "Exception\.Message -match '\^PRIVATE_ROLE_SNAPSHOT_STOP:'" }).Count -ge 2) 'snapshot_partial_directory_stop_passthrough_missing'
 Assert-Protocol ($source.Contains('function Assert-OwnerOnlyPrivateSnapshotDirectory') -and $source.Contains('directories may correctly retain that descriptor as inherited rules') -and $source.Contains("Assert-OwnerOnlyPrivateSnapshotDirectory `$partial 'partial_directory'") -and $source.Contains("Assert-OwnerOnlyPrivateSnapshotDirectory `$bundle 'bundle'")) 'snapshot_partial_directory_inherited_acl_gate_missing'
 Assert-Protocol ($source.Contains("non_fqa_identity_security = 'BYTE_EXACT_SHA256'") -and $source.Contains('manifest_fqa_security_policy_invalid') -and $source.Contains('Compare-Object $fqaAllowedVolatile $manifestAllowedVolatile')) 'snapshot_fqa_manifest_policy_binding_missing'
+Assert-Protocol ($source.Contains('manifest_fqt_security_policy_invalid') -and $source.Contains('Compare-Object $fqtAllowedVolatile $manifestFqtAllowedVolatile')) 'snapshot_fqt_manifest_policy_binding_missing'
 
 # SHA-256 binds dump, manifest, completion marker, and the compare inputs.
 foreach ($needle in @('MANIFEST.json', 'MANIFEST.sha256', 'SHA256SUMS', 'database.sql.gz', 'Get-FileHash', 'bundle_checksum_mismatch', 'ExpectedPreManifestSha256', 'ExpectedPostManifestSha256')) {
@@ -129,6 +145,7 @@ foreach ($needle in @('MANIFEST.json', 'MANIFEST.sha256', 'SHA256SUMS', 'databas
 # append-only growth permitted by the Phase 3.4.1 cleanup contract.
 Assert-Protocol ($source.Contains("if (`$key -eq 'audit_events') { continue }") -and $source.Contains('post_cleanup_count_mismatch_')) 'snapshot_stable_count_compare_missing'
 Assert-Protocol ($source.Contains('$stableSemanticKeys') -and $source.Contains('post_cleanup_fingerprint_mismatch_')) 'snapshot_stable_semantic_compare_missing'
+Assert-Protocol ($source.Contains('teacher_fixture_presence_changed') -and $source.Contains('fqt_identity_rows')) 'snapshot_fqt_pre_post_presence_binding_missing'
 Assert-Protocol ($source.Contains('records=PRESERVED semantics=PRESERVED audit=APPEND_ONLY_PREFIX_PRESERVED')) 'snapshot_bounded_compare_record_missing'
 Assert-Protocol ($source.Contains("`$privacyMarker = 'COUNTS_AND_OPAQUE_HASHES_ONLY_NO_PATHS_IDS_FILENAMES_COMMENT_BODIES_OR_SECRETS'")) 'snapshot_privacy_marker_missing'
 

@@ -74,8 +74,11 @@ function New-State(
     [string]$AuditPrefix,
     [switch]$CountDrift,
     [string]$UnsafeFqaCountKey = '',
+    [switch]$TeacherFixturePresent,
+    [string]$UnsafeFqtCountKey = '',
     [switch]$NonFqaSecurityDrift,
-    [switch]$FqaTopologyDrift
+    [switch]$FqaTopologyDrift,
+    [switch]$FqtTopologyDrift
 ) {
     $counts = [ordered]@{
         class_identity_schema_version = 18
@@ -122,6 +125,19 @@ function New-State(
         fqa_live_auth_keys = 0
         fqa_valid_password_rows = 3
         fqa_system_admin_rows = 1
+        fqt_identity_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_frozen_identity_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_account_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_current_account_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_principal_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_seat_principal_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_valid_binding_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
+        fqt_disallowed_business_rows = 0
+        fqt_active_leases = 0
+        fqt_conflict_leases = 0
+        fqt_live_sessions = 0
+        fqt_live_auth_keys = 0
+        fqt_valid_password_rows = $(if ($TeacherFixturePresent) { 1 } else { 0 })
     }
     if (-not [string]::IsNullOrEmpty($UnsafeFqaCountKey)) {
         if (-not $counts.Contains($UnsafeFqaCountKey) -or -not $UnsafeFqaCountKey.StartsWith('fqa_', [StringComparison]::Ordinal)) {
@@ -129,16 +145,23 @@ function New-State(
         }
         $counts[$UnsafeFqaCountKey] = if ([uint64]$counts[$UnsafeFqaCountKey] -eq 0) { [uint64]1 } else { [uint64]$counts[$UnsafeFqaCountKey] - 1 }
     }
+    if (-not [string]::IsNullOrEmpty($UnsafeFqtCountKey)) {
+        if (-not $TeacherFixturePresent -or -not $counts.Contains($UnsafeFqtCountKey) -or -not $UnsafeFqtCountKey.StartsWith('fqt_', [StringComparison]::Ordinal)) {
+            throw 'synthetic_unsafe_fqt_count_key_invalid'
+        }
+        $counts[$UnsafeFqtCountKey] = if ([uint64]$counts[$UnsafeFqtCountKey] -eq 0) { [uint64]1 } else { [uint64]$counts[$UnsafeFqtCountKey] - 1 }
+    }
     $semantic = [ordered]@{}
     foreach ($name in @(
         'schema_ledger', 'canonical_media', 'album_membership', 'comments',
-        'identity_security', 'fqa_security_equivalence', 'submissions', 'person_curation',
+        'identity_security', 'fqa_security_equivalence', 'fqt_security_equivalence', 'submissions', 'person_curation',
         'spotlight_memories_pins', 'ai_projection_control'
     )) {
         $semantic[$name] = Get-TextSha ('stable:' + $name)
     }
     if ($NonFqaSecurityDrift) { $semantic.identity_security = Get-TextSha 'drift:non-fqa-identity-security' }
     if ($FqaTopologyDrift) { $semantic.fqa_security_equivalence = Get-TextSha 'drift:fqa-safe-topology' }
+    if ($FqtTopologyDrift) { $semantic.fqt_security_equivalence = Get-TextSha 'drift:fqt-safe-topology' }
     $semantic.audit_full = $AuditFull
     $semantic.audit_preexisting_prefix = $AuditPrefix
     $semantic.audit_high_water_opaque = Get-TextSha ('high-water:' + $AuditRows)
@@ -158,9 +181,9 @@ function New-Bundle(
     $dumpPath = Join-Path $bundle 'database.sql.gz'
     [IO.File]::WriteAllBytes($dumpPath, [byte[]](31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     Set-ClassArchiveOwnerOnlyFileAcl -Path $dumpPath
-    $markerDigest = Get-TextSha ("classarchive-private-role-e2e-business-snapshot-v2`0$Run")
+    $markerDigest = Get-TextSha ("classarchive-private-role-e2e-business-snapshot-v3`0$Run")
     $manifest = [ordered]@{
-        format = 2
+        format = 3
         scope = 'PRIVATE_ROLE_E2E_OWNER_DB_ONLY_ROLLBACK'
         phase = $Phase
         created_at = '2026-08-30T00:00:00.0000000Z'
@@ -199,6 +222,19 @@ function New-Bundle(
                 'revoked_fqa_auth_key_history'
             )
         }
+        fqt_security_policy = [ordered]@{
+            version = 1
+            roster = 'FQA-T-3E2F1A94B0C74D81952E6F0A'
+            comparison = 'FQT_SAFE_TERMINAL_EQUIVALENCE_V1'
+            terminal_counts = 'OPTIONAL_ABSENT_OR_EXACT_REQUIRED_VALUES'
+            allowed_volatile = @(
+                'identity.lock_version', 'identity.updated_at', 'identity.frozen_at',
+                'principal.auth_epoch', 'principal.updated_at', 'core_user.password',
+                'core_user_info.last_visit', 'core_user_info.last_visit_from_history',
+                'core_user_info.lastmodified', 'released_fixture_lease_history',
+                'revoked_fqa_auth_key_history'
+            )
+        }
         excluded = @('SYNTHETIC_PROTOCOL_FIXTURE')
     }
     $manifestPath = Join-Path $bundle 'MANIFEST.json'
@@ -220,6 +256,15 @@ function Invoke-Compare([string]$Run, [string]$PreSha, [string]$PostSha) {
     return @{ ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' }) }
 }
 
+function Assert-CompareFailure([hashtable]$Result, [string]$ExpectedCode, [string]$AssertionPrefix) {
+    Assert-Synthetic ($Result.ExitCode -eq 2) ($AssertionPrefix + '_not_rejected')
+    $pattern = '^PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=' + [regex]::Escape($ExpectedCode) + ' diagnostic_type=InvalidOperationException diagnostic_line=[1-9][0-9]*$'
+    Assert-Synthetic (
+        $Result.Output.Count -eq 1 -and [regex]::IsMatch([string]$Result.Output[0], $pattern),
+        ($AssertionPrefix + '_failure_not_bounded')
+    )
+}
+
 try {
     Set-OwnerOnlyDirectory $root
     $relative = '.codex-work/private-role-e2e/business-snapshots'
@@ -238,6 +283,16 @@ try {
     Assert-Synthetic ($result.ExitCode -eq 0) 'synthetic_append_only_compare_failed'
     Assert-Synthetic ($result.Output.Count -eq 1 -and $result.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_STATE=PASS action=compare records=PRESERVED semantics=PRESERVED audit=APPEND_ONLY_PREFIX_PRESERVED scope=DB_ONLY') 'synthetic_append_only_compare_output_invalid'
 
+    # Positive: the optional fixed Teacher fixture is also safe only when the
+    # exact terminal topology existed on both sides of the E2E window.
+    $runFqtPresent = New-RandomRunMarker
+    $auditFqtPresent = Get-TextSha 'audit-fqt-present'
+    $preFqtPresentSha = New-Bundle $runFqtPresent 'pre' (New-State 105 $auditFqtPresent $auditFqtPresent -TeacherFixturePresent) 105
+    $postFqtPresentSha = New-Bundle $runFqtPresent 'post' (New-State 108 (Get-TextSha 'audit-fqt-present-post') $auditFqtPresent -TeacherFixturePresent) 105
+    $fqtPresentResult = Invoke-Compare $runFqtPresent $preFqtPresentSha $postFqtPresentSha
+    Assert-Synthetic ($fqtPresentResult.ExitCode -eq 0) 'synthetic_fqt_terminal_compare_failed'
+    Assert-Synthetic ($fqtPresentResult.Output.Count -eq 1 -and $fqtPresentResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_STATE=PASS action=compare records=PRESERVED semantics=PRESERVED audit=APPEND_ONLY_PREFIX_PRESERVED scope=DB_ONLY') 'synthetic_fqt_terminal_compare_output_invalid'
+
     # Negative: even the fixed FQA exception is fail-closed. Frozen state,
     # exact account/principal topology, zero live lease/session/key state, and
     # valid closed password hashes are independently mandatory.
@@ -251,9 +306,43 @@ try {
         $preFqaUnsafeSha = New-Bundle $runFqaUnsafe 'pre' (New-State 10 $auditFqaUnsafe $auditFqaUnsafe) 10
         $postFqaUnsafeSha = New-Bundle $runFqaUnsafe 'post' (New-State 11 (Get-TextSha ('audit-fqa-unsafe-post-' + $unsafeFqaCount)) $auditFqaUnsafe -UnsafeFqaCountKey $unsafeFqaCount) 10
         $fqaUnsafeResult = Invoke-Compare $runFqaUnsafe $preFqaUnsafeSha $postFqaUnsafeSha
-        Assert-Synthetic ($fqaUnsafeResult.ExitCode -eq 2) ('synthetic_' + $unsafeFqaCount + '_not_rejected')
-        Assert-Synthetic ($fqaUnsafeResult.Output.Count -eq 1 -and $fqaUnsafeResult.Output[0] -eq ('PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=manifest_fqa_terminal_invalid_' + $unsafeFqaCount)) ('synthetic_' + $unsafeFqaCount + '_failure_not_bounded')
+        Assert-CompareFailure $fqaUnsafeResult ('manifest_fqa_terminal_invalid_' + $unsafeFqaCount) ('synthetic_' + $unsafeFqaCount)
     }
+
+    # Negative: the FQA-T exception remains fail-closed. Every terminal count
+    # is exact when it exists, including frozen/closed/no-live-credential
+    # invariants; the absent state is separately valid only on both sides.
+    foreach ($unsafeFqtCount in @(
+        'fqt_frozen_identity_rows', 'fqt_account_rows', 'fqt_principal_rows',
+        'fqt_active_leases', 'fqt_conflict_leases', 'fqt_live_sessions',
+        'fqt_live_auth_keys', 'fqt_valid_password_rows'
+    )) {
+        $runFqtUnsafe = New-RandomRunMarker
+        $auditFqtUnsafe = Get-TextSha ('audit-fqt-unsafe-' + $unsafeFqtCount)
+        $preFqtUnsafeSha = New-Bundle $runFqtUnsafe 'pre' (New-State 20 $auditFqtUnsafe $auditFqtUnsafe -TeacherFixturePresent) 20
+        $postFqtUnsafeSha = New-Bundle $runFqtUnsafe 'post' (New-State 21 (Get-TextSha ('audit-fqt-unsafe-post-' + $unsafeFqtCount)) $auditFqtUnsafe -TeacherFixturePresent -UnsafeFqtCountKey $unsafeFqtCount) 20
+        $fqtUnsafeResult = Invoke-Compare $runFqtUnsafe $preFqtUnsafeSha $postFqtUnsafeSha
+        Assert-CompareFailure $fqtUnsafeResult ('manifest_fqt_terminal_invalid_' + $unsafeFqtCount) ('synthetic_' + $unsafeFqtCount)
+    }
+
+    # Bootstrap/removal during the test window is forbidden even if aggregate
+    # business counts were somehow made to look equal. The explicit presence
+    # binding makes this a stable, privacy-safe failure code.
+    $runFqtPresence = New-RandomRunMarker
+    $auditFqtPresence = Get-TextSha 'audit-fqt-presence'
+    $preFqtPresenceSha = New-Bundle $runFqtPresence 'pre' (New-State 22 $auditFqtPresence $auditFqtPresence) 22
+    $postFqtPresenceSha = New-Bundle $runFqtPresence 'post' (New-State 23 (Get-TextSha 'audit-fqt-presence-post') $auditFqtPresence -TeacherFixturePresent) 22
+    $fqtPresenceResult = Invoke-Compare $runFqtPresence $preFqtPresenceSha $postFqtPresenceSha
+    Assert-CompareFailure $fqtPresenceResult 'teacher_fixture_presence_changed' 'synthetic_fqt_presence_change'
+
+    # The converse is equally unsafe: a terminal fixture that existed before
+    # the run cannot disappear afterwards under the optional-exception rule.
+    $runFqtRemoval = New-RandomRunMarker
+    $auditFqtRemoval = Get-TextSha 'audit-fqt-removal'
+    $preFqtRemovalSha = New-Bundle $runFqtRemoval 'pre' (New-State 24 $auditFqtRemoval $auditFqtRemoval -TeacherFixturePresent) 24
+    $postFqtRemovalSha = New-Bundle $runFqtRemoval 'post' (New-State 25 (Get-TextSha 'audit-fqt-removal-post') $auditFqtRemoval) 24
+    $fqtRemovalResult = Invoke-Compare $runFqtRemoval $preFqtRemovalSha $postFqtRemovalSha
+    Assert-CompareFailure $fqtRemovalResult 'teacher_fixture_presence_changed' 'synthetic_fqt_presence_removal'
 
     # Negative: Compare also rejects a bundle that merely claims the durable
     # recovery volume was not proven empty during Capture.
@@ -262,8 +351,7 @@ try {
     $preRecoverySha = New-Bundle $runRecovery 'pre' (New-State 11 $auditRecovery $auditRecovery) 11
     $postRecoverySha = New-Bundle $runRecovery 'post' (New-State 12 (Get-TextSha 'audit-fqa-recovery-post') $auditRecovery) 11 -DurableRecoveryEmpty $false
     $recoveryResult = Invoke-Compare $runRecovery $preRecoverySha $postRecoverySha
-    Assert-Synthetic ($recoveryResult.ExitCode -eq 2) 'synthetic_fqa_durable_recovery_not_rejected'
-    Assert-Synthetic ($recoveryResult.Output.Count -eq 1 -and $recoveryResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=manifest_fqa_security_policy_invalid') 'synthetic_fqa_durable_recovery_failure_not_bounded'
+    Assert-CompareFailure $recoveryResult 'manifest_fqa_security_policy_invalid' 'synthetic_fqa_durable_recovery'
 
     # Negative: every non-FQA identity/security byte remains exact.
     $runNonFqa = New-RandomRunMarker
@@ -271,8 +359,7 @@ try {
     $preNonFqaSha = New-Bundle $runNonFqa 'pre' (New-State 12 $auditNonFqa $auditNonFqa) 12
     $postNonFqaSha = New-Bundle $runNonFqa 'post' (New-State 13 (Get-TextSha 'audit-non-fqa-post') $auditNonFqa -NonFqaSecurityDrift) 12
     $nonFqaResult = Invoke-Compare $runNonFqa $preNonFqaSha $postNonFqaSha
-    Assert-Synthetic ($nonFqaResult.ExitCode -eq 2) 'synthetic_non_fqa_security_drift_not_rejected'
-    Assert-Synthetic ($nonFqaResult.Output.Count -eq 1 -and $nonFqaResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=post_cleanup_fingerprint_mismatch_identity_security') 'synthetic_non_fqa_security_failure_not_bounded'
+    Assert-CompareFailure $nonFqaResult 'post_cleanup_fingerprint_mismatch_identity_security' 'synthetic_non_fqa_security_drift'
 
     # Negative: a fixed FQA topology/group/account change is not volatile.
     $runFqaTopology = New-RandomRunMarker
@@ -280,8 +367,17 @@ try {
     $preFqaTopologySha = New-Bundle $runFqaTopology 'pre' (New-State 14 $auditFqaTopology $auditFqaTopology) 14
     $postFqaTopologySha = New-Bundle $runFqaTopology 'post' (New-State 15 (Get-TextSha 'audit-fqa-topology-post') $auditFqaTopology -FqaTopologyDrift) 14
     $fqaTopologyResult = Invoke-Compare $runFqaTopology $preFqaTopologySha $postFqaTopologySha
-    Assert-Synthetic ($fqaTopologyResult.ExitCode -eq 2) 'synthetic_fqa_topology_drift_not_rejected'
-    Assert-Synthetic ($fqaTopologyResult.Output.Count -eq 1 -and $fqaTopologyResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=post_cleanup_fingerprint_mismatch_fqa_security_equivalence') 'synthetic_fqa_topology_failure_not_bounded'
+    Assert-CompareFailure $fqaTopologyResult 'post_cleanup_fingerprint_mismatch_fqa_security_equivalence' 'synthetic_fqa_topology_drift'
+
+    # Negative: FQA-T static topology is just as strict as FQA-C. The
+    # normalized projection only omits deliberately lease-owned volatile
+    # values, never account/group/seat/principal topology.
+    $runFqtTopology = New-RandomRunMarker
+    $auditFqtTopology = Get-TextSha 'audit-fqt-topology'
+    $preFqtTopologySha = New-Bundle $runFqtTopology 'pre' (New-State 16 $auditFqtTopology $auditFqtTopology -TeacherFixturePresent) 16
+    $postFqtTopologySha = New-Bundle $runFqtTopology 'post' (New-State 17 (Get-TextSha 'audit-fqt-topology-post') $auditFqtTopology -TeacherFixturePresent -FqtTopologyDrift) 16
+    $fqtTopologyResult = Invoke-Compare $runFqtTopology $preFqtTopologySha $postFqtTopologySha
+    Assert-CompareFailure $fqtTopologyResult 'post_cleanup_fingerprint_mismatch_fqt_security_equivalence' 'synthetic_fqt_topology_drift'
 
     # Negative: an equal-hash bundle with a changed canonical count must still
     # fail the business-state comparison.
@@ -290,8 +386,7 @@ try {
     $preCountSha = New-Bundle $runCount 'pre' (New-State 20 $auditCount $auditCount) 20
     $postCountSha = New-Bundle $runCount 'post' (New-State 21 (Get-TextSha 'audit-count-post') $auditCount -CountDrift) 20
     $countResult = Invoke-Compare $runCount $preCountSha $postCountSha
-    Assert-Synthetic ($countResult.ExitCode -eq 2) 'synthetic_count_drift_not_rejected'
-    Assert-Synthetic ($countResult.Output.Count -eq 1 -and $countResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=post_cleanup_count_mismatch_canonical_photos') 'synthetic_count_drift_failure_not_bounded'
+    Assert-CompareFailure $countResult 'post_cleanup_count_mismatch_canonical_photos' 'synthetic_count_drift'
 
     # Negative: audit may grow, but the pre-test prefix may never be changed or
     # removed. The comparison rejects a forged prefix without exposing rows.
@@ -300,8 +395,7 @@ try {
     $preAuditSha = New-Bundle $runAudit 'pre' (New-State 30 $auditBase $auditBase) 30
     $postAuditSha = New-Bundle $runAudit 'post' (New-State 33 (Get-TextSha 'audit-prefix-post') (Get-TextSha 'audit-prefix-forged')) 30
     $auditResult = Invoke-Compare $runAudit $preAuditSha $postAuditSha
-    Assert-Synthetic ($auditResult.ExitCode -eq 2) 'synthetic_audit_prefix_drift_not_rejected'
-    Assert-Synthetic ($auditResult.Output.Count -eq 1 -and $auditResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=audit_preexisting_prefix_changed') 'synthetic_audit_prefix_failure_not_bounded'
+    Assert-CompareFailure $auditResult 'audit_preexisting_prefix_changed' 'synthetic_audit_prefix_drift'
 
     # Negative: a changed dump byte is rejected by the per-file SHA-256 set
     # before any semantic comparison can accept the bundle.
@@ -315,8 +409,7 @@ try {
     [IO.File]::WriteAllBytes($postDump, $bytes)
     Assert-ClassArchiveOwnerOnlyFileAcl -Path $postDump
     $hashResult = Invoke-Compare $runHash $preHashSha $postHashSha
-    Assert-Synthetic ($hashResult.ExitCode -eq 2) 'synthetic_dump_hash_drift_not_rejected'
-    Assert-Synthetic ($hashResult.Output.Count -eq 1 -and $hashResult.Output[0] -eq 'PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=Compare phase=pre code=bundle_checksum_mismatch') 'synthetic_dump_hash_failure_not_bounded'
+    Assert-CompareFailure $hashResult 'bundle_checksum_mismatch' 'synthetic_dump_hash_drift'
 
     Write-Output "PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT_COMPARE=PASS assertions=$assertions"
 }
@@ -331,3 +424,8 @@ finally {
         }
     }
 }
+
+# Negative child-process probes intentionally return non-zero while this
+# harness verifies that they fail closed. Do not let the final expected probe
+# leak its native exit status to CI after the whole harness has passed.
+exit 0
