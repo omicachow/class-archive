@@ -333,9 +333,10 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
 
 function Copy-ContainerFileToPrivateSnapshot([string]$ContainerSource, [string]$Destination) {
     # Do not pass a Windows path containing non-ASCII characters through
-    # `wslpath`: legacy Windows PowerShell can code-page-mangle it before WSL
-    # receives the argument. Run docker cp from the already trusted WSL
-    # project cwd and pass only a strictly validated ASCII relative target.
+    # Docker/WSL. Legacy Windows PowerShell can code-page-mangle it before the
+    # native Docker client resolves the destination. Stage to an ASCII-only
+    # WSL temporary path, then stream it to the Windows destination through a
+    # .NET FileStream that never puts that destination on a WSL command line.
     if ($ContainerSource -notmatch '^[a-f0-9]{12,64}:/tmp/classarchive-private-role-e2e-[a-f0-9]{32}\.sql\.gz$') {
         Stop-PrivateRoleSnapshot 'mariadb_dump_container_source_invalid'
     }
@@ -349,13 +350,48 @@ function Copy-ContainerFileToPrivateSnapshot([string]$ContainerSource, [string]$
     if ($relative -notmatch '^\.codex-work/private-role-e2e/business-snapshots/(?:pre|post)-[a-f0-9]{24}\.partial/database\.sql\.gz$') {
         Stop-PrivateRoleSnapshot 'mariadb_dump_destination_relative_invalid'
     }
-    # Fixed source-controlled one-line shell program. Source and destination
-    # are positional arguments, never interpolated into shell syntax.
-    $copyRunner = 'source="$1"; destination="$2"; test -d "$(dirname "$destination")"; docker cp "$source" "$destination"'
-    [void](Invoke-WslCapture @(
-        '-d', 'Ubuntu', '--cd', $projectRoot, '--exec',
-        'sh', '-eu', '-c', $copyRunner, 'sh', $ContainerSource, ('./' + $relative)
-    ) 'mariadb_dump_copy_failed')
+    if (Test-Path -LiteralPath $fullDestination) { Stop-PrivateRoleSnapshot 'mariadb_dump_destination_already_exists' }
+
+    $stageDirectory = '/tmp/classarchive-private-role-e2e-transfer'
+    $stageFile = $stageDirectory + '/' + ([Guid]::NewGuid().ToString('N')) + '.sql.gz'
+    $stageRunner = 'source="$1"; stage="$2"; mkdir -p /tmp/classarchive-private-role-e2e-transfer; chmod 700 /tmp/classarchive-private-role-e2e-transfer; docker cp "$source" "$stage"; test -s "$stage"'
+    try {
+        [void](Invoke-WslCapture @(
+            '-d', 'Ubuntu', '--exec', 'sh', '-eu', '-c', $stageRunner, 'sh', $ContainerSource, $stageFile
+        ) 'mariadb_dump_copy_failed')
+        $stageHashLines = @(Invoke-WslCapture @('-d', 'Ubuntu', '--exec', 'sha256sum', $stageFile) 'mariadb_dump_stage_hash_failed')
+        if ($stageHashLines.Count -ne 1 -or $stageHashLines[0] -notmatch '^(?<hash>[a-f0-9]{64})\s+') {
+            Stop-PrivateRoleSnapshot 'mariadb_dump_stage_hash_invalid'
+        }
+        $stageHash = [string]$Matches.hash
+
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = "$env:SystemRoot\System32\wsl.exe"
+        $psi.Arguments = '-d Ubuntu --exec cat ' + $stageFile
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::Start($psi)
+        if ($null -eq $process) { Stop-PrivateRoleSnapshot 'mariadb_dump_stage_stream_start_failed' }
+        try {
+            $destinationStream = [IO.File]::Open($fullDestination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $process.StandardOutput.BaseStream.CopyTo($destinationStream) }
+            finally { $destinationStream.Dispose() }
+            $standardError = $process.StandardError.ReadToEnd()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($standardError)) {
+                Stop-PrivateRoleSnapshot 'mariadb_dump_stage_stream_failed'
+            }
+        }
+        finally { $process.Dispose() }
+        $destinationHash = Get-Sha256 $fullDestination
+        if ($destinationHash -ne $stageHash) { Stop-PrivateRoleSnapshot 'mariadb_dump_stage_hash_mismatch' }
+    }
+    finally {
+        try { [void](Invoke-WslCapture @('-d', 'Ubuntu', '--exec', 'rm', '-f', '--', $stageFile) 'mariadb_dump_stage_cleanup_failed') }
+        catch {}
+    }
 }
 
 function Get-PiwigoComposePrefix {
