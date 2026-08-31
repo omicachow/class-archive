@@ -114,6 +114,7 @@ Assert-Contains $service 'information_schema.COLUMNS' 'private_e2e_fixture_lease
 Assert-Contains $service 'information_schema.STATISTICS' 'private_e2e_fixture_lease_index_attestation_missing'
 Assert-Contains $service 'public function resolveConflictIdentityLease(' 'private_e2e_fixture_conflict_resolution_api_missing'
 Assert-Contains $service "SET ``state``='RELEASED'" 'private_e2e_fixture_conflict_resolution_terminal_state_missing'
+Assert-Contains $service "AND ``expected_lock_version``=? AND ``lease_revision``=?" 'private_e2e_fixture_conflict_resolution_cas_conjunction_missing'
 Assert-Contains $service 'class_identity_fixture_lease_conflict_resolution_required' 'private_e2e_fixture_conflict_resolution_owner_run_guard_missing'
 Assert-Contains $runtime 'ENGINE=MyISAM' 'private_e2e_fixture_lease_malformed_engine_fixture_missing'
 Assert-Contains $runtime 'class_identity_fixture_lease_storage_invalid' 'private_e2e_fixture_lease_malformed_storage_rejection_missing'

@@ -897,7 +897,7 @@ final class PrivateE2EFixtureLeaseService
                     "UPDATE `{$this->table}` SET `state`='RELEASED',`released_at`=UTC_TIMESTAMP(6),"
                     . '`lease_revision`=`lease_revision`+1,`updated_at`=UTC_TIMESTAMP(6) '
                     . "WHERE `lease_id`=? AND `state`='CONFLICT' AND `test_run_id`=? AND `fixture_owner`=? "
-                    . '`expected_lock_version`=? AND `lease_revision`=?',
+                    . 'AND `expected_lock_version`=? AND `lease_revision`=?',
                 );
                 $leaseId = (string) $conflict['lease_id'];
                 $revision = (int) $conflict['lease_revision'];
