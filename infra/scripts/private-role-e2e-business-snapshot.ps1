@@ -817,7 +817,11 @@ try {
 }
 catch {
     $message = [string]$_.Exception.Message
+    # Failure output must remain private-data safe while still being actionable:
+    # expose only the exception type, never an exception message/path/row value.
+    $diagnosticType = [string]$_.Exception.GetType().Name
+    if ($diagnosticType -notmatch '^[A-Za-z0-9_]{1,120}$') { $diagnosticType = 'UnknownException' }
     $code = if ($message -match '^PRIVATE_ROLE_SNAPSHOT_STOP:([a-z0-9_]{1,120})$') { [string]$Matches[1] } else { 'private_role_snapshot_failed_' + $script:snapshotStage }
-    Write-Output "PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=$Action phase=$Phase code=$code"
+    Write-Output "PRIVATE_ROLE_E2E_BUSINESS_SNAPSHOT=FAIL action=$Action phase=$Phase code=$code diagnostic_type=$diagnosticType"
     exit 2
 }
