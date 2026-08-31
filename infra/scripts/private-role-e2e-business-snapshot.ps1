@@ -286,9 +286,13 @@ function Invoke-PiwigoComposeCapture([string[]]$Arguments, [string]$Code) {
 function ConvertTo-FixedShellRunner([string]$FixedScript, [string]$Code) {
     # All callers pass fixed source-controlled shell programs. Encode them so
     # WSL receives one ASCII-only argv value instead of a newline-bearing
-    # command argument; this is not a user-data transport channel.
-    if ([string]::IsNullOrWhiteSpace($FixedScript)) { Stop-PrivateRoleSnapshot $Code }
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($FixedScript))
+    # command argument; this is not a user-data transport channel. Normalize
+    # CRLF first: Linux sh treats the trailing carriage return in `set -eu\r`
+    # as part of the option, so a Windows checkout must have identical probe
+    # semantics to an LF checkout.
+    $normalized = $FixedScript.Replace("`r`n", "`n").Replace("`r", "`n")
+    if ([string]::IsNullOrWhiteSpace($normalized)) { Stop-PrivateRoleSnapshot $Code }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
     if ($encoded -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot $Code }
     return "printf '%s' $encoded | base64 -d | sh -eu -s"
 }
