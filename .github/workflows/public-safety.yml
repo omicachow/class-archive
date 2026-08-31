@@ -110,7 +110,6 @@ jobs:
           ./tests/phase3/photos-app-v4-chrome-upload-lifecycle-protocol.ps1
           ./tests/phase3/photos-app-v4-chrome-performance-protocol.ps1
           ./tests/phase3/photos-app-v4-owner-browser-qa-protocol.ps1
-          ./tests/phase3/class-archive-stdin-ingress-synthetic.ps1
           ./tests/phase3/private-e2e-fixture-lease-protocol.ps1
           ./tests/phase3/private-e2e-teacher-fixture-lease-protocol.ps1
           ./tests/phase3/private-e2e-teacher-fixture-visibility-protocol.ps1
@@ -172,3 +171,15 @@ jobs:
             exit 1
           fi
           printf 'PUBLIC_CREDENTIAL_GATE=PASS commits=%d\n' "${#commits[@]}"
+
+  windows-native-stdin-ingress:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This test specifically proves the Windows PowerShell 5.1 stdin and
+      # Win32 argument-escaping fallback. Keep it on Windows rather than
+      # replacing that evidence with a different Linux pwsh behavior.
+      - name: Verify Windows native stdin ingress
+        shell: powershell
+        run: .\tests\phase3\class-archive-stdin-ingress-synthetic.ps1
