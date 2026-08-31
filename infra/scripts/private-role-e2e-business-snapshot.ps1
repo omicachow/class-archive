@@ -299,7 +299,12 @@ function Assert-FqaDurableRecoveryEmpty {
     # independently prove the dedicated, non-web-served volume is empty. The
     # exact owner/group/mode contract prevents a substituted host directory
     # from being accepted as an empty recovery volume.
-    $script = @'
+    # Pass the fixed probe through a base64-only command argument rather than
+    # a multiline `sh -c` argument.  WSL command-line marshalling can alter
+    # newline-bearing arguments even though the same probe works inside the
+    # container.  This is deliberately not an input channel: the probe is
+    # fixed source code, encoded locally, and its base64 alphabet is asserted.
+    $probe = @'
 set -eu
 root=/var/lib/class-archive-private-e2e
 mountpoint -q -- "$root"
@@ -308,6 +313,9 @@ mountpoint -q -- "$root"
 [ -z "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)" ]
 printf 'FQA_DURABLE_RECOVERY=EMPTY\n'
 '@
+    $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+    if ($encodedProbe -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot 'fqa_durable_recovery_probe_encoding_invalid' }
+    $script = 'printf %s ' + $encodedProbe + ' | base64 -d | sh -eu -s'
     $lines = Invoke-PiwigoComposeCapture @(
         'exec', '-T', '--user', 'root', 'piwigo', 'sh', '-eu', '-c', $script
     ) 'fqa_durable_recovery_probe_failed'
