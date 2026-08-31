@@ -112,6 +112,8 @@ Assert-Contains $broker 'ensureMode ? 1 : 0' 'teacher_broker_mode_xor_missing'
 Assert-Contains $broker "PHP_SAPI !== 'cli'" 'teacher_broker_cli_guard_missing'
 Assert-Contains $broker 'v4teacherPersistentRun($run)' 'teacher_broker_fixed_persistent_run_guard_missing'
 Assert-Contains $broker '!hash_equals(V4_TEACHER_BROKER_PERSISTENT_RUN, $run)' 'teacher_broker_dynamic_run_rejection_missing'
+Assert-Contains $broker 'function v4teacherSafeThrowableCode(\Throwable $error): string' 'teacher_broker_safe_runtime_error_mapper_missing'
+Assert-Contains $broker "(?:class_identity|teacher_broker)_[a-z0-9_]{1,80}" 'teacher_broker_safe_runtime_error_allowlist_missing'
 Assert-Contains $adapter "const PRIVATE_E2E_TEACHER_FIXTURE_OWNER = 'v4-owner-teacher-fixture-broker';" 'teacher_adapter_owner_mismatch'
 
 # Recovery is a terminal repair path, not a new fixture acquisition. It needs

@@ -62,6 +62,25 @@ function v4teacherFail(string $code): never
     throw new V4TeacherBrokerFailure($code);
 }
 
+function v4teacherSafeThrowableCode(\Throwable $error): string
+{
+    // A broker failure record is intentionally a closed diagnostic surface.
+    // Only bounded Class Archive implementation codes can leave the process;
+    // database text, paths, user data and every unknown exception remain
+    // opaque so a failed local acceptance run cannot become a secret sink.
+    $message = $error->getMessage();
+    if (preg_match('/\A(?:class_identity|teacher_broker)_[a-z0-9_]{1,80}\z/D', $message) === 1) {
+        return $message;
+    }
+    if ($error instanceof \mysqli_sql_exception) {
+        return 'teacher_broker_runtime_sql';
+    }
+    if ($error instanceof \TypeError) {
+        return 'teacher_broker_runtime_type';
+    }
+    return 'unexpected';
+}
+
 function v4teacherRun(string $run): string
 {
     if (preg_match('/\A[a-f0-9]{24}\z/D', $run) !== 1) {
@@ -1595,7 +1614,9 @@ try {
         }
     }
 } catch (Throwable $error) {
-    $code = $error instanceof V4TeacherBrokerFailure ? $error->getMessage() : 'unexpected';
+    $code = $error instanceof V4TeacherBrokerFailure
+        ? $error->getMessage()
+        : v4teacherSafeThrowableCode($error);
     if (preg_match('/\A[a-z0-9_]{1,96}\z/D', $code) !== 1) {
         $code = 'unexpected';
     }
