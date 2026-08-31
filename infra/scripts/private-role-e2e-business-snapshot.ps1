@@ -302,6 +302,19 @@ function Get-SafeExternalFailureClass([string[]]$Lines) {
     return 'unclassified'
 }
 
+function Write-PrivateExternalFailureDiagnostic([string]$Code, [int]$ExitCode, [string[]]$Lines) {
+    # Opt-in only. The raw host diagnostic stays in the already ignored,
+    # owner-only private snapshot root and is never written to stdout, a Git
+    # artifact, or an application log. It exists solely to repair a failing
+    # local recovery drill without guessing at Docker/WSL behavior.
+    if ($env:CLASS_ARCHIVE_PRIVATE_ROLE_E2E_DIAGNOSTICS -ne '1') { return }
+    if ($Code -notmatch '^[a-z0-9_]{1,120}$') { return }
+    $path = Join-Path $privateRoot 'last-external-failure.local.txt'
+    [IO.File]::WriteAllText($path, ([string]::Join("`n", @($Lines))), [Text.UTF8Encoding]::new($false))
+    Set-ClassArchiveOwnerOnlyFileAcl -Path $path
+    Assert-ClassArchiveOwnerOnlyFileAcl -Path $path
+}
+
 function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     $previous = $ErrorActionPreference
     try {
@@ -311,6 +324,7 @@ function Invoke-WslCapture([string[]]$Arguments, [string]$Code) {
     }
     finally { $ErrorActionPreference = $previous }
     if ($exitCode -ne 0) {
+        Write-PrivateExternalFailureDiagnostic $Code ([int]$exitCode) $lines
         $failureClass = Get-SafeExternalFailureClass $lines
         Stop-PrivateRoleSnapshot ($Code + '_exit_' + [Math]::Abs([int]$exitCode) + '_' + $failureClass)
     }
