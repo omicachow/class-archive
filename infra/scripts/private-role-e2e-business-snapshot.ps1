@@ -776,10 +776,16 @@ try {
     try {
         $script:snapshotStage = 'partial_directory_create'
         try { [IO.Directory]::CreateDirectory($partial) | Out-Null }
-        catch { Stop-PrivateRoleSnapshot 'partial_directory_create_failed' }
+        catch {
+            if ([string]$_.Exception.Message -match '^PRIVATE_ROLE_SNAPSHOT_STOP:') { throw }
+            Stop-PrivateRoleSnapshot 'partial_directory_create_failed'
+        }
         $script:snapshotStage = 'partial_directory_acl'
         try { Set-OwnerOnlyDirectoryAcl $partial }
-        catch { Stop-PrivateRoleSnapshot 'partial_directory_acl_failed' }
+        catch {
+            if ([string]$_.Exception.Message -match '^PRIVATE_ROLE_SNAPSHOT_STOP:') { throw }
+            Stop-PrivateRoleSnapshot 'partial_directory_acl_failed'
+        }
         $script:snapshotStage = 'state_before'
         $stateBefore = Get-OwnerBusinessState $auditPrefixRows
         $script:snapshotStage = 'database_dump'

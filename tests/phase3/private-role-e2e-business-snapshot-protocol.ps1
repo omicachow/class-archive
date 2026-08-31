@@ -108,6 +108,7 @@ Assert-Protocol ($source.Contains('state_fqa_terminal_invalid') -and $source.Con
 Assert-Protocol ($source.Contains("u.password REGEXP '^[$]P[$][./0-9A-Za-z]{31}$'") -and $source.Contains("u.password REGEXP '^[$]2[aby][$][0-9]{2}[$][./0-9A-Za-z]{53}$'") -and $source.Contains("u.password REGEXP '^[$]argon2(id|i|d)")) 'snapshot_fqa_password_hash_format_gate_missing'
 Assert-Protocol ($source.Contains("mountpoint -q -- `"`$root`"") -and $source.Contains("FQA_DURABLE_RECOVERY=EMPTY") -and $source.Contains('Assert-FqaDurableRecoveryEmpty') -and $source.Contains("durable_recovery_empty = `$true")) 'snapshot_fqa_durable_recovery_gate_missing'
 Assert-Protocol ($source.Contains('[Convert]::ToBase64String') -and $source.Contains("'^[A-Za-z0-9+/=]+$'") -and $source.Contains('base64 -d | sh -eu -s') -and $source.Contains('$lines = @(Invoke-PiwigoComposeCapture')) 'snapshot_fqa_durable_recovery_ingress_hardening_missing'
+Assert-Protocol (($source.Split("`n") | Where-Object { $_ -match "Exception\.Message -match '\^PRIVATE_ROLE_SNAPSHOT_STOP:'" }).Count -ge 2) 'snapshot_partial_directory_stop_passthrough_missing'
 Assert-Protocol ($source.Contains("non_fqa_identity_security = 'BYTE_EXACT_SHA256'") -and $source.Contains('manifest_fqa_security_policy_invalid') -and $source.Contains('Compare-Object $fqaAllowedVolatile $manifestAllowedVolatile')) 'snapshot_fqa_manifest_policy_binding_missing'
 
 # SHA-256 binds dump, manifest, completion marker, and the compare inputs.
