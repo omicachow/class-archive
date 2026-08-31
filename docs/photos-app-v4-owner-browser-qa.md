@@ -25,8 +25,12 @@ The broker refuses to open unless every expected invariant still holds:
 The PowerShell wrapper holds an exclusive ignored host lock. The PHP broker
 holds a MariaDB advisory lock for the whole run and has a 15-minute maximum
 TTL. Passwords are generated inside the broker and cross the process boundary
-only in a one-link 0600 file copied to an ignored, owner-only path. Passwords,
-usernames, and paths never appear in stdout.
+only once through the already-authenticated broker control pipe. The broker
+validates its private 0600 recovery document, emits one bounded base64 record
+to its redirected parent pipe, and the wrapper immediately writes it to an
+ignored, owner-only 0600 host file. It does not use a second `docker exec` or
+`docker cp` transport. Passwords, usernames, paths, and the export record
+never appear in terminal output.
 
 Opening order is fail-closed:
 

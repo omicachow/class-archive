@@ -29,10 +29,10 @@ foreach ($path in @($wrapperPath, $runnerPath, $leaseProtocolPath, $boundedNativ
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) ('owner_fqa_browser_file_missing_' + [IO.Path]::GetFileNameWithoutExtension($path))
 }
 
-# The wrapper transports its owner-only credential and later removes the
-# container recovery plan with Linux commands that use their own `--` operand
-# separator.  Only the first WSL delimiter is structural; payload separators
-# must survive unchanged after timeout injection.
+# The durable-plan cleanup command uses its own `--` operand separator. Only
+# the first WSL delimiter is structural; payload separators must survive
+# unchanged after timeout injection. Credential export itself now stays on the
+# already-authenticated broker control pipe and must not open a second exec.
 . $boundedNativePath
 $credentialCopyArguments = @(Add-ClassArchiveWslTimeout -Arguments @(
     '-d', 'Ubuntu', '--exec', 'docker', 'compose', 'exec', '-T', 'piwigo',
@@ -208,7 +208,12 @@ Assert-Contains $wrapper 'Assert-ClassArchiveOwnerOnlyFileAcl -Path $item.FullNa
 Assert-Contains $wrapper 'Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPath' 'owner_fqa_credential_acl_before_write_missing'
 Assert-Contains $wrapper '[System.IO.Directory]::SetAccessControl($resolved, $acl)' 'owner_fqa_native_directory_acl_backend_missing'
 Assert-Contains $wrapper 'private_directory_acl_backend_unavailable' 'owner_fqa_directory_acl_fail_closed_missing'
-Assert-Contains $wrapper "'base64', '-w0', '--', `$ContainerPath" 'owner_fqa_credential_private_transport_missing'
+Assert-Contains $wrapper 'Copy-FqaCredentialFromBroker' 'owner_fqa_broker_credential_transport_missing'
+Assert-Contains $wrapper "WriteLine('EXPORT ' + `$Run)" 'owner_fqa_broker_export_command_missing'
+Assert-Contains $wrapper 'V4_OWNER_FQA_CREDENTIAL=' 'owner_fqa_broker_export_record_missing'
+Assert-Contains $wrapper 'credential_export_timeout' 'owner_fqa_broker_export_timeout_missing'
+Assert-Contains $wrapper 'credential_export_rejected' 'owner_fqa_broker_export_rejection_missing'
+Assert-NotContains $wrapper "'base64', '-w0'" 'owner_fqa_second_exec_credential_transport_forbidden'
 Assert-NotContains $wrapper "'cp', ('piwigo:'" 'owner_fqa_insecure_docker_cp_forbidden'
 Assert-Contains $wrapper 'Stop-FqaNativeProcessTree' 'owner_fqa_broker_reap_missing'
 Assert-Contains $wrapper 'Invoke-FqaLeaseRecovery' 'owner_fqa_independent_refreeze_missing'

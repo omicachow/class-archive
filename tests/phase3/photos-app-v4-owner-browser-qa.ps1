@@ -239,8 +239,11 @@ function Initialize-FqaDurableRecoveryRoot {
     ) -TimeoutSeconds 30 -Code 'durable_recovery_root_unavailable')
 }
 
-function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPath) {
+function Copy-FqaCredentialFromBroker([Diagnostics.Process]$Broker, [string]$Run, [string]$HostPath) {
     $script:wrapperStage = 'credential_copy_preflight'
+    if ($null -eq $Broker -or $Broker.HasExited) {
+        Stop-V4OwnerFqa 'credential_broker_unavailable'
+    }
     if (Test-Path -LiteralPath $HostPath) { Stop-V4OwnerFqa 'credential_path_not_fresh' }
     Assert-PrivateParentAcl -Candidate $HostPath -Code 'credential'
 
@@ -253,12 +256,30 @@ function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPa
         $script:wrapperStage = 'credential_copy_acl'
         Set-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
-        $script:wrapperStage = 'credential_copy_transport'
-        $result = Invoke-BoundedPiwigo -Arguments @(
-            'exec', '-T', '--user', 'nginx', 'piwigo',
-            'base64', '-w0', '--', $ContainerPath
-        ) -TimeoutSeconds 30 -Code 'credential_copy_failed'
-        $encoded = ([string]$result.Stdout).Trim()
+        # Use the already authenticated broker control pipe rather than a
+        # second docker exec. The broker validates its 0600 recovery document,
+        # exports it exactly once for this run, and remains alive for the
+        # eventual close/refreeze attestation.
+        $script:wrapperStage = 'credential_broker_export'
+        try {
+            $Broker.StandardInput.WriteLine('EXPORT ' + $Run)
+            $Broker.StandardInput.Flush()
+        } catch {
+            Stop-V4OwnerFqa 'credential_broker_unavailable'
+        }
+        $exportTask = $Broker.StandardOutput.ReadLineAsync()
+        if (-not $exportTask.Wait([TimeSpan]::FromSeconds(30))) {
+            Stop-V4OwnerFqa 'credential_export_timeout'
+        }
+        $record = [string]$exportTask.Result
+        if ($record -notmatch '^V4_OWNER_FQA_CREDENTIAL=([A-Za-z0-9+/]{64,131072}={0,2})$') {
+            if ($record -match '^V4_OWNER_FQA_LEASE=FAIL stage=(?:bootstrap|runtime) code=[a-z0-9_]+$') {
+                Stop-V4OwnerFqa 'credential_export_rejected'
+            }
+            Stop-V4OwnerFqa 'credential_export_invalid'
+        }
+        $encoded = $Matches[1]
+        $record = ''
         if ($encoded -notmatch '^[A-Za-z0-9+/]{64,131072}={0,2}$') { Stop-V4OwnerFqa 'credential_transport_invalid' }
         $bytes = $null
         try {
@@ -278,6 +299,7 @@ function Copy-FqaCredentialFromContainer([string]$ContainerPath, [string]$HostPa
         finally {
             if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
         }
+        $encoded = ''
         $script:wrapperStage = 'credential_copy_final_acl'
         Assert-ClassArchiveOwnerOnlyFileAcl -Path $HostPath
     }
@@ -606,7 +628,7 @@ try {
     $leaseBroker = Start-FqaLeaseBroker -Run $run -ContainerCredentialPath $containerCredentialPath
     $containerCredentialNeedsCleanup = $true
     $wrapperStage = 'credential_copy'
-    Copy-FqaCredentialFromContainer -ContainerPath $containerCredentialPath -HostPath $credentialPath
+    Copy-FqaCredentialFromBroker -Broker $leaseBroker -Run $run -HostPath $credentialPath
     # Preserve the owner-only recovery plan in the container until exact lease
     # closure. The watchdog uses it after a wrapper/broker crash to remove only
     # password hashes installed by this run.

@@ -6,9 +6,11 @@ declare(strict_types=1);
  * Local-only, bounded credential lease for one historical FQA aggregate.
  *
  * This broker deliberately keeps the database advisory lock and its stdin
- * control channel open for the complete browser run.  Credentials cross the
- * process boundary only through one 0600 file.  EOF, STOP, timeout, signals,
- * or any Throwable enter the same freeze-first cleanup path.
+ * control channel open for the complete browser run. Credentials are exported
+ * exactly once over that authenticated pipe and are written immediately to an
+ * owner-only 0600 host file; no second docker exec reads the recovery plan.
+ * EOF, STOP, timeout, signals, or any Throwable enter the same freeze-first
+ * cleanup path.
  */
 
 const V4_FQA_ROOT = '/var/www/html/piwigo';
@@ -472,6 +474,72 @@ function v4fqaReadCredentialPlan(string $path, string $run): array
     return $document['recovery_plan'];
 }
 
+/**
+ * Return the short-lived browser credential document only over the already
+ * authenticated broker control pipe.
+ *
+ * This deliberately does not create a second docker exec transport window:
+ * the same process that owns the lease proves the recovery file is present,
+ * regular, private, bound to this run, and structurally complete before it
+ * emits one base64 line to its parent.  Callers must never log the result.
+ */
+function v4fqaExportCredentialDocument(string $path, string $run): string
+{
+    // Reuse the strict recovery-plan validator first. It rejects symlinks,
+    // unsafe modes, hard links, stale runs, and malformed recovery data.
+    v4fqaReadCredentialPlan($path, $run);
+
+    clearstatcache(true, $path);
+    $stat = @lstat($path);
+    if (!is_array($stat)
+        || (($stat['mode'] ?? 0) & 0170000) !== 0100000
+        || (($stat['mode'] ?? 0) & 0777) !== 0600
+        || (int) ($stat['nlink'] ?? 0) !== 1
+        || is_link($path)
+        || (int) ($stat['size'] ?? 0) < 128
+        || (int) ($stat['size'] ?? 0) > 65536
+    ) {
+        v4fqaFail('credential_export_file_invalid');
+    }
+    $raw = file_get_contents($path);
+    if (!is_string($raw)) {
+        v4fqaFail('credential_export_read_failed');
+    }
+    try {
+        $document = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+    } catch (Throwable) {
+        v4fqaFail('credential_export_document_invalid');
+    }
+    if (!is_array($document)
+        || ($document['version'] ?? null) !== 3
+        || ($document['environment'] ?? null) !== 'PRIVATE_REAL_FULL_OWNER_V4_FQA_LEASE'
+        || ($document['run'] ?? null) !== $run
+        || !is_array($document['lease'] ?? null)
+        || ($document['lease']['roster'] ?? null) !== V4_FQA_ROSTER
+        || ($document['lease']['roles'] ?? null) !== 3
+        || !is_array($document['roles'] ?? null)
+        || array_keys($document['roles']) !== array_map('strtolower', V4_FQA_ROLES)
+    ) {
+        v4fqaFail('credential_export_document_invalid');
+    }
+    foreach ($document['roles'] as $role => $credential) {
+        if (!is_array($credential)
+            || !is_string($credential['username'] ?? null)
+            || !is_string($credential['password'] ?? null)
+            || $credential['username'] === ''
+            || strlen($credential['password']) < 16
+            || strlen($credential['password']) > 512
+        ) {
+            v4fqaFail('credential_export_role_invalid');
+        }
+    }
+    $encoded = base64_encode($raw);
+    if ($encoded === '' || strlen($encoded) > 131072) {
+        v4fqaFail('credential_export_size_invalid');
+    }
+    return $encoded;
+}
+
 function v4fqaRemoveCredentialFile(string $path): void
 {
     if (!file_exists($path) && !is_link($path)) {
@@ -867,6 +935,7 @@ $leaseOpened = false;
 $recoveryCompleted = false;
 $cleanupTerminal = false;
 $cleanupSafe = false;
+$credentialExported = false;
 $credentialPlan = [];
 $lockHeld = false;
 $state = null;
@@ -1082,7 +1151,25 @@ try {
         if ($line === false) {
             break; // parent EOF: cleanup immediately
         }
-        if (hash_equals('STOP ' . $run, trim($line))) {
+        $control = trim($line);
+        if (hash_equals('EXPORT ' . $run, $control)) {
+            if ($credentialExported) {
+                v4fqaFail('credential_export_replayed');
+            }
+            $encodedCredential = v4fqaExportCredentialDocument($credentialFile, $run);
+            $record = "V4_OWNER_FQA_CREDENTIAL={$encodedCredential}\n";
+            if (fwrite(STDOUT, $record) !== strlen($record) || !fflush(STDOUT)) {
+                v4fqaFail('credential_export_write_failed');
+            }
+            // Do not retain a second plaintext-bearing buffer after the single
+            // parent-bound export. The durable recovery document remains until
+            // ordinary broker closure can attest cleanup.
+            $encodedCredential = '';
+            $record = '';
+            $credentialExported = true;
+            continue;
+        }
+        if (hash_equals('STOP ' . $run, $control)) {
             break;
         }
         v4fqaFail('control_message_invalid');
