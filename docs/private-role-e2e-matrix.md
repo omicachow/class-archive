@@ -38,6 +38,22 @@ node tests/phase3/private-role-capability-inventory.mjs
 
 JSON 中包含 200 个 operation 和 1,400 个按角色展开的 row，每行均含 `operation_id`、`route`、`http_method`、`role`、`allowed`、`ownership_condition`、`era_condition`、`visibility_scope`、`requires_approval`、`requires_audit`、`mutates_data` 和 `cleanup_strategy`。
 
+## 源契约漂移门禁
+
+当前生成文件为 `schema_version=2`，还包含一个可公开审查的
+`source_surface_contract`。它不是另一套权限真相，而是让手工能力表
+不会悄悄落后于代码的静态门禁：
+
+- Gateway 的固定读路由、简单路由、动态照片/人物/搜索分支、可接受的媒体 variant 与写契约必须与声明集一致；
+- Web compatibility BFF 的每一条公开路径与其 canonical Gateway 目标必须逐对一致，不能只比较数量；
+- ClassIdentity 公共页面/动作、内部 member-upload bridge、Admin action 和 Piwigo WS capability 分类都必须与源代码一致；
+- 新增、删除或重定向任一上述 surface 时，inventory 会失败，要求同时更新权限矩阵和角色验收计划。
+
+这项检查仅证明 **STATIC_CODE_AUDIT**。它不证明某个角色已经完成 HTTP
+或 Chrome E2E；对于内容、数量、封面、搜索和媒体，仍必须用真实会话验证
+FULL / HERITAGE_ONLY、UNKNOWN fail-closed 与 MediaGuard 的 GET / HEAD /
+Range 行为。
+
 ## 角色真相
 
 | 角色 | 当前代码中的真实状态 |

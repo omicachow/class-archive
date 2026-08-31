@@ -49,6 +49,44 @@ function exactSet(actual, expected, label) {
   }
 }
 
+function exactMultiset(actual, expected, label) {
+  const left = [...actual].sort();
+  const right = [...expected].sort();
+  if (JSON.stringify(left) !== JSON.stringify(right)) {
+    fail(`${label}_source_drift expected=${JSON.stringify(right)} actual=${JSON.stringify(left)}`);
+  }
+}
+
+function exactPairs(actual, expected, label) {
+  const normalize = (pairs) => pairs
+    .map(([publicPath, internalPath]) => `${publicPath}\u0000${internalPath}`)
+    .sort();
+  const left = normalize(actual);
+  const right = normalize(expected);
+  if (JSON.stringify(left) !== JSON.stringify(right)) {
+    fail(`${label}_source_drift expected=${JSON.stringify(right)} actual=${JSON.stringify(left)}`);
+  }
+}
+
+function phpMethodBody(text, name) {
+  const pattern = new RegExp(`private static function ${name}\\([^]*?\\n    }\\n\\n    /\\*\\*`, 'm');
+  return text.match(pattern)?.[0] ?? fail(`php_method_missing:${name}`);
+}
+
+function parsePhpLiteralSegmentRoutes(text) {
+  return [...text.matchAll(/\$segments === \[([^\]]*)\]/g)].map((match) => {
+    const segments = [...match[1].matchAll(/'([^']+)'/g)].map((token) => token[1]);
+    if (segments.length === 0) fail('php_literal_segment_route_invalid');
+    return segments.join('/');
+  });
+}
+
+function parseMapEntries(text, name) {
+  const body = text.match(new RegExp(`${name}\\s*=\\s*new Map\\(\\[([\\s\\S]*?)\\n\\]\\);`))?.[1]
+    ?? fail(`${name}_missing`);
+  return [...body.matchAll(/\['([^']+)'\s*,\s*'([^']+)'\]/g)].map((match) => [match[1], match[2]]);
+}
+
 const gatewayMutationRoutes = Object.freeze([
   'manage/people/create',
   'manage/people/update',
@@ -104,27 +142,72 @@ const gatewayReadRoutes = Object.freeze([
   'search/smart',
   'me',
 ]);
+const gatewayReadBody = phpMethodBody(sourceText.gateway, 'handleProductRead');
+const gatewayReadLiteralRoutes = parsePhpLiteralSegmentRoutes(gatewayReadBody);
+const expectedGatewayReadLiteralRoutes = Object.freeze([
+  'product-state',
+  'member-upload/options',
+  'home',
+  'collections/home',
+  'collections/state',
+  'collections/pins',
+  'spotlight',
+  'search/grouped',
+  'search/hybrid',
+  'search/suggestions',
+  'manage/people',
+  'manage/options',
+  'manage/duplicates',
+]);
+exactMultiset(gatewayReadLiteralRoutes, expectedGatewayReadLiteralRoutes, 'gateway_read_literal_routes');
+
+const simpleRoutesBody = sourceText.gateway.match(/private const SIMPLE_ROUTES\s*=\s*\[([^\]]*)\];/)?.[1]
+  ?? fail('gateway_simple_routes_missing');
+const gatewaySimpleRoutes = [...simpleRoutesBody.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+const expectedGatewaySimpleRoutes = Object.freeze(['photos', 'timeline', 'albums', 'people', 'memories', 'me', 'home']);
+exactSet(gatewaySimpleRoutes, expectedGatewaySimpleRoutes, 'gateway_simple_routes');
+
+const gatewayParseRouteBody = phpMethodBody(sourceText.gateway, 'parseRoute');
+const gatewayParseRouteDiscriminants = [...gatewayParseRouteBody.matchAll(/\$route === '([^']+)'/g)].map((match) => match[1]);
+exactMultiset(gatewayParseRouteDiscriminants, ['photos', 'photos', 'people', 'search', 'search'], 'gateway_parse_route_discriminants');
+const gatewayMediaVariants = gatewayParseRouteBody.match(/in_array\(\$segments\[3\], \[([^\]]+)\]/)?.[1]
+  ? [...gatewayParseRouteBody.match(/in_array\(\$segments\[3\], \[([^\]]+)\]/)[1].matchAll(/'([^']+)'/g)].map((match) => match[1])
+  : fail('gateway_media_variants_missing');
+exactSet(gatewayMediaVariants, ['thumbnail', 'xsmall', 'small', 'medium', 'large', 'preview', 'original'], 'gateway_media_variants');
+const gatewayDispatchBody = sourceText.gateway.match(/\$response\s*=\s*match \(\$route\) \{([\s\S]*?)\n\s*\};/)?.[1]
+  ?? fail('gateway_read_dispatch_missing');
+const gatewayDispatchRoutes = [...gatewayDispatchBody.matchAll(/'([^']+)'\s*=>/g)].map((match) => match[1]);
+exactSet(gatewayDispatchRoutes, ['photos', 'media', 'timeline', 'albums', 'people', 'memories', 'search', 'smart-search', 'me'], 'gateway_read_dispatch_routes');
 for (const marker of [
-  "['product-state']", "['member-upload', 'options']", "['collections', 'home']",
-  "['search', 'grouped']", "['search', 'hybrid']", "['search', 'suggestions']",
-  "['manage', 'people']", "['manage', 'options']", "['manage', 'duplicates']",
-  "'media' => self::deliverMedia", "'smart-search' => $gateway->smartSearch",
+  "($segments[0] ?? null) === 'comments'", "($segments[0] ?? null) === 'albums'",
+  "($segments[2] ?? null) === 'media'", "'media' => self::deliverMedia", "'smart-search' => $gateway->smartSearch",
 ]) {
-  if (!sourceText.gateway.includes(marker)) fail(`gateway_read_marker_missing:${marker}`);
+  if (!gatewayReadBody.includes(marker) && !gatewayParseRouteBody.includes(marker) && !gatewayDispatchBody.includes(marker)) {
+    fail(`gateway_read_marker_missing:${marker}`);
+  }
 }
 
-function parseMapKeys(text, name) {
-  const body = text.match(new RegExp(`${name}\\s*=\\s*new Map\\(\\[([\\s\\S]*?)\\n\\]\\);`))?.[1]
-    ?? fail(`${name}_missing`);
-  return [...body.matchAll(/\['([^']+)'\s*,/g)].map((match) => match[1]);
-}
-
-const bffReadMap = parseMapKeys(sourceText.webCompat, 'photoUiGatewayReadRoutes');
-const bffMutationMap = parseMapKeys(sourceText.webCompat, 'photoUiGatewayMutationRoutes');
-if (bffReadMap.length !== 11) fail(`bff_read_map_count:${bffReadMap.length}`);
-exactSet(
-  bffMutationMap,
-  gatewayMutationRoutes.map((route) => `/api/class-archive/${route}`),
+const expectedBffReadMap = Object.freeze([
+  ['/api/class-archive/product-state', '/api/product-state'],
+  ['/api/class-archive/member-upload/options', '/api/member-upload/options'],
+  ['/api/class-archive/albums', '/api/albums'],
+  ['/api/class-archive/home', '/api/home'],
+  ['/api/class-archive/collections/home', '/api/collections/home'],
+  ['/api/class-archive/collections/state', '/api/collections/state'],
+  ['/api/class-archive/collections/pins', '/api/collections/pins'],
+  ['/api/class-archive/spotlight', '/api/spotlight'],
+  ['/api/class-archive/manage/people', '/api/manage/people'],
+  ['/api/class-archive/manage/options', '/api/manage/options'],
+  ['/api/class-archive/manage/duplicates', '/api/manage/duplicates'],
+]);
+const bffReadEntries = parseMapEntries(sourceText.webCompat, 'photoUiGatewayReadRoutes');
+const bffMutationEntries = parseMapEntries(sourceText.webCompat, 'photoUiGatewayMutationRoutes');
+const bffReadMap = bffReadEntries.map(([publicPath]) => publicPath);
+const bffMutationMap = bffMutationEntries.map(([publicPath]) => publicPath);
+exactPairs(bffReadEntries, expectedBffReadMap, 'bff_read_map');
+exactPairs(
+  bffMutationEntries,
+  gatewayMutationRoutes.map((route) => [`/api/class-archive/${route}`, `/api/${route}`]),
   'bff_mutation_map',
 );
 
@@ -138,6 +221,30 @@ const expectedAdminActions = Object.freeze([
   'resolve_anonymous',
 ]);
 exactSet(adminActions, expectedAdminActions, 'admin_actions');
+
+const publicIdentityRoutes = [...sourceText.publicIdentity.matchAll(/private const (ROUTE_[A-Z_]+) = '([^']+)';/g)]
+  .map((match) => [match[1], match[2]]);
+const expectedPublicIdentityRoutes = Object.freeze([
+  ['ROUTE_CLAIM', 'claim'],
+  ['ROUTE_FAMILY_INVITE', 'family-invite'],
+  ['ROUTE_MY_IDENTITY', 'my'],
+  ['ROUTE_MEMBER_UPLOAD', 'member-upload'],
+]);
+exactPairs(publicIdentityRoutes, expectedPublicIdentityRoutes, 'public_identity_routes');
+const publicIdentityMutations = [...sourceText.publicIdentity.matchAll(/\$route === self::(ROUTE_[A-Z_]+) && \$action === '([^']+)'/g)]
+  .map((match) => [match[1], match[2]]);
+const expectedPublicIdentityMutations = Object.freeze([
+  ['ROUTE_CLAIM', 'claim'],
+  ['ROUTE_FAMILY_INVITE', 'accept_family'],
+  ['ROUTE_MY_IDENTITY', 'issue_family_invitation'],
+  ['ROUTE_MY_IDENTITY', 'activate_anonymous'],
+  ['ROUTE_MY_IDENTITY', 'submit_family_photo'],
+]);
+exactPairs(publicIdentityMutations, expectedPublicIdentityMutations, 'public_identity_mutations');
+if (!sourceText.publicIdentity.includes("$action !== 'publish_member_photo'")
+  || !sourceText.publicIdentity.includes("($_SERVER['CLASS_ARCHIVE_WEB_COMPAT_INTERNAL'] ?? '') !== '1'")) {
+  fail('member_upload_private_bridge_contract_missing');
+}
 
 const wsBody = sourceText.capabilityGuard.match(/private const WS_CAPABILITIES\s*=\s*\[([\s\S]*?)\n\s*\];/)?.[1]
   ?? fail('ws_capabilities_missing');
@@ -537,10 +644,41 @@ const rows = operations.flatMap((operation) => roles.map((role) => ({
 })));
 
 const document = {
-  schema_version: 1,
+  schema_version: 2,
   evidence_level: 'STATIC_CODE_AUDIT',
   generated_at: new Date().toISOString(),
   source_files: Object.values(sources),
+  source_contract_integrity: 'PASS',
+  // These extracted, public-safe declarations prevent a new route/action or
+  // BFF remap from silently inheriting a hand-written matrix entry. They are
+  // source-contract evidence only; runtime authorization still needs HTTP and
+  // browser proof against a real role/session.
+  source_surface_contract: {
+    gateway: {
+      literal_read_routes: [...gatewayReadLiteralRoutes].sort(),
+      simple_read_routes: [...gatewaySimpleRoutes].sort(),
+      parse_route_discriminants: [...new Set(gatewayParseRouteDiscriminants)].sort(),
+      media_variants: [...gatewayMediaVariants].sort(),
+      read_dispatch_routes: [...gatewayDispatchRoutes].sort(),
+      mutation_routes: [...parsedGatewayMutations].sort(),
+    },
+    web_compat: {
+      gateway_read_mappings: bffReadEntries.map(([publicPath, internalPath]) => ({ public_path: publicPath, internal_path: internalPath })),
+      gateway_mutation_mappings: bffMutationEntries.map(([publicPath, internalPath]) => ({ public_path: publicPath, internal_path: internalPath })),
+    },
+    public_identity: {
+      routes: publicIdentityRoutes.map(([constant, route]) => ({ constant, route })),
+      mutations: publicIdentityMutations.map(([route_constant, action]) => ({ route_constant, action })),
+      member_upload: {
+        action: 'publish_member_photo',
+        browser_direct_access: 'DENY_UNLESS_FIXED_WEB_COMPAT_INTERNAL_BRIDGE',
+      },
+    },
+    admin: { actions: [...adminActions].sort() },
+    piwigo_ws: {
+      classified_mutations: wsMutations.map(({ route, capability }) => ({ route, capability })),
+    },
+  },
   counting_rule: 'Each independently callable route-pattern plus method is one operation. The canonical Piwigo Gateway and its BFF aliases are separate attack surfaces. Static assets, health, redirects, page-shell documents, reflection.* wildcard methods, and three legacy HTML guard families are reported in docs but excluded.',
   counts: {
     ...actualCounts,
