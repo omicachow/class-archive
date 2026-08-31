@@ -82,6 +82,7 @@ foreach ($needle in @(
     "teacher_business_write_observed",
     "state.role === 'TEACHER'",
     "state.canEraUpload === true && state.canFamilySubmission === false && state.canManage === false",
+    "teacher_my_profile_ready",
     "teacher_manage_api_denied",
     "teacher_family_anonymous_admin_affordance",
     "teacher_library_cards",

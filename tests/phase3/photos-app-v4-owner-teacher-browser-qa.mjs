@@ -386,6 +386,8 @@ async function assertTeacherAffordances(page) {
   check(await dialog.waitFor({ state: 'detached', timeout: 10_000 }).then(() => true).catch(() => false), 'teacher_avatar_close');
 
   await gotoOwned(page, new URL('/my', configuration.photoOrigin), 'teacher_my_route');
+  check(await page.locator('a.profile-link').first().waitFor({ state: 'visible', timeout: 30_000 })
+    .then(() => true).catch(() => false), 'teacher_my_profile_ready');
   const profileLinks = await page.locator('a.profile-link').evaluateAll((links) => links.map((link) => {
     const target = new URL(link.href);
     return { path: target.pathname, text: (link.textContent ?? '').trim() };
