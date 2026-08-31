@@ -247,6 +247,16 @@ function Invoke-PiwigoComposeCapture([string[]]$Arguments, [string]$Code) {
     return Invoke-WslCapture @((Get-PiwigoComposePrefix) + $Arguments) $Code
 }
 
+function ConvertTo-FixedShellRunner([string]$FixedScript, [string]$Code) {
+    # All callers pass fixed source-controlled shell programs. Encode them so
+    # WSL receives one ASCII-only argv value instead of a newline-bearing
+    # command argument; this is not a user-data transport channel.
+    if ([string]::IsNullOrWhiteSpace($FixedScript)) { Stop-PrivateRoleSnapshot $Code }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($FixedScript))
+    if ($encoded -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot $Code }
+    return "printf '%s' $encoded | base64 -d | sh -eu -s"
+}
+
 function Assert-OwnerRuntimeProof {
     if ($Endpoint -ne 'owner') { Stop-PrivateRoleSnapshot 'owner_endpoint_required' }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lifecycle runtime-owner | Out-Null
@@ -313,9 +323,7 @@ mountpoint -q -- "$root"
 [ -z "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)" ]
 printf 'FQA_DURABLE_RECOVERY=EMPTY\n'
 '@
-    $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
-    if ($encodedProbe -notmatch '^[A-Za-z0-9+/=]+$') { Stop-PrivateRoleSnapshot 'fqa_durable_recovery_probe_encoding_invalid' }
-    $script = 'printf %s ' + $encodedProbe + ' | base64 -d | sh -eu -s'
+    $script = ConvertTo-FixedShellRunner $probe 'fqa_durable_recovery_probe_encoding_invalid'
     # A single successful probe is emitted as a scalar string by PowerShell.
     # Under StrictMode that scalar has no `.Count`; normalize it to an array
     # before enforcing the exact-one-line result contract.
@@ -463,11 +471,12 @@ fingerprint audit_full "SELECT * FROM ${base}audit_event ORDER BY id;"
 fingerprint audit_preexisting_prefix "SELECT * FROM ${base}audit_event ORDER BY id LIMIT ${CLASS_ARCHIVE_AUDIT_PREFIX_ROWS};"
 fingerprint audit_high_water_opaque "SELECT COALESCE(MAX(id),0) FROM ${base}audit_event;"
 '@
+    $stateRunner = ConvertTo-FixedShellRunner $stateScript 'mariadb_business_state_encoding_invalid'
     $lines = Invoke-PiwigoComposeCapture @(
         'exec', '-T',
         '-e', ('CLASS_ARCHIVE_EXPECTED_SCHEMA=' + $expectedSchema),
         '-e', ('CLASS_ARCHIVE_AUDIT_PREFIX_ROWS=' + $AuditPrefixRows),
-        'db', 'sh', '-eu', '-c', $stateScript
+        'db', 'sh', '-eu', '-c', $stateRunner
     ) 'mariadb_business_state_failed'
     return ConvertTo-StrictState $lines
 }
@@ -508,9 +517,10 @@ gzip -6 "$raw"
 '@
     try {
         $script:snapshotStage = 'database_dump_execute'
+        $dumpRunner = ConvertTo-FixedShellRunner $dumpScript 'mariadb_dump_encoding_invalid'
         [void](Invoke-PiwigoComposeCapture @(
             'exec', '-T', '-e', ('CLASS_ARCHIVE_DB_DUMP_FILE=' + $containerFile),
-            'db', 'sh', '-eu', '-c', $dumpScript
+            'db', 'sh', '-eu', '-c', $dumpRunner
         ) 'mariadb_dump_failed')
         $script:snapshotStage = 'database_dump_container_lookup'
         $containerIds = @(Invoke-PiwigoComposeCapture @('ps', '-q', 'db') 'mariadb_container_lookup_failed')
