@@ -876,6 +876,76 @@ volume_file_count() {
     -eu -c 'find /source -xdev -type f -printf ".\n" | wc -l' 2>/dev/null | tr -d '[:space:]'
 }
 
+managed_original_file_count() {
+  local container="${piwigo_project}-db-1"
+  local expected
+  expected=$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_images;')
+  if ! docker exec "$container" sh -eu -c \
+    'exec mariadb --batch --skip-column-names --raw --default-character-set=utf8mb4 --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT id,HEX(path) FROM piwigo_images ORDER BY id;"' \
+    | python3 -I -c '
+import re
+import sys
+import unicodedata
+
+expected = int(sys.argv[1])
+seen_ids = set()
+seen_paths = set()
+count = 0
+for raw in sys.stdin.buffer:
+    line = raw[:-1] if raw.endswith(b"\n") else raw
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    fields = line.split(b"\t")
+    if len(fields) != 2 or not re.fullmatch(rb"[1-9][0-9]*", fields[0]):
+        raise SystemExit("managed_original_sql_record_invalid")
+    image_id = int(fields[0])
+    if image_id in seen_ids:
+        raise SystemExit("managed_original_image_id_duplicate")
+    seen_ids.add(image_id)
+    encoded = fields[1]
+    if len(encoded) == 0 or len(encoded) % 2 or not re.fullmatch(rb"[0-9A-F]+", encoded):
+        raise SystemExit("managed_original_path_hex_invalid")
+    try:
+        path = bytes.fromhex(encoded.decode("ascii")).decode("utf-8", "strict")
+    except (UnicodeDecodeError, ValueError):
+        raise SystemExit("managed_original_path_utf8_invalid")
+    if any(ord(character) < 32 or ord(character) == 127 for character in path) or "\\" in path:
+        raise SystemExit("managed_original_path_control_invalid")
+    if path.startswith("./upload/"):
+        root = "upload"
+        relative = path[len("./upload/"):]
+    elif path.startswith("./galleries/"):
+        root = "galleries"
+        relative = path[len("./galleries/"):]
+    else:
+        raise SystemExit("managed_original_path_root_invalid")
+    segments = relative.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise SystemExit("managed_original_path_segment_invalid")
+    portable = unicodedata.normalize("NFC", root + "/" + relative).casefold()
+    if portable in seen_paths:
+        raise SystemExit("managed_original_path_duplicate")
+    seen_paths.add(portable)
+    sys.stdout.buffer.write((root + "/" + relative).encode("utf-8") + b"\0")
+    count += 1
+if count != expected or len(seen_ids) != expected or len(seen_paths) != expected:
+    raise SystemExit("managed_original_count_mismatch")
+' "$expected" \
+    | docker run --rm -i --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+      --mount "type=volume,source=$piwigo_uploads,target=/source/upload,readonly" \
+      --mount "type=volume,source=$piwigo_galleries,target=/source/galleries,readonly" \
+      --entrypoint xargs "$MARIADB_IMAGE_LOCK" -0 -r -n 64 sh -eu -c '
+        for relative do
+          case "$relative" in upload/*|galleries/*) ;; *) exit 71 ;; esac
+          target=/source/$relative
+          [ -f "$target" ] && [ ! -L "$target" ] || exit 73
+        done
+      ' _ 2>/dev/null; then
+    fail restored_managed_original_verification_failed
+  fi
+  printf '%s' "$expected"
+}
+
 verify_loopback_exposure() {
   local piwigo_container="${piwigo_project}-piwigo-1" container mapping
   mapping=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$piwigo_container" 2>/dev/null) || fail piwigo_exposure_inspect_failed
@@ -900,7 +970,7 @@ verify_restored_data() {
 import json,sys
 a=json.load(open(sys.argv[1],encoding="utf-8")); b=json.load(open(sys.argv[2],encoding="utf-8"))
 values=[]
-for key in ("schema_version","source_records","canonical_photos","piwigo_images","physical_originals","album_relationships","albums","comments_and_replies","replies","visible_people","ai_index_rows","ai_jobs","ai_jobs_complete","ai_jobs_open"):
+for key in ("schema_version","source_records","canonical_photos","piwigo_images","physical_originals","album_relationships","albums","comments_and_replies","replies","visible_people","ai_index_rows","ai_jobs","ai_jobs_complete","ai_jobs_open","managed_upload_originals","managed_gallery_originals","raw_upload_files","raw_gallery_files"):
   value=a.get(key)
   if not isinstance(value,int) or value < 0: raise SystemExit(1)
   values.append(str(value))
@@ -914,14 +984,14 @@ PY
   IFS=' ' read -r -a expected <<EOF
 $expected_line
 EOF
-  [ "${#expected[@]}" -eq 18 ] || fail expected_count_manifest_invalid
+  [ "${#expected[@]}" -eq 22 ] || fail expected_count_manifest_invalid
 
   local actual=(
     "$(mariadb_scalar 'SELECT COALESCE(MAX(version),0) FROM piwigo_class_identity_migration;')"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_class_identity_photo_source;')"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_class_identity_photo;')"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_images;')"
-    "$(( $(volume_file_count "$piwigo_uploads") + $(volume_file_count "$piwigo_galleries") ))"
+    "$(managed_original_file_count)"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_image_category;')"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_class_identity_album;')"
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_class_identity_photo_comment;')"
@@ -931,6 +1001,10 @@ EOF
     "$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_class_identity_ai_index_job;')"
     "$(mariadb_scalar "SELECT COUNT(*) FROM piwigo_class_identity_ai_index_job WHERE state='COMPLETE';")"
     "$(mariadb_scalar "SELECT COUNT(*) FROM piwigo_class_identity_ai_index_job WHERE state<>'COMPLETE';")"
+    "$(mariadb_scalar "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './upload/%';")"
+    "$(mariadb_scalar "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './galleries/%';")"
+    "$(volume_file_count "$piwigo_uploads")"
+    "$(volume_file_count "$piwigo_galleries")"
     "$(postgres_scalar 'SELECT COUNT(*) FROM asset;')"
     "$(postgres_scalar 'SELECT COUNT(*) FROM asset_face;')"
     "$(postgres_scalar 'SELECT COUNT(*) FROM person;')"

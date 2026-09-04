@@ -192,7 +192,7 @@ foreach ($file in $files) {
 }
 
 $summary = $ownerFixture.summary
-if ([string]$ownerCapture.format -cne 'class-archive-owner-capture-counts-v1' -or [string]$ownerPostgresCapture.format -cne 'class-archive-owner-postgres-capture-counts-v1' -or [string]$syntheticCapture.format -cne 'class-archive-synthetic-capture-counts-v1') {
+if ([string]$ownerCapture.format -cne 'class-archive-owner-capture-counts-v2' -or [string]$ownerPostgresCapture.format -cne 'class-archive-owner-postgres-capture-counts-v1' -or [string]$syntheticCapture.format -cne 'class-archive-synthetic-capture-counts-v2') {
     Fail 'capture_count_format_invalid'
 }
 if ([string]$sanitization.format -cne 'class-archive-runtime-sanitization-v2' -or
@@ -224,6 +224,9 @@ $ownerInvariants = @(
     ([int]$ownerCapture.ai_jobs_complete + [int]$ownerCapture.ai_jobs_open -eq [int]$ownerCapture.ai_jobs),
     ([int]$ownerCapture.canonical_photos -eq [int]$ownerCapture.piwigo_images),
     ([int]$ownerCapture.canonical_photos -eq [int]$ownerCapture.physical_originals),
+    ([int]$ownerCapture.managed_upload_originals + [int]$ownerCapture.managed_gallery_originals -eq [int]$ownerCapture.physical_originals),
+    ([int]$ownerCapture.raw_upload_files -ge [int]$ownerCapture.managed_upload_originals),
+    ([int]$ownerCapture.raw_gallery_files -ge [int]$ownerCapture.managed_gallery_originals),
     ([int]$ownerCapture.canonical_photos -eq [int]$ownerCapture.ai_index_rows),
     ([int]$ownerPostgresCapture.assets -eq [int]$ownerPostgres.assets),
     ([int]$ownerPostgresCapture.faces -eq [int]$ownerPostgres.faces),
@@ -240,7 +243,10 @@ if ([int]$ownerCapture.visible_people -lt 0 -or [int]$ownerCapture.visible_peopl
 if ([int]$syntheticCapture.schema_version -ne [int]$syntheticFixture.class_identity_schema_version -or
     [int]$syntheticCapture.images -ne [int]$syntheticFixture.summary.images.count -or
     [int]$syntheticCapture.physical_originals -ne [int]$syntheticFixture.summary.physical_originals.count -or
-    [int]$syntheticCapture.multi_album_images -ne [int]$syntheticFixture.summary.multi_album_images) {
+    [int]$syntheticCapture.multi_album_images -ne [int]$syntheticFixture.summary.multi_album_images -or
+    [int]$syntheticCapture.managed_upload_originals + [int]$syntheticCapture.managed_gallery_originals -ne [int]$syntheticCapture.physical_originals -or
+    [int]$syntheticCapture.raw_upload_files -lt [int]$syntheticCapture.managed_upload_originals -or
+    [int]$syntheticCapture.raw_gallery_files -lt [int]$syntheticCapture.managed_gallery_originals) {
     Fail 'synthetic_capture_count_invariant_failed'
 }
 if ([int]$sourceInventory.total_files -ne $sourceFiles.Count -or [int64]$sourceInventory.total_bytes -ne [int64](($sourceFiles | Measure-Object -Property size -Sum).Sum) -or
@@ -297,6 +303,10 @@ $manifest = [ordered]@{
             canonical_photos=[int]$ownerCapture.canonical_photos
             piwigo_images=[int]$ownerCapture.piwigo_images
             physical_originals=[int]$ownerCapture.physical_originals
+            managed_upload_originals=[int]$ownerCapture.managed_upload_originals
+            managed_gallery_originals=[int]$ownerCapture.managed_gallery_originals
+            raw_upload_files=[int]$ownerCapture.raw_upload_files
+            raw_gallery_files=[int]$ownerCapture.raw_gallery_files
             album_relationships=[int]$ownerCapture.album_relationships
             albums=[int]$ownerCapture.albums
             comments_and_replies=[int]$ownerCapture.comments_and_replies
@@ -315,6 +325,10 @@ $manifest = [ordered]@{
             schema_version=[int]$syntheticCapture.schema_version
             images=[int]$syntheticCapture.images
             physical_originals=[int]$syntheticCapture.physical_originals
+            managed_upload_originals=[int]$syntheticCapture.managed_upload_originals
+            managed_gallery_originals=[int]$syntheticCapture.managed_gallery_originals
+            raw_upload_files=[int]$syntheticCapture.raw_upload_files
+            raw_gallery_files=[int]$syntheticCapture.raw_gallery_files
             multi_album_images=[int]$syntheticCapture.multi_album_images
         }
         private_sources = [ordered]@{

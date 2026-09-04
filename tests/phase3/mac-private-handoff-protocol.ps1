@@ -99,9 +99,13 @@ foreach ($needle in @(
     'wait_container_ready','staging_package_timestamp_mismatch','concurrent_capture_in_progress',
     'unexpected_running_${scope}_network_container_','mariadb_sanitizer_database_create_failed',
     "--execute='SELECT 1;'",'mariadb_myisam_check_not_ok','CHECK TABLE','never REPAIR',
-    'mariadb_source_dump_stage_failed','mariadb_sanitizer_import_failed',
-    'mariadb_unsanitized_intermediate_cleanup_failed','/tmp/classarchive-source.sql'
-)) { Assert-True ($capture.Contains($needle)) ('mac_capture_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
+     'mariadb_source_dump_stage_failed','mariadb_sanitizer_import_failed',
+     'mariadb_unsanitized_intermediate_cleanup_failed','/tmp/classarchive-source.sql',
+     'managed_original_file_count','SELECT id,HEX(path) FROM piwigo_images ORDER BY id',
+     '--entrypoint xargs','managed_original_verification_failed',
+     'unicodedata.normalize("NFC", root + "/" + relative).casefold()',
+     '[ -f "$target" ] && [ ! -L "$target" ]'
+ )) { Assert-True ($capture.Contains($needle)) ('mac_capture_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(
     'class-archive-mac-private-handoff-v2','LOCAL_PHYSICAL_MEDIA_ONLY',
@@ -136,8 +140,9 @@ foreach ($needle in @(
     'piwigo_database_config_restore_failed','OWNER_DATABASE_COUNTS=PASS_MANIFEST_EXACT',
     'IMMICH_METADATA_BOOTSTRAP=NOT_RUN','IMMICH_BRIDGE_BOOTSTRAP=NOT_RUN',
     'ML_MODEL_CACHE=EXCLUDED_NOT_RESTORED','AI_RESULTS_AVAILABLE_IMMEDIATELY=NOT_RUNTIME_TESTED',
-    'ANONYMOUS_PSEUDONYM_CONTINUITY=NOT_GUARANTEED','MAC_RUNTIME_TESTED=NO',
-    'DATA_RESTORED_PIWIGO_CORE_READY'
+     'ANONYMOUS_PSEUDONYM_CONTINUITY=NOT_GUARANTEED','MAC_RUNTIME_TESTED=NO',
+     'DATA_RESTORED_PIWIGO_CORE_READY','managed_original_file_count',
+     'restored_managed_original_verification_failed','SELECT id,HEX(path) FROM piwigo_images ORDER BY id'
 )) { Assert-True ($restore.Contains($needle)) ('mac_restore_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($forbidden in @(

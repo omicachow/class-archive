@@ -171,7 +171,7 @@ case "$helper_image" in sha256:[0-9a-f][0-9a-f]*) ;; *) fail helper_image_digest
 docker run --rm --log-driver none --network none --read-only --entrypoint sh "$helper_image" -eu -c '
   tar --version | grep -q "GNU tar"
   find --version >/dev/null
-  command -v gzip sha256sum find tar >/dev/null
+  command -v gzip sha256sum find tar xargs >/dev/null
 ' || fail helper_capability_preflight_failed
 docker exec "$owner_db" sh -eu -c 'command -v mariadb mariadb-dump mariadb-admin >/dev/null' \
   || fail mariadb_tool_preflight_failed
@@ -315,11 +315,94 @@ volume_file_count() {
     | tr -d '[:space:]'
 }
 
+managed_original_file_count() {
+  local database_container=$1
+  local uploads_volume=$2
+  local galleries_volume=$3
+  local expected
+
+  # The upload/gallery volumes also contain web-server guard files and may
+  # retain unreferenced QA or pending binaries.  They are storage files, not
+  # published Piwigo originals.  Count only image paths referenced by
+  # piwigo_images and prove every referenced path resolves to a regular file in
+  # one of the two read-only volumes.  SQL emits HEX(path), so embedded newline
+  # or control bytes cannot alter record boundaries.  Python validates the
+  # record count, UTF-8, path grammar, and macOS-portable normalized uniqueness
+  # before emitting NUL-delimited relative paths to the isolated file checker.
+  # Any malformed, traversal-like, missing, symlink, or duplicate path makes
+  # capture fail closed.
+  expected=$(mariadb_scalar "$database_container" 'SELECT COUNT(*) FROM piwigo_images;')
+  if ! docker exec "$database_container" sh -eu -c \
+    'exec mariadb --batch --skip-column-names --raw --default-character-set=utf8mb4 --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT id,HEX(path) FROM piwigo_images ORDER BY id;"' \
+    | python3 -I -c '
+import re
+import sys
+import unicodedata
+
+expected = int(sys.argv[1])
+seen_ids = set()
+seen_paths = set()
+count = 0
+for raw in sys.stdin.buffer:
+    line = raw[:-1] if raw.endswith(b"\n") else raw
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    fields = line.split(b"\t")
+    if len(fields) != 2 or not re.fullmatch(rb"[1-9][0-9]*", fields[0]):
+        raise SystemExit("managed_original_sql_record_invalid")
+    image_id = int(fields[0])
+    if image_id in seen_ids:
+        raise SystemExit("managed_original_image_id_duplicate")
+    seen_ids.add(image_id)
+    encoded = fields[1]
+    if len(encoded) == 0 or len(encoded) % 2 or not re.fullmatch(rb"[0-9A-F]+", encoded):
+        raise SystemExit("managed_original_path_hex_invalid")
+    try:
+        path = bytes.fromhex(encoded.decode("ascii")).decode("utf-8", "strict")
+    except (UnicodeDecodeError, ValueError):
+        raise SystemExit("managed_original_path_utf8_invalid")
+    if any(ord(character) < 32 or ord(character) == 127 for character in path) or "\\" in path:
+        raise SystemExit("managed_original_path_control_invalid")
+    if path.startswith("./upload/"):
+        root = "upload"
+        relative = path[len("./upload/"):]
+    elif path.startswith("./galleries/"):
+        root = "galleries"
+        relative = path[len("./galleries/"):]
+    else:
+        raise SystemExit("managed_original_path_root_invalid")
+    segments = relative.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise SystemExit("managed_original_path_segment_invalid")
+    portable = unicodedata.normalize("NFC", root + "/" + relative).casefold()
+    if portable in seen_paths:
+        raise SystemExit("managed_original_path_duplicate")
+    seen_paths.add(portable)
+    sys.stdout.buffer.write((root + "/" + relative).encode("utf-8") + b"\0")
+    count += 1
+if count != expected or len(seen_ids) != expected or len(seen_paths) != expected:
+    raise SystemExit("managed_original_count_mismatch")
+' "$expected" \
+    | docker run --rm -i --log-driver none --network none --read-only \
+      --mount "type=volume,source=$uploads_volume,target=/source/upload,readonly" \
+      --mount "type=volume,source=$galleries_volume,target=/source/galleries,readonly" \
+      --entrypoint xargs "$helper_image" -0 -r -n 64 sh -eu -c '
+        for relative do
+          case "$relative" in upload/*|galleries/*) ;; *) exit 71 ;; esac
+          target=/source/$relative
+          [ -f "$target" ] && [ ! -L "$target" ] || exit 73
+        done
+      ' _; then
+    fail managed_original_verification_failed
+  fi
+  printf '%s' "$expected"
+}
+
 write_owner_capture_counts() {
   local output=$1
   assert_new_output "$output"
   local schema source_records canonical images relationships albums comments replies visible_people ai_rows ai_jobs ai_complete ai_open originals
-  local piwigo_data_files piwigo_script_files upload_files gallery_files derivative_files immich_upload_files
+  local piwigo_data_files piwigo_script_files raw_upload_files raw_gallery_files derivative_files immich_upload_files managed_uploads managed_galleries
   schema=$(mariadb_scalar "$owner_db" 'SELECT COALESCE(MAX(version),0) FROM piwigo_class_identity_migration;')
   source_records=$(mariadb_scalar "$owner_db" 'SELECT COUNT(*) FROM piwigo_class_identity_photo_source;')
   canonical=$(mariadb_scalar "$owner_db" 'SELECT COUNT(*) FROM piwigo_class_identity_photo;')
@@ -335,13 +418,16 @@ write_owner_capture_counts() {
   ai_open=$(mariadb_scalar "$owner_db" "SELECT COUNT(*) FROM piwigo_class_identity_ai_index_job WHERE state<>'COMPLETE';")
   piwigo_data_files=$(volume_file_count "$owner_piwigo_data")
   piwigo_script_files=$(volume_file_count "$owner_piwigo_scripts")
-  upload_files=$(volume_file_count "$owner_uploads")
-  gallery_files=$(volume_file_count "$owner_galleries")
+  raw_upload_files=$(volume_file_count "$owner_uploads")
+  raw_gallery_files=$(volume_file_count "$owner_galleries")
   derivative_files=$(volume_file_count "$owner_derivatives")
   immich_upload_files=$(volume_file_count "$owner_immich_upload")
-  originals=$(( upload_files + gallery_files ))
-  printf '{"format":"class-archive-owner-capture-counts-v1","captured_at":"%s","schema_version":%s,"source_records":%s,"canonical_photos":%s,"piwigo_images":%s,"physical_originals":%s,"album_relationships":%s,"albums":%s,"comments_and_replies":%s,"replies":%s,"visible_people":%s,"ai_index_rows":%s,"ai_jobs":%s,"ai_jobs_complete":%s,"ai_jobs_open":%s,"piwigo_data_files":%s,"piwigo_script_files":%s,"canonical_upload_files":%s,"canonical_gallery_files":%s,"piwigo_derivative_files":%s,"immich_upload_files":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$schema" "$source_records" "$canonical" "$images" "$originals" "$relationships" "$albums" "$comments" "$replies" "$visible_people" "$ai_rows" "$ai_jobs" "$ai_complete" "$ai_open" "$piwigo_data_files" "$piwigo_script_files" "$upload_files" "$gallery_files" "$derivative_files" "$immich_upload_files" >"$output.partial"
+  originals=$(managed_original_file_count "$owner_db" "$owner_uploads" "$owner_galleries")
+  managed_uploads=$(mariadb_scalar "$owner_db" "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './upload/%';")
+  managed_galleries=$(mariadb_scalar "$owner_db" "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './galleries/%';")
+  [ $(( managed_uploads + managed_galleries )) -eq "$originals" ] || fail owner_managed_original_root_count_mismatch
+  printf '{"format":"class-archive-owner-capture-counts-v2","captured_at":"%s","schema_version":%s,"source_records":%s,"canonical_photos":%s,"piwigo_images":%s,"physical_originals":%s,"album_relationships":%s,"albums":%s,"comments_and_replies":%s,"replies":%s,"visible_people":%s,"ai_index_rows":%s,"ai_jobs":%s,"ai_jobs_complete":%s,"ai_jobs_open":%s,"piwigo_data_files":%s,"piwigo_script_files":%s,"managed_upload_originals":%s,"managed_gallery_originals":%s,"raw_upload_files":%s,"raw_gallery_files":%s,"piwigo_derivative_files":%s,"immich_upload_files":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$schema" "$source_records" "$canonical" "$images" "$originals" "$relationships" "$albums" "$comments" "$replies" "$visible_people" "$ai_rows" "$ai_jobs" "$ai_complete" "$ai_open" "$piwigo_data_files" "$piwigo_script_files" "$managed_uploads" "$managed_galleries" "$raw_upload_files" "$raw_gallery_files" "$derivative_files" "$immich_upload_files" >"$output.partial"
   mv -- "$output.partial" "$output"
 }
 
@@ -361,18 +447,21 @@ write_owner_postgres_capture_counts() {
 write_synthetic_capture_counts() {
   local output=$1
   assert_new_output "$output"
-  local schema images originals multi_album piwigo_data_files piwigo_script_files upload_files gallery_files derivative_files
+  local schema images originals multi_album piwigo_data_files piwigo_script_files raw_upload_files raw_gallery_files derivative_files managed_uploads managed_galleries
   schema=$(mariadb_scalar "$synthetic_db" 'SELECT COALESCE(MAX(version),0) FROM piwigo_class_identity_migration;')
   images=$(mariadb_scalar "$synthetic_db" 'SELECT COUNT(*) FROM piwigo_images;')
   piwigo_data_files=$(volume_file_count "$synthetic_piwigo_data")
   piwigo_script_files=$(volume_file_count "$synthetic_piwigo_scripts")
-  upload_files=$(volume_file_count "$synthetic_uploads")
-  gallery_files=$(volume_file_count "$synthetic_galleries")
+  raw_upload_files=$(volume_file_count "$synthetic_uploads")
+  raw_gallery_files=$(volume_file_count "$synthetic_galleries")
   derivative_files=$(volume_file_count "$synthetic_derivatives")
-  originals=$(( upload_files + gallery_files ))
+  originals=$(managed_original_file_count "$synthetic_db" "$synthetic_uploads" "$synthetic_galleries")
+  managed_uploads=$(mariadb_scalar "$synthetic_db" "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './upload/%';")
+  managed_galleries=$(mariadb_scalar "$synthetic_db" "SELECT COUNT(*) FROM piwigo_images WHERE path LIKE './galleries/%';")
+  [ $(( managed_uploads + managed_galleries )) -eq "$originals" ] || fail synthetic_managed_original_root_count_mismatch
   multi_album=$(mariadb_scalar "$synthetic_db" 'SELECT COUNT(*) FROM (SELECT image_id FROM piwigo_image_category GROUP BY image_id HAVING COUNT(*)>1) AS grouped_images;')
-  printf '{"format":"class-archive-synthetic-capture-counts-v1","captured_at":"%s","schema_version":%s,"images":%s,"physical_originals":%s,"multi_album_images":%s,"piwigo_data_files":%s,"piwigo_script_files":%s,"upload_files":%s,"gallery_files":%s,"derivative_files":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$schema" "$images" "$originals" "$multi_album" "$piwigo_data_files" "$piwigo_script_files" "$upload_files" "$gallery_files" "$derivative_files" >"$output.partial"
+  printf '{"format":"class-archive-synthetic-capture-counts-v2","captured_at":"%s","schema_version":%s,"images":%s,"physical_originals":%s,"multi_album_images":%s,"piwigo_data_files":%s,"piwigo_script_files":%s,"managed_upload_originals":%s,"managed_gallery_originals":%s,"raw_upload_files":%s,"raw_gallery_files":%s,"derivative_files":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$schema" "$images" "$originals" "$multi_album" "$piwigo_data_files" "$piwigo_script_files" "$managed_uploads" "$managed_galleries" "$raw_upload_files" "$raw_gallery_files" "$derivative_files" >"$output.partial"
   mv -- "$output.partial" "$output"
 }
 
@@ -600,7 +689,7 @@ archive_volume "$owner_immich_upload" "$root/payloads/owner/owner-immich-derivat
 
 write_owner_capture_counts "$owner_capture_compare"
 write_owner_postgres_capture_counts "$owner_postgres_compare"
-compare_capture_counts "$root/payloads/private-metadata/owner-capture-counts.json" "$owner_capture_compare" class-archive-owner-capture-counts-v1 \
+compare_capture_counts "$root/payloads/private-metadata/owner-capture-counts.json" "$owner_capture_compare" class-archive-owner-capture-counts-v2 \
   || fail owner_snapshot_drift_during_capture
 compare_capture_counts "$root/payloads/private-metadata/owner-postgres-capture-counts.json" "$owner_postgres_compare" class-archive-owner-postgres-capture-counts-v1 \
   || fail owner_postgres_snapshot_drift_during_capture
@@ -620,7 +709,7 @@ archive_volume "$synthetic_uploads" "$root/payloads/synthetic/synthetic-uploads.
 archive_volume "$synthetic_galleries" "$root/payloads/synthetic/synthetic-galleries.tar" .
 archive_volume "$synthetic_derivatives" "$root/payloads/synthetic/synthetic-derivatives.tar" .
 write_synthetic_capture_counts "$synthetic_capture_compare"
-compare_capture_counts "$root/payloads/synthetic/synthetic-capture-counts.json" "$synthetic_capture_compare" class-archive-synthetic-capture-counts-v1 \
+compare_capture_counts "$root/payloads/synthetic/synthetic-capture-counts.json" "$synthetic_capture_compare" class-archive-synthetic-capture-counts-v2 \
   || fail synthetic_snapshot_drift_during_capture
 rm -f -- "$synthetic_capture_compare" "$synthetic_capture_compare.partial" \
   || fail synthetic_comparison_file_cleanup_failed
