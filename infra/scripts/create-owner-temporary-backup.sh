@@ -145,6 +145,15 @@ if [ "$mode" = verify ] || [ "$mode" = verify-pending ]; then
   exit 0
 fi
 
+# Source the versioned contract only for source-runtime preflight/backup. The
+# standalone encrypted-payload verifier above intentionally remains usable for
+# historical bundles without consulting current schema code.
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || fail recovery_contract_path_invalid
+recovery_contracts=$script_dir/class-archive-recovery-contracts.sh
+[ -f "$recovery_contracts" ] && [ ! -L "$recovery_contracts" ] || fail recovery_contract_unavailable
+# shellcheck source=class-archive-recovery-contracts.sh
+. "$recovery_contracts"
+
 piwigo=class_archive_private_full_v3_piwigo-piwigo-1
 mariadb=class_archive_private_full_v3_piwigo-db-1
 immich_server=class_archive_private_full_v3_immich-immich-server-1
@@ -199,6 +208,10 @@ assert_volume "$piwigo_db" class_archive_private_full_v3_piwigo piwigo_db
 assert_volume "$immich_upload" class_archive_private_full_v3_immich immich_upload
 assert_volume "$immich_db" class_archive_private_full_v3_immich immich_db
 
+mariadb_query() {
+  docker exec "$mariadb" sh -eu -c 'exec mariadb --batch --skip-column-names --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute "$1"' sh "$1" 2>/dev/null
+}
+
 helper_image=$(docker inspect --format '{{.Image}}' "$mariadb" 2>/dev/null)
 case "$helper_image" in sha256:[0-9a-f][0-9a-f]*) ;; *) fail helper_image_invalid ;; esac
 docker run --rm --log-driver none --network none --read-only --memory 256m --memory-swap 256m --pids-limit 128 \
@@ -228,6 +241,11 @@ config_bytes=$(( $(volume_bytes "$piwigo_data") + $(volume_bytes "$piwigo_script
 immich_upload_bytes=$(volume_bytes "$immich_upload")
 ai_index_bytes=$(postgres_query "SELECT COALESCE(SUM(pg_total_relation_size(format('%I.%I',schemaname,tablename))),0)::bigint FROM pg_tables WHERE schemaname='public' AND tablename IN ('asset_face','face_search','person','smart_search');" | tr -d '[:space:]')
 case "$ai_index_bytes" in ''|*[!0-9]*) fail ai_index_size_invalid ;; esac
+preflight_ci_migration=$(mariadb_query "SELECT COALESCE(MIN(TABLE_NAME),'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME REGEXP '^[A-Za-z0-9_]+class_identity_migration$';" | tr -d '[:space:]')
+case "$preflight_ci_migration" in ''|*[!A-Za-z0-9_]*) fail class_identity_prefix_invalid ;; esac
+preflight_ci_base=${preflight_ci_migration%migration}
+preflight_schema_version=$(mariadb_query "SELECT COALESCE(MAX(version),0) FROM ${preflight_ci_base}migration;" | tr -d '[:space:]')
+ca_recovery_select_by_schema "$preflight_schema_version" || fail class_identity_schema_invalid
 raw_total=$(( original_bytes + mariadb_bytes + postgres_bytes + config_bytes + immich_upload_bytes ))
 est_backup=$(( raw_total + (raw_total / 10) + 104857600 ))
 est_restore=$(( raw_total + (raw_total / 10) + 104857600 ))
@@ -235,6 +253,9 @@ printf '%s\n' "OWNER_ORIGINAL_BYTES=$original_bytes"
 printf '%s\n' "MARIADB_BYTES=$mariadb_bytes"
 printf '%s\n' "IMMICH_POSTGRES_BYTES=$postgres_bytes"
 printf '%s\n' "AI_INDEX_BYTES=$ai_index_bytes"
+printf '%s\n' "CLASS_IDENTITY_SCHEMA_VERSION=$preflight_schema_version"
+printf '%s\n' "RECOVERY_MANIFEST_FORMAT=$CA_RECOVERY_FORMAT"
+printf '%s\n' "RECOVERY_CONTRACT=$CA_RECOVERY_CONTRACT"
 printf '%s\n' "CONFIG_STATE_BYTES=$config_bytes"
 printf '%s\n' "IMMICH_UPLOAD_BYTES=$immich_upload_bytes"
 printf '%s\n' "EST_BACKUP_BYTES=$est_backup"
@@ -358,10 +379,6 @@ archive_piwigo_data() {
   assert_bundle_file "$output"
 }
 
-mariadb_query() {
-  docker exec "$mariadb" sh -eu -c 'exec mariadb --batch --skip-column-names --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute "$1"' sh "$1" 2>/dev/null
-}
-
 assert_ai_index_ready() {
   # The Owner restore promise is "people and search are immediately usable".
   # It is therefore not enough to snapshot a persisted index while there are
@@ -373,7 +390,7 @@ assert_ai_index_ready() {
   case "$ai_ci_migration" in ''|*[!A-Za-z0-9_]*) fail ai_index_prefix_invalid ;; esac
   ai_ci_base=${ai_ci_migration%migration}
   ai_schema_version=$(mariadb_query "SELECT COALESCE(MAX(version),0) FROM ${ai_ci_base}migration;" | tr -d '[:space:]')
-  case "$ai_schema_version" in 16) ;; *) fail ai_index_schema_not_ready ;; esac
+  ca_recovery_select_by_schema "$ai_schema_version" || fail ai_index_schema_not_ready
 
   ai_canonical_photos=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}photo;" | tr -d '[:space:]')
   ai_assets_ready=$(mariadb_query "SELECT COUNT(*) FROM ${ai_ci_base}ai_asset_index;" | tr -d '[:space:]')
@@ -453,12 +470,13 @@ ci_base=${ci_migration%migration}
 pwg_base=${ci_base%class_identity_}
 [ "$pwg_base" != "$ci_base" ] || fail piwigo_prefix_invalid
 schema_version=$(mariadb_query "SELECT COALESCE(MAX(version),0) FROM ${ci_base}migration;" | tr -d '[:space:]')
-case "$schema_version" in 15|16) ;; *) fail class_identity_schema_invalid ;; esac
+case "$schema_version" in 15) ;; 16|17|18) ca_recovery_select_by_schema "$schema_version" || fail class_identity_schema_invalid ;; *) fail class_identity_schema_invalid ;; esac
+[ "$schema_version" = "$ai_schema_version" ] || fail class_identity_schema_changed_during_backup
 source_records=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source;" | tr -d '[:space:]')
-if [ "$schema_version" = 16 ]; then
-  source_presentations=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source_presentation;" | tr -d '[:space:]')
-else
+if [ "$schema_version" = 15 ]; then
   source_presentations=0
+else
+  source_presentations=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source_presentation;" | tr -d '[:space:]')
 fi
 canonical_photos=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo;" | tr -d '[:space:]')
 piwigo_images=$(mariadb_query "SELECT COUNT(*) FROM ${pwg_base}images;" | tr -d '[:space:]')
@@ -473,6 +491,29 @@ spotlights=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}spotlight;" | tr -d '
 memories=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}auto_collection;" | tr -d '[:space:]')
 audit_events=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}audit_event;" | tr -d '[:space:]')
 ai_assets=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}ai_asset_index;" | tr -d '[:space:]')
+case "$schema_version" in
+  17|18)
+    collection_snapshots=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_snapshot;" | tr -d '[:space:]')
+    collection_snapshot_items=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_snapshot_item;" | tr -d '[:space:]')
+    collection_snapshot_pointers=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_snapshot_pointer;" | tr -d '[:space:]')
+    collection_pins=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_pin;" | tr -d '[:space:]')
+    collection_feedback=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_feedback;" | tr -d '[:space:]')
+    collection_maintenance_state=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}collection_maintenance_state;" | tr -d '[:space:]')
+    ;;
+  *)
+    collection_snapshots=0
+    collection_snapshot_items=0
+    collection_snapshot_pointers=0
+    collection_pins=0
+    collection_feedback=0
+    collection_maintenance_state=0
+    ;;
+esac
+if [ "$schema_version" = 18 ]; then
+  spotlight_rotation_state=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}spotlight_rotation_state;" | tr -d '[:space:]')
+else
+  spotlight_rotation_state=0
+fi
 ai_job_table_exists=$(mariadb_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${ci_base}ai_index_job';" | tr -d '[:space:]')
 case "$ai_job_table_exists" in
   0) ai_jobs_total=0; ai_jobs_complete=0; ai_jobs_pending=0; ai_jobs_running=0; ai_jobs_unavailable=0; ai_jobs_failed=0; ai_jobs_cancelled=0 ;;
@@ -487,7 +528,7 @@ case "$ai_job_table_exists" in
     ;;
   *) fail ai_job_table_shape_invalid ;;
 esac
-for value in "$source_records" "$source_presentations" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets" "$ai_jobs_total" "$ai_jobs_complete" "$ai_jobs_pending" "$ai_jobs_running" "$ai_jobs_unavailable" "$ai_jobs_failed" "$ai_jobs_cancelled"; do
+for value in "$source_records" "$source_presentations" "$canonical_photos" "$piwigo_images" "$album_relationships" "$leaf_albums" "$comments" "$replies" "$visible_people" "$person_merges" "$person_rules" "$spotlights" "$memories" "$audit_events" "$ai_assets" "$collection_snapshots" "$collection_snapshot_items" "$collection_snapshot_pointers" "$collection_pins" "$collection_feedback" "$collection_maintenance_state" "$spotlight_rotation_state" "$ai_jobs_total" "$ai_jobs_complete" "$ai_jobs_pending" "$ai_jobs_running" "$ai_jobs_unavailable" "$ai_jobs_failed" "$ai_jobs_cancelled"; do
   case "$value" in ''|*[!0-9]*) fail mariadb_count_invalid ;; esac
 done
 
@@ -523,6 +564,8 @@ image_ref() {
 }
 
 printf '%s\n' "CLASS_IDENTITY_SCHEMA_VERSION=$schema_version"
+printf '%s\n' "RECOVERY_MANIFEST_FORMAT=$CA_RECOVERY_FORMAT"
+printf '%s\n' "RECOVERY_CONTRACT=$CA_RECOVERY_CONTRACT"
 printf '%s\n' 'PIWIGO_VERSION=16.4.0'
 printf '%s\n' 'IMMICH_VERSION=3.1.0'
 printf '%s\n' "SOURCE_RECORDS=$source_records"
@@ -540,6 +583,13 @@ printf '%s\n' "SPOTLIGHTS=$spotlights"
 printf '%s\n' "MEMORIES=$memories"
 printf '%s\n' "AUDIT_EVENTS=$audit_events"
 printf '%s\n' "AI_ASSET_INDEX=$ai_assets"
+printf '%s\n' "COLLECTION_SNAPSHOTS=$collection_snapshots"
+printf '%s\n' "COLLECTION_SNAPSHOT_ITEMS=$collection_snapshot_items"
+printf '%s\n' "COLLECTION_SNAPSHOT_POINTERS=$collection_snapshot_pointers"
+printf '%s\n' "COLLECTION_PINS=$collection_pins"
+printf '%s\n' "COLLECTION_FEEDBACK=$collection_feedback"
+printf '%s\n' "COLLECTION_MAINTENANCE_STATE=$collection_maintenance_state"
+printf '%s\n' "SPOTLIGHT_ROTATION_STATE=$spotlight_rotation_state"
 printf '%s\n' "AI_JOBS_TOTAL=$ai_jobs_total"
 printf '%s\n' "AI_JOBS_COMPLETE=$ai_jobs_complete"
 printf '%s\n' "AI_JOBS_PENDING=$ai_jobs_pending"

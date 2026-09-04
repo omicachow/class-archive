@@ -193,7 +193,13 @@ $assert(is_string($restoreSource)
 $assert(str_contains($source['backup'], 'DB_ONLY_SYNTHETIC_V18_RECOVERY')
     && str_contains($source['backup'], 'format":10') && str_contains($source['backup'], 'mariadb-dump') && str_contains($source['backup'], 'sha256sum -c')
     && str_contains($source['restore'], 'target_not_empty') && str_contains($source['restore'], 'restored_schema_not_v18'), 'format10_backup_restore_fail_closed_missing');
-$assert(str_contains($source['v17Contract'], 'CA_RECOVERY_FORMAT=9') && !str_contains($source['v17Contract'], 'spotlight_rotation_state'), 'historical_v17_recovery_contract_mutated');
+$format9Start = strpos($source['v17Contract'], '    9)');
+$format10Start = strpos($source['v17Contract'], '    10)');
+$format9Contract = ($format9Start === false || $format10Start === false || $format10Start <= $format9Start)
+    ? ''
+    : substr($source['v17Contract'], $format9Start, $format10Start - $format9Start);
+$assert(str_contains($format9Contract, 'CA_RECOVERY_FORMAT=9') && !str_contains($format9Contract, 'spotlight_rotation_state'), 'historical_v17_recovery_contract_mutated');
+$assert(str_contains($source['v17Contract'], 'CA_RECOVERY_FORMAT=10') && str_contains($source['v17Contract'], "CA_RECOVERY_CONTRACT='FORMAT_10_SCHEMA_18'") && str_contains($source['v17Contract'], 'spotlight_rotation_state'), 'format10_schema18_recovery_contract_missing');
 
 foreach ($source as $name => $contents) {
     $assert(preg_match('/[A-Za-z]:\\\\/', $contents) !== 1, "{$name}_contains_windows_path");

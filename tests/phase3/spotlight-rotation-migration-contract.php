@@ -81,11 +81,16 @@ $assert(str_contains($source['semantic'], 'spotlight_rotation_migration_not_idem
     && str_contains($source['semantic'], 'hero_delete_restrict')
     && str_contains($source['semantic'], 'scope_primary_key')
     && str_contains($source['semantic'], 'schedule'), 'v18_constraint_fixture_missing');
-$assert(str_contains($source['v17_contract'], 'CA_RECOVERY_FORMAT=9')
-    && str_contains($source['v17_contract'], 'CA_RECOVERY_SCHEMA_VERSION=17')
-    && !str_contains($source['v17_contract'], 'spotlight_rotation_state'), 'historical_v17_recovery_contract_mutated');
+$format9Start = strpos($source['v17_contract'], '    9)');
+$format10Start = strpos($source['v17_contract'], '    10)');
+$format9Contract = ($format9Start === false || $format10Start === false || $format10Start <= $format9Start)
+    ? ''
+    : substr($source['v17_contract'], $format9Start, $format10Start - $format9Start);
+$assert(str_contains($format9Contract, 'CA_RECOVERY_FORMAT=9')
+    && str_contains($format9Contract, 'CA_RECOVERY_SCHEMA_VERSION=17')
+    && !str_contains($format9Contract, 'spotlight_rotation_state'), 'historical_v17_recovery_contract_mutated');
 $assert(str_contains($source['v17_runtime_contract'], 'format9_schema17_contract_missing')
-    && !str_contains($source['v17_runtime_contract'], 'spotlight_rotation_state'), 'historical_v17_runtime_evidence_mutated');
+    && str_contains($source['v17_runtime_contract'], 'format9_must_not_absorb_v18_table'), 'historical_v17_runtime_evidence_mutated');
 
 foreach ($source as $name => $contents) {
     if ($name === 'v17_runtime_contract') {

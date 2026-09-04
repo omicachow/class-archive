@@ -441,9 +441,18 @@ function Get-Preflight([hashtable]$Boundary) {
     $values = Parse-SafeEvidence $lines
     foreach ($name in @(
         'OWNER_ORIGINAL_BYTES', 'MARIADB_BYTES', 'IMMICH_POSTGRES_BYTES', 'AI_INDEX_BYTES',
-        'CONFIG_STATE_BYTES', 'IMMICH_UPLOAD_BYTES', 'EST_BACKUP_BYTES', 'EST_RESTORE_BYTES'
+        'CONFIG_STATE_BYTES', 'IMMICH_UPLOAD_BYTES', 'EST_BACKUP_BYTES', 'EST_RESTORE_BYTES',
+        'CLASS_IDENTITY_SCHEMA_VERSION', 'RECOVERY_MANIFEST_FORMAT', 'RECOVERY_CONTRACT'
     )) {
-        if (-not $values.ContainsKey($name) -or [uint64]$values[$name] -le 0) { Stop-OwnerBackup 'preflight_evidence_invalid' }
+        if (-not $values.ContainsKey($name)) { Stop-OwnerBackup 'preflight_evidence_invalid' }
+    }
+    foreach ($name in @('OWNER_ORIGINAL_BYTES','MARIADB_BYTES','IMMICH_POSTGRES_BYTES','AI_INDEX_BYTES','CONFIG_STATE_BYTES','IMMICH_UPLOAD_BYTES','EST_BACKUP_BYTES','EST_RESTORE_BYTES')) {
+        if ([uint64]$values[$name] -le 0) { Stop-OwnerBackup 'preflight_evidence_invalid' }
+    }
+    $expectedRecovery = Get-RecoveryContractDefinition ([uint64]$values.CLASS_IDENTITY_SCHEMA_VERSION)
+    if ([uint64]$values.RECOVERY_MANIFEST_FORMAT -ne [uint64]$expectedRecovery.manifest_format -or
+        -not [string]::Equals([string]$values.RECOVERY_CONTRACT, [string]$expectedRecovery.name, [StringComparison]::Ordinal)) {
+        Stop-OwnerBackup 'preflight_recovery_contract_invalid'
     }
     $payload = [uint64]$values.EST_BACKUP_BYTES + [uint64]$values.EST_RESTORE_BYTES
     $tenGiB = [uint64](10GB)
@@ -552,6 +561,33 @@ function Test-FixedAsciiEqual([string]$Left, [string]$Right) {
 
 function Test-OwnerBackupId([string]$Value) {
     return $Value -match '\Aowner-full-(?:v2-)?[0-9]{8}T[0-9]{6}Z\z'
+}
+
+function Get-RecoveryContractDefinition([uint64]$SchemaVersion) {
+    switch ($SchemaVersion) {
+        16 { return [ordered]@{ manifest_format = [uint64]8; name = 'FORMAT_8_SCHEMA_16'; schema_version = [uint64]16 } }
+        17 { return [ordered]@{ manifest_format = [uint64]9; name = 'FORMAT_9_SCHEMA_17'; schema_version = [uint64]17 } }
+        18 { return [ordered]@{ manifest_format = [uint64]10; name = 'FORMAT_10_SCHEMA_18'; schema_version = [uint64]18 } }
+        default { Stop-OwnerBackup 'recovery_contract_schema_invalid' }
+    }
+}
+
+function Assert-ManifestRecoveryContract($Manifest) {
+    $schemaVersion = [uint64]$Manifest.schema_versions.class_identity
+    $property = $Manifest.PSObject.Properties['recovery_contract']
+    # Historical v1/v2 bundles predate an explicit inner recovery-contract
+    # object. Continue to verify those schema-15/16 artifacts exactly as they
+    # were published; every schema-17+ bundle must carry the versioned object.
+    if ($null -eq $property) {
+        if ($schemaVersion -in @([uint64]15, [uint64]16)) { return }
+        Stop-OwnerBackup 'backup_recovery_contract_missing'
+    }
+    $expected = Get-RecoveryContractDefinition $schemaVersion
+    if ([uint64]$Manifest.recovery_contract.manifest_format -ne [uint64]$expected.manifest_format -or
+        -not [string]::Equals([string]$Manifest.recovery_contract.name, [string]$expected.name, [StringComparison]::Ordinal) -or
+        [uint64]$Manifest.recovery_contract.schema_version -ne [uint64]$expected.schema_version) {
+        Stop-OwnerBackup 'backup_recovery_contract_invalid'
+    }
 }
 
 function Get-PayloadSpecs([int]$Version = 1) {
@@ -734,6 +770,11 @@ function Write-PortableRecoveryKit {
             piwigo = '16.4.0'
             immich = '3.1.0'
         }
+        recovery_contract = [ordered]@{
+            manifest_format = [uint64]$Evidence.RECOVERY_MANIFEST_FORMAT
+            name = [string]$Evidence.RECOVERY_CONTRACT
+            schema_version = [uint64]$Evidence.CLASS_IDENTITY_SCHEMA_VERSION
+        }
         restore_order = @('MARIADB','PIWIGO_POSIX_STATE','CANONICAL_MEDIA','IMMICH_POSTGRES','IMMICH_UPLOAD','RESTORE_SECRETS','VALIDATE')
     })
     Write-Utf8Json (Join-Path $kit 'manifest.json') ([ordered]@{
@@ -820,6 +861,7 @@ function Invoke-VerifyPortableBundle {
     Assert-BundleIdentity $Bundle $backupId
     try { $manifest = Get-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
     catch { Stop-OwnerBackup 'backup_manifest_invalid' }
+    Assert-ManifestRecoveryContract $manifest
     Assert-PortableRecoveryKit $Bundle $manifest
     $phraseOwned = $false
     if ($null -eq $PortablePhrase) {
@@ -864,6 +906,7 @@ function Invoke-VerifyBundle([hashtable]$Boundary, [string]$Bundle) {
         $manifest.independent_disaster_backup -ne $false) {
         Stop-OwnerBackup 'backup_manifest_contract_invalid'
     }
+    Assert-ManifestRecoveryContract $manifest
     $archiveEntries = @($manifest.archives)
     $payloadSpecs = @(Get-PayloadSpecs $bundleVersion)
     if ($archiveEntries.Count -ne $payloadSpecs.Count) { Stop-OwnerBackup 'backup_manifest_archive_inventory_invalid' }
@@ -960,6 +1003,9 @@ try {
             ' SYSTEM_DRIVE_CAPACITY_GUARD=' + $preflight.SYSTEM_DRIVE_CAPACITY_GUARD +
             ' ARCHIVE_HELPER_MEMORY_BYTES=' + $preflight.ARCHIVE_HELPER_MEMORY_BYTES +
             ' ARCHIVE_HELPER_LOG_DRIVER=' + $preflight.ARCHIVE_HELPER_LOG_DRIVER +
+            ' CLASS_IDENTITY_SCHEMA_VERSION=' + $preflight.CLASS_IDENTITY_SCHEMA_VERSION +
+            ' RECOVERY_MANIFEST_FORMAT=' + $preflight.RECOVERY_MANIFEST_FORMAT +
+            ' RECOVERY_CONTRACT=' + $preflight.RECOVERY_CONTRACT +
             ' filesystem=exFAT temporary_target=YES independent_disaster_backup=NO')
         exit 0
     }
@@ -1033,17 +1079,29 @@ try {
         )
         $evidence = Parse-SafeEvidence $helperLines
         $requiredEvidence = @(
-            'CLASS_IDENTITY_SCHEMA_VERSION','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS',
+            'CLASS_IDENTITY_SCHEMA_VERSION','RECOVERY_MANIFEST_FORMAT','RECOVERY_CONTRACT','PIWIGO_VERSION','IMMICH_VERSION','SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS',
             'PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES','VISIBLE_PEOPLE',
             'PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
+            'COLLECTION_SNAPSHOTS','COLLECTION_SNAPSHOT_ITEMS','COLLECTION_SNAPSHOT_POINTERS','COLLECTION_PINS',
+            'COLLECTION_FEEDBACK','COLLECTION_MAINTENANCE_STATE','SPOTLIGHT_ROTATION_STATE',
             'AI_INDEX_READY','AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX',
             'OWNER_STATE_SHA256','IMMICH_POSTGRES_STATE_SHA256','IMMICH_UPLOAD_STATE_SHA256','IMMICH_SNAPSHOT_XMAX',
             'MARIADB_IMAGE','PIWIGO_IMAGE','IMMICH_SERVER_IMAGE','IMMICH_ML_IMAGE','POSTGRES_IMAGE'
         )
         foreach ($name in $requiredEvidence) { if (-not $evidence.ContainsKey($name)) { Stop-OwnerBackup 'backup_evidence_missing' } }
-        if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(15,16) -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
+        if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(16,17,18) -or [string]$evidence.PIWIGO_VERSION -ne '16.4.0' -or
             [string]$evidence.IMMICH_VERSION -ne '3.1.0') { Stop-OwnerBackup 'backup_schema_version_invalid' }
+        $expectedRecovery = Get-RecoveryContractDefinition ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION)
+        if ([uint64]$evidence.RECOVERY_MANIFEST_FORMAT -ne [uint64]$expectedRecovery.manifest_format -or
+            -not [string]::Equals([string]$evidence.RECOVERY_CONTRACT, [string]$expectedRecovery.name, [StringComparison]::Ordinal)) {
+            Stop-OwnerBackup 'backup_recovery_contract_invalid'
+        }
+        if ([uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -ne [uint64]$preflight.CLASS_IDENTITY_SCHEMA_VERSION -or
+            [uint64]$evidence.RECOVERY_MANIFEST_FORMAT -ne [uint64]$preflight.RECOVERY_MANIFEST_FORMAT -or
+            -not [string]::Equals([string]$evidence.RECOVERY_CONTRACT, [string]$preflight.RECOVERY_CONTRACT, [StringComparison]::Ordinal)) {
+            Stop-OwnerBackup 'backup_recovery_contract_changed_after_preflight'
+        }
         if ([string]$evidence.AI_INDEX_READY -ne 'PASS' -or
             [uint64]$evidence.AI_JOBS_TOTAL -ne [uint64]$evidence.AI_JOBS_COMPLETE -or
             [uint64]$evidence.AI_JOBS_PENDING -ne 0 -or [uint64]$evidence.AI_JOBS_RUNNING -ne 0 -or
@@ -1062,6 +1120,8 @@ try {
         foreach ($name in @(
             'SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS','PIWIGO_IMAGES','ALBUM_RELATIONSHIPS','LEAF_ALBUMS','COMMENTS','REPLIES',
             'VISIBLE_PEOPLE','PERSON_MERGES','PERSON_RULES','SPOTLIGHTS','MEMORIES','AUDIT_EVENTS','AI_ASSET_INDEX',
+            'COLLECTION_SNAPSHOTS','COLLECTION_SNAPSHOT_ITEMS','COLLECTION_SNAPSHOT_POINTERS','COLLECTION_PINS',
+            'COLLECTION_FEEDBACK','COLLECTION_MAINTENANCE_STATE','SPOTLIGHT_ROTATION_STATE',
             'AI_JOBS_TOTAL','AI_JOBS_COMPLETE','AI_JOBS_PENDING','AI_JOBS_RUNNING','AI_JOBS_UNAVAILABLE','AI_JOBS_FAILED','AI_JOBS_CANCELLED',
             'IMMICH_ASSETS','IMMICH_FACE_RECORDS','IMMICH_RAW_PERSONS','IMMICH_SEARCH_INDEX'
         )) { $counts[$name.ToLowerInvariant()] = [uint64]$evidence[$name] }
@@ -1133,6 +1193,7 @@ try {
                 piwigo = '16.4.0'
                 immich = '3.1.0'
             }
+            recovery_contract = $expectedRecovery
             container_images = [ordered]@{
                 piwigo = [string]$evidence.PIWIGO_IMAGE
                 mariadb = [string]$evidence.MARIADB_IMAGE

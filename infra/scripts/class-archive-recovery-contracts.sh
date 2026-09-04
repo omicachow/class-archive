@@ -5,6 +5,9 @@
 # remains immutable so an old synthetic drill can still be interpreted exactly
 # as it was recorded.  Format 9 is an additive schema-v17 contract; it is the
 # first format that includes the Photos App v4 collection business state.
+# Format 10 is the additive schema-v18 contract and is the first format that
+# preserves the durable server-side Spotlight rotation checkpoint. Historical
+# formats are intentionally not widened when a later schema adds business truth.
 #
 # This file intentionally contains no environment expansion and no caller
 # supplied identifiers.  Consumers must still resolve and validate their own
@@ -28,6 +31,13 @@ ca_recovery_select_by_format() {
       CA_RECOVERY_BUSINESS_TABLES='migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_source_presentation photo_duplicate batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item photo_comment auto_collection auto_collection_photo ai_asset_index ai_index_job native_source_epoch collection_snapshot collection_snapshot_item collection_snapshot_pointer collection_pin collection_feedback collection_maintenance_state'
       CA_RECOVERY_SCHEMA_JSON='{"version":17,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_source_presentation","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","photo_comment","auto_collection","auto_collection_photo","ai_asset_index","ai_index_job","native_source_epoch","collection_snapshot","collection_snapshot_item","collection_snapshot_pointer","collection_pin","collection_feedback","collection_maintenance_state"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
       ;;
+    10)
+      CA_RECOVERY_FORMAT=10
+      CA_RECOVERY_SCHEMA_VERSION=18
+      CA_RECOVERY_CONTRACT='FORMAT_10_SCHEMA_18'
+      CA_RECOVERY_BUSINESS_TABLES='migration identity seat account principal token operation audit_event role_group rate_limit_bucket submission archive_image photo person person_merge person_photo_rule album spotlight photo_source photo_source_presentation photo_duplicate batch_operation batch_operation_item private_library_collection private_library_folder private_library_import private_library_import_item photo_comment auto_collection auto_collection_photo ai_asset_index ai_index_job native_source_epoch collection_snapshot collection_snapshot_item collection_snapshot_pointer collection_pin collection_feedback collection_maintenance_state spotlight_rotation_state'
+      CA_RECOVERY_SCHEMA_JSON='{"version":18,"business_tables":["migration","identity","seat","account","principal","token","operation","audit_event","role_group","rate_limit_bucket","submission","archive_image","photo","person","person_merge","person_photo_rule","album","spotlight","photo_source","photo_source_presentation","photo_duplicate","batch_operation","batch_operation_item","private_library_collection","private_library_folder","private_library_import","private_library_import_item","photo_comment","auto_collection","auto_collection_photo","ai_asset_index","ai_index_job","native_source_epoch","collection_snapshot","collection_snapshot_item","collection_snapshot_pointer","collection_pin","collection_feedback","collection_maintenance_state","spotlight_rotation_state"],"rebuildable_projection_tables":["read_projection","read_photo"],"projection_rebuild":"ALL"}'
+      ;;
     *)
       return 1
       ;;
@@ -40,6 +50,7 @@ ca_recovery_select_by_schema() {
   case "${1:-}" in
     16) ca_recovery_select_by_format 8 ;;
     17) ca_recovery_select_by_format 9 ;;
+    18) ca_recovery_select_by_format 10 ;;
     *) return 1 ;;
   esac
 }
@@ -63,7 +74,7 @@ ca_recovery_read_manifest_header() {
 
 # Generic Piwigo synthetic bundles have an exact fixed file set. This strict
 # selector preserves format-8/schema-16 behavior while allowing the additive
-# format-9/schema-17 equivalent; unknown keys or a different file set fail
+# format-9/schema-17 and format-10/schema-18 equivalents; unknown keys or a different file set fail
 # before the generic restore clear_target boundary.
 ca_recovery_select_manifest() {
   ca_recovery_read_manifest_header "${1:-}" || return 1

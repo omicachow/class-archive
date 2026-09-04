@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runnerPath = Join-Path $projectRoot 'infra\scripts\owner-temporary-backup.ps1'
 $helperPath = Join-Path $projectRoot 'infra\scripts\create-owner-temporary-backup.sh'
+$contractsPath = Join-Path $projectRoot 'infra\scripts\class-archive-recovery-contracts.sh'
+$fixturePath = Join-Path $projectRoot 'infra\scripts\capture-restore-fixture.php'
 $assertions = 0
 
 function Assert-True([bool]$Condition, [string]$Code) {
@@ -19,8 +21,12 @@ function Assert-True([bool]$Condition, [string]$Code) {
 
 Assert-True (Test-Path -LiteralPath $runnerPath -PathType Leaf) 'owner_temp_backup_runner_missing'
 Assert-True (Test-Path -LiteralPath $helperPath -PathType Leaf) 'owner_temp_backup_helper_missing'
+Assert-True (Test-Path -LiteralPath $contractsPath -PathType Leaf) 'owner_temp_backup_recovery_contracts_missing'
+Assert-True (Test-Path -LiteralPath $fixturePath -PathType Leaf) 'owner_temp_backup_capture_fixture_missing'
 $runner = [IO.File]::ReadAllText($runnerPath)
 $helper = [IO.File]::ReadAllText($helperPath)
+$contracts = [IO.File]::ReadAllText($contractsPath)
+$fixture = [IO.File]::ReadAllText($fixturePath)
 
 foreach ($needle in @(
     "[ValidateSet('preflight', 'backup', 'verify', 'verify-portable')]",
@@ -127,7 +133,7 @@ foreach ($needle in @(
     'postgres_state_changed_during_backup',
     'postgres_state_digest()',
     'immich_upload_archive_snapshot_mismatch',
-    'case "$schema_version" in 15|16)',
+    '16|17|18) ca_recovery_select_by_schema "$schema_version"',
     'source_presentations=$(mariadb_query "SELECT COUNT(*) FROM ${ci_base}photo_source_presentation;"',
     'source_presentations=0',
     'SOURCE_PRESENTATIONS=$source_presentations',
@@ -163,6 +169,26 @@ Assert-True ($helper.Contains('assert_ai_index_ready()') `
     -and $helper.Contains("fail ai_index_job_coverage_incomplete") `
     -and $helper.Contains('printf ''%s\n'' ''AI_INDEX_READY=PASS''') `
     -and $helper.IndexOf('assert_ai_index_ready') -lt $helper.IndexOf('owner_state_before=$(owner_state_digest)')) 'owner_temp_backup_ai_completion_gate_missing'
+Assert-True ($helper.Contains('. "$recovery_contracts"') `
+    -and $helper.Contains('ca_recovery_select_by_schema "$ai_schema_version"') `
+    -and $helper.Contains('ca_recovery_select_by_schema "$preflight_schema_version"') `
+    -and $helper.Contains('RECOVERY_MANIFEST_FORMAT=$CA_RECOVERY_FORMAT') `
+    -and $helper.Contains('RECOVERY_CONTRACT=$CA_RECOVERY_CONTRACT')) 'owner_temp_backup_versioned_recovery_contract_missing'
+Assert-True ($contracts.Contains('CA_RECOVERY_FORMAT=10') `
+    -and $contracts.Contains('CA_RECOVERY_SCHEMA_VERSION=18') `
+    -and $contracts.Contains("CA_RECOVERY_CONTRACT='FORMAT_10_SCHEMA_18'") `
+    -and $contracts.Contains('18) ca_recovery_select_by_format 10')) 'owner_temp_backup_format10_schema18_contract_missing'
+$format9Start = $contracts.IndexOf('    9)', [StringComparison]::Ordinal)
+$format10Start = $contracts.IndexOf('    10)', [StringComparison]::Ordinal)
+Assert-True ($format9Start -ge 0 -and $format10Start -gt $format9Start) 'owner_temp_backup_format_contract_order_invalid'
+$format9 = $contracts.Substring($format9Start, $format10Start - $format9Start)
+Assert-True (-not $format9.Contains('spotlight_rotation_state')) 'owner_temp_backup_historical_format9_mutated'
+Assert-True ($fixture.Contains('!in_array($version, [16, 17, 18], true)') `
+    -and $fixture.Contains('if ($schemaVersion >= 17)') `
+    -and $fixture.Contains('if ($schemaVersion === 18)') `
+    -and $fixture.Contains("'fixture_version' => 10") `
+    -and $fixture.Contains("'recovery_contract' => 'FORMAT_10_SCHEMA_18'") `
+    -and $fixture.Contains("'spotlight_rotation_state' => 'SELECT ``scope``,HEX(``hero_spotlight_id``)")) 'owner_temp_backup_schema18_capture_fixture_missing'
 Assert-True ($runner.Contains("'AI_INDEX_READY','AI_JOBS_TOTAL'") `
     -and $runner.Contains("Stop-OwnerBackup 'backup_ai_index_not_ready'") `
     -and $runner.Contains('ready = ([string]$evidence.AI_INDEX_READY -eq ''PASS'')')) 'owner_temp_backup_ai_completion_evidence_missing'
@@ -181,7 +207,22 @@ Assert-True ($runner.Contains("immich_upload_guard = 'DETERMINISTIC_TAR_DIGEST_B
 Assert-True ($runner.Contains("Stop-OwnerBackup 'backup_bundle_inventory_invalid'")) 'owner_temp_backup_exact_bundle_inventory_missing'
 Assert-True ($runner.Contains("Stop-OwnerBackup 'backup_manifest_archive_contract_invalid'")) 'owner_temp_backup_manifest_archive_verification_missing'
 Assert-True ($runner.Contains("'SOURCE_RECORDS','SOURCE_PRESENTATIONS','CANONICAL_PHOTOS'")) 'owner_temp_backup_presentation_count_evidence_missing'
-Assert-True ($runner.Contains('[uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(15,16)')) 'owner_temp_backup_schema_compatibility_missing'
+Assert-True ($runner.Contains('[uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION -notin @(16,17,18)')) 'owner_temp_backup_schema_compatibility_missing'
+Assert-True ($runner.Contains("18 { return [ordered]@{ manifest_format = [uint64]10; name = 'FORMAT_10_SCHEMA_18'; schema_version = [uint64]18 } }") `
+    -and $runner.Contains('Assert-ManifestRecoveryContract $manifest') `
+    -and $runner.Contains('preflight_recovery_contract_invalid') `
+    -and $runner.Contains('backup_recovery_contract_changed_after_preflight') `
+    -and $runner.Contains('backup_recovery_contract_missing') `
+    -and $runner.Contains('backup_recovery_contract_invalid')) 'owner_temp_backup_schema18_manifest_binding_missing'
+foreach ($needle in @(
+    'COLLECTION_SNAPSHOTS=$collection_snapshots',
+    'COLLECTION_SNAPSHOT_ITEMS=$collection_snapshot_items',
+    'COLLECTION_SNAPSHOT_POINTERS=$collection_snapshot_pointers',
+    'COLLECTION_PINS=$collection_pins',
+    'COLLECTION_FEEDBACK=$collection_feedback',
+    'COLLECTION_MAINTENANCE_STATE=$collection_maintenance_state',
+    'SPOTLIGHT_ROTATION_STATE=$spotlight_rotation_state'
+)) { Assert-True ($helper.Contains($needle)) ('owner_temp_backup_v18_count_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()) }
 Assert-True ($runner.Contains('class_identity = [uint64]$evidence.CLASS_IDENTITY_SCHEMA_VERSION')) 'owner_temp_backup_manifest_schema_not_runtime_bound'
 Assert-True (-not $runner.Contains('schema_versions = [ordered]@{ class_identity = 15;')) 'owner_temp_backup_manifest_schema_hardcoded'
 

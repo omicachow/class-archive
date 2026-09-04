@@ -3,8 +3,9 @@
 declare(strict_types=1);
 
 /**
- * Static contract for the additive format-9/schema-17 synthetic recovery
- * boundary. It never starts Docker, mounts media, or touches a database.
+ * Static contract for immutable format-8/schema-16, format-9/schema-17 and
+ * additive format-10/schema-18 recovery boundaries. It never starts Docker,
+ * mounts media, or touches a database.
  */
 
 $root = dirname(__DIR__, 2);
@@ -91,22 +92,29 @@ $selectManifest = static function (int $format, string $shape, bool $expected) u
 
 $format8Start = $position($source['contracts'], '    8)');
 $format9Start = $position($source['contracts'], '    9)');
+$format10Start = $position($source['contracts'], '    10)');
 $formatDefault = $position($source['contracts'], '    *)');
 $format8 = ($format8Start < 0 || $format9Start <= $format8Start) ? '' : substr($source['contracts'], $format8Start, $format9Start - $format8Start);
-$format9 = ($format9Start < 0 || $formatDefault <= $format9Start) ? '' : substr($source['contracts'], $format9Start, $formatDefault - $format9Start);
+$format9 = ($format9Start < 0 || $format10Start <= $format9Start) ? '' : substr($source['contracts'], $format9Start, $format10Start - $format9Start);
+$format10 = ($format10Start < 0 || $formatDefault <= $format10Start) ? '' : substr($source['contracts'], $format10Start, $formatDefault - $format10Start);
 $assert($format8 !== '' && str_contains($format8, 'CA_RECOVERY_FORMAT=8') && str_contains($format8, 'CA_RECOVERY_SCHEMA_VERSION=16'), 'format8_schema16_contract_missing');
 $assert($format9 !== '' && str_contains($format9, 'CA_RECOVERY_FORMAT=9') && str_contains($format9, 'CA_RECOVERY_SCHEMA_VERSION=17'), 'format9_schema17_contract_missing');
+$assert($format10 !== '' && str_contains($format10, 'CA_RECOVERY_FORMAT=10') && str_contains($format10, 'CA_RECOVERY_SCHEMA_VERSION=18') && str_contains($format10, "CA_RECOVERY_CONTRACT='FORMAT_10_SCHEMA_18'"), 'format10_schema18_contract_missing');
 $assert(!str_contains($format8, 'collection_snapshot') && !str_contains($format8, 'collection_pin'), 'format8_must_not_absorb_v17_tables');
 foreach ([
     'collection_snapshot', 'collection_snapshot_item', 'collection_snapshot_pointer',
     'collection_pin', 'collection_feedback', 'collection_maintenance_state',
 ] as $table) {
     $assert(str_contains($format9, '"' . $table . '"') && str_contains($format9, ' ' . $table), "format9_missing_{$table}");
+    $assert(str_contains($format10, '"' . $table . '"') && str_contains($format10, ' ' . $table), "format10_missing_{$table}");
 }
-$assert(str_contains($source['contracts'], 'ca_recovery_select_by_schema') && str_contains($source['contracts'], '16) ca_recovery_select_by_format 8') && str_contains($source['contracts'], '17) ca_recovery_select_by_format 9'), 'schema_dispatch_not_exact');
+$assert(!str_contains($format9, 'spotlight_rotation_state'), 'format9_must_not_absorb_v18_table');
+$assert(str_contains($format10, '"spotlight_rotation_state"') && str_contains($format10, ' spotlight_rotation_state'), 'format10_missing_spotlight_rotation_state');
+$assert(str_contains($source['contracts'], 'ca_recovery_select_by_schema') && str_contains($source['contracts'], '16) ca_recovery_select_by_format 8') && str_contains($source['contracts'], '17) ca_recovery_select_by_format 9') && str_contains($source['contracts'], '18) ca_recovery_select_by_format 10'), 'schema_dispatch_not_exact');
 $assert(str_contains($source['contracts'], 'ca_recovery_select_manifest') && str_contains($source['contracts'], 'ca_recovery_select_v17_synthetic_manifest') && str_contains($source['contracts'], 'ca_recovery_select_by_format "$_ca_format"'), 'manifest_dispatch_not_fail_closed');
 $selectManifest(8, 'full', true);
 $selectManifest(9, 'full', true);
+$selectManifest(10, 'full', true);
 $selectManifest(9, 'v17-db-only', true);
 $selectManifest(8, 'v17-schema-mismatch', false);
 $selectManifest(777, 'unknown-format', false);
@@ -126,9 +134,11 @@ $assert(str_contains($source['restore'], 'assert_target_safe()'), 'restore_does_
 $assert(str_contains($source['restore'], '[ "$ci_version" = "$expected_schema" ]') && str_contains($source['restore'], 'for suffix in $CA_RECOVERY_ALL_TABLES; do'), 'restore_does_not_recheck_selected_schema_after_import');
 $assert(str_contains($source['audit'], 'ca_recovery_select_manifest "$latest_bundle/MANIFEST.json"'), 'backup_auditor_does_not_validate_versioned_manifest');
 
-$assert(str_contains($source['fixture'], 'function fixtureRecoverySchemaVersion') && str_contains($source['fixture'], 'if ($schemaVersion === 17)'), 'fixture_does_not_branch_for_v17');
+$assert(str_contains($source['fixture'], 'function fixtureRecoverySchemaVersion') && str_contains($source['fixture'], 'if ($schemaVersion >= 17)') && str_contains($source['fixture'], 'if ($schemaVersion === 18)'), 'fixture_does_not_branch_for_v17_v18');
 $assert(str_contains($source['fixture'], "'fixture_version' => 8") && str_contains($source['fixture'], "'class_identity_schema_version' => 16"), 'historical_v16_fixture_shape_missing');
 $assert(str_contains($source['fixture'], "'fixture_version' => 9") && str_contains($source['fixture'], "'backup_manifest_format' => 9") && str_contains($source['fixture'], "'recovery_contract' => 'FORMAT_9_SCHEMA_17'"), 'v17_fixture_contract_missing');
+$assert(str_contains($source['fixture'], "'fixture_version' => 10") && str_contains($source['fixture'], "'class_identity_schema_version' => 18") && str_contains($source['fixture'], "'backup_manifest_format' => 10") && str_contains($source['fixture'], "'recovery_contract' => 'FORMAT_10_SCHEMA_18'"), 'v18_fixture_contract_missing');
+$assert(str_contains($source['fixture'], "'spotlight_rotation_state' => 'SELECT `scope`,HEX(`hero_spotlight_id`)") && str_contains($source['fixture'], 'HEX(`candidate_digest`)') && str_contains($source['fixture'], 'HEX(`revision`)'), 'v18_rotation_fixture_not_opaque_or_missing');
 foreach (['payload_json_sha256', 'payload_title_sha256', 'photo_ids_json_sha256', 'item_key_sha256', 'principal_sha256'] as $field) {
     $assert(str_contains($source['fixture'], $field), "v17_fixture_opaque_field_{$field}_missing");
 }

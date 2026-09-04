@@ -103,7 +103,7 @@ function fixtureRecoverySchemaVersion(mysqli $db, string $ci): int
     $result->free();
     $count = (int) ($row['count'] ?? 0);
     $version = (int) ($row['version'] ?? 0);
-    if ($count !== $version || !in_array($version, [16, 17], true)) {
+    if ($count !== $version || !in_array($version, [16, 17, 18], true)) {
         fixtureFail('recovery_schema_contract_unavailable');
     }
     return $version;
@@ -168,8 +168,8 @@ $tables = [
     'audit' => 'SELECT `id`,`actor_kind`,`action`,`target_type`,`target_id`,`result`,`occurred_at` FROM `' . $ci . 'audit_event` ORDER BY `id` ASC',
     'migration' => 'SELECT `version`,`migration_name`,HEX(`checksum`) AS `checksum`,`plugin_version`,`applied_at` FROM `' . $ci . 'migration` ORDER BY `version` ASC',
 ];
-if ($schemaVersion === 17) {
-    // V17 recovery evidence must preserve all durable Collections-first state,
+if ($schemaVersion >= 17) {
+    // V17+ recovery evidence must preserve all durable Collections-first state,
     // but fixture output remains opaque: JSON and item labels are hashed rather
     // than emitted, so no title, preference, or source context becomes a
     // recovery-report payload.
@@ -180,6 +180,15 @@ if ($schemaVersion === 17) {
         'collection_pin' => 'SELECT HEX(`pin_id`) AS `pin_id`,SHA2(CAST(`principal_id` AS CHAR),256) AS `principal_sha256`,`scope`,`projection_kind`,`item_kind`,SHA2(CAST(`item_key` AS CHAR),256) AS `item_key_sha256`,`ordinal`,`state`,`created_at`,`updated_at`,`removed_at` FROM `' . $ci . 'collection_pin` ORDER BY `pin_id` ASC',
         'collection_feedback' => 'SELECT HEX(`feedback_id`) AS `feedback_id`,SHA2(CAST(`principal_id` AS CHAR),256) AS `principal_sha256`,`scope`,`projection_kind`,`item_kind`,SHA2(CAST(`item_key` AS CHAR),256) AS `item_key_sha256`,`feedback_kind`,`state`,`created_at`,`updated_at`,`retracted_at` FROM `' . $ci . 'collection_feedback` ORDER BY `feedback_id` ASC',
         'collection_maintenance_state' => 'SELECT `maintenance_key`,`state`,HEX(`last_input_revision`) AS `last_input_revision`,HEX(`last_snapshot_id`) AS `last_snapshot_id`,`started_at`,`completed_at`,`last_error_code`,`created_at`,`updated_at` FROM `' . $ci . 'collection_maintenance_state` ORDER BY `maintenance_key` ASC',
+    ];
+}
+if ($schemaVersion === 18) {
+    // V18 adds the bounded, server-side Spotlight rotation checkpoint. It is
+    // business state rather than a rebuildable read projection: losing it can
+    // change the selected hero and fairness schedule after restore. Spotlight
+    // identifiers and candidate/revision bytes remain opaque in evidence.
+    $tables += [
+        'spotlight_rotation_state' => 'SELECT `scope`,HEX(`hero_spotlight_id`) AS `hero_spotlight_id`,HEX(`candidate_digest`) AS `candidate_digest`,`display_count`,`last_rotated_at`,`next_rotation_at`,HEX(`revision`) AS `revision`,`created_at`,`updated_at` FROM `' . $ci . 'spotlight_rotation_state` ORDER BY `scope` ASC',
     ];
 }
 $summary = [];
@@ -207,12 +216,26 @@ if ($schemaVersion === 16) {
         ],
         'summary' => $summary,
     ];
-} else {
+} elseif ($schemaVersion === 17) {
     $payload = [
         'fixture_version' => 9,
         'class_identity_schema_version' => 17,
         'backup_manifest_format' => 9,
         'recovery_contract' => 'FORMAT_9_SCHEMA_17',
+        'projection_recovery' => [
+            'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
+            'projection' => 'ALL',
+            'expected_count' => (int) $summary['photo']['count'],
+            'required_active' => ['PHOTO_CATALOG', 'TIMELINE', 'ALBUMS', 'PEOPLE', 'MEMORIES', 'SPOTLIGHT'],
+        ],
+        'summary' => $summary,
+    ];
+} else {
+    $payload = [
+        'fixture_version' => 10,
+        'class_identity_schema_version' => 18,
+        'backup_manifest_format' => 10,
+        'recovery_contract' => 'FORMAT_10_SCHEMA_18',
         'projection_recovery' => [
             'policy' => 'REBUILD_FROM_BUSINESS_TRUTH',
             'projection' => 'ALL',
