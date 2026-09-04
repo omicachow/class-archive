@@ -468,15 +468,30 @@ sanitized_mariadb_dump() {
     --mount "type=volume,source=$clone_volume,target=/var/lib/mysql" \
     -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 "$helper_image" >/dev/null
   ready=0
-  for _ in $(seq 1 90); do
-    if docker exec "$clone_name" mariadb-admin --protocol=socket --user=root ping --silent >/dev/null 2>&1; then
+  for _ in $(seq 1 120); do
+    # mariadb-admin ping may exit successfully as soon as the daemon answers,
+    # before a normal SQL connection through the socket is usable.  Require an
+    # actual query so a slow first initialization cannot create a false-ready
+    # sanitizer and abort an otherwise valid capture.
+    if docker exec "$clone_name" mariadb --batch --skip-column-names \
+      --protocol=socket --user=root --execute='SELECT 1;' >/dev/null 2>&1; then
       ready=1
       break
     fi
     sleep 1
   done
   [ "$ready" = 1 ] || fail mariadb_sanitizer_not_ready
-  docker exec "$clone_name" mariadb --protocol=socket --user=root --execute="CREATE DATABASE \`$database\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  database_ready=0
+  for _ in $(seq 1 30); do
+    if docker exec "$clone_name" mariadb --protocol=socket --user=root \
+      --execute="CREATE DATABASE IF NOT EXISTS \`$database\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+      >/dev/null 2>&1; then
+      database_ready=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$database_ready" = 1 ] || fail mariadb_sanitizer_database_create_failed
   docker exec "$source_container" sh -eu -c \
     'exec mariadb-dump --quick --lock-all-tables --routines --events --triggers --hex-blob --default-character-set=utf8mb4 --skip-comments --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
     | docker exec -i "$clone_name" mariadb --protocol=socket --user=root "$database"

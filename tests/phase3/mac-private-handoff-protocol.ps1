@@ -97,7 +97,8 @@ foreach ($needle in @(
     '--exclude=./_data/.class-archive-immich-bridge.json','runtime_secrets_included":false',
     'org.classarchive.disposable=handoff-sanitizer','realpath -sm','docker stop -t 60',
     'wait_container_ready','staging_package_timestamp_mismatch','concurrent_capture_in_progress',
-    'unexpected_running_${scope}_network_container_'
+    'unexpected_running_${scope}_network_container_','mariadb_sanitizer_database_create_failed',
+    "--execute='SELECT 1;'"
 )) { Assert-True ($capture.Contains($needle)) ('mac_capture_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(
