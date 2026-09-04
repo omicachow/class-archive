@@ -50,7 +50,8 @@ foreach ($needle in @(
 
 foreach ($needle in @(
     'EXPECTED_SHA256','outer_sha256_mismatch','archive_member_boundary_invalid','member.isfile() or member.isdir()',
-    'len(roots) == 1','--no-same-owner','HANDOFF_ARCHIVE_VERIFY=PASS'
+    'len(roots) == 1','--no-same-owner','HANDOFF_ARCHIVE_VERIFY=PASS',
+    'unicodedata.normalize("NFC", name).casefold()','outer_sha256_changed_during_verification'
 )) { Assert-True ($archiveVerify.Contains($needle)) ('mac_archive_verifier_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(
@@ -60,7 +61,8 @@ foreach ($needle in @(
     'MediaGuard','X-Accel-Redirect','redistribution','PROHIBITED','UNKNOWN',
     'PRODUCTION_READY=NO','PRIVATE_UNENCRYPTED_LOCAL_DATA','HANDOFF_V2_MODE=LOCAL_PHYSICAL_MEDIA_ONLY',
     'HANDOFF_V2_ENCRYPTION=NONE','HANDOFF_V2_PUBLIC_OR_CLOUD_TRANSFER=FORBIDDEN',
-    'HANDOFF_V2_MAC_FILEVAULT_RECOMMENDED=YES'
+    'HANDOFF_V2_MAC_FILEVAULT_RECOMMENDED=YES','v2 **没有恢复口令，也没有便携密钥 envelope**',
+    'ANONYMOUS_PSEUDONYM_CONTINUITY=NOT_GUARANTEED'
 )) { Assert-True ($doc.Contains($needle)) ('mac_handoff_doc_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($text in @($preflight,$verify,$archiveVerify,$doc)) {
@@ -72,6 +74,9 @@ foreach ($text in @($preflight,$verify,$archiveVerify,$doc)) {
 Assert-True ($preflight.Contains('docker ps -aq --filter') -and $preflight.Contains('docker volume ls -q --filter')) 'mac_preflight_fresh_volume_readonly_check_missing'
 Assert-True (-not $preflight.Contains('docker volume rm')) 'mac_preflight_volume_mutation_detected'
 Assert-True ($verify.Contains('checksummed_file_missing_or_not_regular') -and $verify.Contains('checksum_path_unsafe')) 'mac_verifier_path_boundary_missing'
+Assert-True ($verify.Contains('evidence.get("package_verified") is True')) 'mac_verifier_package_verified_true_missing'
+Assert-True ($verify.Contains('stat.S_ISREG(mode) or stat.S_ISDIR(mode)')) 'mac_verifier_special_file_rejection_missing'
+Assert-True ($verify.Contains('datetime.fromisoformat')) 'mac_verifier_created_at_validation_missing'
 Assert-True ($doc.Contains('OWNER_SYNTHETIC_ISOLATION=DIFFERENT_DATABASES_VOLUMES_COMPOSE_PROJECTS')) 'mac_owner_synthetic_isolation_missing'
 
 Write-Output "MAC_PRIVATE_HANDOFF_PROTOCOL=PASS assertions=$assertions private_data_read=NO docker_used=NO"

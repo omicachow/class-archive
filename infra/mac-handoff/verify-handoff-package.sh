@@ -80,14 +80,18 @@ import json
 import os
 import pathlib
 import re
+import stat
 import sys
+from datetime import datetime
 
 root = pathlib.Path(sys.argv[1]).resolve(strict=True)
 manifest_path = root / "manifest.json"
 with manifest_path.open(encoding="utf-8") as handle:
     manifest = json.load(handle)
 
-assert isinstance(manifest.get("created_at"), str) and manifest["created_at"]
+created_at = manifest.get("created_at")
+assert isinstance(created_at, str) and created_at.endswith("Z")
+datetime.fromisoformat(created_at[:-1] + "+00:00")
 git = manifest.get("git", {})
 assert re.fullmatch(r"[0-9a-f]{40}", str(git.get("head", "")))
 assert str(git.get("branch", "")).startswith("codex/")
@@ -136,7 +140,7 @@ if plaintext_private_allowed:
         "external_archive_sha256_required": True,
     }
 evidence = manifest.get("evidence", {})
-assert "package_verified" in evidence
+assert evidence.get("package_verified") is True
 assert evidence.get("mac_runtime_tested") is False
 payloads = manifest.get("payloads")
 assert isinstance(payloads, list) and payloads
@@ -203,6 +207,9 @@ regular_files = {
     for path in root.rglob("*")
     if path.is_file() and not path.is_symlink()
 }
+for path in root.rglob("*"):
+    mode = path.lstat().st_mode
+    assert stat.S_ISREG(mode) or stat.S_ISDIR(mode)
 assert regular_files - allowed_unlisted == set(checksums)
 assert {"manifest.json", "HANDOFF-MAC-PRIVATE.md"}.issubset(checksums)
 assert {path for path in regular_files if path.startswith("payloads/")} == payload_paths

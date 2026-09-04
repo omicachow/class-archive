@@ -24,8 +24,9 @@ COMPLETE
 payloads/
   source/                         # Git bundle / tracked source snapshot / locked upstream evidence
   synthetic/                      # 公开安全的合成测试照片与基线恢复资料
-  owner/                          # 加密的 Owner DB、业务状态、canonical originals、AI index
-  private-metadata/               # 加密的来源、导入、人工整理等私有 manifest（如需要）
+  owner/                          # Owner DB、业务状态、canonical originals、AI index
+  private-metadata/               # 来源、导入、人工整理等私有 manifest（如需要）
+  private-sources/                # 可选的只读原始来源归档，与 managed originals 分离
 metadata/
   immich-upstream.lock.json       # 供解包前 architecture Gate 读取的公开锁副本
 ```
@@ -94,6 +95,11 @@ v2 持有者能够读取真实照片、真实文件名、数据库、评论、�
 防止整包被替换。复制到 Mac 后应立即放入启用 FileVault 的本地磁盘并执行
 `chmod 600`。包内仍严格禁止明文 `.env`、Cookie、可复用 session、token、API
 secret、GPG data key 或恢复口令；Mac runtime secret 必须重新生成。
+
+v2 **没有恢复口令，也没有便携密钥 envelope**。恢复时直接读取已校验的 payload；
+任何要求输入 GPG/DPAPI 恢复秘密的步骤只适用于 v1。不要给 v2 临时增加一个写在脚本、
+环境变量或文档里的共享口令。v2 的保密边界完全依赖实体介质保管，以及复制到 Mac 后
+由 FileVault 提供的静态数据保护。
 
 v2 的 `PRIVATE_UNENCRYPTED_LOCAL_DATA` payload 只有在 manifest 同时声明本地实体
 介质限制、无保密保护、禁止公开/云传输和物理保管确认时才被 verifier 接受。
@@ -192,10 +198,12 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 ### 3. Owner 私有状态
 
 1. 校验 Owner immutable backup 自己的 `COMPLETE`、manifest 和全部 SHA-256。
-2. 通过 portable GPG envelope 以 no-echo 方式解开恢复所需 data key；Mac 路径不得
-   使用 Windows DPAPI。临时明文只放 `mktemp -d` 创建的 `0700` 目录，并在 trap 中清除。
-3. 从 `.env.example` 生成目标 Mac 的新 runtime secret；只有必须保持匿名 pseudonym、
-   claim/audit 或备份解密一致性的 secret 才从加密 envelope 恢复。
+2. v1 通过 portable GPG envelope 以 no-echo 方式解开恢复所需 data key；Mac 路径
+   不得使用 Windows DPAPI。临时明文只放 `mktemp -d` 创建的 `0700` 目录，并在 trap
+   中清除。v2 跳过本步，直接读取已通过 SHA-256 校验的明文 payload。
+3. 从 `.env.example` 生成目标 Mac 的全新 runtime secret。v2 不携带原
+   `CLASS_ARCHIVE_CLAIM_PEPPER`、`CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET`、bridge
+   token 或 session secret；全部既有登录会话、未完成 Claim/Invite/Reset 必须视为失效。
 4. 先启动空 MariaDB，恢复一致性逻辑 dump；再恢复 Piwigo application/scripts、
    uploads、galleries 与 canonical originals 的 POSIX tar。模式、UID/GID 与 symlink
    在 Linux volume 内恢复，不能依赖 macOS/exFAT 宿主权限。
@@ -210,6 +218,15 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 8. 先跑 MediaGuard，再开放 BFF；最后用新 Chrome profile 跑 Owner、Family、Teacher、
    Anonymous 浏览器 E2E。Family 的 LIVING、Pending 和数量/封面/搜索侧信道必须继续拒绝。
 9. 冷重启全部服务，证明人物、搜索、评论、回忆和投影立即可用，且没有全库 reindex。
+
+### v2 的匿名代号连续性限制
+
+匿名展示代号由 `CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET` 派生。因为无口令 v2
+有意排除所有 runtime secret，Mac 重新生成该 secret 后，历史上下文的即时匿名代号和
+管理员解析结果**不能保证与 Windows 完全相同**。数据库中已经保存的评论展示快照会保留，
+但重新计算的代号可能变化。若必须保持跨主机完全连续，只能由 Owner 通过另一个受保护、
+不在本包中的通道迁移原 secret，或改用含加密 secret envelope 的 v1；未做到时必须将
+`ANONYMOUS_PSEUDONYM_CONTINUITY=NOT_GUARANTEED`，不得隐藏为完整恢复成功。
 
 ## 测试照片与真实图库
 

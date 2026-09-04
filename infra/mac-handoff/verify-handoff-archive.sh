@@ -35,8 +35,9 @@ fi
 # Read every tar header before extraction. Only one ordinary top-level folder
 # and regular files/directories are accepted; links and special nodes fail.
 zstd -q -dc -- "$archive" | python3 -c '
-import pathlib, sys, tarfile
+import pathlib, sys, tarfile, unicodedata
 seen = set()
+portable_seen = set()
 roots = set()
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
     for member in handle:
@@ -46,6 +47,9 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
         assert ".." not in pure.parts and pure.parts
         assert name not in seen
         seen.add(name)
+        portable_name = unicodedata.normalize("NFC", name).casefold()
+        assert portable_name not in portable_seen
+        portable_seen.add(portable_name)
         roots.add(pure.parts[0])
         assert member.isfile() or member.isdir()
 assert len(roots) == 1
@@ -59,5 +63,13 @@ root=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -print)
 [ -n "$root" ] && [ "$(printf '%s\n' "$root" | wc -l | tr -d ' ')" = 1 ] || fail extracted_root_invalid
 verifier=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/verify-handoff-package.sh
 "$verifier" "$root"
+if command -v gsha256sum >/dev/null 2>&1; then
+  actual_after=$(gsha256sum -- "$archive" | awk '{print $1}')
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual_after=$(sha256sum -- "$archive" | awk '{print $1}')
+else
+  actual_after=$(shasum -a 256 -- "$archive" | awk '{print $1}')
+fi
+[ "$(printf '%s' "$actual_after" | tr 'A-F' 'a-f')" = "$expected" ] || fail outer_sha256_changed_during_verification
 printf 'OUTER_ARCHIVE_SHA256=%s\n' "$actual"
 printf 'HANDOFF_ARCHIVE_VERIFY=PASS\n'
