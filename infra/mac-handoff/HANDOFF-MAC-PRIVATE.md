@@ -1,8 +1,10 @@
 # Class Archive 完整私有 Mac 迁移交接
 
-本文是 macOS 迁移的**通用恢复契约**，不包含照片、账号、密钥、数据库或任何
-本机绝对路径。最终交付包必须把本文复制到包根目录，并生成与包本身一致的
-`manifest.json`、`checksums.sha256` 和 `COMPLETE`。
+本文是 macOS 迁移的**通用恢复契约**；文档正文不包含照片、账号、密钥、数据库或
+任何本机绝对路径。最终交付包会包含真实媒体与私有业务状态，必须把本文复制到包根
+目录，并生成与包本身一致的 `manifest.json`、`checksums.sha256` 和根目录唯一的
+`COMPLETE`。当前完整私有交接采用 v2 无加密实体介质模式，属于高度敏感的本地私有
+数据，不是适合网络传输或公开存储的发布包。
 
 ## 证据边界
 
@@ -30,11 +32,21 @@ payloads/
   source/immich-upstream.lock.json # 供解包前 architecture Gate 读取的公开锁副本
 ```
 
-`COMPLETE` 的内容固定为：
+`COMPLETE` 必须只出现在交接包根目录，且内容与 `manifest.json` 的格式版本严格对应。
+v1 使用：
 
 ```text
 CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V1
 ```
+
+v2 使用：
+
+```text
+CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V2
+```
+
+包内 payload、Owner 子目录或数据库备份不得再放置第二个 `COMPLETE`；完整性只由根目录
+标记、根 manifest 和逐文件校验和共同判定。
 
 `checksums.sha256` 使用小写 SHA-256、两个空格和 POSIX 相对路径。除
 `checksums.sha256` 与 `COMPLETE` 外，每个普通文件必须恰好出现一次；未知文件、
@@ -44,8 +56,8 @@ CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V1
 
 ```json
 {
-  "format": "class-archive-mac-private-handoff-v1",
-  "version": 1,
+  "format": "class-archive-mac-private-handoff-v2",
+  "version": 2,
   "created_at": "UTC ISO-8601",
   "git": { "branch": "codex/...", "head": "40-char sha" },
   "privacy": {
@@ -54,7 +66,11 @@ CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V1
     "git_safe": false
   },
   "evidence": {
-    "package_verified": true,
+    "capture_completed": true,
+    "package_verification": "EXTERNAL_VERIFIER_REQUIRED",
+    "private_source_archive_verification": "PASS",
+    "source_integrity_before_after": "PASS",
+    "runtime_sanitization": "PASS",
     "mac_runtime_tested": false
   },
   "payloads": [
@@ -62,8 +78,8 @@ CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V1
       "path": "payloads/...",
       "size": 1,
       "sha256": "64-char sha",
-      "classification": "PUBLIC_SAFE_SOURCE | SYNTHETIC_TEST_DATA | PRIVATE_NONSECRET_METADATA | PRIVATE_ENCRYPTED_DATA",
-      "encrypted": true,
+      "classification": "PUBLIC_SAFE_SOURCE | SYNTHETIC_TEST_DATA | PRIVATE_UNENCRYPTED_LOCAL_DATA",
+      "encrypted": false,
       "required": true
     }
   ]
@@ -95,6 +111,11 @@ v2 持有者能够读取真实照片、真实文件名、数据库、评论、�
 `chmod 600`。包内仍严格禁止明文 `.env`、Cookie、可复用 session、token、API
 secret、GPG data key 或恢复口令；Mac runtime secret 必须重新生成。
 
+因此 v2 只能通过受控的实体介质当面转移；禁止上传云盘、邮件附件、即时通信文件、
+Git、CI artifact、HTTP 文件服务或任何公网位置。运输盘遗失、借用或被复制，应视为
+真实图库和数据库已经泄露。接收后先在启用 FileVault 的 Mac 本地磁盘完成校验与持久
+化存放，再开始恢复；不用时应物理保管或安全移除介质。
+
 v2 **没有恢复口令，也没有便携密钥 envelope**。恢复时直接读取已校验的 payload；
 任何要求输入 GPG/DPAPI 恢复秘密的步骤只适用于 v1。不要给 v2 临时增加一个写在脚本、
 环境变量或文档里的共享口令。v2 的保密边界完全依赖实体介质保管，以及复制到 Mac 后
@@ -110,6 +131,39 @@ v2 的 `PRIVATE_UNENCRYPTED_LOCAL_DATA` payload 只有在 manifest 同时声明�
   <从同机交接报告取得的 64 位 SHA-256>
 ```
 
+### v2 运行状态 payload 对照
+
+当前发布器使用以下稳定文件名；最终以 `manifest.json` 中逐文件 SHA-256 为准：
+
+| 文件 | 恢复内容 | 重要限制 |
+|---|---|---|
+| `payloads/owner/owner-mariadb.sql.gz` | Piwigo、ClassIdentity、相册、评论、人物整理、投影与 Audit | 已清空 session/auth key/激活 key，并移除 Piwigo `secret_key` |
+| `payloads/owner/owner-immich-postgres.dump` | Immich asset、face/person、smart-search index | 已排除 session、API key、shared link、stream session，以及 `system_metadata`、`user_metadata` 的全部数据 |
+| `payloads/owner/owner-piwigo-data.tar` | Piwigo 应用状态 | 不含数据库配置、bridge secret、session、日志与可重建 cache |
+| `payloads/owner/owner-piwigo-scripts.tar` | 已安装生命周期脚本 | 恢复到独立只读/受管 volume 后核对执行位 |
+| `payloads/owner/owner-canonical-uploads.tar`、`owner-canonical-galleries.tar` | Class Archive managed originals | 只恢复到全新空 volume |
+| `payloads/owner/owner-immich-canonical.tar` | Immich `library/upload/profile` | 不含 Immich `backups/` |
+| `payloads/owner/owner-piwigo-derivatives.tar`、`owner-immich-derivatives.tar` | 已预生成的预览和缩略图 | 可重建，但随本地交接保留以缩短首次可用时间 |
+| `payloads/synthetic/*` | 独立 72/72/8 工程基线与 fictional fixtures | 永远使用不同 Compose project、DB 和 volumes |
+| `payloads/private-sources/private-source-a.tar`、`private-source-b.tar` | 两个完整只读原始来源集合 | 默认不导入；只作 provenance/重新核验来源 |
+| `payloads/private-metadata/*` | 来源清单、导入映射、恢复指纹和私有 QA 元数据 | 含真实文件名，禁止复制到 Git 或公开报告 |
+
+所有内外层归档都只允许普通文件和目录；符号链接、硬链接及设备/FIFO/socket 等特殊节点
+会被 verifier 拒绝。归档头可以保存普通文件的 POSIX mode/UID/GID 恢复信息，但不得依赖
+链接语义搬运运行状态。
+
+恢复任一 POSIX tar 前必须先执行包校验，并确认目标 named volume 完全为空。恢复 helper
+使用 `--network none`、只读 rootfs 和最小 capability；不得把 tar 直接展开到 macOS 用户
+目录或现有业务 volume。MariaDB 先建立目标数据库后导入 gzip 逻辑 dump；PostgreSQL 用
+`pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges` 导入 custom-format
+dump。恢复后再生成新的 `.env`/runtime secrets，随后启动应用层。
+
+Immich PostgreSQL dump 有意不携带 `system_metadata` 和 `user_metadata` 的任何行；这些
+表中的安装级、用户级状态不能当作已恢复业务证据。目标 Mac 必须根据锁定版本、包内非
+秘密配置及恢复脚本重新建立所需运行 metadata，再核对 schema 和服务健康。face/person、
+search index 是否恢复，应以各自业务表和 manifest 计数验证，不能用重建的 metadata 行
+替代。
+
 在 v1 中，Owner 数据、真实照片、数据库、来源 manifest、账号状态和 AI embedding
 必须属于 `PRIVATE_ENCRYPTED_DATA`，使用 `.gpg` payload 且在包内保持加密。v2
 只能按上一节的显式本地实体介质契约标记为 `PRIVATE_UNENCRYPTED_LOCAL_DATA`。只含
@@ -122,27 +176,105 @@ GPG passphrase 或临时 data key 放入外层 tar、manifest、日志或交接�
 恢复所需的最低环境：
 
 1. 当前受支持的 macOS 与 Docker Desktop for Mac，包含 Docker Compose v2。
-2. Git、Bash、Python 3.11+、GnuPG、BSD tar/gzip，以及 SHA-256 工具。
+2. Git、Bash、Python 3.11+、BSD tar/gzip、`zstd`，以及 SHA-256 工具。v1 另需
+   GnuPG；当前无加密 v2 不需要 GPG 解密，但 preflight 仍可能检查完整通用恢复工具集。
    校验脚本依次使用 `gsha256sum`、`sha256sum`、macOS 自带的 `shasum -a 256`。
 3. 足够的本地存储：解包后 payload 大小的两倍，再额外保留至少 20 GiB；完整
    Owner 恢复应按实际 manifest 和 Docker Desktop data disk 增加余量。
 4. 仅在需要重建 Immich Web 或运行浏览器测试时安装 Node `24.15.0`、通过
    Corepack 使用 pnpm `11.13.1`、Google Chrome Stable 与项目锁定的 Playwright。
    已交付且已校验的 Web build 不要求为了恢复而重新执行 `pnpm install`。
-5. 可选 Homebrew 包：`gnupg python@3.11 coreutils gnu-tar`。不得用 Homebrew
-   自动升级项目锁定的容器镜像或 Node/pnpm 版本。
+5. 推荐通过 Homebrew 安装：`brew install zstd python@3.11 coreutils gnu-tar`；恢复
+   v1 时再安装 `gnupg`。`zstd` 是读取外层 `.tar.zst` 的必需工具，不是可选项。不得
+   用 Homebrew 自动升级项目锁定的容器镜像或 Node/pnpm 版本。
 
-推荐第一次执行：
+单文件归档无法在解包前提供自身内部的执行脚本。第一次接收时，必须先从交接报告或
+Owner 直接提供的另一条可信通道取得 64 位外层 SHA-256，使用 macOS 自带工具完成
+bootstrap 校验，然后只解包到新建的隔离目录：
 
 ```bash
-./infra/mac-handoff/verify-handoff-package.sh /path/to/extracted-handoff
-./infra/mac-handoff/mac-preflight.sh \
-  --package-root /path/to/extracted-handoff \
+archive=/Volumes/TRANSFER/ClassArchive-Complete-Mac-Handoff-....tar.zst
+expected='PASTE_64_HEX_SHA256_FROM_TRUSTED_HANDOFF_REPORT'
+actual=$(shasum -a 256 -- "$archive" | awk '{print $1}')
+test "$actual" = "$expected"
+mkdir -p /path/to/private/classarchive-handoff
+chmod 700 /path/to/private/classarchive-handoff
+zstd -q -dc -- "$archive" | tar -tf - >/dev/null
+zstd -q -dc -- "$archive" \
+  | tar -xf - -C /path/to/private/classarchive-handoff --no-same-owner
+```
+
+外层 SHA-256 匹配后，先从包内当前 HEAD 的 source snapshot 建立 checkout，再使用其中的
+完整 verifier 重新检查包头边界、每个 payload、manifest 和 Git bundle。下面的 `head`
+只能来自刚刚通过外层哈希校验的 manifest：
+
+```bash
+package=/path/to/private/classarchive-handoff/ClassArchive-Complete-Mac-Handoff-...
+head=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["git"]["head"])' "$package/manifest.json")
+mkdir -p /path/to/private/classarchive-checkout
+tar -xzf "$package/payloads/source/class-archive-source-$head.tar.gz" \
+  -C /path/to/private/classarchive-checkout --strip-components=1
+/path/to/private/classarchive-checkout/infra/mac-handoff/verify-handoff-package.sh "$package"
+/path/to/private/classarchive-checkout/infra/mac-handoff/mac-preflight.sh \
+  --package-root "$package" \
   --fresh-project classarchive-mac-restore-001 \
   --check-build-toolchain
 ```
 
-脚本只读检查；它不会解密、导入、创建 volume 或启动服务。
+如果已从另一条可信通道取得同一 HEAD 的 verifier，可直接运行
+`verify-handoff-archive.sh ARCHIVE EXPECTED_SHA256 WORK_DIR`；它会在工作目录临时解包、
+完成同等检查并自动删除临时副本。无论使用哪条路径，持久 Owner 恢复都只能引用
+FileVault 保护、空间充足且不在 Git checkout 中的 `package` 目录。
+
+上面的 `mac-preflight.sh` 只读检查；它不会解密、导入、创建 volume 或启动服务。
+
+### 保守恢复编排器
+
+包内同一 HEAD 的 `restore-mac.sh` 提供一个故意受限的恢复路径。先从 Git bundle 恢复出
+带 `.git` 的 checkout，并确认其 HEAD 与 package manifest 一致；不要直接在只有 source
+tar 内容、没有 Git object database 的目录中运行。推荐顺序如下（路径与 project id 仅为
+示例）：
+
+```bash
+package=/path/to/private/classarchive-handoff/ClassArchive-Complete-Mac-Handoff-...
+checkout=/path/to/private/classarchive-checkout
+runtime_env="$HOME/Library/Application Support/ClassArchive/restore-owner.env"
+state="$HOME/Library/Application Support/ClassArchive/restore-owner-state"
+
+"$checkout/infra/mac-handoff/restore-mac.sh" --prepare-source \
+  --package-root "$package" --checkout "$checkout"
+"$checkout/infra/mac-handoff/restore-mac.sh" --init-env "$runtime_env" \
+  --restore-id classarchive_mac_owner_001 --core-port 8490 --compat-port 8491
+"$checkout/infra/mac-handoff/restore-mac.sh" --preflight-only \
+  --package-root "$package" --checkout "$checkout" \
+  --runtime-env "$runtime_env" --state-dir "$state"
+"$checkout/infra/mac-handoff/restore-mac.sh" --restore \
+  --package-root "$package" --checkout "$checkout" \
+  --runtime-env "$runtime_env" --state-dir "$state"
+```
+
+`--dry-run` 是 `--preflight-only` 的同义入口。runtime env 必须由 `--init-env` 新建为当前
+用户拥有的 `0600` 文件；脚本只输出“已生成”，绝不输出秘密值。恢复 identity、state
+目录、Compose containers、networks 和每个 named volume 都必须是全新的；发现任何同名
+对象就 fail closed。脚本没有 reset/reuse/delete/prune/down 路径，失败后的 partial restore
+会原样保留供人工核查，不能用同一 identity 重跑。
+
+当前 `--restore` 的成功范围仅为 `DATA_RESTORE + PIWIGO_CORE_READY`：它恢复 MariaDB、
+Immich PostgreSQL dump、Piwigo/managed media/derivative POSIX tar，在 Linux named volume
+中恢复 archive mode，并对照 capture manifest 核对计数；只发布 loopback Piwigo 端口，
+同时验证 guest 对已知 original/derivative 的 GET、HEAD、Range 拒绝。完成标记只会在这些
+检查全部通过后生成。
+
+它**不会**伪装完成以下步骤：被排除的 ML model cache 安装、Immich `system_metadata` /
+`user_metadata` 重建、技术用户与 bridge secret/bootstrap、Immich/ML/BFF 全栈启动、角色
+浏览器 E2E、授权用户 MediaGuard 矩阵、cold restart/no-reindex 证明。脚本会明确输出
+`IMMICH_METADATA_BOOTSTRAP=NOT_RUN`、`IMMICH_BRIDGE_BOOTSTRAP=NOT_RUN`、
+`AI_RESULTS_AVAILABLE_IMMEDIATELY=NOT_RUNTIME_TESTED` 与 `MAC_RUNTIME_TESTED=NO`；这些
+项目完成真实 Mac runtime 验收前，不得把数据恢复等同于完整迁移 PASS。
+
+当前容器锁是 `linux/amd64`。Apple Silicon 必须显式传
+`--allow-amd64-emulation` 才能进入实验性 preflight/restore；这只是风险确认，不会把
+架构或性能 Gate 改成 PASS。
 
 ## Apple Silicon / 容器架构 Gate
 
@@ -178,8 +310,11 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 
 ### 1. 验证与代码恢复
 
-1. 校验外层单文件压缩包的 sidecar SHA-256，再解包到普通本地目录。
-2. 运行 `verify-handoff-package.sh`，确认 `PACKAGE_VERIFIED=PASS`。
+1. 按“目标 Mac 环境”的 bootstrap 流程从包外可信渠道取得外层 SHA-256，校验后解包到
+   FileVault 保护的持久普通目录；若另有可信 verifier，也可先运行
+   `verify-handoff-archive.sh`，注意其临时解包会自动删除。
+2. 从已校验包中的 source snapshot 建立 checkout，再运行 `verify-handoff-package.sh`，
+   确认 `PACKAGE_VERIFIED=PASS`；后续恢复只引用该持久目录。
 3. 从 Git bundle 恢复分支，确认 HEAD、`git fsck`、tracked snapshot 与锁文件。
 4. 运行 `mac-preflight.sh`；任何 architecture、空间、端口或 fresh-project 失败都先处理。
 5. 在执行权限丢失的 exFAT 传输介质上解包后，明确为项目 `.sh` 和
@@ -196,16 +331,18 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 
 ### 3. Owner 私有状态
 
-1. 校验 Owner immutable backup 自己的 `COMPLETE`、manifest 和全部 SHA-256。
+1. 校验交接包根目录唯一的 `COMPLETE`、`manifest.json` 和全部 SHA-256；Owner payload
+   没有也不应拥有独立 `COMPLETE` 标记。
 2. v1 通过 portable GPG envelope 以 no-echo 方式解开恢复所需 data key；Mac 路径
    不得使用 Windows DPAPI。临时明文只放 `mktemp -d` 创建的 `0700` 目录，并在 trap
    中清除。v2 跳过本步，直接读取已通过 SHA-256 校验的明文 payload。
 3. 从 `.env.example` 生成目标 Mac 的全新 runtime secret。v2 不携带原
-   `CLASS_ARCHIVE_CLAIM_PEPPER`、`CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET`、bridge
+   `CLASS_ARCHIVE_CLAIM_CODE_PEPPER`、`CLASS_ARCHIVE_ANONYMOUS_PSEUDONYM_SECRET`、bridge
    token 或 session secret；全部既有登录会话、未完成 Claim/Invite/Reset 必须视为失效。
 4. 先启动空 MariaDB，恢复一致性逻辑 dump；再恢复 Piwigo application/scripts、
-   uploads、galleries 与 canonical originals 的 POSIX tar。模式、UID/GID 与 symlink
-   在 Linux volume 内恢复，不能依赖 macOS/exFAT 宿主权限。
+   uploads、galleries 与 canonical originals 的 POSIX tar。普通文件的 mode、UID/GID
+   恢复信息以归档头为准，不能依赖 macOS/exFAT 宿主权限；交接归档不接受 symlink 或
+   其他特殊节点。
 5. 恢复 Immich PostgreSQL custom-format dump、Immich asset/upload state 与
    ClassArchivePhoto/ClassArchivePerson mapping。恢复 face/search index 后禁止先触发
    全库 AI 重算来掩盖缺失。
@@ -232,14 +369,19 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 - `SYNTHETIC_TEST_DATA` 可以包含项目审查过的 fictional fixtures 和 72/72/8 基线；
   synthetic 与 Owner 数据必须进入不同数据库、volumes 和 Compose project。
 - 机器可判定边界：`OWNER_SYNTHETIC_ISOLATION=DIFFERENT_DATABASES_VOLUMES_COMPOSE_PROJECTS`。
-- 实际图库应由加密 Owner backup 中的 managed canonical originals 加上 MariaDB/
-  PostgreSQL/mapping 恢复，不能用 Windows Docker VHDX 或裸 named-volume 目录当作
-  可移植备份。
+- 实际图库应由已验证的 Owner payload 中的 managed canonical originals 加上 MariaDB/
+  PostgreSQL/mapping 恢复；v1 payload 必须加密，v2 则仅允许处于已声明的本地实体介质
+  风险模式。两者都不能用 Windows Docker VHDX 或裸 named-volume 目录当作可移植备份。
 - 完整私有交接必须包含原始来源目录的独立归档，并明确标记为只读
   provenance/source；它与 managed canonical originals 分开计数，恢复时默认只挂载为
   只读来源，绝不能自动再次导入。
-- 真实文件名、路径、截图、face mapping、导入 manifest 都必须留在加密 payload；
-  不得复制进 Git checkout、公开 CI、README、Issue 或日志。
+- 真实文件名、路径、face mapping、导入 manifest 只能留在私有 payload；v1 中必须加密，
+  v2 中虽为明文但必须保持实体介质私有保管。不得复制进 Git checkout、公开 CI、README、
+  Issue 或日志。
+- 大批历史浏览器截图与临时 Profile 不包含在本交接包中；`private-import-and-provenance.tar`
+  可能保留少量与真实图库清晰度/导入验收直接相关的私有截图证据。它们同整个交接包一样
+  只能留在受控本地介质，不能充当 Mac 实测证据。Mac 恢复后仍应在其独立 ignored 目录
+  重新生成必要截图；含真实照片的截图不得回传 Git、CI、Issue 或云端。
 
 ## ML 模型与许可证
 

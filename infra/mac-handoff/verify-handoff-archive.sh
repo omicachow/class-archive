@@ -8,18 +8,24 @@ fail() {
   exit 1
 }
 
-[ "$#" -eq 2 ] || {
-  printf 'Usage: verify-handoff-archive.sh ARCHIVE.tar.zst EXPECTED_SHA256\n' >&2
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || {
+  printf 'Usage: verify-handoff-archive.sh ARCHIVE.tar.zst EXPECTED_SHA256 [WORK_DIR]\n' >&2
   exit 64
 }
 
 archive=$1
 expected=$(printf '%s' "$2" | tr 'A-F' 'a-f')
+work_dir=${3:-$(dirname -- "$archive")}
 [ -f "$archive" ] && [ ! -L "$archive" ] || fail archive_missing_or_symlink
+[ -d "$work_dir" ] && [ ! -L "$work_dir" ] || fail work_directory_missing_or_symlink
+work_lexical=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$work_dir")
+work_physical=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$work_dir")
+[ "$work_lexical" = "$work_physical" ] || fail work_directory_symlink_forbidden
+work_dir=$work_physical
 case "$expected" in ''|*[!0-9a-f]*) fail expected_sha256_invalid ;; esac
 [ "${#expected}" -eq 64 ] || fail expected_sha256_invalid
 
-for command_name in zstd python3 tar; do
+for command_name in zstd python3 tar df awk; do
   command -v "$command_name" >/dev/null 2>&1 || fail "missing_command_$command_name"
 done
 
@@ -34,12 +40,15 @@ fi
 
 # Read every tar header before extraction. Only one ordinary top-level folder
 # and regular files/directories are accepted; links and special nodes fail.
-zstd -q -dc -- "$archive" | python3 -c '
+uncompressed_bytes=$(zstd -q -dc -- "$archive" | python3 -I -c '
 import pathlib, sys, tarfile, unicodedata
+if not __debug__:
+    raise RuntimeError("python_assertions_disabled")
 seen = set()
 portable_seen = set()
 portable_types = {}
 roots = set()
+regular_bytes = 0
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
     for member in handle:
         name = member.name
@@ -58,14 +67,20 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
         if member.isfile():
             assert not any(existing.startswith(portable_name + "/") for existing in portable_types)
             portable_types[portable_name] = "file"
+            regular_bytes += member.size
         else:
             portable_types[portable_name] = "dir"
         roots.add(pure.parts[0])
         assert member.isfile() or member.isdir()
 assert len(roots) == 1
-' || fail archive_member_boundary_invalid
+print(regular_bytes)
+') || fail archive_member_boundary_invalid
+case "$uncompressed_bytes" in ''|*[!0-9]*) fail archive_uncompressed_size_invalid ;; esac
+free_bytes=$(df -Pk "$work_dir" | awk 'NR==2 {printf "%.0f\n", $4 * 1024}')
+required_free=$((uncompressed_bytes + uncompressed_bytes / 20 + 1073741824))
+[ "${free_bytes%.*}" -ge "$required_free" ] || fail work_directory_insufficient_space
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/classarchive-handoff.XXXXXXXX")
+tmp=$(mktemp -d "$work_dir/.classarchive-handoff-verify.XXXXXXXX")
 chmod 700 "$tmp"
 trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
 zstd -q -dc -- "$archive" | tar -xf - -C "$tmp" --no-same-owner
