@@ -35,7 +35,10 @@ foreach ($needle in @(
     'container_arch_gate_amd64_lock_on_apple_silicon_requires_isolated_runtime_proof',
     "node_version_24.15.0","pnpm_version_11.13.1",'google_chrome_stable_present',
     'PACKAGE_VERIFIED=','MAC_RUNTIME_TESTED=NO','MAC_PREFLIGHT=PASS_STATIC_ONLY',
-    'command_name in git docker gpg python3 tar gzip zstd shasum'
+    'command_name in git docker gpg python3 tar gzip zstd shasum lsof',
+    'port_${port}_out_of_range','port_${port}_duplicate','container-lock.json',
+    'container_lock_contract_invalid','docker_desktop_vm_capacity_requires_manual_gate',
+    'restore_compose_render_and_named_volume_gate_required'
 )) { Assert-True ($preflight.Contains($needle)) ('mac_preflight_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(

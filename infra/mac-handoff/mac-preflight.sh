@@ -95,7 +95,7 @@ case "$host_arch" in
   *) fail "unsupported_host_arch_$host_arch" ;;
 esac
 
-for command_name in git docker gpg python3 tar gzip zstd shasum; do
+for command_name in git docker gpg python3 tar gzip zstd shasum lsof; do
   require_command "$command_name"
 done
 
@@ -124,11 +124,20 @@ fi
 
 old_ifs=$IFS
 IFS=','
+seen_ports=','
 for port in $ports; do
   case "$port" in
     ''|*[!0-9]*) fail 'port_list_invalid' ;;
     *)
-      if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        fail "port_${port}_out_of_range"
+        continue
+      fi
+      case "$seen_ports" in
+        *,"$port",*) fail "port_${port}_duplicate"; continue ;;
+      esac
+      seen_ports="${seen_ports}${port},"
+      if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
         fail "port_${port}_already_listening"
       else
         pass "port_${port}_available"
@@ -151,16 +160,37 @@ if [ -n "$package_root" ]; then
     fi
 
     lock="$package_root/payloads/source/immich-upstream.lock.json"
-    if [ -f "$lock" ]; then
-      locked_platforms=$(python3 - "$lock" <<'PY'
+    container_lock="$package_root/payloads/source/container-lock.json"
+    if [ -f "$lock" ] && [ -f "$container_lock" ]; then
+      locked_platforms=$(python3 - "$lock" "$container_lock" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-values = sorted({str(item.get("platform", "")) for item in data.get("images", {}).values() if item.get("platform")})
+    upstream = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    containers = json.load(handle)
+assert upstream.get("upstream", {}).get("version") == "v3.1.0"
+assert upstream.get("upstream", {}).get("commit") == "8aa95c67470a02a8ddedf03c2e52963af33065ff"
+assert containers.get("format") == "class-archive-container-lock-v1"
+images = containers.get("images")
+assert isinstance(images, list) and len(images) >= 6
+required = ("piwigo/piwigo:", "mariadb:", "ghcr.io/immich-app/immich-server:",
+            "ghcr.io/immich-app/immich-machine-learning:",
+            "ghcr.io/immich-app/postgres:", "docker.io/valkey/valkey:")
+references = [str(item.get("image_reference", "")) for item in images]
+assert all(any(reference.startswith(prefix) for reference in references) for prefix in required)
+for item in images:
+    assert item.get("os") == "linux"
+    assert item.get("architecture") in {"amd64", "arm64"}
+    assert str(item.get("image_id", "")).startswith("sha256:")
+    assert "@sha256:" in str(item.get("image_reference", ""))
+    assert item.get("repo_digests")
+values = sorted({"linux/" + str(item["architecture"]) for item in images})
 print(",".join(values))
 PY
-)
-      if [ "$host_arch" = "arm64" ] || [ "$host_arch" = "aarch64" ]; then
+) || locked_platforms='INVALID'
+      if [ "$locked_platforms" = INVALID ]; then
+        fail 'container_lock_contract_invalid'
+      elif [ "$host_arch" = "arm64" ] || [ "$host_arch" = "aarch64" ]; then
         case ",$locked_platforms," in
           *,linux/amd64,*)
             fail 'container_arch_gate_amd64_lock_on_apple_silicon_requires_isolated_runtime_proof'
@@ -168,10 +198,13 @@ PY
           *) pass 'container_arch_gate_no_explicit_amd64_only_lock' ;;
         esac
       else
-        pass "container_arch_gate_host_matches_${locked_platforms:-unspecified}"
+        case ",$locked_platforms," in
+          *,linux/amd64,*) pass "container_arch_gate_host_matches_$locked_platforms" ;;
+          *) fail "container_arch_gate_intel_incompatible_$locked_platforms" ;;
+        esac
       fi
     else
-      fail 'immich_upstream_lock_not_found_in_package'
+      fail 'container_or_immich_lock_not_found_in_package'
     fi
 
     package_kib=$(du -sk "$package_root" 2>/dev/null | awk '{print $1}')
@@ -179,11 +212,14 @@ PY
     required_kib=$((package_kib * 2 + 20 * 1024 * 1024))
     if [ "$available_kib" -ge "$required_kib" ]; then
       pass "storage_margin_kib_${available_kib}"
+      warn 'docker_desktop_vm_capacity_requires_manual_gate'
     else
       fail "storage_margin_insufficient_available_${available_kib}_required_${required_kib}"
     fi
   fi
 fi
+
+warn 'restore_compose_render_and_named_volume_gate_required'
 
 if [ "$check_build_toolchain" -eq 1 ]; then
   for command_name in node corepack pnpm; do

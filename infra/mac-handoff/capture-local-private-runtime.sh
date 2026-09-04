@@ -166,7 +166,7 @@ sanitized_mariadb_dump() {
   database=$(docker exec "$source_container" printenv MARIADB_DATABASE | tr -d '\r\n')
   case "$database" in ''|*[!A-Za-z0-9_]*) fail mariadb_database_name_invalid ;; esac
   prefix_count=$(docker exec "$source_container" sh -eu -c \
-    'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=''piwigo_class_identity_migration'';"' | tr -d '[:space:]')
+    'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=0x70697769676f5f636c6173735f6964656e746974795f6d6967726174696f6e;"' | tr -d '[:space:]')
   [ "$prefix_count" = 1 ] || fail mariadb_expected_prefix_missing
 
   stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM
