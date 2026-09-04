@@ -576,11 +576,13 @@ sanitized_mariadb_dump() {
     -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 "$helper_image" >/dev/null
   ready=0
   for _ in $(seq 1 120); do
-    # mariadb-admin ping may exit successfully as soon as the daemon answers,
-    # before a normal SQL connection through the socket is usable.  Require an
-    # actual query so a slow first initialization cannot create a false-ready
-    # sanitizer and abort an otherwise valid capture.
-    if docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names \
+    # The official image starts a temporary initialization server before its
+    # entrypoint finally execs the long-running mariadbd as PID 1.  A ping or
+    # even SELECT 1 can succeed against that temporary server and then lose its
+    # connection during the intentional handoff.  Require both final PID 1 and
+    # a real socket query before importing the snapshot.
+    if docker exec "$clone_name" sh -eu -c '[ "$(cat /proc/1/comm)" = mariadbd ]' >/dev/null 2>&1 \
+      && docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names \
       --protocol=socket --user=root --execute='SELECT 1;' >/dev/null 2>&1; then
       ready=1
       break
@@ -611,10 +613,18 @@ sanitized_mariadb_dump() {
     >/dev/null 2>&1; then
     fail mariadb_source_dump_stage_failed
   fi
-  docker exec "$clone_name" sh -eu -c \
-    'exec mariadb --skip-ssl --protocol=socket --user=root "$1" </tmp/classarchive-source.sql' _ "$database" \
-    >/dev/null 2>&1 || fail mariadb_sanitizer_import_failed
-  docker exec "$clone_name" sh -eu -c 'rm -f -- /tmp/classarchive-source.sql' \
+  if ! docker exec "$clone_name" sh -eu -c \
+    'mariadb --skip-ssl --protocol=socket --user=root "$1" </tmp/classarchive-source.sql >/dev/null 2>/tmp/classarchive-import.err' _ "$database"; then
+    import_error=$(docker exec "$clone_name" sh -eu -c '
+      code=$(sed -n "s/^ERROR \([0-9][0-9]*\).*/\1/p" /tmp/classarchive-import.err | head -1)
+      line=$(sed -n "s/^ERROR [0-9][0-9]* .* at line \([0-9][0-9]*\).*/\1/p" /tmp/classarchive-import.err | head -1)
+      case "$code" in ""|*[!0-9]*) code=UNKNOWN ;; esac
+      case "$line" in ""|*[!0-9]*) line=UNKNOWN ;; esac
+      printf "code_%s_line_%s" "$code" "$line"
+    ' 2>/dev/null || printf 'code_UNKNOWN_line_UNKNOWN')
+    fail "mariadb_sanitizer_import_failed_$import_error"
+  fi
+  docker exec "$clone_name" sh -eu -c 'rm -f -- /tmp/classarchive-source.sql /tmp/classarchive-import.err' \
     >/dev/null 2>&1 || fail mariadb_unsanitized_intermediate_cleanup_failed
 
   for table in piwigo_sessions piwigo_user_auth_keys; do
