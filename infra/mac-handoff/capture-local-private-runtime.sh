@@ -580,7 +580,7 @@ sanitized_mariadb_dump() {
     # before a normal SQL connection through the socket is usable.  Require an
     # actual query so a slow first initialization cannot create a false-ready
     # sanitizer and abort an otherwise valid capture.
-    if docker exec "$clone_name" mariadb --batch --skip-column-names \
+    if docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names \
       --protocol=socket --user=root --execute='SELECT 1;' >/dev/null 2>&1; then
       ready=1
       break
@@ -590,7 +590,7 @@ sanitized_mariadb_dump() {
   [ "$ready" = 1 ] || fail mariadb_sanitizer_not_ready
   database_ready=0
   for _ in $(seq 1 30); do
-    if docker exec "$clone_name" mariadb --protocol=socket --user=root \
+    if docker exec "$clone_name" mariadb --skip-ssl --protocol=socket --user=root \
       --execute="CREATE DATABASE IF NOT EXISTS \`$database\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
       >/dev/null 2>&1; then
       database_ready=1
@@ -605,30 +605,30 @@ sanitized_mariadb_dump() {
   # expose private metadata in terminal logs).  The unsanitized intermediate
   # exists only in this throw-away container layer and is removed immediately.
   if ! docker exec "$source_container" sh -eu -c \
-    'exec mariadb-dump --quick --lock-all-tables --routines --events --triggers --hex-blob --default-character-set=utf8mb4 --skip-comments --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
+    'exec mariadb-dump --skip-ssl --quick --lock-all-tables --routines --events --triggers --hex-blob --default-character-set=utf8mb4 --skip-comments --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
     2>/dev/null | docker exec -i "$clone_name" sh -eu -c \
     'umask 077; target=/tmp/classarchive-source.sql; test ! -e "$target"; cat >"$target"; test -s "$target"' \
     >/dev/null 2>&1; then
     fail mariadb_source_dump_stage_failed
   fi
   docker exec "$clone_name" sh -eu -c \
-    'exec mariadb --protocol=socket --user=root "$1" </tmp/classarchive-source.sql' _ "$database" \
+    'exec mariadb --skip-ssl --protocol=socket --user=root "$1" </tmp/classarchive-source.sql' _ "$database" \
     >/dev/null 2>&1 || fail mariadb_sanitizer_import_failed
   docker exec "$clone_name" sh -eu -c 'rm -f -- /tmp/classarchive-source.sql' \
     >/dev/null 2>&1 || fail mariadb_unsanitized_intermediate_cleanup_failed
 
   for table in piwigo_sessions piwigo_user_auth_keys; do
-    count=$(docker exec "$clone_name" mariadb --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$table';" | tr -d '[:space:]')
+    count=$(docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$table';" | tr -d '[:space:]')
     [ "$count" = 1 ] || fail "required_sensitive_table_missing_$table"
-    docker exec "$clone_name" mariadb --protocol=socket --user=root "$database" --execute="TRUNCATE TABLE \`$table\`;"
+    docker exec "$clone_name" mariadb --skip-ssl --protocol=socket --user=root "$database" --execute="TRUNCATE TABLE \`$table\`;"
   done
-  lease_exists=$(docker exec "$clone_name" mariadb --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='piwigo_class_identity_private_e2e_fixture_lease';" | tr -d '[:space:]')
-  [ "$lease_exists" = 0 ] || docker exec "$clone_name" mariadb --protocol=socket --user=root "$database" --execute='TRUNCATE TABLE piwigo_class_identity_private_e2e_fixture_lease;'
-  docker exec "$clone_name" mariadb --protocol=socket --user=root "$database" --execute="UPDATE piwigo_class_identity_token SET state='REVOKED', revoked_at=COALESCE(revoked_at,UTC_TIMESTAMP(6)), reserved_by_operation_id=NULL, reserved_at=NULL WHERE state IN ('ISSUED','RESERVED'); UPDATE piwigo_class_identity_seat SET state='AVAILABLE', updated_at=UTC_TIMESTAMP(6), lock_version=lock_version+1 WHERE state='INVITED'; UPDATE piwigo_user_infos SET activation_key=NULL,activation_key_expire=NULL; UPDATE piwigo_user_mail_notification SET check_key=''; DELETE FROM piwigo_config WHERE param='secret_key';"
+  lease_exists=$(docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='piwigo_class_identity_private_e2e_fixture_lease';" | tr -d '[:space:]')
+  [ "$lease_exists" = 0 ] || docker exec "$clone_name" mariadb --skip-ssl --protocol=socket --user=root "$database" --execute='TRUNCATE TABLE piwigo_class_identity_private_e2e_fixture_lease;'
+  docker exec "$clone_name" mariadb --skip-ssl --protocol=socket --user=root "$database" --execute="UPDATE piwigo_class_identity_token SET state='REVOKED', revoked_at=COALESCE(revoked_at,UTC_TIMESTAMP(6)), reserved_by_operation_id=NULL, reserved_at=NULL WHERE state IN ('ISSUED','RESERVED'); UPDATE piwigo_class_identity_seat SET state='AVAILABLE', updated_at=UTC_TIMESTAMP(6), lock_version=lock_version+1 WHERE state='INVITED'; UPDATE piwigo_user_infos SET activation_key=NULL,activation_key_expire=NULL; UPDATE piwigo_user_mail_notification SET check_key=''; DELETE FROM piwigo_config WHERE param='secret_key';"
 
-  unsafe=$(docker exec "$clone_name" mariadb --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT (SELECT COUNT(*) FROM piwigo_sessions)+(SELECT COUNT(*) FROM piwigo_user_auth_keys)+(SELECT COUNT(*) FROM piwigo_user_infos WHERE activation_key IS NOT NULL OR activation_key_expire IS NOT NULL)+(SELECT COUNT(*) FROM piwigo_user_mail_notification WHERE check_key <> '')+(SELECT COUNT(*) FROM piwigo_config WHERE LOWER(param) REGEXP '(secret|token|password|passphrase|oauth|smtp|credential)')+(SELECT COUNT(*) FROM piwigo_class_identity_token WHERE state IN ('ISSUED','RESERVED'))+(SELECT COUNT(*) FROM piwigo_class_identity_seat WHERE state='INVITED')+(SELECT COUNT(*) FROM piwigo_class_identity_audit_event WHERE CONCAT_WS(' ',old_value,new_value,reason) REGEXP 'Bearer[[:space:]]+[A-Za-z0-9._~-]{20,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}');" | tr -d '[:space:]')
+  unsafe=$(docker exec "$clone_name" mariadb --skip-ssl --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT (SELECT COUNT(*) FROM piwigo_sessions)+(SELECT COUNT(*) FROM piwigo_user_auth_keys)+(SELECT COUNT(*) FROM piwigo_user_infos WHERE activation_key IS NOT NULL OR activation_key_expire IS NOT NULL)+(SELECT COUNT(*) FROM piwigo_user_mail_notification WHERE check_key <> '')+(SELECT COUNT(*) FROM piwigo_config WHERE LOWER(param) REGEXP '(secret|token|password|passphrase|oauth|smtp|credential)')+(SELECT COUNT(*) FROM piwigo_class_identity_token WHERE state IN ('ISSUED','RESERVED'))+(SELECT COUNT(*) FROM piwigo_class_identity_seat WHERE state='INVITED')+(SELECT COUNT(*) FROM piwigo_class_identity_audit_event WHERE CONCAT_WS(' ',old_value,new_value,reason) REGEXP 'Bearer[[:space:]]+[A-Za-z0-9._~-]{20,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}');" | tr -d '[:space:]')
   [ "$unsafe" = 0 ] || fail mariadb_sanitization_incomplete
-  docker exec "$clone_name" mariadb-dump --quick --lock-all-tables --routines --events --triggers \
+  docker exec "$clone_name" mariadb-dump --skip-ssl --quick --lock-all-tables --routines --events --triggers \
     --hex-blob --default-character-set=utf8mb4 --skip-comments --protocol=socket --user=root "$database" \
     | gzip -1 -n >"$output.partial"
   gzip -t "$output.partial"

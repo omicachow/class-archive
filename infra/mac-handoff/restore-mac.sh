@@ -857,7 +857,7 @@ verify_volume_identity() {
 
 mariadb_scalar() {
   local query=$1 value container="${piwigo_project}-db-1"
-  value=$(docker exec "$container" sh -eu -c 'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="$1"' _ "$query" 2>/dev/null | tr -d '[:space:]') || fail mariadb_query_failed
+  value=$(docker exec "$container" sh -eu -c 'exec mariadb --skip-ssl --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="$1"' _ "$query" 2>/dev/null | tr -d '[:space:]') || fail mariadb_query_failed
   case "$value" in ''|*[!0-9]*) fail mariadb_count_invalid ;; esac
   printf '%s' "$value"
 }
@@ -881,7 +881,7 @@ managed_original_file_count() {
   local expected
   expected=$(mariadb_scalar 'SELECT COUNT(*) FROM piwigo_images;')
   if ! docker exec "$container" sh -eu -c \
-    'exec mariadb --batch --skip-column-names --raw --default-character-set=utf8mb4 --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT id,HEX(path) FROM piwigo_images ORDER BY id;"' \
+    'exec mariadb --skip-ssl --batch --skip-column-names --raw --default-character-set=utf8mb4 --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT id,HEX(path) FROM piwigo_images ORDER BY id;"' \
     | python3 -I -c '
 import re
 import sys
@@ -1033,7 +1033,7 @@ EOF
 
 guest_media_guard_smoke() {
   local raw encoded derivative_raw derivative_encoded status
-  raw=$(docker exec "${piwigo_project}-db-1" sh -eu -c 'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT path FROM piwigo_images WHERE path REGEXP 0x5e5c2e2f2875706c6f61647c67616c6c6572696573292f ORDER BY COALESCE(filesize,2147483647),id LIMIT 1;"' 2>/dev/null | tr -d '\r\n') || fail media_path_probe_failed
+  raw=$(docker exec "${piwigo_project}-db-1" sh -eu -c 'exec mariadb --skip-ssl --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT path FROM piwigo_images WHERE path REGEXP 0x5e5c2e2f2875706c6f61647c67616c6c6572696573292f ORDER BY COALESCE(filesize,2147483647),id LIMIT 1;"' 2>/dev/null | tr -d '\r\n') || fail media_path_probe_failed
   [ -n "$raw" ] || fail media_path_probe_empty
   encoded=$(python3 -I - "$raw" <<'PY'
 import sys,urllib.parse
@@ -1178,13 +1178,21 @@ for ((attempt=0; attempt<120; attempt++)); do
   sleep 1
 done
 [ "${health:-}" = healthy ] || fail mariadb_health_timeout
-tables=$(mariadb_scalar 'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE();')
-[ "$tables" = 0 ] || fail fresh_mariadb_database_not_empty
-gzip -t "$owner_payload/owner-mariadb.sql.gz" || fail mariadb_dump_invalid
-gzip -dc "$owner_payload/owner-mariadb.sql.gz" \
-  | docker exec -i "${piwigo_project}-db-1" sh -eu -c \
-    'exec mariadb --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
-    >/dev/null 2>&1 || fail mariadb_restore_failed
+  tables=$(mariadb_scalar 'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE();')
+  [ "$tables" = 0 ] || fail fresh_mariadb_database_not_empty
+  gzip -t "$owner_payload/owner-mariadb.sql.gz" || fail mariadb_dump_invalid
+  mariadb_restore_archive=/tmp/classarchive-owner-mariadb.sql.gz
+  docker exec "${piwigo_project}-db-1" test ! -e "$mariadb_restore_archive" || fail mariadb_restore_staging_exists
+  docker cp "$owner_payload/owner-mariadb.sql.gz" "${piwigo_project}-db-1:$mariadb_restore_archive" \
+    >/dev/null 2>&1 || fail mariadb_restore_staging_copy_failed
+  if ! docker exec "${piwigo_project}-db-1" sh -eu -c \
+    'gzip -t "$1"; gzip -dc "$1" | mariadb --skip-ssl --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
+    _ "$mariadb_restore_archive" >/dev/null 2>&1; then
+    docker exec "${piwigo_project}-db-1" rm -f -- "$mariadb_restore_archive" >/dev/null 2>&1 || true
+    fail mariadb_restore_failed
+  fi
+  docker exec "${piwigo_project}-db-1" rm -f -- "$mariadb_restore_archive" \
+    >/dev/null 2>&1 || fail mariadb_restore_staging_cleanup_failed
 
 docker run --rm --log-driver none --network none --read-only --cap-drop ALL \
   --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true \

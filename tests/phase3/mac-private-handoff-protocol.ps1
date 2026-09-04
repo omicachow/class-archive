@@ -104,7 +104,7 @@ foreach ($needle in @(
      'managed_original_file_count','SELECT id,HEX(path) FROM piwigo_images ORDER BY id',
      '--entrypoint xargs','managed_original_verification_failed',
      'unicodedata.normalize("NFC", root + "/" + relative).casefold()',
-     '[ -f "$target" ] && [ ! -L "$target" ]'
+     '[ -f "$target" ] && [ ! -L "$target" ]','mariadb --skip-ssl --protocol=socket'
  )) { Assert-True ($capture.Contains($needle)) ('mac_capture_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(
@@ -142,7 +142,9 @@ foreach ($needle in @(
     'ML_MODEL_CACHE=EXCLUDED_NOT_RESTORED','AI_RESULTS_AVAILABLE_IMMEDIATELY=NOT_RUNTIME_TESTED',
      'ANONYMOUS_PSEUDONYM_CONTINUITY=NOT_GUARANTEED','MAC_RUNTIME_TESTED=NO',
      'DATA_RESTORED_PIWIGO_CORE_READY','managed_original_file_count',
-     'restored_managed_original_verification_failed','SELECT id,HEX(path) FROM piwigo_images ORDER BY id'
+     'restored_managed_original_verification_failed','SELECT id,HEX(path) FROM piwigo_images ORDER BY id',
+     'mariadb_restore_staging_copy_failed','mariadb_restore_staging_cleanup_failed',
+     'mariadb --skip-ssl --protocol=socket'
 )) { Assert-True ($restore.Contains($needle)) ('mac_restore_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($forbidden in @(
