@@ -45,13 +45,15 @@ foreach ($needle in @(
 foreach ($needle in @(
     'class-archive-mac-private-handoff-v2','CLASS_ARCHIVE_MAC_PRIVATE_HANDOFF_COMPLETE_V2',
     'PRIVATE_UNENCRYPTED_LOCAL_DATA','LOCAL_PHYSICAL_MEDIA_ONLY','OUT_OF_BAND_REQUIRED',
-    'contains_plaintext_runtime_secrets','required_components','payload_paths'
+    'contains_plaintext_runtime_secrets','required_component_class','component_items','payload_paths',
+    'path.stat().st_nlink == 1','PRIVATE_NONSECRET_METADATA'
 )) { Assert-True ($verify.Contains($needle)) ('mac_v2_verifier_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(
     'EXPECTED_SHA256','outer_sha256_mismatch','archive_member_boundary_invalid','member.isfile() or member.isdir()',
     'len(roots) == 1','--no-same-owner','HANDOFF_ARCHIVE_VERIFY=PASS',
-    'unicodedata.normalize("NFC", name).casefold()','outer_sha256_changed_during_verification'
+    'unicodedata.normalize("NFC", canonical).casefold()','portable_types.get(parent) != "file"',
+    'outer_sha256_changed_during_verification'
 )) { Assert-True ($archiveVerify.Contains($needle)) ('mac_archive_verifier_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(

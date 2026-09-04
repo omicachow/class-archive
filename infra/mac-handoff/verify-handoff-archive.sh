@@ -38,6 +38,7 @@ zstd -q -dc -- "$archive" | python3 -c '
 import pathlib, sys, tarfile, unicodedata
 seen = set()
 portable_seen = set()
+portable_types = {}
 roots = set()
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
     for member in handle:
@@ -45,11 +46,20 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as handle:
         pure = pathlib.PurePosixPath(name)
         assert name and not name.startswith("/") and "\\" not in name
         assert ".." not in pure.parts and pure.parts
-        assert name not in seen
+        canonical = "/".join(pure.parts)
+        assert canonical and name not in seen
         seen.add(name)
-        portable_name = unicodedata.normalize("NFC", name).casefold()
+        portable_name = unicodedata.normalize("NFC", canonical).casefold()
         assert portable_name not in portable_seen
         portable_seen.add(portable_name)
+        for index in range(1, len(pure.parts)):
+            parent = unicodedata.normalize("NFC", "/".join(pure.parts[:index])).casefold()
+            assert portable_types.get(parent) != "file"
+        if member.isfile():
+            assert not any(existing.startswith(portable_name + "/") for existing in portable_types)
+            portable_types[portable_name] = "file"
+        else:
+            portable_types[portable_name] = "dir"
         roots.add(pure.parts[0])
         assert member.isfile() or member.isdir()
 assert len(roots) == 1

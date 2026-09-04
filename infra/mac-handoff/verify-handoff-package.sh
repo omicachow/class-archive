@@ -58,7 +58,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   separator=$(printf '%s' "$line" | cut -c65-66)
   relative=$(printf '%s' "$line" | cut -c67-)
   case "$expected" in
-    *[!0-9a-fA-F]*|'') fail 'checksum_digest_invalid' ;;
+    *[!0-9a-f]*|'') fail 'checksum_digest_invalid' ;;
   esac
   [ "${#expected}" -eq 64 ] || fail 'checksum_digest_length_invalid'
   [ "$separator" = '  ' ] || fail 'checksum_separator_invalid'
@@ -156,6 +156,7 @@ for raw in (root / "checksums.sha256").read_text(encoding="utf-8").splitlines():
 
 payload_paths = set()
 components = set()
+component_items = {}
 private_payload_count = 0
 for item in payloads:
     relative = item.get("path")
@@ -186,20 +187,32 @@ for item in payloads:
     if component is not None:
         assert isinstance(component, str) and re.fullmatch(r"[A-Z][A-Z0-9_]+", component)
         components.add(component)
+        component_items.setdefault(component, []).append(item)
     assert isinstance(item.get("required"), bool)
     assert item.get("size") == candidate.stat().st_size
     assert re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
     assert checksums.get(relative) == item["sha256"]
 
 assert private_payload_count > 0
-if plaintext_private_allowed:
-    required_components = {
-        "SOURCE_CODE", "SYNTHETIC_BASELINE", "OWNER_MARIADB",
-        "OWNER_IMMICH_POSTGRES", "OWNER_CANONICAL_MEDIA",
-        "OWNER_DERIVATIVES", "OWNER_PRIVATE_METADATA",
-        "PRIVATE_SOURCE_LIBRARY", "IMMICH_LOCKS_AND_ML_MANIFEST",
-    }
-    assert required_components <= components
+required_component_class = {
+    "SOURCE_CODE": "PUBLIC_SAFE_SOURCE",
+    "SYNTHETIC_BASELINE": "SYNTHETIC_TEST_DATA",
+    "OWNER_MARIADB": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "OWNER_IMMICH_POSTGRES": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "OWNER_CANONICAL_MEDIA": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "OWNER_DERIVATIVES": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "OWNER_PRIVATE_METADATA": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "PRIVATE_SOURCE_LIBRARY": "PRIVATE_UNENCRYPTED_LOCAL_DATA" if plaintext_private_allowed else "PRIVATE_ENCRYPTED_DATA",
+    "IMMICH_LOCKS_AND_ML_MANIFEST": "PUBLIC_SAFE_SOURCE",
+}
+for component, classification in required_component_class.items():
+    matching = component_items.get(component, [])
+    assert matching
+    assert any(item.get("required") is True and item.get("classification") == classification for item in matching)
+
+for item in payloads:
+    if item.get("classification") == "PRIVATE_NONSECRET_METADATA":
+        assert item["path"].startswith("payloads/source/")
 
 allowed_unlisted = {"checksums.sha256", "COMPLETE"}
 regular_files = {
@@ -210,9 +223,15 @@ regular_files = {
 for path in root.rglob("*"):
     mode = path.lstat().st_mode
     assert stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+    if stat.S_ISREG(mode):
+        assert path.stat().st_nlink == 1
 assert regular_files - allowed_unlisted == set(checksums)
 assert {"manifest.json", "HANDOFF-MAC-PRIVATE.md"}.issubset(checksums)
 assert {path for path in regular_files if path.startswith("payloads/")} == payload_paths
+assert {
+    path for path in regular_files
+    if not path.startswith("payloads/") and path not in allowed_unlisted
+} == {"manifest.json", "HANDOFF-MAC-PRIVATE.md"}
 PY
 
 printf 'CHECKSUM_TOOL=%s\n' "$hash_kind"
