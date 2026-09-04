@@ -82,9 +82,38 @@ import pathlib
 import re
 import stat
 import sys
+import tarfile
+import unicodedata
 from datetime import datetime
 
 root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+
+def validate_inner_tar(path: pathlib.Path) -> None:
+    seen = set()
+    portable_types = {}
+    with tarfile.open(path, mode="r:") as handle:
+        for member in handle:
+            name = member.name
+            pure = pathlib.PurePosixPath(name)
+            assert name and not name.startswith("/") and "\\" not in name
+            assert ".." not in pure.parts
+            if not pure.parts:
+                assert member.isdir()
+                continue
+            canonical = "/".join(pure.parts)
+            portable = unicodedata.normalize("NFC", canonical).casefold()
+            assert portable not in seen
+            seen.add(portable)
+            for index in range(1, len(pure.parts)):
+                parent = unicodedata.normalize("NFC", "/".join(pure.parts[:index])).casefold()
+                assert portable_types.get(parent) != "file"
+            if member.isfile():
+                assert not any(existing.startswith(portable + "/") for existing in portable_types)
+                portable_types[portable] = "file"
+            else:
+                assert member.isdir()
+                portable_types[portable] = "dir"
+
 manifest_path = root / "manifest.json"
 with manifest_path.open(encoding="utf-8") as handle:
     manifest = json.load(handle)
@@ -192,6 +221,10 @@ for item in payloads:
     assert item.get("size") == candidate.stat().st_size
     assert re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
     assert checksums.get(relative) == item["sha256"]
+    if relative.endswith(".tar") and item.get("classification") in {
+        "SYNTHETIC_TEST_DATA", "PRIVATE_UNENCRYPTED_LOCAL_DATA",
+    }:
+        validate_inner_tar(candidate)
 
 assert private_payload_count > 0
 required_component_class = {

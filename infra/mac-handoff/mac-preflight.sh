@@ -150,10 +150,7 @@ if [ -n "$package_root" ]; then
       fail 'handoff_package_integrity'
     fi
 
-    lock="$package_root/payloads/source/infra/immich-spike/immich-upstream.lock.json"
-    if [ ! -f "$lock" ]; then
-      lock="$package_root/metadata/immich-upstream.lock.json"
-    fi
+    lock="$package_root/payloads/source/immich-upstream.lock.json"
     if [ -f "$lock" ]; then
       locked_platforms=$(python3 - "$lock" <<'PY'
 import json, sys

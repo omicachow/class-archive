@@ -26,9 +26,8 @@ payloads/
   synthetic/                      # 公开安全的合成测试照片与基线恢复资料
   owner/                          # Owner DB、业务状态、canonical originals、AI index
   private-metadata/               # 来源、导入、人工整理等私有 manifest（如需要）
-  private-sources/                # 可选的只读原始来源归档，与 managed originals 分离
-metadata/
-  immich-upstream.lock.json       # 供解包前 architecture Gate 读取的公开锁副本
+  private-sources/                # 必需的只读原始来源归档，与 managed originals 分离
+  source/immich-upstream.lock.json # 供解包前 architecture Gate 读取的公开锁副本
 ```
 
 `COMPLETE` 的内容固定为：
@@ -236,8 +235,9 @@ Intel Mac 只能通过主机架构静态匹配这一层 Gate；仍需真实 runt
 - 实际图库应由加密 Owner backup 中的 managed canonical originals 加上 MariaDB/
   PostgreSQL/mapping 恢复，不能用 Windows Docker VHDX 或裸 named-volume 目录当作
   可移植备份。
-- 若交付还包含原始来源目录的第二份归档，必须明确标记为只读 provenance/source，
-  与 managed canonical originals 分开计数，避免恢复时重复导入。
+- 完整私有交接必须包含原始来源目录的独立归档，并明确标记为只读
+  provenance/source；它与 managed canonical originals 分开计数，恢复时默认只挂载为
+  只读来源，绝不能自动再次导入。
 - 真实文件名、路径、截图、face mapping、导入 manifest 都必须留在加密 payload；
   不得复制进 Git checkout、公开 CI、README、Issue 或日志。
 
