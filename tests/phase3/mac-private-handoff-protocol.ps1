@@ -98,7 +98,9 @@ foreach ($needle in @(
     'org.classarchive.disposable=handoff-sanitizer','realpath -sm','docker stop -t 60',
     'wait_container_ready','staging_package_timestamp_mismatch','concurrent_capture_in_progress',
     'unexpected_running_${scope}_network_container_','mariadb_sanitizer_database_create_failed',
-    "--execute='SELECT 1;'",'mariadb_myisam_check_not_ok','CHECK TABLE','never REPAIR'
+    "--execute='SELECT 1;'",'mariadb_myisam_check_not_ok','CHECK TABLE','never REPAIR',
+    'mariadb_source_dump_stage_failed','mariadb_sanitizer_import_failed',
+    'mariadb_unsanitized_intermediate_cleanup_failed','/tmp/classarchive-source.sql'
 )) { Assert-True ($capture.Contains($needle)) ('mac_capture_contract_missing_' + ($needle -replace '[^A-Za-z0-9]+','_').Trim('_')) }
 
 foreach ($needle in @(

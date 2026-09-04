@@ -510,9 +510,23 @@ sanitized_mariadb_dump() {
     sleep 1
   done
   [ "$database_ready" = 1 ] || fail mariadb_sanitizer_database_create_failed
-  docker exec "$source_container" sh -eu -c \
+  # First finish the source dump into the disposable clone container, then
+  # import it as a separate step.  A failed producer must never leave the SQL
+  # client consuming a truncated stream and echoing a large INSERT (which can
+  # expose private metadata in terminal logs).  The unsanitized intermediate
+  # exists only in this throw-away container layer and is removed immediately.
+  if ! docker exec "$source_container" sh -eu -c \
     'exec mariadb-dump --quick --lock-all-tables --routines --events --triggers --hex-blob --default-character-set=utf8mb4 --skip-comments --host=127.0.0.1 --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
-    | docker exec -i "$clone_name" mariadb --protocol=socket --user=root "$database"
+    2>/dev/null | docker exec -i "$clone_name" sh -eu -c \
+    'umask 077; target=/tmp/classarchive-source.sql; test ! -e "$target"; cat >"$target"; test -s "$target"' \
+    >/dev/null 2>&1; then
+    fail mariadb_source_dump_stage_failed
+  fi
+  docker exec "$clone_name" sh -eu -c \
+    'exec mariadb --protocol=socket --user=root "$1" </tmp/classarchive-source.sql' _ "$database" \
+    >/dev/null 2>&1 || fail mariadb_sanitizer_import_failed
+  docker exec "$clone_name" sh -eu -c 'rm -f -- /tmp/classarchive-source.sql' \
+    >/dev/null 2>&1 || fail mariadb_unsanitized_intermediate_cleanup_failed
 
   for table in piwigo_sessions piwigo_user_auth_keys; do
     count=$(docker exec "$clone_name" mariadb --batch --skip-column-names --protocol=socket --user=root "$database" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='$table';" | tr -d '[:space:]')
