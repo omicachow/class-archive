@@ -456,6 +456,24 @@ sanitized_mariadb_dump() {
   assert_new_output "$output"
   database=$(docker exec "$source_container" printenv MARIADB_DATABASE | tr -d '\r\n')
   case "$database" in ''|*[!A-Za-z0-9_]*) fail mariadb_database_name_invalid ;; esac
+
+  # Piwigo still has a small set of MyISAM tables.  A previously interrupted
+  # web process can leave their "not closed cleanly" flag set even though the
+  # table contents pass a full check; mariadb-dump then refuses SHOW CREATE.
+  # With every application writer stopped, run CHECK TABLE (never REPAIR) and
+  # require a final OK status.  Real corruption remains a hard stop.
+  myisam_tables=$(docker exec "$source_container" sh -eu -c \
+    'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND ENGINE=0x4d794953414d ORDER BY TABLE_NAME;"')
+  while IFS= read -r myisam_table; do
+    [ -n "$myisam_table" ] || continue
+    case "$myisam_table" in *[!A-Za-z0-9_]*) fail mariadb_myisam_table_name_invalid ;; esac
+    check_result=$(docker exec "$source_container" sh -eu -c \
+      'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="$1"' \
+      _ "CHECK TABLE \`$myisam_table\`;" 2>/dev/null) || fail mariadb_myisam_check_failed
+    printf '%s\n' "$check_result" | awk -F '\t' 'END { exit !($3 == "status" && $4 == "OK") }' \
+      || fail mariadb_myisam_check_not_ok
+  done <<<"$myisam_tables"
+
   prefix_count=$(docker exec "$source_container" sh -eu -c \
     'exec mariadb --batch --skip-column-names --protocol=socket --user=root --password="$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" --execute="SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=0x70697769676f5f636c6173735f6964656e746974795f6d6967726174696f6e;"' | tr -d '[:space:]')
   [ "$prefix_count" = 1 ] || fail mariadb_expected_prefix_missing
